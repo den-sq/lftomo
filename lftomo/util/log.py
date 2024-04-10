@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import IntFlag
 from operator import ior
 from functools import reduce
+from pathlib import Path
 from sys import stdout, exc_info
 from typing import TextIO
 
@@ -35,16 +36,24 @@ class Logger:
 		"""Initializes new logger, with starting time and log target locations.
 
 			:param log_screen: Dictionary showing what values are written to stdout and stderr, based on LOG flags.
-			:param log_files: List of file paths (or otherwise openable handles) to write to.
+			:param log_files: Dictionary of log file with the statuses they will write to.
 		"""
 
 		self.script_start = datetime.now()
 		self.__attached_funcs = []
-		self.__log_screen = {
-			"stdout": LOG.STATUS | LOG.TIME | LOG.WARN | LOG.INFO,
-			"stderr": LOG.ERROR
-		}
-		self.__logs = {} 	# {"general": (Path(f"imaging_log_{self.script_start}.txt"), ~LOG.INFO)}
+		if log_screen is not None:
+			self.__log_screen = log_screen
+		else:
+			self.__log_screen = {
+				"stdout": LOG.STATUS | LOG.TIME | LOG.WARN | LOG.INFO,
+				"stderr": LOG.ERROR
+			}
+		if log_files is not None:
+			self.__logs = log_files
+		else:
+			self.__logs = {
+				"general": (Path(f"imaging_log_{self.script_start}.txt"), ~(LOG.INFO or LOG.DEBUG))
+			}
 		self.__pid = psutil.Process().pid
 
 	def header(self, out=None):
