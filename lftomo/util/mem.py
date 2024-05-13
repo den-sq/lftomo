@@ -93,7 +93,8 @@ class SharedNP:
 				mem = shared_memory.SharedMemory(create=True, size=self.__full_size, name=self.__name)
 				log.write("Shared Memory", f"Shared Memory Name {self.__name} Recreated", log_level=LOG.INFO)
 			elif len(mem.buf) < self.__ar_size:
-				log.write("Shared Memory", f"Existing {self.__name} Memory Too Small for Array ({len(mem.buf)} vs {self.__ar_size})",
+				log.write("Shared Memory",
+					f"Existing {self.__name} Memory Too Small for Array ({len(mem.buf)} vs {self.__ar_size})",
 					log_level=LOG.ERROR)
 				raise MemoryError
 			else:

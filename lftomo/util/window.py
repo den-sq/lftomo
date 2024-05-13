@@ -4,6 +4,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Self
 
+from natsort import natsorted
 import numpy as np
 import tifffile as tf
 
@@ -27,6 +28,22 @@ class DataWindow(object):
 
 	def __str__(self):
 		return f"{self.__shape} ({self.__dtype}) at {self.__pos}"
+
+	@property
+	def start(self) -> int:
+		return self.__pos
+
+	@property
+	def stop(self) -> int:
+		return self.__pos + self.__shape.Y
+
+	@property
+	def shape(self) -> namedtuple:
+		return self.__shape
+
+	@property
+	def __len__(self) -> int:
+		return self.__shape.Y
 
 	@property
 	def dtype(self) -> type:
@@ -80,7 +97,7 @@ class DataWindow(object):
 		""" Gets the slice of the window in the projection domain. """
 		return np.s_[:, self.__pos: self.__pos + self.__shape.Y, :]
 
-	def y(self) -> range:
+	def Y(self) -> range:
 		""" Gets the slice of the window in the Y dimension. """
 		return range(self.__pos, self.__pos + self.__shape.Y)
 
@@ -131,12 +148,12 @@ class DataWindowSet(object):
 		self.__dtype = dtype
 
 		if data_shape.Theta == fov.Theta * fov.Count:
-			self.__angles = np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False)
+			self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
 		else:
 			if angle_steps is None:
 				raise Exception("Missing Angle Steps for handling Missing Frames")
 			else:
-				self.__angles = [step * np.deg2rad(fov.Degrees) / fov.Count for step in angle_steps]
+				self.__angles = np.array([step * np.deg2rad(fov.Degrees) / fov.Count for step in angle_steps])
 
 	def __iter__(self) -> _DataWindowIter:
 		return _DataWindowIter(self.__data_shape._replace(Y=self.__window_size),
@@ -153,22 +170,45 @@ class DataWindowSet(object):
 				pad_shape.X if pad_shape.X is not None else self.__pad_shape.X)
 
 	@property
+	def window_size(self):
+		return self.__window_size
+
+	@property
 	def data_shape(self):
 		return self.__data_shape
+
+	@property
+	def window_shape(self):
+		return self.__data_shape._replace(Y=self.__window_size)
 
 	@property
 	def angles(self):
 		return self.__angles
 
+	@property
+	def img_shape(self):
+		return ImgShape(self.__data_shape.Y, self.__data_shape.X)
+
+	@property
+	def dtype(self):
+		return self.__dtype
+
 	def __len__(self):
 		return len(range(0, self.__data_range.stop, self.__window_size))
 
-	def at_interval(self, interval: int) -> _DataWindowIter:
+	def full_window(self) -> DataWindow:
+		return DataWindow(self.__data_shape, self.__data_range.start, self.__pad_shape, self.__dtype)
+
+	def at_interval(self, interval: int) -> Self:
+		""" Todo: Fix Angle Stuff
+		"""
+
 		start = self.__data_range.start
 		stop = self.__data_range.stop
-		return _DataWindowIter(self.__data_shape._replace(Y=1),
-								range(start, stop, int((stop - start) / interval)),
-								self.__pad_shape, self.__dtype)
+
+		return DataWindowSet(self.__data_shape._replace(Y=interval), 1,
+								range(start, stop, int((stop - start) / interval)), self.__fov,
+								self.__dtype)
 
 	def from_folder(source: PathLike, shape_type: type, window_size: int, fov: CTFov, data_range: range = None,
 					angle_steps: np.ndarray = None) -> Self:
@@ -184,7 +224,7 @@ class DataWindowSet(object):
 			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
 			:retval: DataWindowSet for the files.
 			"""
-		source_files = list(Path(source).iterdir())
+		source_files = natsorted(Path(source).glob("**/*.tif*"))
 		with tf.TiffFile(source_files[0]) as tif:
 			base_image = tif.pages[0]
 			img_shape = ImgShape(base_image.shape[0], base_image.shape[1])

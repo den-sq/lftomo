@@ -56,6 +56,9 @@ class Logger:
 			}
 		self.__pid = psutil.Process().pid
 
+	def set_logdir(self, logdir):
+		self.__logs["general"] = (Path(logdir, f"imaging_log_{self.script_start}.txt"), self.__logs["general"][1])
+
 	def header(self, out=None):
 		"""Writes explanatory header for the logging format.
 
