@@ -13,18 +13,22 @@ ProjOrder = namedtuple("ProjOrder", ['Theta', 'Y', 'X'])
 ReconOrder = namedtuple("ReconOrder", ['Y', 'Z', 'X'])
 
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
-ImgShape = namedtuple("Proj", ['Y', 'X'])
+ImgShape = namedtuple("ImgShape", ['Y', 'X'])
 
 
 class DataWindow(object):
 	""" Window of data currently being worked with. """
 
-	def __init__(self, shape: namedtuple, pos: int, pad: ImgShape, dtype: type = None):
+	def __init__(self, shape: namedtuple, pos: int, pad: ImgShape, dtype: type = None, step: int = None):
 		self.__shape = shape
 		self.__pad = pad
 		self.__pos = pos
 		self.__dtype = dtype
 		self.__window_type = type(self.__shape)
+		if step is None:
+			self.__step = 1
+		else:
+			self.__step = step
 
 	def __str__(self):
 		return f"{self.__shape} ({self.__dtype}) at {self.__pos}"
@@ -35,11 +39,18 @@ class DataWindow(object):
 
 	@property
 	def stop(self) -> int:
-		return self.__pos + self.__shape.Y
+		return self.__pos + self.__shape.Y * self.__step
+
+	@property
+	def step(self) -> int:
+		return self.__step
 
 	@property
 	def shape(self) -> namedtuple:
 		return self.__shape
+
+	def recon_shape(self) -> namedtuple:
+		return ReconOrder(Y=self.__shape.Y, Z=self.__shape.X, X=self.__shape.X)
 
 	@property
 	def __len__(self) -> int:
@@ -59,16 +70,18 @@ class DataWindow(object):
 
 			:retval: DataWindow expanded and repositioned by padding.
 		"""
-		return DataWindow(self.__shape, self.__pad.Y, self.__pad)
+		return DataWindow(self.__shape, self.__pad.Y, self.__pad, self.__dtype)
 
 	@property
 	def fresh(self) -> Self:
-		return DataWindow(self.__shape, self.__pos + self.__pad.Y, ImgShape(0, self.__pad.X))
+		return DataWindow(self.__shape, self.__pos + self.__pad.Y, ImgShape(0, self.__pad.X),
+							self.__dtype, self.__step)
 
 	@property
 	def retained(self) -> Self:
 		return DataWindow(self.__shape._replace(Y=self.__pad.Y * 2),
-							self.__pos - self.__pad.Y, ImgShape(0, self.__pad.X))
+							self.__pos - self.__pad.Y, ImgShape(0, self.__pad.X),
+							self.__dtype, self.__step)
 
 	@property
 	def y_pad(self) -> Self:
@@ -77,7 +90,8 @@ class DataWindow(object):
 			:retval: DataWindow expanded and repositioned by padding.
 		"""
 		return DataWindow(self.__shape._replace(Y=self.__shape.Y + 2 * self.__pad.Y),
-							self.__pos - self.__pad.Y, self.__pad._replace(Y=0))
+							self.__pos - self.__pad.Y, self.__pad._replace(Y=0), 
+							self.__dtype, self.__step)
 
 	@property
 	def xy_pad(self) -> Self:
@@ -86,20 +100,21 @@ class DataWindow(object):
 			:retval: DataWindow expanded and repositioned by padding.
 		"""
 		return DataWindow(self.__shape._replace(Y=self.__shape.Y + 2 * self.__pad.Y),
-							self.__pos - self.__pad.Y, ImgShape(0, 0))
+							self.__pos - self.__pad.Y, ImgShape(0, 0), 
+							self.__dtype, self.__step)
 
 	def sino(self) -> slice:
 		""" Gets the slice of the window in the sinogram domain.
 		"""
-		return np.s_[self.__pos: self.__pos + self.__shape.Y, :, :]
+		return np.s_[self.__pos: self.__pos + self.__shape.Y * self.__step:self.__step, :, :]
 
 	def proj(self) -> slice:
 		""" Gets the slice of the window in the projection domain. """
-		return np.s_[:, self.__pos: self.__pos + self.__shape.Y, :]
+		return np.s_[:, self.__pos: self.__pos + self.__shape.Y * self.__step:self.__step, :]
 
 	def Y(self) -> range:
 		""" Gets the slice of the window in the Y dimension. """
-		return range(self.__pos, self.__pos + self.__shape.Y)
+		return np.s_[self.__pos:self.__pos + self.__shape.Y * self.__step:self.__step]
 
 
 class _DataWindowIter(Iterator):
@@ -197,7 +212,7 @@ class DataWindowSet(object):
 		return len(range(0, self.__data_range.stop, self.__window_size))
 
 	def full_window(self) -> DataWindow:
-		return DataWindow(self.__data_shape, self.__data_range.start, self.__pad_shape, self.__dtype)
+		return DataWindow(self.__data_shape, self.__data_range.start, self.__pad_shape, self.__dtype, self.__data_range.step)
 
 	def at_interval(self, interval: int) -> Self:
 		""" Todo: Fix Angle Stuff

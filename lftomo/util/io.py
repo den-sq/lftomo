@@ -2,14 +2,17 @@ from collections import namedtuple
 from collections.abc import Mapping, Callable
 from multiprocessing import shared_memory, Pool
 from os import PathLike
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import ArrayLike
 from psutil import cpu_count
+from skimage import measure
+import tomopy
 import tifffile as tf
 
 from .log import log, LOG
-from .mem import SharedNP
+from .mem import SharedNP, ReconOrder
 from .window import DataWindow
 
 
@@ -95,7 +98,48 @@ def _slice_at(shape: namedtuple, item: str, value: int):
 	return tuple(temp_slice)
 
 
-def distribute_write(sino_mem: SharedNP, path: PathLike, i, slice_at: str = None, out_type: np.dtype = None):
+def write_centers(center_mem: SharedNP, path: PathLike, center_range, angles,
+					proc_count: int = cpu_count(), calc_entropy: bool = True, disk_write: bool = True) -> Mapping:
+	""" Creates the reconstructions for a set of centers to disk, calculating entropy
+		for center finding and/or writing to disk.
+
+		:param center_mem: Metadata for center sinograms.
+		:param path: Base path for center files.
+		:param center_range: Centers to iterate through.
+		:param angles: Reconstruction angles.
+		:param proc_count: # of simulatenous processes to use for reconstruction and writing.
+		:param calc_entropy: Whether to make an entropy calculation for a center calculation.
+		:param disk_write: Whether to write center slices to disk.
+	"""
+
+	if not (disk_write or calc_entropy):
+		log.write("Center Finding", "Given no tasks (disk write or entropy calculation.)", LOG.ERROR)
+		return
+
+	center_entropy = {}
+
+	recon_shape = ReconOrder(Y=len(center_range), Z=center_mem.shape.X, X=center_mem.shape.X)
+
+	recon = np.zeros(recon_shape)
+
+	with SharedNP("cf_write_mem", dtype=np.float32,
+					shape=recon_shape) as cf_write_mem:
+		with center_mem as center_data, cf_write_mem as write_mem:
+			for i, cent in enumerate(center_range):
+				write_mem[i, :, :] = tomopy.recon(np.expand_dims(center_data, axis=0), angles, center=cent,
+													sinogram_order=True, algorithm='gridrec')
+				if calc_entropy:
+					center_entropy[str(cent)] = measure.shannon_entropy(recon[i])
+
+		if disk_write:
+			with Pool(proc_count) as pool:
+				pool.starmap(write_slice, [(cf_write_mem, Path(path, f"center_{cent:.2f}.tif"), i)
+												for i, cent in enumerate(center_range)])
+
+	return center_entropy
+
+
+def write_slice(sino_mem: SharedNP, path: PathLike, i, slice_at: str = None, out_type: np.dtype = None):
 	""" Writes a portion of sinogram to disk.
 
 		:param sino_mem: Metadata for reconstruction shared memory.
