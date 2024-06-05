@@ -1,12 +1,13 @@
 from collections import namedtuple
 from enum import Enum
+from pathlib import Path
 
 import numpy as np
 import tifffile as tf
 
-
 from lftomo.util.mem import SharedNP
 from lftomo.util.window import DataWindow, ImgShape
+from lftomo.util.log import log
 
 
 FlatPair = namedtuple("FlatPair", ['Index', 'Offset'])
@@ -81,57 +82,69 @@ def calculate_shift(flats: np.ndarray, scope: ImgShape = ImgShape(Y=20, X=20),
 		:param presub: Whether darks are presubtracted from gains.
 	"""
 	if not presub:
-		flats[FLAT.PREGAIN] -= flats[FLAT.PREDARK]
-		flats[FLAT.POSTGAIN] -= flats[FLAT.POSTDARK]
+		flats[FLAT.PREGAIN.index] -= flats[FLAT.PREDARK.index]
+		flats[FLAT.POSTGAIN.index] -= flats[FLAT.POSTDARK.index]
 
 	# generate division
-	flats_map = np.divide(flats[FLAT.POSTGAIN], flats[FLAT.PREGAIN])
-	flats_scope = np.s_[scope.Y: -scope.Y, scope.X: -scope.Y]
+	flats[FLAT.PREGAIN.index][flats[FLAT.PREGAIN.index] == 0] = 0.000000001
+	flats_map = np.divide(flats[FLAT.POSTGAIN.index], flats[FLAT.PREGAIN.index])
+	flats_scope = np.s_[scope.Y: -scope.Y: interval, scope.X: -scope.X]
+
+	log.write("Flat Shift", "Map and Scope Created.")
 
 	# Array for map ranges.
 	pos_range = [Distance(Y=y, X=x) for y in range(-scope.Y, scope.Y)
 									for x in range(-scope.X, scope.X)]
 
-	# Array for lines to spot check.
-	line_intervals = np.array(range(scope.Y, flats.shape[0] - scope.Y, interval))
-
 	# Completely blown out areas - No change at all
-	defect_mask = flats_map == 1.0
+	defect_mask = flats_map != 1.0
 
 	# Shifted beam map array.
 	linemap = np.empty((scope.Y * 2, scope.X * 2,
-						flats.shape[0] - scope.Y * 2, flats.shape[1] - scope.X * 2))
+						flats_map[flats_scope].shape[0],
+						flats_map[flats_scope].shape[1]))
 
-	# Results (Average and Intensity) array.
-	dist_change = np.empty((scope.Y * 2, scope.X * 2, 1, 1))
+	# Results (Average and Standard Deviation) arrays.
+	dist_avg = np.empty((scope.Y * 2, scope.X * 2))
+	dist_stddev = np.empty((scope.Y * 2, scope.X * 2))
 
-	def make_linemap(pos: Distance):
-		""" Assigns entry in 4d-array (linemap) with beam map shifted in X-Y direction.
-			Base is beam map limited by scope.
+	log.write("Flat Shift", f"Map and Scope Created {linemap.shape}, {flats_map[flats_scope].shape}"
+							f"{defect_mask[flats_scope].shape}, {np.count_nonzero(defect_mask)}")
 
-			:param pos: Y,X position ranging from -scope to scope.
-		"""
-		linemap[pos.Y + scope.Y, pos.X + scope.X, :, :] = flats_map[
-				pos.Y + scope.Y: flats_map.shape[0] + pos.Y - scope.Y,
-				pos.X + scope.X: flats_map.shape[1] + pos.X - scope.X]
+	# Mask Test
+	test_scope = np.s_[0: flats_map.shape[0] - 2 * scope.Y: interval, 0: flats_map.shape[1] - 2 * scope.X]
+	test = np.logical_and(defect_mask[flats_scope], defect_mask[test_scope])
+	log.write("Flat Shift", f"{np.count_nonzero(test)}")
 
-	map(make_linemap, pos_range)
+	out_base = Path("..", "data", "output", "flat_gen")
+	out_base.mkdir(parents=True, exist_ok=True)
 
 	def calc_linemap(pos: Distance):
 		""" Calculates accuracy of inverted linemaps """
 		pos_scope = np.s_[pos.Y + scope.Y, pos.X + scope.X]
+		local_scope = np.s_[pos.Y + scope.Y: flats_map.shape[0] + pos.Y - scope.Y:interval,
+								pos.X + scope.X: flats_map.shape[1] + pos.X - scope.X]
+		local_mask = np.logical_and(defect_mask[local_scope], defect_mask[pos_scope])
 
-		temp = np.add(flats_map[flats_scope][defect_mask[flats_scope]],
-						linemap[pos_scope][defect_mask[pos_scope]])
+		temp = np.add(flats_map[flats_scope][local_mask], flats_map[local_scope][local_mask])
+		tf.imwrite(out_base.joinpath(f"sum_{pos.Y}_{pos.X}.tif"),
+					np.add(flats_map[flats_scope], flats_map[local_scope]))
 
-		dist_change[pos.Y + scope.Y, pos.X + scope.X] = (np.average(temp), np.std(temp))
+		dist_avg[pos_scope] = np.average(temp)
+		dist_stddev[pos_scope] = np.std(temp)
 
-	map(calc_linemap, pos_range)
+	list(map(calc_linemap, pos_range))
 
-	results = np.argsort(dist_change, axis=3)
+	log.write("Flat Shift", "Linemap Calculated")
 
-	with open("test_out.txt", "w") as result_text:
-		result_text.write(results)
+	results = np.argsort(dist_stddev, axis=None).reshape(40, 40)
+
+	log.write("Flat Finding", f"{results.shape}")
+
+	with open("test_other.txt", "w") as change_data:
+		for y in range(0, scope.Y * 2):
+			for x in range(0, scope.X * 2):
+				change_data.write(f"{y - scope.Y}:{x - scope.X}:{dist_stddev[y,x]}:{results[y,x]}\n")
 
 
 def shifting_flat(data_mem, flat_mem):
