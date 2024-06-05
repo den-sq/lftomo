@@ -6,9 +6,11 @@ import tifffile as tf
 
 
 from lftomo.util.mem import SharedNP
-from lftomo.util.window import DataWindow
+from lftomo.util.window import DataWindow, ImgShape
+
 
 FlatPair = namedtuple("FlatPair", ['Index', 'Offset'])
+Distance = namedtuple("Distance", ['Y', 'X'])
 
 
 class FLAT(Enum):
@@ -69,30 +71,67 @@ def shift_normalize():
 	pass
 
 
-def calculate_shift(flats):
-	# interval = flats.shape[1] // 20
-	horiz_range = 20
-	flats_map = np.divide(
-		np.divide(flats[1], flats[0]),
-		np.divide(flats[3], flats[2])
-	)
+def calculate_shift(flats: np.ndarray, scope: ImgShape = ImgShape(Y=20, X=20),
+					interval: int = 20, presub: bool = False):
+	""" Calculate location of beam movement.
 
-	lines = flats_map[list(range(0, flats.shape[1], 20)), horiz_range:-horiz_range]
+		:param flats: Flatfield data.
+		:param scope: Range of maximum beam movement to detect.
+		:param interval: Interval between lines examined for movement.
+		:param presub: Whether darks are presubtracted from gains.
+	"""
+	if not presub:
+		flats[FLAT.PREGAIN] -= flats[FLAT.PREDARK]
+		flats[FLAT.POSTGAIN] -= flats[FLAT.POSTDARK]
 
-	# Cleanup for loop
-	for x in range(0, lines.shape[0]):
-		# temp = np.add(flats_map[horiz_range: -horiz_range], lines[x, :])
-		# sums = np.std(temp, axis=0)
-		pass
 	# generate division
-	# choose n lines
-	# For each line
-	# 	Sum against every line in the division, getting:
-	# 		average intensity value
-	# 		deviation from average intensity value
-	# 		Whether random line had higher or lower intensity value
-	# For Now:
-	# 	Print lines, step with lowest devation when lower or higher
+	flats_map = np.divide(flats[FLAT.POSTGAIN], flats[FLAT.PREGAIN])
+	flats_scope = np.s_[scope.Y: -scope.Y, scope.X: -scope.Y]
+
+	# Array for map ranges.
+	pos_range = [Distance(Y=y, X=x) for y in range(-scope.Y, scope.Y)
+									for x in range(-scope.X, scope.X)]
+
+	# Array for lines to spot check.
+	line_intervals = np.array(range(scope.Y, flats.shape[0] - scope.Y, interval))
+
+	# Completely blown out areas - No change at all
+	defect_mask = flats_map == 1.0
+
+	# Shifted beam map array.
+	linemap = np.empty((scope.Y * 2, scope.X * 2,
+						flats.shape[0] - scope.Y * 2, flats.shape[1] - scope.X * 2))
+
+	# Results (Average and Intensity) array.
+	dist_change = np.empty((scope.Y * 2, scope.X * 2, 1, 1))
+
+	def make_linemap(pos: Distance):
+		""" Assigns entry in 4d-array (linemap) with beam map shifted in X-Y direction.
+			Base is beam map limited by scope.
+
+			:param pos: Y,X position ranging from -scope to scope.
+		"""
+		linemap[pos.Y + scope.Y, pos.X + scope.X, :, :] = flats_map[
+				pos.Y + scope.Y: flats_map.shape[0] + pos.Y - scope.Y,
+				pos.X + scope.X: flats_map.shape[1] + pos.X - scope.X]
+
+	map(make_linemap, pos_range)
+
+	def calc_linemap(pos: Distance):
+		""" Calculates accuracy of inverted linemaps """
+		pos_scope = np.s_[pos.Y + scope.Y, pos.X + scope.X]
+
+		temp = np.add(flats_map[flats_scope][defect_mask[flats_scope]],
+						linemap[pos_scope][defect_mask[pos_scope]])
+
+		dist_change[pos.Y + scope.Y, pos.X + scope.X] = (np.average(temp), np.std(temp))
+
+	map(calc_linemap, pos_range)
+
+	results = np.argsort(dist_change, axis=3)
+
+	with open("test_out.txt", "w") as result_text:
+		result_text.write(results)
 
 
 def shifting_flat(data_mem, flat_mem):
