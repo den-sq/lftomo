@@ -81,6 +81,8 @@ def distribute_read(target_mem: SharedNP, window: DataWindow, source_files: Arra
 
 	pairs_func = generate_offset_pairs_sino if sino_order else generate_offset_pairs_proj
 
+	log.write("Mem Read", f"{base_offset}|{window.shape.Y}")
+
 	# if sino_order:
 	# 	log.write("Read Example", generate_offset_pairs_sino(0), LOG.INFO)
 	# else:
@@ -120,23 +122,23 @@ def write_centers(center_mem: SharedNP, path: PathLike, center_range, angles,
 
 	recon_shape = ReconOrder(Y=len(center_range), Z=center_mem.shape.X, X=center_mem.shape.X)
 
-	recon = np.zeros(recon_shape)
-
-	with SharedNP("cf_write_mem", dtype=np.float32,
-					shape=recon_shape) as cf_write_mem:
+	with SharedNP("cf_write_mem", dtype=np.float32, shape=recon_shape) as cf_write_mem:
 		with center_mem as center_data, cf_write_mem as write_mem:
 			for i, cent in enumerate(center_range):
 				write_mem[i, :, :] = tomopy.recon(np.expand_dims(center_data, axis=0), angles, center=cent,
 													sinogram_order=True, algorithm='gridrec')
 				if calc_entropy:
-					center_entropy[str(cent)] = measure.shannon_entropy(recon[i])
+					center_entropy[str(cent)] = measure.shannon_entropy(write_mem[i, :, :])
 
 		if disk_write:
 			with Pool(proc_count) as pool:
 				pool.starmap(write_slice, [(cf_write_mem, Path(path, f"center_{cent:.2f}.tif"), i)
 												for i, cent in enumerate(center_range)])
 
-	return center_entropy
+	if calc_entropy:
+		return sorted(center_entropy.items(), key=lambda item: item[1])[0][0]
+	else:
+		return None
 
 
 def write_slice(sino_mem: SharedNP, path: PathLike, i, slice_at: str = None, out_type: np.dtype = None):

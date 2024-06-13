@@ -46,6 +46,10 @@ class DataWindow(object):
 		return self.__step
 
 	@property
+	def y_range(self) -> range:
+		return range(self.__pos, self.__pos + self.__shape.Y * self.__step, self.__step)
+
+	@property
 	def shape(self) -> namedtuple:
 		return self.__shape
 
@@ -90,7 +94,7 @@ class DataWindow(object):
 			:retval: DataWindow expanded and repositioned by padding.
 		"""
 		return DataWindow(self.__shape._replace(Y=self.__shape.Y + 2 * self.__pad.Y),
-							self.__pos - self.__pad.Y, self.__pad._replace(Y=0), 
+							self.__pos - self.__pad.Y, self.__pad._replace(Y=0),
 							self.__dtype, self.__step)
 
 	@property
@@ -100,7 +104,7 @@ class DataWindow(object):
 			:retval: DataWindow expanded and repositioned by padding.
 		"""
 		return DataWindow(self.__shape._replace(Y=self.__shape.Y + 2 * self.__pad.Y),
-							self.__pos - self.__pad.Y, ImgShape(0, 0), 
+							self.__pos - self.__pad.Y, ImgShape(0, 0),
 							self.__dtype, self.__step)
 
 	def sino(self) -> slice:
@@ -120,6 +124,7 @@ class DataWindow(object):
 class _DataWindowIter(Iterator):
 	def __init__(self, data_shape: SinoOrder, data_range: range, pad: ImgShape, dtype: type):
 		self.__iter = iter(data_range)
+		self.__end = data_range.stop
 		self.__pos = 0
 		self.__data_shape = data_shape
 		self.__pad = pad
@@ -127,7 +132,12 @@ class _DataWindowIter(Iterator):
 
 	def __next__(self):
 		self.__pos = next(self.__iter)
-		return DataWindow(self.__data_shape, self.__pos, self.__pad, self.__dtype)
+		if self.__pos + self.__data_shape.Y + self.__pad.Y > self.__end:
+			window_shape = self.__data_shape._replace(Y=self.__end - self.__pos - self.__pad.Y)
+		else:
+			window_shape = self.__data_shape
+
+		return DataWindow(window_shape, self.__pos, self.__pad, self.__dtype)
 
 
 class DataWindowSet(object):

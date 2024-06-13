@@ -62,8 +62,11 @@ def weighted_normalize(sino_mem: SharedNP, flats_mem: SharedNP, sino_read: Share
 		else:
 			gain_map = np.subtract(np.average(flats[FLAT.PREGAIN.index:FLAT.POSTGAIN.index + 1, window.Y(), :], axis=0,
 									weights=[window.shape.Theta - projection, projection]), dark_map)
-		gain_map[gain_map == 0.0] = 0.000000001
 		temp = np.subtract(sino_sm[:, projection, :].astype(sino_mem.dtype), dark_map)
+
+		gain_zero = (gain_map == 0).reshape(gain_map.shape)
+		if gain_zero.sum() > 0:
+			gain_map[gain_zero] = 0.0000001
 
 		sino[:, projection, :] = np.divide(temp, gain_map)
 
@@ -99,16 +102,11 @@ def calculate_shift(flats: np.ndarray, scope: ImgShape = ImgShape(Y=20, X=20),
 	# Completely blown out areas - No change at all
 	defect_mask = flats_map != 1.0
 
-	# Shifted beam map array.
-	linemap = np.empty((scope.Y * 2, scope.X * 2,
-						flats_map[flats_scope].shape[0],
-						flats_map[flats_scope].shape[1]))
-
 	# Results (Average and Standard Deviation) arrays.
 	dist_avg = np.empty((scope.Y * 2, scope.X * 2))
 	dist_stddev = np.empty((scope.Y * 2, scope.X * 2))
 
-	log.write("Flat Shift", f"Map and Scope Created {linemap.shape}, {flats_map[flats_scope].shape}"
+	log.write("Flat Shift", f"Map and Scope Created {flats_map[flats_scope].shape}"
 							f"{defect_mask[flats_scope].shape}, {np.count_nonzero(defect_mask)}")
 
 	# Mask Test
