@@ -66,7 +66,7 @@ def weighted_normalize(sino_mem: SharedNP, flats_mem: SharedNP, sino_read: Share
 
 		gain_zero = (gain_map == 0).reshape(gain_map.shape)
 		if gain_zero.sum() > 0:
-			gain_map[gain_zero] = 0.0000001
+			gain_map[gain_zero] = np.min(np.abs(gain_map[np.invert(gain_zero)]))
 
 		sino[:, projection, :] = np.divide(temp, gain_map)
 
