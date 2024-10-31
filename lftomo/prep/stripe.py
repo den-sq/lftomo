@@ -111,7 +111,13 @@ def remove_large_vo(sino_mem: SharedNP, i: int, snr: int = 3, size: int = 51, dr
 		sino_base[:, sino_mask] = sino_smooth[:, sino_mask]
 
 
-def remove_dead_vo(sino_mem: SharedNP, i: int, snr: int = 3, size: int = 51, norm: float = True):
+def remove_dead_vo(dw: DataWindow, sino_mem: SharedNP, snr: int = 3, size: int = 51, norm: float = True,
+					proc_count: int = 12):
+	with Pool(proc_count) as pool:
+		pool.starmap(_remove_dead_vo, [(sino_mem, i, snr, size, norm) for i in dw.internal.y_range])
+
+
+def _remove_dead_vo(sino_mem: SharedNP, i: int, snr: int = 3, size: int = 51, norm: float = True):
 	with sino_mem[i] as sino_base:
 		# Portion used for binary dilation.
 		mask_cut = np.s_[2:-2]
