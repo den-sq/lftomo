@@ -4,6 +4,7 @@ from multiprocessing import shared_memory, Pool
 from os import PathLike
 from pathlib import Path
 
+import h5py
 import numpy as np
 from numpy.typing import ArrayLike
 from psutil import cpu_count
@@ -25,7 +26,7 @@ def np_convert(dtype: np.dtype, source: ArrayLike):
 		return source.astype(dtype)
 
 
-def byteread_helper(target: SharedNP, image: PathLike, i_dtype: np.dtype, offsets: ArrayLike, size: int):
+def byteread_helper(target: str, image: PathLike, i_dtype: np.dtype, offsets: ArrayLike, size: int):
 	""" Sinogram order-capable reader using direct buffer reading.
 
 		TODO: Figure out if you can get rid of for loop - order matters.
@@ -58,30 +59,47 @@ def distribute_read(target_mem: SharedNP, window: DataWindow, source_files: Arra
 	"""
 	# Find the offset values for start of blocks.
 	# I wrote that this needs to be changed for .. some reason?
-	base_offset = target_mem.buffer_address.start
+	target_base_offset = target_mem.buffer_address.start
 
 	h_step = window.itemsize * window.shape.X
 
 	block_size = h_step * (window.shape.Theta if sino_order else window.shape.Y)
 	size = h_step if sino_order else block_size
 
-	with tf.TiffFile(source_files[0]) as tif:
-		offset = tif.pages[0].dataoffsets[0]
+	if source_files[0].suffix == ".h5":
+		# Single h5 file with dataset.
+		h5_ds = h5py.File(source_files[0], 'r')['exchange']['data']
+		source_base_offset = h5_ds.id.get_offset()
+		index_offset = h5_ds.nbytes // len(h5_ds)
+		source_set = [(i, source_files[0]) for i in range(len(h5_ds))]
+	elif source_files[0].suffix in [".tif", ".tiff"]:
+		with tf.TiffFile(source_files[0]) as tif:
+			if len(tif.pages) > 1:
+				# Multi-Page Tiff
+				source_base_offset = tif.pages[0].dataoffsets[0]
+				index_offset = tif.pages[1].dataoffsets[0] - source_base_offset
+				source_set = [(i, source_files[0]) for i in range(len(h5_ds))]
+			else:
+				# Single Page Tiff(s)
+				source_base_offset = tif.pages[0].dataoffsets[0]
+				index_offset = 0
+				source_set = enumerate(source_files)
 
 	# log.write("Distributing Read", f"Step {h_step} ; Block {block_size} ; Size {size}", LOG.INFO)
 	# log.write("Distributing Read", f"Write Offset {base_offset} ; Read Offset {offset}", LOG.INFO)
 
 	def generate_offset_pairs_sino(i):
-		return [{"source": offset + (window.start + j) * h_step,
-				"target": int(base_offset + j * block_size + i * h_step)}
+		return [{"source": source_base_offset + index_offset * i + (window.start + j) * h_step,
+				"target": int(target_base_offset + j * block_size + i * h_step)}
 					for j in range(window.shape.Y)]
 
 	def generate_offset_pairs_proj(i):
-		return [{"source": offset + (window.start) * h_step, "target": int(base_offset + i * block_size)}]
+		return [{"source": source_base_offset + index_offset * i + (window.start) * h_step,
+				"target": int(target_base_offset + i * block_size)}]
 
 	pairs_func = generate_offset_pairs_sino if sino_order else generate_offset_pairs_proj
 
-	log.write("Mem Read", f"{base_offset}|{window.shape.Y}")
+	log.write("Mem Read", f"{target_base_offset}|{window.shape.Y}")
 
 	# if sino_order:
 	# 	log.write("Read Example", generate_offset_pairs_sino(0), LOG.INFO)
@@ -91,7 +109,7 @@ def distribute_read(target_mem: SharedNP, window: DataWindow, source_files: Arra
 	# Distribute actual reading
 	with Pool(thread_max) as pool:
 		pool.starmap(read_func,
-			[(target_mem.name, image, window.dtype, pairs_func(i), size) for i, image in enumerate(source_files)])
+			[(target_mem.name, image, window.dtype, pairs_func(i), size) for i, image in source_set])
 
 
 def _slice_at(shape: namedtuple, item: str, value: int):

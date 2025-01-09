@@ -4,6 +4,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Self
 
+import h5py
 from natsort import natsorted
 import numpy as np
 import tifffile as tf
@@ -237,9 +238,7 @@ class DataWindowSet(object):
 
 	def from_folder(source: PathLike, shape_type: type, window_size: int, fov: CTFov, data_range: range = None,
 					angle_steps: np.ndarray = None) -> Self:
-		""" Creates a DataWindowSet from a folder of files.
-
-			Currently limited to .tiff files.
+		""" Creates a DataWindowSet from a folder of tiff files.
 
 			:param source: Path to folder of .tiff files.
 			:param shape_type: Type for the shape of the data (ProjOrder, SinoOrder, ReconOrder).
@@ -268,6 +267,45 @@ class DataWindowSet(object):
 									min(window_size, img_shape.Y), data_range, fov, base_image.dtype, angle_steps)
 			else:
 				raise TypeError("Data Shape Must Contain Y, X, and Theta or Z")
+
+	def from_file(source: PathLike, shape_type: type, window_size: int, fov: CTFov, data_range: range = None,
+					angle_steps: np.ndarray = None) -> Self:
+		""" Creates a DataWindowSet from a multi-page tiff or h5 file.
+
+			:param source: Path to single input file..
+			:param shape_type: Type for the shape of the data (ProjOrder, SinoOrder, ReconOrder).
+			:param window_size: Size of the window (in the y dimension) that will be created when moving through the data.
+			:param data_range: Size of the window (in the theta/Z dimension) based on the files.
+			:param fov: Field of view details of the image, for handling helical reconstruction.
+			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
+			:retval: DataWindowSet for the files.
+			"""
+		if source.suffix == ".h5":
+			h5_ds = h5py.File(source, 'r')['exchange']['data']
+			img_shape = ImgShape(h5_ds.shape[1], h5_ds.shape[2])
+			img_dtype = h5_ds.dtype
+			length = len(h5_ds)
+
+		elif source.suffix in [".tif", ".tiff"]:
+			with tf.TiffFile(source) as tif:
+				img_shape = ImgShape(tif.pages[0].shape[0], tif.pages[0].shape[1])
+				img_dtype = tif.pages[0].dtype
+				length = len(tif.pages)
+
+		# Iteration is over Y dimension, so if no data range is specified go over entire Y dimension.
+		if data_range is None:
+			data_range = range(0, img_shape.Y, window_size)
+
+		if hasattr(shape_type, "Theta"):
+			if fov.Theta is None:
+				fov = fov._replace(Theta=length)
+			return DataWindowSet(shape_type(Theta=length, Y=img_shape.Y, X=img_shape.X),
+								min(window_size, img_shape.Y), data_range, fov, img_dtype, angle_steps)
+		elif hasattr(shape_type, "Z"):
+			return DataWindowSet(shape_type(Z=length, Y=img_shape.Y, X=img_shape.X),
+								min(window_size, img_shape.Y), data_range, fov, img_dtype, angle_steps)
+		else:
+			raise TypeError("Data Shape Must Contain Y, X, and Theta or Z")
 
 
 def get_tilt_pad(width: int, rot_center: float, tilt: float):
