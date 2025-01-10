@@ -1,15 +1,21 @@
 #!/usr/bin/env python
+from collections import namedtuple
 from multiprocessing import Pool
 
 import numpy as np
+import pywt
 from scipy.signal import medfilt2d
 from scipy.ndimage import median_filter
 from scipy.ndimage import binary_dilation
 from scipy.ndimage import uniform_filter1d
 from scipy import interpolate
+from tomopy.util import mproc
+
 
 from lftomo.util.mem import SharedNP
 from lftomo.util.window import DataWindow
+
+DetailCoeff = namedtuple("DetailCoeff", ["cH", "cV", "cD"])
 
 # Add Copyright Notice
 
@@ -149,3 +155,67 @@ def _remove_dead_vo(sino_mem: SharedNP, i: int, snr: int = 3, size: int = 51, no
 	# Remove residual stripes
 	if norm is True:
 		remove_large_vo(sino_mem, i, snr, size, norm=norm)
+
+
+def remove_stripe_fw(dw: DataWindow, sino_mem: SharedNP, level: int = None, wname: str = 'db5', sigma: float = 2.0,
+						zero_pad: bool = False, proc_count: int = 12):
+	"""
+	Remove horizontal stripes from sinogram using the Fourier-Wavelet (FW)
+	based method :cite:`Munch:09`.
+
+	:param dw: Datawindow specifying range to operate on..
+	:param sino_mem: Sinogram memory of data.
+	:param level: Number of levels of wavelet decomposition.
+				Defaults to log2 of the largest dimension of the input.
+	:param uname: Wavelet decomposition filter.
+	:param sigma: Damping parameter in Fourier space.
+	:param zero_pad: Whether to pad with zeroes instead of symmetrically during
+				wavelet transformation. :cite:`Munch:09` specifices symmetric but
+				tomopy offers additional optional zero-padding before wavelet
+				transformation; so here's just zero-padding during transformation
+				as an option.
+	:param proc_count: int, optional
+	"""
+	if level is None:
+		level = int(np.ceil(np.log2(np.max(sino_mem.shape))))
+	with Pool(proc_count) as pool:
+		pool.starmap(_remove_stripe_fw, [(sino_mem, i, level, wname, sigma, zero_pad) for i in dw.internal.y_range])
+
+
+def _compounding_dwt2(sli, wname, mode, level):
+	sli, coeff = pywt.dwt2(sli, wname, mode=mode)
+	return _compounding_dwt2(sli, wname, mode, level - 1) + [DetailCoeff(*coeff)] if level else [sli]
+
+
+def _remove_stripe_fw(sino_mem, i, level, wname, sigma, zero_pad=False):
+	extension_mode = "zero" if zero_pad else "symmetric"
+	theta_pad = sino_mem.shape.Theta // 16
+
+	with sino_mem[i] as sino:
+		sino_indexing = np.s_[theta_pad:theta_pad + sino_mem.shape.Theta, 0:sino_mem.shape.X]
+		sli = np.pad(sino[:, :], ((theta_pad, ), (0, )), 'constant', constant_values=(0.0, 0.0))
+		cWavelet = []
+
+		# Wavelet decomposition
+		for _j in range(level):
+			sli, coeff = pywt.dwt2(sli, wname, mode=extension_mode)
+			cWavelet = [DetailCoeff(*coeff)] + cWavelet
+
+		# Ring artifact removal in FFT space.
+		def fft_space_removal(j):
+			fcV = np.fft.fftshift(np.fft.fft(cWavelet[j].cV, axis=0))
+			my, mx = fcV.shape
+
+			# Damping of ring artifact information.
+			y_hat = (np.arange(-my, my, 2, dtype='float32') + 1) / 2
+			damp = -np.expm1(-np.square(y_hat) / (2 * np.square(sigma)))
+			fcV *= np.transpose(np.tile(damp, (mx, 1)))
+
+			# Inverse FFT.
+			cWavelet[j] = cWavelet[j]._replace(cV=np.real(np.fft.ifft(np.fft.ifftshift(fcV), axis=0)))
+
+		# map doesn't execute by default, so let's just do this
+		[fft_space_removal(x) for x in range(0, len(cWavelet))]
+
+		# Multilevel Wavelet Reconstruction
+		sino[:, :] = pywt.waverec2([sli] + cWavelet, wname, mode=extension_mode)[sino_indexing]
