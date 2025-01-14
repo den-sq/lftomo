@@ -58,6 +58,7 @@ class Logger:
 
 	def set_logdir(self, logdir):
 		self.__logs["general"] = (Path(logdir, f"imaging_log_{self.script_start}.txt"), self.__logs["general"][1])
+		Path(logdir).mkdir(parents=True, exist_ok=True)
 
 	def header(self, out=None):
 		"""Writes explanatory header for the logging format.
