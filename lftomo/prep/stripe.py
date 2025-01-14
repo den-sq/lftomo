@@ -189,11 +189,10 @@ def _compounding_dwt2(sli, wname, mode, level):
 
 def _remove_stripe_fw(sino_mem, i, level, wname, sigma, zero_pad=False):
 	extension_mode = "zero" if zero_pad else "symmetric"
-	theta_pad = sino_mem.shape.Theta // 16
 
 	with sino_mem[i] as sino:
-		sino_indexing = np.s_[theta_pad:theta_pad + sino_mem.shape.Theta, 0:sino_mem.shape.X]
-		sli = np.pad(sino[:, :], ((theta_pad, ), (0, )), 'constant', constant_values=(0.0, 0.0))
+		sino_indexing = np.s_[0:sino_mem.shape.Theta, 0:sino_mem.shape.X]
+		sli = sino[:, :]
 		cWavelet = []
 
 		# Wavelet decomposition
