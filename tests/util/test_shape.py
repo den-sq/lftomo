@@ -1,5 +1,4 @@
-# import numpy as np
-
+from dataclasses import astuple
 from lftomo.util.shapes import ProjOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder
 
 
@@ -12,13 +11,14 @@ def test_shape_casting():
 
 	assert po == so.to(ProjOrder)
 
-	assert im == so.cut(ImgSlice)
-	assert im == po.cut(ImgSlice)
-	assert yv == so.cut(Y)
-	assert yv == po.cut(Y)
-	assert yv == im.cut(Y)
+	assert im == so.extract(ImgSlice)
+	assert im == po.extract(ImgSlice)
+	assert yv == so.extract(Y)
+	assert yv == po.extract(Y)
+	assert yv == im.extract(Y)
 	assert ro == ReconOrder.of(so)
 	assert ro == ReconOrder.of(po)
+	assert astuple(po.cut(Y)) == (50, 100)
 
 	so_to_po = [1, 0, 2]
 	po_to_so = [1, 0, 2]

@@ -1,179 +1,191 @@
 from collections import namedtuple
-from collections.abc import Iterator
+from copy import deepcopy
+from dataclasses import asdict, replace, fields
+from functools import partial
 from os import PathLike
 from pathlib import Path
-from typing import Self
+from typing import Self, Sequence, Iterator
 
 import h5py
 from natsort import natsorted
 import numpy as np
 import tifffile as tf
 
-SinoOrder = namedtuple("SinoOrder", ['Y', 'Theta', 'X'])
-ProjOrder = namedtuple("ProjOrder", ['Theta', 'Y', 'X'])
-ReconOrder = namedtuple("ReconOrder", ['Y', 'Z', 'X'])
+from .shapes import DataShape, DataRange, IntIter, SliceIter, TFIter
 
+# Field of view during data acquisition.
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
-ImgShape = namedtuple("ImgShape", ['Y', 'X'])
 
 
-class DataWindow(object):
-	""" Window of data currently being worked with. """
+class DataRef(object):
+	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape,
+					step: DataShape, dtype: type = None, offset: int = 0):
 
-	def __init__(self, shape: namedtuple, pos: int, pad: ImgShape, dtype: type = None, step: int = None):
-		self.__shape = shape
+		pad_shift = pos.param_max(pos, pad) - pos
+		if pad_shift:
+			print("Shifting position and shape for padding.")
+
+		self.__pos = pos + pad_shift
+		self.__shape = shape - pad_shift  # If padding reallocates position, we shrink.
 		self.__pad = pad
-		self.__pos = pos
+		self.__step = step
 		self.__dtype = dtype
-		self.__window_type = type(self.__shape)
-		if step is None:
-			self.__step = 1
-		else:
-			self.__step = step
-
-	def __str__(self):
-		return f"{self.__shape} ({self.__dtype}) at {self.__pos}"
+		self.__offset = offset
 
 	@property
-	def start(self) -> int:
+	def shape(self) -> DataShape:
+		return self.__shape
+
+	@property
+	def pos(self) -> DataShape:
 		return self.__pos
 
 	@property
-	def stop(self) -> int:
-		return self.__pos + self.__shape.Y * self.__step
-
-	@property
-	def step(self) -> int:
+	def step(self) -> DataShape:
 		return self.__step
 
 	@property
-	def y_range(self) -> range:
-		return range(self.__pos, self.__pos + self.__shape.Y * self.__step, self.__step)
+	def frange(self) -> DataRange:
+		return DataRange(self.pos, (self.shape + self.pos).extract(self.pos), self.step)
 
 	@property
-	def shape(self) -> namedtuple:
-		return self.__shape
-
-	def recon_shape(self) -> namedtuple:
-		return ReconOrder(Y=self.__shape.Y, Z=self.__shape.X, X=self.__shape.X)
-
-	@property
-	def __len__(self) -> int:
-		return self.__shape.Y
+	def pad(self) -> DataShape:
+		return self.__pad
 
 	@property
 	def dtype(self) -> type:
 		return self.__dtype
 
+	def __str__(self) -> str:
+		return f"{self.shape} ({self.dtype}) at {self.pos} stepping by {self.step}"
+
 	@property
 	def itemsize(self) -> int:
-		return self.__dtype.itemsize
+		return np.dtype(self.dtype).itemsize
 
 	@property
-	def internal(self) -> Self:
-		""" Get the window for internal memory, positioned at 0.
+	def step_shape(self) -> DataShape:
+		ss = replace(self.shape, **asdict(self.step))
+		return ss
 
-			:retval: DataWindow expanded and repositioned by padding.
-		"""
-		return DataWindow(self.__shape, self.__pad.Y, self.__pad, self.__dtype)
+	def with_pad(self, pad_dim: Sequence = None, shrink=False) -> Self:
+		new_ref = deepcopy(self)
+		if pad_dim is None:
+			pad_dim = [field.name for field in fields(self.__pad)]
+		try:
+			kept = replace(self.__pad, **{key: 0 for key in pad_dim})
+		except ValueError as ve:
+			ve.add_note("No padding found for dimension.")
+
+		shift = self.pad - kept
+		new_ref.__shape = new_ref.__shape + shift + shift  # maybe I do need that int math
+		new_ref.__pad = kept
+		new_ref.__pos = self.pos - shift.extract(self.pos) 	# removing padding so don't need to recheck dim.
+		return new_ref
+
+	def rescope(self, pos: DataShape = None, pad: DataShape = None, dtype: type = None, shape: DataShape = None) -> Self:
+		new_ref = deepcopy(self)
+
+		if pos is not None:
+			new_ref.__pos = replace(self.pos, **asdict(pos))
+		if pad is not None:
+			pad_shift = pad + (-self.pad)
+			new_ref.__pad = replace(self.pad, **asdict(pad))
+			if pos is None:
+				new_ref.__pos += pad_shift
+		if dtype is not None:
+			new_ref.__dtype = dtype
+		if shape is not None:
+			new_ref.__shape = replace(self.shape, **asdict(shape))
+		elif pad is not None:
+			new_ref.__shape -= (pad_shift + pad_shift)
+
+		pos_pad_shift = new_ref.__pos.param_max(new_ref.__pos, new_ref.__pad) - new_ref.__pos
+		if pos_pad_shift:
+			print(f"Shifting position and shape to allow for padding by {pos_pad_shift}")
+			new_ref.__pos += pos_pad_shift
+			new_ref.__shape -= pos_pad_shift
+
+		return new_ref
+
+	def int_iter(self) -> Iterator:
+		return self.frange.get_iter(conv=IntIter)
+
+	def step_iter(self) -> Iterator:
+		return self.frange.get_iter()
+
+	def slice_iter(self) -> Iterator:
+		return self.frange.get_iter(conv=partial(SliceIter, shape=self.shape))
+
+
+class TomoWindow(DataRef):
+	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape, step: DataShape,
+					dtype: type, work_dtype: type):
+		super().__init__(shape, pad, pos, step, dtype)
+		self.__work_dtype = work_dtype
 
 	@property
-	def fresh(self) -> Self:
-		return DataWindow(self.__shape, self.__pos + self.__pad.Y, ImgShape(0, self.__pad.X),
-							self.__dtype, self.__step)
-
-	@property
-	def retained(self) -> Self:
-		return DataWindow(self.__shape._replace(Y=self.__pad.Y * 2),
-							self.__pos - self.__pad.Y, ImgShape(0, self.__pad.X),
-							self.__dtype, self.__step)
-
-	@property
-	def y_pad(self) -> Self:
-		""" Get the window padded in the Y dimension.
-
-			:retval: DataWindow expanded and repositioned by padding.
-		"""
-		return DataWindow(self.__shape._replace(Y=self.__shape.Y + 2 * self.__pad.Y),
-							self.__pos - self.__pad.Y, self.__pad._replace(Y=0),
-							self.__dtype, self.__step)
-
-	@property
-	def xy_pad(self) -> Self:
-		""" Get the window padded in the X and Y dimension.
-
-			:retval: DataWindow expanded and repositioned by padding.
-		"""
-		return DataWindow(self.__shape._replace(Y=self.__shape.Y + 2 * self.__pad.Y),
-							self.__pos - self.__pad.Y, ImgShape(0, 0),
-							self.__dtype, self.__step)
-
-	def sino(self) -> slice:
-		""" Gets the slice of the window in the sinogram domain.
-		"""
-		return np.s_[self.__pos: self.__pos + self.__shape.Y * self.__step:self.__step, :, :]
-
-	def proj(self) -> slice:
-		""" Gets the slice of the window in the projection domain. """
-		return np.s_[:, self.__pos: self.__pos + self.__shape.Y * self.__step:self.__step, :]
-
-	def Y(self) -> range:
-		""" Gets the slice of the window in the Y dimension. """
-		return np.s_[self.__pos:self.__pos + self.__shape.Y * self.__step:self.__step]
+	def internal(self):
+		return self.rescope(pos=self.pad.extract(self.pos), dtype=self.__work_dtype)
 
 
-class _DataWindowIter(Iterator):
-	def __init__(self, data_shape: SinoOrder, data_range: range, pad: ImgShape, dtype: type):
-		self.__iter = iter(data_range)
-		self.__end = data_range.stop
-		self.__pos = 0
-		self.__data_shape = data_shape
-		self.__pad = pad
-		self.__dtype = dtype
+class TomoWindowIter(TFIter):
+	def __init__(self, dr: DataRange, shape: DataShape, pad: DataShape,
+					dtype: type, work_dtype: type, substep: DataShape = None):
+		self.shape = shape
+		self.pad = pad
+		self.dtype = dtype
+		self.work_dtype = dtype
+		self.stop = dr.stop
+		self.substep = substep if substep is not None else dr.step.make_with(1)
 
-	def __next__(self):
-		self.__pos = next(self.__iter)
-		if self.__pos + self.__data_shape.Y + self.__pad.Y > self.__end:
-			window_shape = self.__data_shape._replace(Y=self.__end - self.__pos - self.__pad.Y)
+	def __call__(self, pos) -> tuple:
+		step_end = (self.shape + pos + self.pad).extract(pos)
+
+		if step_end < self.stop:
+			winshape = self.shape
 		else:
-			window_shape = self.__data_shape
+			# Standard shape would extend beyond the range, so cut it down.
+			winshape = replace(self.shape, **{k: v for k, v in asdict(self.stop - pos - self.pad.extract(pos)).items()
+											if v < asdict(self.shape)[k]})
 
-		return DataWindow(window_shape, self.__pos, self.__pad, self.__dtype)
+		return TomoWindow(winshape, self.pad, pos, self.substep, self.dtype, self.work_dtype)
 
 
-class DataWindowSet(object):
+class TomoDataSet(DataRef):
 	""" Set of windows for slicing data into smaller portions.
 
 		Iterable for grabbing each window in order.
 	"""
 
-	def __init__(self, data_shape: namedtuple, window_size: int, data_range: range, fov: CTFov,
-					dtype: type = None, angle_steps: np.ndarray = None):
+	def __init__(self, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
+					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32):
 		""" Initializes DataWindowSet.
 
-			:param data_shape: Shape of the overall dataset.
-			:param window_size: Size of the window (in the y dimension) that will be created when moving through the data.
-			:param data_range: Size of the window (in the theta/Z dimension) based on the files.
-			:param fov: Field of view details of the image, for handling helical reconstruction.
+			:param ds_shape: Shape of the overall dataset.
+			:param over: Either a full range to iterate over or just the per-step iteration.
+			:param fov: Field of view details of the image, for angle calculation.
 			:param dtype: Type of data being iterated over.
 			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
 		"""
-
-		if not hasattr(data_shape, 'Y'):
-			raise TypeError("data_shape must have a y-dimension to iterate through.")
-
-		self.__data_shape = data_shape
-		if data_range is not None:
-			self.__data_range = data_range
+		if isinstance(over, DataShape):
+			pos = over.make_with(0)
+			shape = shape
+			step = over
+		elif isinstance(over, DataRange):
+			pos = over.start
+			shape = replace(shape, **asdict(over.stop - over.start))
+			step = over.step
 		else:
-			self.__data_range = range(0, self.__data_shape.Y, window_size)
+			print(f"Invalid over {type(over)} - must be step size (single shape) or a full range (start, stop, step)")
+
+		super().__init__(shape=shape, pad=shape.make_with(0), pos=pos, step=step, dtype=dtype)
+
+		self.__work_dtype = work_dtype
 
 		self.__fov = fov
-		self.__pad_shape = ImgShape(0, 0)
-		self.__window_size = window_size
-		self.__dtype = dtype
-
-		if data_shape.Theta == fov.Theta * fov.Count:
+		self.__angle_steps = angle_steps
+		if shape.Theta == fov.Theta * fov.Count:
 			self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
 		else:
 			if angle_steps is None:
@@ -181,66 +193,34 @@ class DataWindowSet(object):
 			else:
 				self.__angles = np.array([step * np.deg2rad(fov.Degrees) / fov.Count for step in angle_steps])
 
-	def __iter__(self) -> _DataWindowIter:
-		return _DataWindowIter(self.__data_shape._replace(Y=self.__window_size),
-								self.__data_range, self.__pad_shape, self.__dtype)
-
-	def update_padding(self, pad_shape: ImgShape):
-		""" Updates padding values to those of pad_shape.
-			None values are ignored (e.g. equivalent is not updated).
-
-			:param pad_shape: NamedTuple (Y and X) with new values (integers).
-		"""
-		self.__pad_shape = ImgShape(
-				pad_shape.Y if pad_shape.Y is not None else self.__pad_shape.Y,
-				pad_shape.X if pad_shape.X is not None else self.__pad_shape.X)
-
-	@property
-	def window_size(self):
-		return self.__window_size
-
-	@property
-	def data_shape(self):
-		return self.__data_shape
-
-	@property
-	def window_shape(self):
-		return self.__data_shape._replace(Y=self.__window_size)
-
 	@property
 	def angles(self):
 		return self.__angles
 
 	@property
-	def img_shape(self):
-		return ImgShape(self.__data_shape.Y, self.__data_shape.X)
+	def fov(self):
+		return self.__fov
 
-	@property
-	def dtype(self):
-		return self.__dtype
+	def full_window(self) -> TomoWindow:
+		return TomoWindow(self.shape, self.pad, self.pos, self.step, self.dtype, self.__work_dtype)
 
-	def __len__(self):
-		return len(range(0, self.__data_range.stop, self.__window_size))
+	def __iter__(self) -> Iterator:
+		partial_twi = partial(TomoWindowIter, shape=self.step_shape, pad=self.pad, dtype=self.dtype,
+								work_dtype=self.__work_dtype)
+		return self.frange.get_iter(partial_twi)
 
-	def full_window(self) -> DataWindow:
-		return DataWindow(self.__data_shape, self.__data_range.start, self.__pad_shape, self.__dtype, self.__data_range.step)
+	def iter_with(self, *, wsize: DataShape = None, substep: DataShape = None):
+		window = self.step_shape
+		if wsize is not None:
+			window = replace(window, **asdict(wsize))
+		self.frange.get_iter(partial(TomoWindowIter, window, self.pad, self.dtype, self.__work_dtype, substep))
 
-	def at_interval(self, interval: int) -> Self:
-		""" Todo: Fix Angle Stuff
-		"""
+	@classmethod
+	def from_disk(cls, source: PathLike, fov: CTFov, shape_type: type, over: DataRange | DataShape,
+					angle_steps: np.ndarray = None, work_dtype: type = np.float32) -> Self:
+		""" Creates a TomoWindowSet from a multi-page tiff or h5 file, or a set of tiff files.
 
-		start = self.__data_range.start
-		stop = self.__data_range.stop
-
-		return DataWindowSet(self.__data_shape._replace(Y=interval), 1,
-								range(start, stop, int((stop - start) / interval)), self.__fov,
-								self.__dtype)
-
-	def from_folder(source: PathLike, shape_type: type, window_size: int, fov: CTFov, data_range: range = None,
-					angle_steps: np.ndarray = None) -> Self:
-		""" Creates a DataWindowSet from a folder of tiff files.
-
-			:param source: Path to folder of .tiff files.
+			:param source: Path to input
 			:param shape_type: Type for the shape of the data (ProjOrder, SinoOrder, ReconOrder).
 			:param window_size: Size of the window (in the y dimension) that will be created when moving through the data.
 			:param data_range: Size of the window (in the theta/Z dimension) based on the files.
@@ -248,64 +228,33 @@ class DataWindowSet(object):
 			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
 			:retval: DataWindowSet for the files.
 			"""
-		source_files = natsorted(Path(source).glob("**/*.tif*"))
-		with tf.TiffFile(source_files[0]) as tif:
-			base_image = tif.pages[0]
-			img_shape = ImgShape(base_image.shape[0], base_image.shape[1])
 
-			# Iteration is over Y dimension, so if no data range is specified go over entire Y dimension.
-			if data_range is None:
-				data_range = range(0, img_shape.Y, window_size)
-
-			if hasattr(shape_type, "Theta"):
-				if fov.Theta is None:
-					fov = fov._replace(Theta=len(source_files))
-				return DataWindowSet(shape_type(Theta=len(source_files), Y=img_shape.Y, X=img_shape.X),
-									min(window_size, img_shape.Y), data_range, fov, base_image.dtype, angle_steps)
-			elif hasattr(shape_type, "Z"):
-				return DataWindowSet(shape_type(Z=len(source_files), Y=img_shape.Y, X=img_shape.X),
-									min(window_size, img_shape.Y), data_range, fov, base_image.dtype, angle_steps)
-			else:
-				raise TypeError("Data Shape Must Contain Y, X, and Theta or Z")
-
-	def from_file(source: PathLike, shape_type: type, window_size: int, fov: CTFov, data_range: range = None,
-					angle_steps: np.ndarray = None) -> Self:
-		""" Creates a DataWindowSet from a multi-page tiff or h5 file.
-
-			:param source: Path to single input file..
-			:param shape_type: Type for the shape of the data (ProjOrder, SinoOrder, ReconOrder).
-			:param window_size: Size of the window (in the y dimension) that will be created when moving through the data.
-			:param data_range: Size of the window (in the theta/Z dimension) based on the files.
-			:param fov: Field of view details of the image, for handling helical reconstruction.
-			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
-			:retval: DataWindowSet for the files.
-			"""
-		if source.suffix == ".h5":
+		source = Path(source)
+		if source.is_dir():
+			source_files = natsorted(source.glob("**/*.tif*"))
+			with tf.TiffFile(source_files[0]) as tif:
+				img_shape = tif.pages[0].shape
+				img_dtype = tif.pages[0].dtype
+				length = len(source_files)
+		elif source.suffix == ".h5":
 			h5_ds = h5py.File(source, 'r')['exchange']['data']
-			img_shape = ImgShape(h5_ds.shape[1], h5_ds.shape[2])
+			img_shape = h5_ds.shape[1], h5_ds.shape[2]
 			img_dtype = h5_ds.dtype
 			length = len(h5_ds)
-
 		elif source.suffix in [".tif", ".tiff"]:
 			with tf.TiffFile(source) as tif:
-				img_shape = ImgShape(tif.pages[0].shape[0], tif.pages[0].shape[1])
+				img_shape = tif.pages[0].shape
 				img_dtype = tif.pages[0].dtype
 				length = len(tif.pages)
-
-		# Iteration is over Y dimension, so if no data range is specified go over entire Y dimension.
-		if data_range is None:
-			data_range = range(0, img_shape.Y, window_size)
-
-		if hasattr(shape_type, "Theta"):
-			if fov.Theta is None:
-				fov = fov._replace(Theta=length)
-			return DataWindowSet(shape_type(Theta=length, Y=img_shape.Y, X=img_shape.X),
-								min(window_size, img_shape.Y), data_range, fov, img_dtype, angle_steps)
-		elif hasattr(shape_type, "Z"):
-			return DataWindowSet(shape_type(Z=length, Y=img_shape.Y, X=img_shape.X),
-								min(window_size, img_shape.Y), data_range, fov, img_dtype, angle_steps)
 		else:
-			raise TypeError("Data Shape Must Contain Y, X, and Theta or Z")
+			print("Could not ID file type. exiting.")
+
+		if fov.Theta is None:
+			if "Theta" in [field.name for field in fields(shape_type)]:
+				fov = fov._replace(Theta=length)
+
+		new_shape = shape_type(length, *img_shape)
+		return cls(fov, new_shape, over, angle_steps, img_dtype, work_dtype)
 
 
 def get_tilt_pad(width: int, rot_center: float, tilt: float):
