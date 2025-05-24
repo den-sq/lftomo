@@ -68,14 +68,20 @@ class DataRef(object):
 		ss = replace(self.shape, **asdict(self.step))
 		return ss
 
+	@property
+	def stride(self) -> DataShape:
+		vals = list(asdict(self.shape).values()) + [1]
+		return type(self.shape)(*[self.itemsize * np.prod(vals[x + 1:]) for x in range(len(vals) - 1)])
+
 	def with_pad(self, pad_dim: Sequence = None, shrink=False) -> Self:
 		new_ref = deepcopy(self)
 		if pad_dim is None:
 			pad_dim = [field.name for field in fields(self.__pad)]
 		try:
 			kept = replace(self.__pad, **{key: 0 for key in pad_dim})
-		except ValueError as ve:
-			ve.add_note("No padding found for dimension.")
+		except TypeError as te:
+			te.add_note("No padding found for dimension.")
+			raise te
 
 		shift = self.pad - kept
 		new_ref.__shape = new_ref.__shape + shift + shift  # maybe I do need that int math
@@ -177,21 +183,22 @@ class TomoDataSet(DataRef):
 			shape = replace(shape, **asdict(over.stop - over.start))
 			step = over.step
 		else:
-			print(f"Invalid over {type(over)} - must be step size (single shape) or a full range (start, stop, step)")
+			print(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
+			raise TypeError(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
 
 		super().__init__(shape=shape, pad=shape.make_with(0), pos=pos, step=step, dtype=dtype)
 
 		self.__work_dtype = work_dtype
 
 		self.__fov = fov
-		self.__angle_steps = angle_steps
-		if shape.Theta == fov.Theta * fov.Count:
-			self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
-		else:
-			if angle_steps is None:
-				raise Exception("Missing Angle Steps for handling Missing Frames")
+
+		if angle_steps is None:
+			if shape.Theta == fov.Theta * fov.Count:
+				self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
 			else:
-				self.__angles = np.array([step * np.deg2rad(fov.Degrees) / fov.Count for step in angle_steps])
+				raise Exception("Missing Angle Steps for handling Missing Frames")
+		else:
+			self.__angles = np.array([step * np.deg2rad(fov.Degrees) / fov.Count for step in angle_steps])
 
 	@property
 	def angles(self):
@@ -213,7 +220,12 @@ class TomoDataSet(DataRef):
 		window = self.step_shape
 		if wsize is not None:
 			window = replace(window, **asdict(wsize))
-		self.frange.get_iter(partial(TomoWindowIter, window, self.pad, self.dtype, self.__work_dtype, substep))
+			frange = replace(self.frange, step=wsize)
+		else:
+			frange = self.frange
+
+		return frange.get_iter(partial(TomoWindowIter, shape=window, pad=self.pad, dtype=self.dtype,
+											work_dtype=self.__work_dtype, substep=substep))
 
 	@classmethod
 	def from_disk(cls, source: PathLike, fov: CTFov, shape_type: type, over: DataRange | DataShape,
@@ -255,8 +267,3 @@ class TomoDataSet(DataRef):
 
 		new_shape = shape_type(length, *img_shape)
 		return cls(fov, new_shape, over, angle_steps, img_dtype, work_dtype)
-
-
-def get_tilt_pad(width: int, rot_center: float, tilt: float):
-	# Remvoing minimum pad
-	return max(abs(int(np.ceil(max(width - rot_center, rot_center) * np.sin(tilt)))), 0)

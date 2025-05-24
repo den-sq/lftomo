@@ -1,8 +1,9 @@
 from functools import partial
 import numpy as np
+import pytest
 
 from lftomo.util.shapes import ProjOrder, Y, ImgSlice, IntIter, SliceIter, Proj
-from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov
+from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, DataRef
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
 
 
@@ -21,6 +22,44 @@ def test_tilt_pad():
 
 def test_full_dummy_run():
 	pass
+
+
+def test_creation():
+	fov = CTFov(1501, 180, 1)
+	shape = ProjOrder(Theta=1501, Y=2048, X=2048)
+	over = Y.drange(0, 1048, 24)
+	dtype = np.int16
+	work_dtype = np.float32
+
+	tds = TomoDataSet(fov, shape, over, dtype=dtype, work_dtype=work_dtype)
+
+	assert tds.pos == Y(0)
+	assert tds.shape == ProjOrder(Theta=1501, Y=1048, X=2048)
+	assert tds.step == Y(24)
+
+	tdr = DataRef(shape, Y(2), Y(0), Y(1), dtype)
+
+	assert tdr.pos == Y(2)
+	assert tdr.shape == ProjOrder(1501, 2046, 2048)
+
+	tw = tds.full_window()
+
+	assert tw.pos == Y(0)
+	assert tw.step == Y(24)
+	assert tw.shape == ProjOrder(1501, 1048, 2048)
+
+	# Missing angle steps
+	with pytest.raises(Exception):
+		tds = TomoDataSet(CTFov(1969, 180, 1), shape, over, dtype=dtype, work_dtype=work_dtype)
+
+	# Passing Angles
+	tds = TomoDataSet(fov, shape, over, angle_steps=np.arange(0, 1501, 2),
+						dtype=dtype, work_dtype=work_dtype)
+
+	assert all(tds.angles == [i * np.deg2rad(fov.Degrees) for i in range(0, 1501, 2)])
+
+	with pytest.raises(TypeError):
+		tds = TomoDataSet(fov, shape, 24, dtype=dtype, work_dtype=work_dtype)
 
 
 def test_dataset_methods():
@@ -53,6 +92,17 @@ def test_dataset_methods():
 												for x in range(0, 240, 24)]
 	assert [(f.shape, f.pos) for f in rs_list] == [(ProjOrder(Theta=1969, Y=min(24, 236 - x), X=2048), Y(max(x, 2)))
 												for x in range(2, 238, 24)]
+
+
+def test_alt_iter():
+	tds = generate_dataset()
+
+	large_window = tds.iter_with(wsize=Y(48))
+	large_window_list = list(large_window)
+
+	print([(x.shape, x.pos) for x in large_window_list])
+
+	assert [x.shape for x in large_window_list] == [ProjOrder(Theta=1969, Y=48, X=2048)] * 5
 
 
 def test_1d_window_iter():
@@ -111,6 +161,7 @@ def test_data_ref_fields():
 	assert df.itemsize == 2
 	assert str(df) == f"{ProjOrder(Theta=1900, Y=24, X=2048)} ({np.int16}) at {Y(1024)} stepping by {Y(1)}"
 	assert df.step_shape == ProjOrder(Theta=1900, Y=1, X=2048)
+	assert df.stride == ProjOrder(Theta=98304, Y=4096, X=2)
 
 
 def test_data_ref_iters():
@@ -129,11 +180,13 @@ def test_data_ref_iters():
 	assert list(df.step_iter()) == [Y(x) for x in range(1024, 1048, 1)]
 	assert list(drange) == [Y(x) for x in range(1024, 1048, 1)]
 
+	int_iter_list = list(drange_int_iter)
 	assert list(df.int_iter()) == list(range(1024, 1048, 1))
-	assert list(drange_int_iter) == list(range(1024, 1048, 1))
+	assert int_iter_list == list(df.int_iter())
 
+	slice_iter_list = list(drange_slice_iter)
 	assert list(df.slice_iter()) == list([np.s_[:, x, :] for x in range(1024, 1048, 1)])
-	assert list(drange_slice_iter) == list([np.s_[:, x, :] for x in range(1024, 1048, 1)])
+	assert slice_iter_list == list(df.slice_iter())
 
 
 def test_data_ref_padding():
@@ -148,6 +201,9 @@ def test_data_ref_padding():
 	print(dffp.shape)
 	assert dffp.shape == ProjOrder(Theta=1900, Y=28, X=2056)
 	assert dffp.frange == Y.drange(1022, 1050, 1)
+
+	with pytest.raises(TypeError):
+		dfp = df.with_pad(["Kumquat"])
 
 
 def test_data_ref_rescope():
