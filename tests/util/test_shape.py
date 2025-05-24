@@ -1,5 +1,11 @@
-from dataclasses import astuple
-from lftomo.util.shapes import ProjOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder
+import pytest
+
+import numpy as np
+
+from dataclasses import astuple, asdict
+from functools import partial
+from lftomo.util.shapes import ProjOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
+from lftomo.util.shapes import IntIter, ContigMemIter, MemAddressIter, SliceIter
 
 
 def test_shape_casting():
@@ -10,7 +16,6 @@ def test_shape_casting():
 	yv = Y(Y=12)
 
 	assert po == so.to(ProjOrder)
-
 	assert im == so.extract(ImgSlice)
 	assert im == po.extract(ImgSlice)
 	assert yv == so.extract(Y)
@@ -25,6 +30,58 @@ def test_shape_casting():
 
 	assert so_to_po == so.transpose(po)
 	assert po_to_so == po.transpose(so)
+
+	# Cut
+	tx = so.cut(Y)
+	assert tx.Theta == 50
+	assert tx.X == 100
+	assert "Y" not in asdict(tx)
+
+	# Extract
+	pj = so.extract(Proj)
+	assert pj.Y == 12
+	assert pj.X == 100
+	assert "Theta" not in asdict(pj)
+
+
+def test_cast_errors():
+	so = SinoOrder(Y=24, Theta=1501, X=2048)
+	po = ProjOrder(Y=24, Theta=1501, X=2048)
+	ro = ReconOrder(Y=24, X=2048, Z=2048)
+	pj = Proj(Y=24, X=2048)
+	tx = YSlice(Theta=1501, X=2048)
+
+	with pytest.raises(TypeError) as te:
+		so.to(['Y', 'Theta', 'X'])
+	print(f"to: {te.__dict__}")
+
+	with pytest.raises(TypeError) as te:
+		so.extract("Kumquat")
+	print(f"extract: {te}")
+
+	with pytest.raises(KeyError) as ke:
+		pj.extract(Theta)
+	print(f"extract fields: {ke}")
+
+	with pytest.raises(TypeError) as te:
+		so.cut(["Y", "Theta", "X"])
+	print(f"cut (type): {te}")
+
+	with pytest.raises(IndexError) as ie:
+		so.cut(ProjOrder)
+	print(f"cut (values): {ie}")
+
+	with pytest.raises(TypeError) as te:
+		po.transpose(ro)
+	print(f"transpose: {te}")
+
+	with pytest.raises(ValueError) as ve:
+		po.transpose(pj)
+	print(f"transpose field count: {ve}")
+
+	with pytest.raises(AttributeError) as ae:
+		ReconOrder.of(tx)
+	print(f"bad recon cast: {ae}")
 
 
 def test_shape_math():
@@ -79,6 +136,23 @@ def test_shape_compare():
 	assert not ProjOrder(Theta=12, Y=11, X=7) > SinoOrder(Y=7, Theta=12, X=3)
 
 
+def test_shape_operator_error():
+	po = ProjOrder(Y=24, Theta=1501, X=2048)
+	pj = Proj(Y=24, X=2048)
+
+	with pytest.raises(AttributeError) as ae:
+		pj < po
+	print(f"Comparison Count: {ae}")
+
+	with pytest.raises(AttributeError) as ae:
+		pj // po
+	print(f"Comparison Count: {ae}")
+
+	with pytest.raises(ValueError) as ve:
+		po.param_min(pj)
+	print(f"Comparison Count: {ve}")
+
+
 def test_shape_func():
 	# Flat Creation
 	po = ProjOrder.make_with(2)
@@ -116,6 +190,21 @@ def test_range_1D():
 
 	assert extra_space_list == extra_space_match
 
+	with pytest.raises(ValueError) as ve:
+		DataRange(Y(5), Y(25), Proj(1, 1))
+	print(f"Oversized Step: {ve}")
+
+	with pytest.raises(ValueError) as ve:
+		DataRange(Y(5), Proj(25, 5), Y(1))
+	print(f"Oversized Stop: {ve}")
+
+
+def test_range_at_interval():
+	interval_range = Y.range_at_interval(0, 24, 4)
+	std_range = Y.drange(0, 24, 6)
+
+	assert std_range == interval_range
+
 
 def test_range_2D():
 	basic_2d = ImgSlice.drange((0, 0), (4, 2), (1, 1))
@@ -145,3 +234,114 @@ def test_range_3D():
 								for theta in range(0, 3, 2)], []), [])
 
 	assert space_3d_list == space_3d_match
+
+
+def test_custom_iter_1d():
+	shape = ProjOrder(Theta=1501, Y=2048, X=2048)
+	win_shape = ProjOrder(Theta=1501, Y=24, X=2048)
+	sino_shape = SinoOrder(Theta=1501, Y=24, X=2048)
+	itemsize = np.dtype(np.uint16).itemsize
+	vals = list(asdict(shape).values()) + [1]
+	stride = type(shape)(*[itemsize * np.prod(vals[x + 1:]) for x in range(len(vals) - 1)])
+	vals = list(asdict(sino_shape).values()) + [1]
+	sino_stride = type(sino_shape)(*[itemsize * np.prod(vals[x + 1:]) for x in range(len(vals) - 1)])
+
+	drange_int_iter = Y.drange(1024, 1048, 1).get_iter(IntIter)
+	drange_slice_iter = Y.drange(1024, 1048, 1).get_iter(partial(SliceIter, shape=win_shape))
+	drange_mem_iter = Y.drange(1024, 1048, 1).get_iter(partial(MemAddressIter, offset=1024, stride=stride))
+	drange_contig_iter = Y.drange(1024, 1048, 1).get_iter(
+							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, break_fields=["Theta"]))
+
+	int_iter_list = list(drange_int_iter)
+	slice_iter_list = list(drange_slice_iter)
+	mem_iter_list = list(drange_mem_iter)
+
+	assert int_iter_list == list(range(1024, 1048, 1))
+	assert slice_iter_list == list([np.s_[:, x, :] for x in range(1024, 1048, 1)])
+
+# 	print(mem_iter_list)
+# 	print([1024 + (2048 * 2) * i for i in range(1024, 1048)])
+
+	assert mem_iter_list == [1024 + (2048 * 2) * i for i in range(1024, 1048)]
+
+	print(drange_contig_iter.conv.contig_stride)
+
+	assert drange_contig_iter.conv.contig_stride == 24 * 2048 * 2
+	drange_contig_iter_list = list(drange_contig_iter)
+
+	print(drange_contig_iter_list)
+
+	assert list(np.unique(drange_contig_iter_list)) == [1024 + (2048 * 2) * 1024]
+
+	drange_sino_contig_iter = Y.drange(1024, 1048, 1).get_iter(
+							partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape, break_fields=["Theta"]))
+
+	print(drange_sino_contig_iter.conv.contig_stride)
+
+	assert drange_sino_contig_iter.conv.contig_stride == 2048 * 2
+	drange_sino_contig_iter_list = list(drange_sino_contig_iter)
+
+	print(drange_sino_contig_iter_list)
+	print([1024 + (1501 * 2048 * 2) * i for i in range(1024, 1048)])
+
+	print(len(drange_sino_contig_iter_list))
+	print(len([1024 + (1501 * 2048 * 2) * i for i in range(1024, 1048)]))
+
+	assert list(np.unique(drange_sino_contig_iter_list)) == [1024 + (2048 * 1501 * 2) * i for i in range(1024, 1048)]
+
+	with pytest.raises(IndexError) as ie:
+		Y.drange(1024, 1048, 1).get_iter(partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape,
+											break_fields=["X"]))
+	print(f"Break Field last in shape: {ie}")
+
+	drange_skip_contig_iter = Y.drange(1024, 1048, 2).get_iter(
+							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, break_fields=["Theta"]))
+	assert drange_skip_contig_iter.conv.contig_stride == 2048 * 2
+
+	skip_contig_iter_list = list(drange_skip_contig_iter)
+	assert skip_contig_iter_list == [1024 + (2048 * 2) * i for i in range(1024, 1048, 2)]
+
+
+def test_custom_iter_2d():
+	shape = ProjOrder(Theta=1501, Y=2048, X=2048)
+	win_shape = ProjOrder(Theta=1501, Y=24, X=2048)
+	sino_shape = SinoOrder(Theta=1501, Y=24, X=2048)
+	itemsize = np.dtype(np.uint16).itemsize
+	vals = list(asdict(shape).values()) + [1]
+	stride = type(shape)(*[itemsize * np.prod(vals[x + 1:]) for x in range(len(vals) - 1)])
+	vals = list(asdict(sino_shape).values()) + [1]
+	sino_stride = type(sino_shape)(*[itemsize * np.prod(vals[x + 1:]) for x in range(len(vals) - 1)])
+
+	start = XSlice(Theta=0, Y=1024)
+	stop = XSlice(Theta=1501, Y=1048)
+	step = XSlice(Theta=1, Y=1)
+
+	drange_int_iter = XSlice.drange(start, stop, step).get_iter(IntIter)
+	drange_slice_iter = XSlice.drange(start, stop, step).get_iter(partial(SliceIter, shape=win_shape))
+	drange_mem_iter = XSlice.drange(start, stop, step).get_iter(partial(MemAddressIter, offset=1024, stride=stride))
+	drange_contig_iter = XSlice.drange(start, stop, step).get_iter(
+							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, break_fields=["Theta"]))
+	drange_sino_contig_iter = XSlice.drange(start, stop, step).get_iter(
+							partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape, break_fields=["Theta"]))
+
+	int_iter_list = list(drange_int_iter)
+	slice_iter_list = list(drange_slice_iter)
+	mem_iter_list = list(drange_mem_iter)
+	contig_iter_list = list(np.unique(list(drange_contig_iter)))
+	sino_contig_iter_list = list(np.unique(list(drange_sino_contig_iter)))
+
+	print(int_iter_list[:50])
+
+	assert slice_iter_list == list([np.s_[y, x, :] for y in range(0, 1501) for x in range(1024, 1048)])
+
+	assert mem_iter_list == [1024 + (2048 * 2048 * 2) * theta + (2048 * 2) * y for theta in range(0, 1501)
+								for y in range(1024, 1048)]
+
+	assert contig_iter_list == [1024 + (2048 * 2048 * 2) * theta + (2048 * 2) * 1024 for theta in range(0, 1501)]
+
+	print(sino_contig_iter_list[:50])
+	print([1024 + (24 * 2048 * 2) * y + (2048 * 2) * theta for y in range(1024, 1048)
+										for theta in range(0, 1501)][:50])
+
+	assert sino_contig_iter_list == [1024 + (1501 * 2048 * 2) * y + (2048 * 2) * theta for y in range(1024, 1048)
+										for theta in range(0, 1501)]

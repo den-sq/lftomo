@@ -6,7 +6,8 @@ from collections import namedtuple
 from dataclasses import dataclass, asdict, replace, fields, astuple, make_dataclass, Field, InitVar
 from functools import cached_property
 import operator
-from typing import Self, Sequence
+import sys
+from typing import Self, Sequence, Union
 
 import numpy as np
 
@@ -17,7 +18,7 @@ class DataShape(ABC):
 			dec = target if isinstance(target, type) else type(target)
 			return dec(**asdict(self))
 		except TypeError as te:
-			te.add_note("Must target another DataShape.")
+			te.add_note(f"{sys._getframe(0).f_code.co_name}: Must target another DataShape or Datashape Type.")
 			raise te
 
 	def extract(self, target: type | Self) -> Self:
@@ -25,34 +26,38 @@ class DataShape(ABC):
 			dec = target if isinstance(target, type) else type(target)
 			source = asdict(self)
 			return dec(**{field.name: source[field.name] for field in fields(target)})
-		except ValueError as ve:
-			ve.add_note("Target field(s) must exist in source.")
-			raise ve
+		except TypeError as te:
+			te.add_note(f"{sys._getframe(0).f_code.co_name}: Must target another Datashape or Datashape Type.")
+			raise te
+		except KeyError as ke:
+			ke.add_note(f"{sys._getframe(0).f_code.co_name}: Target field(s) must exist in source.")
+			raise ke
 
 	def cut(self, target: type | Self) -> Self:
 		try:
-			dec = self.gen(fields[target])
+			target_fields = [field.name for field in fields(target)]
+			dec = self.gen([field for field in fields(self) if field.name not in target_fields])
 			source = asdict(self)
-			return dec(**{k: v for k, v in source.items() if k not in asdict(target)})
-		except ValueError as ve:
-			ve.add_note("Must leave at least 1 field.")
-			raise ve
+			return dec(**{k: v for k, v in source.items() if k not in target_fields})
+		except TypeError as te:
+			te.add_note(f"{sys._getframe(0).f_code.co_name}: Must target another Datashape or Datashape Type.")
+			raise te
+		except IndexError as ie:
+			ie.add_note(f"{sys._getframe(0).f_code.co_name}: Must leave at least 1 field.")
+			raise ie
 
 	def transpose(self, target: type | Self) -> tuple:
 		""" Generates transpose matrix for compatiable with np.transpose and the like."""
 		try:
 			if len(fields(self)) != len(fields(target)):
-				raise ValueError("Source and Target must have same number of fields.")
-			dec = target if isinstance(target, type) else type(target)
+				raise ValueError(f"{sys._getframe(0).f_code.co_name}: Source and Target must have same number of fields.")
 
+			dec = target if isinstance(target, type) else type(target)
 			source = asdict(self)
 			dest = dec(**source)
 			return [list(source).index(key) for key in asdict(dest).keys()]
-		except ValueError as ve:
-			ve.add_note("Source and Target must have same fields.")
-			raise ve
 		except TypeError as te:
-			te.add_note("Must target another DataShape.")
+			te.add_note(f"{sys._getframe(0).f_code.co_name}: Target must be a datashape or datashape type with the same fields.")
 			raise te
 
 	def is_sub(self, target: type | Self) -> Self:
@@ -119,9 +124,9 @@ class DataShape(ABC):
 		try:
 			return cls(**{f.name: op([getattr(shapes[i], f.name) for i in range(len(fields_dict)) if f.name in fields_dict[i]])
 									for f in fields(cls)})
-		except AttributeError as ae:
-			ae.add_note(f"{op} Failed - All fields of {cls} must be in at least one argument.")
-			raise ae
+		except ValueError as ve:
+			ve.add_note(f"{op} Failed - All fields of {cls} must be in at least one argument.")
+			raise ve
 
 	@classmethod
 	def param_min(cls, *data_shapes: Self) -> Self:
@@ -133,8 +138,12 @@ class DataShape(ABC):
 
 	@staticmethod
 	def gen(fields: list[Field] | list[str]) -> Self:
-		names = fields if type(fields[0]) is str else [field.name for field in fields]
-		return make_dataclass("_cg_" + "_".join(names), names, bases=(DataShape,))
+		try:
+			names = fields if type(fields[0]) is str else [field.name for field in fields]
+			return make_dataclass("_cg_" + "_".join(names), names, bases=(DataShape,))
+		except IndexError as ie:
+			ie.add_note(f"{sys._getframe(0).f_code.co_name}: Must leave at least 1 field.")
+			raise ie
 
 	@classmethod
 	def make_with(cls, val: int) -> Self:
@@ -156,7 +165,7 @@ class DataShape(ABC):
 		istart = start if isinstance(start, cls) else cls(*start) if isinstance(start, Sequence) else cls.make_with(start)
 		istop = stop if isinstance(stop, cls) else cls(*stop) if isinstance(stop, Sequence) else cls.make_with(stop)
 		interval = interval if isinstance(interval, cls) else cls(*interval) if isinstance(interval, Sequence) else cls.make_with(interval) 	# noqa:E501
-		istep = -((istart - istop) // -interval).extract(interval)
+		istep = -((istop - istart) // -interval).extract(interval)
 		return DataRange(istart, istop, istep)
 
 
@@ -187,6 +196,8 @@ class ImgSlice(DataShape): Y: int; X: int 	 	# noqa: E701,E702
 class Proj(DataShape): Y: int; X: int 	 		# noqa: E701,E702
 @dataclass
 class YSlice(DataShape): Theta: int; X: int 	# noqa: E701,E702
+@dataclass
+class XSlice(DataShape): Theta: int; Y: int 	# noqa: E701,E702
 
 
 @dataclass
@@ -217,9 +228,9 @@ class DataRange(object):
 		if not (self.step.is_sub(self.stop) and self.stop.is_sub(self.start)):
 			raise ValueError("Step and Stop fields must be in Start.")
 
-		for key, val in asdict(self.step).items():
-			if val == 0:
-				raise ValueError(f"Field {key} has a 0 step and would not progress.")
+# 		for key, val in asdict(self.step).items():
+# 			if val == 0:
+# 				raise ValueError(f"Field {key} has a 0 step and would not progress.")
 
 	def get_iter(self, conv: 'TFIter' = None):
 		self.iter_conv = conv
@@ -228,14 +239,20 @@ class DataRange(object):
 		return fetched_iter
 
 	@cached_property
-	def length(self) -> DataShape:
-		dist = (self.stop - self.start.extract(self.stop)).extract(self.step) 	# Distance traveled in range.
-		return -(dist // -self.step)									# Steps to travel; ceiling division to handle partial areas.
+	def shape(self) -> DataShape:
+		""" Shape of the area iterated over. """
+		return self.stop - self.start.extract(self.stop).extract(self.step)
 
 	@cached_property
+	def length(self) -> DataShape:
+		""" Number of steps in each dimension of the iteration. """
+		return -(self.shape // -self.step)
+
 	def __len__(self) -> int:
+		""" Total number of steps in the iteration. """
 		s_len = self.length
-		return np.ravel_multi_index(astuple(s_len - s_len.make_with(1)), astuple(s_len))
+		# print(s_len)
+		return int(np.ravel_multi_index(astuple(s_len - s_len.make_with(1)), astuple(s_len))) + 1
 
 	def __iter__(self) -> '_DataRangeIter':
 		return _DataRangeIter(self.start, self.stop, self.step,
@@ -277,6 +294,7 @@ class TFIter(ABC):
 
 
 class IntIter(TFIter):
+	""" TODO: 1d only """
 	def __init__(self, dr: DataRange):
 		# Increment the first field by 1 to enable clean finishes.
 		# Do we need this here? don't think so  increment = DataShape.gen([fields(dr.len))[0]])(1)
@@ -287,11 +305,87 @@ class IntIter(TFIter):
 		return np.ravel_multi_index(astuple(pos), self.__extended_block)
 
 
-class SliceIter:
+class ContigMemIter(TFIter):
+	def __init__(self, dr: DataRange, offset: int, shape: DataShape, stride: DataShape,
+					break_fields: list[Union[str, fields]]):
+		# increment
+		self.offset = offset
+		self.stride = stride
+		self.__drshape = asdict(dr.shape)
+		self.__drstep = asdict(dr.step)
+		self.__shape = asdict(shape)
+		self.__step_per_addr, self.__contig_volume = self.__contig_calc(break_fields)
+		self.__counter = 0
+		self.__cached_val = None
+
+	@property
+	def contig_stride(self):
+		return self.__contig_volume
+
+	def __contig_calc(self, break_fields):
+		stride_dict = asdict(self.stride)
+		stride_keys = list(stride_dict.keys())
+
+		break_fields = [f if not isinstance(f, Field) else f.name for f in break_fields]
+		contig_field = None
+		step_per_addr = None
+
+		print(list(reversed(stride_keys)))
+
+		for field in reversed(stride_keys):
+			if field in break_fields:
+				# Break fields are in separate files (or are otherwise non-contiguous), so anything in the shape before the
+				# last of them is non-contiguous.
+				break
+			if field in self.__drshape:
+				if self.__drstep[field] != 1:
+					# Not contiguous from here if it's more than one step per read, so it's this field and end.
+					contig_field = field
+					step_per_addr = 1
+					break
+				else:
+					contig_field = field
+					step_per_addr = self.__drshape[field]
+					continue
+
+			# Otherwise, this field is fully contiguous in memory.
+			contig_field = field
+			step_per_addr = None
+
+		print(f"sd: {stride_dict}: cf: {contig_field}: sa: {step_per_addr}")
+
+		if contig_field is None:
+			raise IndexError(f"Break fields must not include last field of shape; {break_fields} in {stride_keys}")
+
+		if step_per_addr is not None:
+			return step_per_addr, step_per_addr * stride_dict[contig_field]
+		else:
+			return 1, self.__shape[contig_field] * stride_dict[contig_field]
+
+	def __call__(self, pos) -> int:
+		if self.__counter % self.__step_per_addr == 0:
+			self.__cached_val = np.sum(astuple(pos * self.stride)) + self.offset
+		self.__counter += 1
+		return self.__cached_val
+
+
+class MemAddressIter(TFIter):
+	def __init__(self, dr: DataRange, offset: int, stride: DataShape):
+		# Increment the first field by 1 to enable clean finishes.
+		# Do we need this here? don't think so  increment = DataShape.gen([fields(dr.len))[0]])(1)
+		# increment
+		self.offset = offset
+		self.stride = stride
+
+	def __call__(self, pos) -> int:
+		return np.sum(astuple(pos * self.stride)) + self.offset
+
+
+class SliceIter(TFIter):
 	def __init__(self, dr: DataRange, shape: DataShape):
 		self.__base = {field.name: slice(None, None, None) for field in fields(shape)}
 
 	def __call__(self, pos) -> tuple:
 		val = asdict(pos)
-		print(f"{val}|{self.__base.keys()}")
+		# print(f"{val}|{self.__base.keys()}")
 		return tuple([base if key not in val else val[key] for key, base in self.__base.items()])
