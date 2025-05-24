@@ -1,6 +1,6 @@
 from dataclasses import astuple, replace, asdict, fields
 from functools import cached_property
-from multiprocessing.shared_memory import SharedMemory
+from multiprocessing.shared_memory import SharedMemory, ShareableList
 from multiprocessing.managers import SharedMemoryManager, BaseManager
 from sys import stdout
 from time import sleep
@@ -69,6 +69,7 @@ class SharedNPArray:
 		else:
 			self.__sm = SharedMemory(name=name)
 			self.__allocated = False
+		self.__shutdown = False
 
 	def size(self, swap=None):
 		""" Size of array in memory.
@@ -81,16 +82,15 @@ class SharedNPArray:
 
 	def __load(self) -> np.ndarray:
 		"""Allocates a numpy array in the shared memory."""
-		try:
+		if self.__sm.buf is not None:
 			ar = np.ndarray(shape=astuple(self.__shape), dtype=self.dtype, buffer=self.__sm.buf)
 			for view in self.__views:
 				ar = ar[view]
 			return ar
-
-		except FileNotFoundError as fe:
-			log.write("Shared Memory", f"Shared Memory {self.__name} Has Not Been Created", log_level=LOG.ERROR)
-			fe.add_note(f"Shared Memory {self.__name} Has Not Been Created")
-			raise fe
+		else:
+			log.write("Shared Memory", f"Shared Memory {self.__name} Was Destroyed or Never Created",
+						log_level=LOG.ERROR)
+			raise FileNotFoundError(f"Shared Memory {self.__name} Was Destroyed or Never Created")
 
 	def array(self):
 		return self.__load()
@@ -98,18 +98,29 @@ class SharedNPArray:
 	def __enter__(self):
 		return self.__load()
 
-	def __exit__(self, *args, **kwargs):
+	def shutdown(self):
+		self.__sm.close()
 		if self.__allocated:
-			self.__sm.close()
 			self.__sm.unlink()
+		self.__shutdown = True
+
+	def __del__(self):
+		if not self.__shutdown:
+			self.shutdown()
+
+	def __exit__(self, *args, **kwargs):
+		pass
 
 	def __getitem__(self, view):
 		# Test if it would create a copy. non-ideal but we shouldn't be calling this much anwyay!
 		if is_advanced_index(view):
-			print("This would be an advanced index and create copies, so should not be used here.")
-			raise IndexError
+			raise IndexError("This would be an advanced index and create copies, so should not be used here.")
 		else:
 			return SharedNPArray(self.__name, self.__shape, self.__dtype, self.__views + [view])
+
+	@cached_property
+	def has_views(self):
+		return len(self.__views) > 0
 
 	@property
 	def name(self):
@@ -139,7 +150,13 @@ def cleanup_mem(*shm_objects):
 		:param shm_objects: Shared memory objects to shut down.
 	"""
 	for shm in shm_objects:
-		if shm is not None:
+		if isinstance(shm, SharedNPArray):
+			shm.shutdown()
+			del shm
+		elif isinstance(shm, ShareableList):
+			shm.shm.close()
+			shm.shm.unlink()
+		elif isinstance(shm, SharedMemory):
 			shm.close()
 			shm.unlink()
 
@@ -156,8 +173,7 @@ def exit_cleanly(step: str, *shm_objects, return_code: int = 0, statement: str =
 	cleanup_mem(*shm_objects)
 
 	sleep(MEM_INTERVAL_TIMER)
-	if throw is not None:
-		raise throw
+	log.footer(error=throw)
 
 	exit(return_code)
 
@@ -167,8 +183,7 @@ def mem_monitor(mem_file, mem_store, pid):
 		with mem_branch as last_step_arr:
 			last_step = last_step_arr.tobytes().decode()
 
-			while last_step.strip() not in ["Error Exit", "Script Completion", "Keyboard Exit", "Exit",
-											"Center Find Done", "Scan Path Failure"]:
+			while last_step.strip() not in ["COMPLETED", "ERRORED"]:
 				last_step = last_step_arr.tobytes().decode()
 				log.write(last_step, out=out, pid=pid)
 				sleep(MEM_INTERVAL_TIMER)

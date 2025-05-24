@@ -1,9 +1,12 @@
 from dataclasses import astuple
+from multiprocessing.shared_memory import SharedMemory, ShareableList
+import pytest
 from sys import getsizeof
+from time import sleep
 
 import numpy as np
 
-from lftomo.util.mem import SharedNPManager
+from lftomo.util.mem import SharedNPManager, SharedNPArray, cleanup_mem, exit_cleanly
 from lftomo.util.shapes import SinoOrder, ProjOrder, ReconOrder
 
 
@@ -25,17 +28,67 @@ def test_alt_creation():
 			assert pj[0, 0, 0] != si[0, 0, 0]
 
 
+def test_direct_create():
+	po = ProjOrder(Y=12, Theta=1501, X=2048)
+
+	# Creates memory and array, deletes when object is deleted on exit.
+	with SharedNPArray("TestMem", po, np.uint16, allocate=True) as po_ar:
+		assert po_ar.shape == (1501, 12, 2048)
+		assert isinstance(po_ar, np.ndarray)
+
+	# Createss new array with same mory.
+	test_mem = SharedNPArray("TestMem", po, np.float32, allocate=True)
+	assert test_mem.size() == 2048 * 1501 * 12 * 4
+
+	cleanup_mem(test_mem)
+
+	# Cannot create array after memory is deleted.
+	with pytest.raises(FileNotFoundError):
+		_ = test_mem.array()
+
+	sleep(1.0)
+
+	# FileNotFound error when memory hasn't been created.
+	with pytest.raises(FileNotFoundError):
+		SharedNPArray("MyHat", po, np.uint16)
+
+	# Deletes multiple objects on exit cleanly call.
+	test_mem = SharedNPArray("AnotherTest", po, np.uint16, allocate=True)
+	shl = ShareableList([5, 1, 2])
+	shm = SharedMemory("TestThree", create=True, size=512)
+
+	with pytest.raises(SystemExit) as se:
+		exit_cleanly("TEST", test_mem, shl, shm, return_code=5, statement="Mem Test Suite",
+						throw=FileNotFoundError("Ignore Me"))
+
+	with pytest.raises(FileNotFoundError):
+		SharedNPArray("AnotherTest", po, np.uint16)
+	with pytest.raises(FileNotFoundError):
+		SharedNPArray("TestThree", po, np.uint16)
+
+	assert se.value.code == 5
+
+
 def test_mem():
 	snm = SharedNPManager()
 	snm.start()
 
 	snp = snm.SharedNPArray(SinoOrder(Y=24, Theta=1501, X=2048), dtype=np.uint16)
 
+	snpss = snp[1:10, :, :]
+
 	snpv = snp[1, :, :]
 
 	snpvv = snpv[5:10, :]
 
+	with pytest.raises(IndexError):
+		_ = snp[[5, 4, 1], :, :]
+
+	with pytest.raises(IndexError):
+		_ = snp[[5, 4, 1, 4]]
+
 	assert snp.shape == SinoOrder(Y=24, Theta=1501, X=2048)
+	assert snpss.shape == SinoOrder(Y=9, Theta=1501, X=2048)
 	assert astuple(snpv.shape) == (1501, 2048)
 	assert astuple(snpvv.shape) == (5, 2048)
 	assert snp.size() == 147554304
@@ -43,6 +96,10 @@ def test_mem():
 	assert snpvv.size() == 20480
 	assert snp.dtype == snpv.dtype == snpvv.dtype == np.dtype(np.uint16)
 	assert snp.name == snpv.name == snpvv.name
+	assert not snp.has_views
+	assert snpss.has_views
+	assert snpv.has_views
+	assert snpvv.has_views
 
 	print(f"Shapes: {snp.shape} | {snpv.shape} | {snpvv.shape}")
 
@@ -66,5 +123,7 @@ def test_mem():
 		assert all(ar[1, 0:10, 5] == 77)
 
 		print(ar[1, 0:10, 0:5])
+
+		assert np.all(snpss.array() == ar[1:10, :, :])
 
 	snm.shutdown()
