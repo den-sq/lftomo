@@ -65,18 +65,15 @@ class Logger:
 
 			:param out: Stream to write to.  If not passed, will write to default log screens and files.
 		"""
-		head_string = f'{"TYPE":6}|{"STEP":20}|   TIMESTAMP   |MEM USAGE|MEM FREE | STATEMENT '
-		if out is not None:
-			click.echo(head_string)
-		else:
-			if "stdout" in self.__log_screen and self.__log_screen["stdout"] is not None:
-				click.echo(head_string)
-			elif "stderr" in self.__log_screen and self.__log_screen["stderr"] is not None:
-				click.echo(head_string, err=True)
+		header_message = f'{"TYPE":6}|{"STEP":20}|   TIMESTAMP   |MEM USAGE|MEM FREE | STATEMENT '
+		self.__special_write(header_message, out)
 
-			for _name, (log_path, _log_flag) in self.__logs.items():
-				with open(log_path, "a") as handle:
-					click.echo(head_string, file=handle)
+	def footer(self, out=None, error=None):
+		step = "COMPLETED" if error is None else "ERRORED"
+		statement = "" if error is None else f"{error}"
+
+		footer_message = self.__log_message(step, statement)
+		self.__special_write(footer_message, out)
 
 	def __log_message(self, step: str, statement: str = '', log_level: LOG = LOG.TIME):
 		styled_type = click.style(f'{log_level.name:6}', log_level.color)
@@ -87,6 +84,19 @@ class Logger:
 				f'|{psutil.virtual_memory().available // 1024 ** 3:07.2f}GB'
 				f'|"{statement}"')
 		return message
+
+	def __special_write(self, message, out=None):
+		if out is not None:
+			click.echo(message, file=out)
+		else:
+			if "stdout" in self.__log_screen and self.__log_screen["stdout"] is not None:
+				click.echo(message)
+			elif "stderr" in self.__log_screen and self.__log_screen["stderr"] is not None:
+				click.echo(message, err=True)
+
+			for _name, (log_path, _log_flag) in self.__logs.items():
+				with open(log_path, "a") as handle:
+					click.echo(message, file=handle)
 
 	def __multi_write(self, message, log_level):
 		if log_level & reduce(ior, self.__log_screen.values()):
@@ -118,11 +128,12 @@ class Logger:
 			"""
 		for func in self.__attached_funcs:
 			func(step, self.__pid)
-		log_line = self.__log_message(step, statement, log_level)
 
 		if write_tb:
 			_, _, last_traceback = exc_info()
-			log_line += f' {last_traceback}'
+			statement += f'-tb-{last_traceback}'
+
+		log_line = self.__log_message(step, statement, log_level)
 
 		if out is not None:
 			click.echo(log_line, file=out, err=(log_level == LOG.ERROR))
