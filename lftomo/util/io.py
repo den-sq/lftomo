@@ -1,32 +1,43 @@
-from collections import namedtuple
 from collections.abc import Mapping, Callable
-from multiprocessing import shared_memory, Pool
+from dataclasses import Field, fields
+from functools import partial
+from multiprocessing import shared_memory, Pool, cpu_count
+from multiprocessing.pool import ThreadPool
+from multiprocessing.connection import Connection
 from os import PathLike
 from pathlib import Path
+from typing import Sequence
 
 import h5py
 import numpy as np
+from natsort import natsorted
 from numpy.typing import ArrayLike
-from psutil import cpu_count
 from skimage import measure
 import tomopy
 import tifffile as tf
 
 from .log import log, LOG
-from .mem import SharedNP, ReconOrder
-from .window import DataWindow
+from .mem import SharedNPArray, SharedNPManager
+from .shapes import ReconOrder, ContigMemIter, DataRange, DataShape, ProjOrder
+from .window import TomoWindow
 
 
 def np_convert(dtype: np.dtype, source: ArrayLike):
 	if np.issubdtype(dtype, np.integer):
 		dtype_range = np.iinfo(dtype).max - np.iinfo(dtype).min
-		source_range = int(np.max(source) - np.min(source))
-		return (source * (dtype_range // source_range))
+		source_range = np.max(source) - np.min(source)
+
+		# Avoid divide by 0, esp. as numpy segfaults when you do.
+		if source_range == 0.0:
+			source_range = 1.0
+
+		return (source * max(int(dtype_range / source_range), 1)).astype(dtype)
 	elif np.issubdtype(dtype, np.floating):
 		return source.astype(dtype)
 
 
-def byteread_helper(target: str, image: PathLike, i_dtype: np.dtype, offsets: ArrayLike, size: int):
+def byteread_helper(target: str, image: PathLike, source_offsets: int | ArrayLike,
+					target_offsets: int | ArrayLike, size: int):
 	""" Sinogram order-capable reader using direct buffer reading.
 
 		TODO: Figure out if you can get rid of for loop - order matters.
@@ -37,89 +48,177 @@ def byteread_helper(target: str, image: PathLike, i_dtype: np.dtype, offsets: Ar
 		:param offsets: Array of memory offsets to read into.  Should be sequential in file.
 		:param size: Size of chunk of memory to read.
 	"""
+	if isinstance(source_offsets, Sequence) and isinstance(target_offsets, Sequence):
+		raise ValueError("At least one offset should be length 1 or this gets real confusing, don't try it.")
+
 	sm = shared_memory.SharedMemory(name=target)
 	with open(image, "rb") as handle:
-		handle.seek(offsets[0]["source"])
-		for offset in offsets:
-			handle.readinto(sm.buf[offset["target"]:offset["target"] + size])
+		if not isinstance(source_offsets, Sequence):
+			handle.seek(source_offsets)
+			if not isinstance(target_offsets, Sequence):
+				handle.readinto(sm.buf[target_offsets:target_offsets + size])
+			else:
+				for i in range(len(target_offsets)):
+					handle.readinto(sm.buf[target_offsets[i]:target_offsets[i] + size])
+		else:
+			for i in range(len(source_offsets)):
+				handle.seek(source_offsets[i])
+				handle.readinto(sm.buf[target_offsets + i * size:target_offsets + (i + 1) * size])
 	sm.close()
 
 
-def distribute_read(target_mem: SharedNP, window: DataWindow, source_files: ArrayLike, sino_order: bool = False,
-					thread_max: int = cpu_count(), read_func: Callable = byteread_helper):
-	""" Distributes file reading into shared memory across multiple threads.
-
-		Currently can work in projection or sinogram order, maybe?
-
-		:param target_mem: Memory to read files into.
-		:param window: Window of data we're reading.
-		:param source_files: List of files to read.
-		:param read_func: Function that does the actual data reading.
-		:param thread_max: Maximum # of threads to use.
-	"""
-	# Find the offset values for start of blocks.
-	# I wrote that this needs to be changed for .. some reason?
-	target_base_offset = target_mem.buffer_address.start
-
-	h_step = window.itemsize * window.shape.X
-
-	block_size = h_step * (window.shape.Theta if sino_order else window.shape.Y)
-	size = h_step if sino_order else block_size
-
-	if source_files[0].suffix == ".h5":
+def get_file_set(source_files: ArrayLike, shape: type = ProjOrder):
+	# TODO: Handle 4D
+	# TODO: Handle limited iteration over theta
+	suffix = Path(source_files[0]).suffix
+	if suffix == ".h5":
 		# Single h5 file with dataset.
 		h5_ds = h5py.File(source_files[0], 'r')['exchange']['data']
+		itemsize = np.dtype(h5_ds.dtype).itemsize
+
 		source_base_offset = h5_ds.id.get_offset()
-		index_offset = h5_ds.nbytes // len(h5_ds)
-		source_set = [(i, source_files[0]) for i in range(len(h5_ds))]
-	elif source_files[0].suffix in [".tif", ".tiff"]:
+		# input_shape = shape(h5_ds.shape)
+		input_stride = shape(h5_ds.nbytes // len(h5_ds), h5_ds.shape[2] * itemsize, itemsize)
+		source_set = [source_files[0]] * len(h5_ds)
+
+	elif suffix in [".tif", ".tiff"]:
 		with tf.TiffFile(source_files[0]) as tif:
-			if len(tif.pages) > 1:
-				# Multi-Page Tiff
-				source_base_offset = tif.pages[0].dataoffsets[0]
+			itemsize = np.dtype(tif.pages[0].dtype).itemsize
+
+			source_base_offset = tif.pages[0].dataoffsets[0]
+			if len(source_files) == 1: 	# Multi-Page Tiff
 				index_offset = tif.pages[1].dataoffsets[0] - source_base_offset
-				source_set = [(i, source_files[0]) for i in range(len(h5_ds))]
-			else:
-				# Single Page Tiff(s)
-				source_base_offset = tif.pages[0].dataoffsets[0]
+				source_set = [source_files[0]] * len(tif.pages)
+			else: 					# Single Page Tiff(s)
 				index_offset = 0
-				source_set = enumerate(source_files)
+				source_set = natsorted(source_files)
+			# input_shape = shape(len(source_set), *tif.pages[0].shape)
+			input_stride = shape(index_offset, tif.pages[0].shape[1] * itemsize, itemsize)
 
-	# log.write("Distributing Read", f"Step {h_step} ; Block {block_size} ; Size {size}", LOG.INFO)
-	# log.write("Distributing Read", f"Write Offset {base_offset} ; Read Offset {offset}", LOG.INFO)
-
-	def generate_offset_pairs_sino(i):
-		return [{"source": source_base_offset + index_offset * i + (window.start + j) * h_step,
-				"target": int(target_base_offset + j * block_size + i * h_step)}
-					for j in range(window.shape.Y)]
-
-	def generate_offset_pairs_proj(i):
-		return [{"source": source_base_offset + index_offset * i + (window.start) * h_step,
-				"target": int(target_base_offset + i * block_size)}]
-
-	pairs_func = generate_offset_pairs_sino if sino_order else generate_offset_pairs_proj
-
-	log.write("Mem Read", f"{target_base_offset}|{window.shape.Y}")
-
-	# if sino_order:
-	# 	log.write("Read Example", generate_offset_pairs_sino(0), LOG.INFO)
-	# else:
-	# 	log.write("Read Example", generate_offset_pairs_proj(0), LOG.INFO)
-
-	# Distribute actual reading
-	with Pool(thread_max) as pool:
-		pool.starmap(read_func,
-			[(target_mem.name, image, window.dtype, pairs_func(i), size) for i, image in source_set])
+	return source_base_offset, input_stride, source_set 	# input_shape
 
 
-def _slice_at(shape: namedtuple, item: str, value: int):
-	temp_slice = [np.s_[:]] * len(shape)
-	temp_slice[shape._fields.index(item)] = value
-	return tuple(temp_slice)
+def file_interval_pad(base: DataRange, shape: DataShape, file_fields: list[str | Field]):
+	intervals = [f.name if isinstance(f, Field) else f for f in file_fields]
+	full_range_fields = set(intervals + [f.name for f in fields(base.step)])
+	if len(full_range_fields) == len(fields(base.step)):
+		return base
+	else:
+		# File stop points from shape object
+		fstop = shape.extract(DataShape.gen(intervals))
+
+		return DataRange(base.start.merge(fstop.make_with(0)),
+						base.stop.merge(fstop),
+						base.step.merge(fstop.make_with(1)))
 
 
-def write_centers(center_mem: SharedNP, path: PathLike, center_range, angles,
-					proc_count: int = cpu_count(), calc_entropy: bool = True, disk_write: bool = True) -> Mapping:
+def read_window(window: TomoWindow,
+					source_files: ArrayLike,
+					target_mem: SharedNPArray,
+					thread_max: int = cpu_count() * 2,
+					mem_window: TomoWindow = None,
+					file_read_func: Callable = get_file_set,
+					read_func: Callable = byteread_helper,
+					file_fields: list[str | Field] = ["Theta"]):
+	# TODO: iteration over file fields isn't checked for in source set.
+	# TODO: padding?
+	# TODO: Revise mem iter setup.
+	# f_range.extract(DataShape.gen(file_fields)) as a pass
+	log.write("RW START")
+
+	mem_offset = 0
+
+	# If we don't have a separate internal window, just clone ours.
+	if mem_window is None:
+		mem_window = window.internal
+
+	file_offset, input_stride, source_set = file_read_func(source_files, type(window.shape))
+
+	log.write("RW FILE INFO")
+
+	m_range = file_interval_pad(mem_window.frange, window.shape, file_fields)
+	f_range = file_interval_pad(window.frange, window.shape, file_fields)
+
+	# Create indicies.
+	i_mem = m_range.get_iter(conv=partial(ContigMemIter, offset=mem_offset, shape=window.shape, stride=window.stride,
+							jump=file_fields))
+	i_file = f_range.get_iter(conv=partial(ContigMemIter, offset=file_offset, shape=window.shape, stride=input_stride,
+							jump=file_fields))
+
+	m_contig = i_mem.conv.contig_stride
+	f_contig = i_file.conv.contig_stride
+
+	if (m_contig % f_contig) and (f_contig % m_contig):
+		log.write("FILE READ", "Source and target memory not fully contiguous.", log_level=LOG.WARN)
+
+	log.write("RW INDICIES")
+
+	def addr_batch(addr, count, comp):
+		vals = np.fromiter(addr, dtype=int, count=count)
+		return vals[::count // len(source_set)] if comp else vals.reshape(len(source_set), count // len(source_set))
+
+	# log.write("FILE READ", f"read length {read_length} from {i_mem.conv.contig_stride, i_file.conv.contig_stride}")
+
+	m_addr = addr_batch(i_mem, len(m_range), m_contig >= f_contig)
+	f_addr = addr_batch(i_file, len(f_range), f_contig >= m_contig)
+
+	log.write("RW ADDR")
+
+	sources = zip(m_addr, f_addr, source_set)
+
+	log.write("RW ZIP")
+
+	# Disperse reading amongst threads.
+	# We're reading in contiguous memory blocks, so go with the shortest of the two memory steps.
+	with ThreadPool(thread_max) as pool:
+		pool.starmap(read_func, [(target_mem.name, image_path, file_addr, mem_addr, min(m_contig, f_contig))
+									for mem_addr, file_addr, image_path in sources])
+
+	log.write("RW READ")
+
+
+def read_file(filename, source_shape, source_type, source_base_offset, target_mem, source_slice):
+	source = np.memmap(filename, dtype=source_type, mode='r', shape=source_shape, offset=source_base_offset)
+	with target_mem as tm:
+		tm[:] = source[source_slice]
+
+
+def file_loader(conn: Connection, source: ArrayLike):
+	win = conn.recv()
+
+	log.write("File Read", "File Loader Started")
+
+	if win is None:
+		# Exit early message.
+		return
+	if not isinstance(win, TomoWindow):
+		return
+
+	try:
+		with SharedNPManager() as (snm,):
+			full_win = win.with_pad()
+			read_mem = snm.SharedNPArray(full_win.shape, full_win.dtype)
+			read_window(full_win, source, target_mem=read_mem)
+			conn.send(read_mem)
+			try:
+				while conn.recv() is not None:
+					log.write("File Read", "Reading Window")
+					read_window(win.with_pad(), source, target_mem=read_mem)
+					conn.send(read_mem)
+			except EOFError:
+				log.write("File Read", "EOF Reached, exiting.")
+	except Exception as ex:
+		log.write("File Read", f"Error while reading files: {ex}")
+
+	log.write("File Read", "Exiting.")
+	conn.close()
+
+
+
+
+def write_centers(center_mem: SharedNPArray, path: PathLike, center_range, angles,
+					proc_count: int = cpu_count(), calc_entropy: bool = True,
+					disk_write: bool = True) -> Mapping:
 	""" Creates the reconstructions for a set of centers to disk, calculating entropy
 		for center finding and/or writing to disk.
 
@@ -140,18 +239,18 @@ def write_centers(center_mem: SharedNP, path: PathLike, center_range, angles,
 
 	recon_shape = ReconOrder(Y=len(center_range), Z=center_mem.shape.X, X=center_mem.shape.X)
 
-	with SharedNP("cf_write_mem", dtype=np.float32, shape=recon_shape) as cf_write_mem:
-		with center_mem as center_data, cf_write_mem as write_mem:
-			for i, cent in enumerate(center_range):
-				write_mem[i, :, :] = tomopy.recon(np.expand_dims(center_data, axis=0), angles, center=cent,
-													sinogram_order=True, algorithm='gridrec')
-				if calc_entropy:
-					center_entropy[str(cent)] = measure.shannon_entropy(write_mem[i, :, :])
+	cf_write_mem = SharedNPArray("cf_write_mem", dtype=np.float32, shape=recon_shape, allocate=True)
+	with center_mem as center_data, cf_write_mem as write_mem:
+		for i, cent in enumerate(center_range):
+			write_mem[i, :, :] = tomopy.recon(np.expand_dims(center_data, axis=0), angles, center=cent,
+												sinogram_order=True, algorithm='gridrec')
+			if calc_entropy:
+				center_entropy[str(cent)] = measure.shannon_entropy(write_mem[i, :, :])
 
-		if disk_write:
-			with Pool(proc_count) as pool:
-				pool.starmap(write_slice, [(cf_write_mem, Path(path, f"center_{cent:.2f}.tif"), i)
-												for i, cent in enumerate(center_range)])
+	if disk_write:
+		with Pool(proc_count) as pool:
+			pool.starmap(write_slice, [(cf_write_mem, Path(path, f"center_{cent:.2f}.tif"), i)
+											for i, cent in enumerate(center_range)])
 
 	if calc_entropy:
 		return sorted(center_entropy.items(), key=lambda item: item[1])[0][0]
@@ -159,21 +258,16 @@ def write_centers(center_mem: SharedNP, path: PathLike, center_range, angles,
 		return None
 
 
-def write_slice(sino_mem: SharedNP, path: PathLike, i, slice_at: str = None, out_type: np.dtype = None):
-	""" Writes a portion of sinogram to disk.
+def write_slice(sha: SharedNPArray, path: PathLike, i=None, out_type: np.dtype = None):
+	""" Writes a portion of image in memory to disk.
 
-		:param sino_mem: Metadata for reconstruction shared memory.
+		:param sha: Metadata for shared memory array.
 		:param path: Path on disk to write to.
-		:param i: Vertical slice(s) (y) of reconstruction to write.
+		:param i: Slice to write.
 		:param slice_act: Field of named tuple we are slicing the write at.
 	"""
-	if slice_at is None:
-		write_slice = np.s_[i, :, :]
-	else:
-		write_slice = _slice_at(sino_mem.shape, slice_at, i)
-
-	with sino_mem as sino:
+	with sha[i] as data:
 		if out_type is None:
-			tf.imwrite(path, sino[write_slice])
+			tf.imwrite(path, data)
 		else:
-			tf.imwrite(path, np_convert(sino[write_slice]))
+			tf.imwrite(path, np_convert(out_type, data))
