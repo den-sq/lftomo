@@ -4,8 +4,11 @@ import numpy as np
 
 from dataclasses import astuple, asdict
 from functools import partial
+from lftomo.util.log import log
 from lftomo.util.shapes import ProjOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
 from lftomo.util.shapes import IntIter, ContigMemIter, MemAddressIter, SliceIter
+
+log.set_logdir("data/logs/")
 
 
 def test_shape_casting():
@@ -250,7 +253,7 @@ def test_custom_iter_1d():
 	drange_slice_iter = Y.drange(1024, 1048, 1).get_iter(partial(SliceIter, shape=win_shape))
 	drange_mem_iter = Y.drange(1024, 1048, 1).get_iter(partial(MemAddressIter, offset=1024, stride=stride))
 	drange_contig_iter = Y.drange(1024, 1048, 1).get_iter(
-							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, break_fields=["Theta"]))
+							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, jump=["Theta"]))
 
 	int_iter_list = list(drange_int_iter)
 	slice_iter_list = list(drange_slice_iter)
@@ -274,7 +277,7 @@ def test_custom_iter_1d():
 	assert list(np.unique(drange_contig_iter_list)) == [1024 + (2048 * 2) * 1024]
 
 	drange_sino_contig_iter = Y.drange(1024, 1048, 1).get_iter(
-							partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape, break_fields=["Theta"]))
+							partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape, jump=["Theta"]))
 
 	print(drange_sino_contig_iter.conv.contig_stride)
 
@@ -291,11 +294,11 @@ def test_custom_iter_1d():
 
 	with pytest.raises(IndexError) as ie:
 		Y.drange(1024, 1048, 1).get_iter(partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape,
-											break_fields=["X"]))
+											jump=["X"]))
 	print(f"Break Field last in shape: {ie}")
 
 	drange_skip_contig_iter = Y.drange(1024, 1048, 2).get_iter(
-							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, break_fields=["Theta"]))
+							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, jump=["Theta"]))
 	assert drange_skip_contig_iter.conv.contig_stride == 2048 * 2
 
 	skip_contig_iter_list = list(drange_skip_contig_iter)
@@ -320,9 +323,9 @@ def test_custom_iter_2d():
 	drange_slice_iter = XSlice.drange(start, stop, step).get_iter(partial(SliceIter, shape=win_shape))
 	drange_mem_iter = XSlice.drange(start, stop, step).get_iter(partial(MemAddressIter, offset=1024, stride=stride))
 	drange_contig_iter = XSlice.drange(start, stop, step).get_iter(
-							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, break_fields=["Theta"]))
+							partial(ContigMemIter, offset=1024, stride=stride, shape=win_shape, jump=["Theta"]))
 	drange_sino_contig_iter = XSlice.drange(start, stop, step).get_iter(
-							partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape, break_fields=["Theta"]))
+							partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape, jump=["Theta"]))
 
 	int_iter_list = list(drange_int_iter)
 	slice_iter_list = list(drange_slice_iter)

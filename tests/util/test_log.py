@@ -5,6 +5,8 @@ from pathlib import Path
 
 from lftomo.util.log import LOG, Logger, log
 
+log.set_logdir("data/logs/")
+
 
 def test_LOG():
 	assert LOG.SILENT == 0
