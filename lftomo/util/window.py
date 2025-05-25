@@ -145,8 +145,10 @@ class TomoWindowIter(TFIter):
 		self.work_dtype = dtype
 		self.stop = dr.stop
 		self.substep = substep if substep is not None else dr.step.make_with(1)
+		self.__step_class = type(dr.step)
 
 	def __call__(self, pos) -> tuple:
+		pos = self.__step_class(*pos)
 		step_end = (self.shape + pos + self.pad).extract(pos)
 
 		if step_end < self.stop:

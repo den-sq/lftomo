@@ -4,7 +4,7 @@ Module containing shapes of data.
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from dataclasses import dataclass, asdict, replace, fields, astuple, make_dataclass, Field, InitVar
-from functools import cached_property
+from functools import cached_property, reduce
 import operator
 import sys
 from typing import Self, Sequence, Union
@@ -45,6 +45,15 @@ class DataShape(ABC):
 		except IndexError as ie:
 			ie.add_note(f"{sys._getframe(0).f_code.co_name}: Must leave at least 1 field.")
 			raise ie
+
+	def merge(self, *targets: type | Self, retain=True) -> Self:
+		merge_data = [asdict(target) for target in targets]
+		if retain:
+			merge_data += [asdict(self)]
+		else:
+			merge_data = [asdict(self)] + merge_data
+		new = reduce(operator.or_, merge_data)
+		return self.gen(list(new))(**new)
 
 	def transpose(self, target: type | Self) -> tuple:
 		""" Generates transpose matrix for compatiable with np.transpose and the like."""
@@ -175,6 +184,8 @@ class ProjOrder(DataShape): Theta: int; Y: int; X: int 	 # noqa: E701,E702
 class SinoOrder(DataShape): Y: int; Theta: int; X: int 	 # noqa: E701,E702
 @dataclass
 class BackwardsSinoOrder(DataShape): X: int; Theta: int; Y: int 	 # noqa: E701,E702
+@dataclass
+class ImageStack(DataShape): Z: int; Y: int; Y: int 	 # noqa: E701,E702
 
 
 @dataclass
@@ -264,27 +275,31 @@ class _DataRangeIter(DataRange):
 	conv: InitVar[callable] = None
 
 	def __post_init__(self, conv: callable):
-		self.at = -1 	# Raveled Index
+		self.__it = np.ndindex(astuple(self.length)) 			# nditerator
 		if conv is not None:
 			self.conv = conv(self)
+		else:
+			self.conv = self.__pos
 
-		# Increment the first field by 1 to enable unraveling the last index.
-		# annoying oneliner bit : + DataShape.gen([fields(self.step_dist)[0]])(1))
-		self._step_block = list(asdict(self.length).values())
-		self._step_block[0] += 1
+		# Need to make math quicker.
+		# Probably a sign DataShape design is off!
+		self.__step_start = astuple(self.start.extract(self.step))
+		self.__step = astuple(self.step)
+		self.__step_f = [f.name for f in fields(self.step)]
 
 	def __iter__(self):
 		return self
 
-	def __next__(self):
-		self.at += 1
-		travel = type(self.step)(*np.unravel_index(self.at, self._step_block))
-		pos = self.start + self.step * travel
+	def __pos(self, step_pos):
+		return replace(self.start, **{self.__step_f[i]: step_pos[i] for i in range(len(self.__step_f))})
 
-		if pos < self.stop:
-			return pos if self.conv is None else self.conv(pos)
-		else:
-			raise StopIteration
+	def __next__(self):
+		# Get index of step (next.(self__it)), find the total traversal (operator.mul)
+		# and then the position in the step dimension (operator.add)
+		step_pos = tuple(map(operator.add, self.__step_start,
+						map(operator.mul, self.__step, next(self.__it))))
+
+		return self.conv(step_pos)
 
 
 class TFIter(ABC):
@@ -297,24 +312,26 @@ class IntIter(TFIter):
 	""" TODO: 1d only """
 	def __init__(self, dr: DataRange):
 		# Increment the first field by 1 to enable clean finishes.
-		# Do we need this here? don't think so  increment = DataShape.gen([fields(dr.len))[0]])(1)
 		# increment
 		self.__extended_block = astuple(dr.length + dr.start)
 
 	def __call__(self, pos) -> int:
-		return np.ravel_multi_index(astuple(pos), self.__extended_block)
+		return np.ravel_multi_index(pos, self.__extended_block)
 
 
 class ContigMemIter(TFIter):
 	def __init__(self, dr: DataRange, offset: int, shape: DataShape, stride: DataShape,
-					break_fields: list[Union[str, fields]]):
+					jump: list[Union[str, fields]]):
 		# increment
 		self.offset = offset
 		self.stride = stride
+
 		self.__drshape = asdict(dr.shape)
 		self.__drstep = asdict(dr.step)
 		self.__shape = asdict(shape)
-		self.__step_per_addr, self.__contig_volume = self.__contig_calc(break_fields)
+
+		self.__step_stride = astuple(stride.extract(dr.step))
+		self.__step_per_addr, self.__contig_volume = self.__contig_calc(jump)
 		self.__counter = 0
 		self.__cached_val = None
 
@@ -329,8 +346,6 @@ class ContigMemIter(TFIter):
 		break_fields = [f if not isinstance(f, Field) else f.name for f in break_fields]
 		contig_field = None
 		step_per_addr = None
-
-		print(list(reversed(stride_keys)))
 
 		for field in reversed(stride_keys):
 			if field in break_fields:
@@ -352,8 +367,6 @@ class ContigMemIter(TFIter):
 			contig_field = field
 			step_per_addr = None
 
-		print(f"sd: {stride_dict}: cf: {contig_field}: sa: {step_per_addr}")
-
 		if contig_field is None:
 			raise IndexError(f"Break fields must not include last field of shape; {break_fields} in {stride_keys}")
 
@@ -362,9 +375,10 @@ class ContigMemIter(TFIter):
 		else:
 			return 1, self.__shape[contig_field] * stride_dict[contig_field]
 
-	def __call__(self, pos) -> int:
+	def __call__(self, step_pos) -> int:
+		# Break Fields offset issue?
 		if self.__counter % self.__step_per_addr == 0:
-			self.__cached_val = np.sum(astuple(pos * self.stride)) + self.offset
+			self.__cached_val = np.sum(tuple(map(operator.mul, step_pos, self.__step_stride)), dtype=int) + self.offset
 		self.__counter += 1
 		return self.__cached_val
 
@@ -376,16 +390,19 @@ class MemAddressIter(TFIter):
 		# increment
 		self.offset = offset
 		self.stride = stride
+		self.__step_stride = astuple(stride.extract(dr.step))
 
-	def __call__(self, pos) -> int:
-		return np.sum(astuple(pos * self.stride)) + self.offset
+	def __call__(self, step_pos) -> int:
+		# Break Fields offset issue?
+		return np.sum(tuple(map(operator.mul, step_pos, self.__step_stride))) + self.offset
 
 
 class SliceIter(TFIter):
 	def __init__(self, dr: DataRange, shape: DataShape):
 		self.__base = {field.name: slice(None, None, None) for field in fields(shape)}
+		self.__step_f = [f.name for f in fields(dr.step)]
 
 	def __call__(self, pos) -> tuple:
-		val = asdict(pos)
 		# print(f"{val}|{self.__base.keys()}")
-		return tuple([base if key not in val else val[key] for key, base in self.__base.items()])
+		return tuple([base if key not in self.__step_f else pos[self.__step_f.index(key)]
+						for key, base in self.__base.items()])
