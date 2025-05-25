@@ -33,6 +33,14 @@ class DataRef(object):
 		self.__offset = offset
 
 	@property
+	def index(self) -> tuple[slice]:
+		start = list(asdict(self.pos.merge(self.shape.make_with(0))).values())
+		stop = list(asdict(self.shape + self.pos).values())
+		step = list(asdict(self.step.merge(self.shape.make_with(1))).values())
+
+		return tuple([slice(start[i], stop[i], step[i]) for i in range(len(start))])
+
+	@property
 	def shape(self) -> DataShape:
 		return self.__shape
 
@@ -75,43 +83,36 @@ class DataRef(object):
 
 	def with_pad(self, pad_dim: Sequence = None, shrink=False) -> Self:
 		new_ref = deepcopy(self)
+
 		if pad_dim is None:
 			pad_dim = [field.name for field in fields(self.__pad)]
 		try:
 			kept = replace(self.__pad, **{key: 0 for key in pad_dim})
+			shift = self.pad - kept
 		except TypeError as te:
 			te.add_note("No padding found for dimension.")
 			raise te
 
-		shift = self.pad - kept
-		new_ref.__shape = new_ref.__shape + shift + shift  # maybe I do need that int math
-		new_ref.__pad = kept
-		new_ref.__pos = self.pos - shift.extract(self.pos) 	# removing padding so don't need to recheck dim.
+		DataRef.__init__(new_ref, self.shape + shift + shift, kept, self.pos - shift.extract(self.pos),
+						self.step, self.dtype, self.__offset)
 		return new_ref
 
 	def rescope(self, pos: DataShape = None, pad: DataShape = None, dtype: type = None, shape: DataShape = None) -> Self:
 		new_ref = deepcopy(self)
 
-		if pos is not None:
-			new_ref.__pos = replace(self.pos, **asdict(pos))
+		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape
+		new_pos = replace(self.pos, **asdict(pos)) if pos is not None else self.pos
+		new_dtype = dtype if dtype is not None else self.dtype
+
 		if pad is not None:
+			new_pad = replace(self.pad, **asdict(pad))
 			pad_shift = pad + (-self.pad)
-			new_ref.__pad = replace(self.pad, **asdict(pad))
-			if pos is None:
-				new_ref.__pos += pad_shift
-		if dtype is not None:
-			new_ref.__dtype = dtype
-		if shape is not None:
-			new_ref.__shape = replace(self.shape, **asdict(shape))
-		elif pad is not None:
-			new_ref.__shape -= (pad_shift + pad_shift)
+			new_pos += pad_shift
+			new_shape -= (pad_shift + pad_shift)
+		else:
+			new_pad = self.pad
 
-		pos_pad_shift = new_ref.__pos.param_max(new_ref.__pos, new_ref.__pad) - new_ref.__pos
-		if pos_pad_shift:
-			print(f"Shifting position and shape to allow for padding by {pos_pad_shift}")
-			new_ref.__pos += pos_pad_shift
-			new_ref.__shape -= pos_pad_shift
-
+		DataRef.__init__(new_ref, new_shape, new_pad, new_pos, self.step, new_dtype, self.__offset)
 		return new_ref
 
 	def int_iter(self) -> Iterator:
