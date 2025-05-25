@@ -83,10 +83,14 @@ class SharedNPArray:
 	def __load(self) -> np.ndarray:
 		"""Allocates a numpy array in the shared memory."""
 		if self.__sm.buf is not None:
-			ar = np.ndarray(shape=astuple(self.__shape), dtype=self.dtype, buffer=self.__sm.buf)
-			for view in self.__views:
-				ar = ar[view]
-			return ar
+			self.__ar = np.ndarray(shape=astuple(self.__shape), dtype=self.dtype, buffer=self.__sm.buf)
+			if self.has_views:
+				ar = self.__ar
+				for view in self.__views:
+					ar = ar[view]
+				return ar
+			else:
+				return self.__ar
 		else:
 			log.write("Shared Memory", f"Shared Memory {self.__name} Was Destroyed or Never Created",
 						log_level=LOG.ERROR)
@@ -109,7 +113,7 @@ class SharedNPArray:
 			self.shutdown()
 
 	def __exit__(self, *args, **kwargs):
-		pass
+		del self.__ar
 
 	def __getitem__(self, view):
 		# Test if it would create a copy. non-ideal but we shouldn't be calling this much anwyay!
