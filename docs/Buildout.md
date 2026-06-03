@@ -45,7 +45,7 @@ Updated after local review of the checked-out `lftomo`, `hatmehyt`, `dan_scripts
 | 29 | Tier-2 datasets: placement, `scan.yaml`, producer-suite reference recons | lftomo | 1/2 | Three small real datasets. For each dataset, identify which legacy producers apply (R2.54, `recon_minimal.py`, `phase_contrast/recon_v1.py`, `b10_recon.py` once ported) and generate one reference per applicable producer. Reference layout per dataset includes `reference/<producer>/recon/` + `pipeline.yaml`. **Depends on #18** for pinning producer-specific pipeline order before references are frozen. |
 | E1 | Phase 2: algorithm composition as Stages | lftomo | 2 | Epic checklist of Stage classes and algorithm options. |
 | E2 | Phase 3: lfcapture build-out and hatmehyt capture wrapper | lfcapture / hatmehyt | 3 | Epic after capture package skeleton exists. |
-| E3 | Phase 4: retire and redirect legacy scripts | varies | 4 | Deprecation READMEs, import shims, tagged legacy releases. |
+| E3 | Phase 4: retire and redirect legacy recon scripts | varies | 4 | Deprecation READMEs, import shims, tagged legacy releases; excludes hatmehyt itself. |
 
 ## Labels to create
 

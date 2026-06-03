@@ -226,12 +226,13 @@ session-root/
   projections/         # TIFF or HDF5
   flats/
   reference/
-    recon/             # reference slice stack — feature-rich ~10-slice chunk OK
-      slice_00000.tif
-      ...
-    metadata.yaml      # producing script path + git SHA, host (Yarrkha?), date,
+    <producer>/        # e.g. r254, recon_minimal, phase_contrast, b10_recon
+      recon/           # reference slice stack — feature-rich ~10-slice chunk OK
+        slice_00000.tif
+        ...
+      metadata.yaml    # producing script path + git SHA, host (Yarrkha?), date,
                        # operator, runtime, env notes (SLURM, GPU)
-    pipeline.yaml      # FULL pipeline specification (per "Pipeline specification"
+      pipeline.yaml    # FULL pipeline specification (per "Pipeline specification"
                        # section above) — which Stages were applied, in what order,
                        # which algorithm-impl each used, exact params each got.
                        # Different references will have different pipeline shapes
@@ -245,7 +246,7 @@ session-root/
 
 A feature-rich chunk (~10 slices through interesting structure) is plenty for most regression assertions and saves disk. Full-volume reference reserved for Tier-3.
 
-The `pipeline.yaml` is what makes references portable: regression test reads the dataset, loads the reference `pipeline.yaml`, runs the unified pipeline with that exact spec, compares output to `reference/recon/` slices. Same machinery whether the reference came from R2.54, `recon_minimal`, or anywhere else — the differences are entirely in what the `pipeline.yaml` declares.
+The `pipeline.yaml` is what makes references portable: regression test reads the dataset, loads `reference/<producer>/pipeline.yaml`, runs the unified pipeline with that exact spec, compares output to `reference/<producer>/recon/` slices. Same machinery whether the reference came from R2.54, `recon_minimal`, or anywhere else — the differences are entirely in what the producer-specific `pipeline.yaml` declares.
 
 **What you don't need to send.**
 - Synthetic / phantom data — generated in code.
@@ -603,7 +604,7 @@ These deserve to be flagged rather than papered over:
 
 In rough order of cost-to-benefit:
 
-1. **Open an architecture issue** in `den-sq/lftomo` capturing this plan so the conversation is durable. Cross-link from a parallel issue in `ChengLabResearch/ReconChengLab` to bring localCT maintainers in for the super-res consent conversation only.
+1. **Open an architecture issue** in `den-sq/lftomo` capturing this plan so the conversation is durable. Add a tracker comment for the ChengLab consent conversation there (or keep it in private notes); do not file issues against `ChengLabResearch/*`.
 2. **Stabilize lftomo imports and dependency metadata.** Move package metadata to `pyproject.toml` + `hatchling`, add/update conda-first environment docs, and make `import lftomo.util.window`, `import lftomo.prep.flat`, `import lftomo.prep.phase`, and `import lftomo.prep.stripe` smoke-testable in the documented env. `uv pip` can be documented as the fast editable-install path inside that env.
 3. **Make the old-lftomo-API decision.** Either add a temporary compatibility shim for B10/notebooks (`DataWindowSet`, `SharedNP`, `distribute_read`) or port those scripts and prep modules to current `TomoDataSet` / `TomoWindow` / `SharedNPArray` immediately.
 4. **Fix the `print_times.py` bug** in B10. One-liner; unrelated to the rest of the plan.
