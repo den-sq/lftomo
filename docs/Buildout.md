@@ -32,7 +32,7 @@ Updated after local review of the checked-out `lftomo`, `hatmehyt`, `dan_scripts
 | 16 | TIFF slices write Stage | lftomo | 1/2 | Start with current `write_slice`, then add dtype/range semantics. |
 | 17 | Pin exact per-lineage pipeline order in reference specs | lftomo | 1/2 | BAC/stripe/log/skew order differs across B10, R2.54, and phase_contrast. |
 | 18 | Catalog `recon_minimal.py` TomoPy-fix wrappers | lftomo | 1.5 | Gates `recon`, `center`, and `phase` Stage canonicalization. |
-| 19 | Fix B10 `print_times.py` pre-assignment bug | lftomo or local B10 tracking | 0 | `writer.writerow(v)` before `v` is assigned; not part of algorithm unification. |
+| 19 | Fix B10 `print_times.py` pre-assignment bug | lftomo | 0 | `writer.writerow(v)` before `v` is assigned; not part of algorithm unification. Filed under lftomo per the "loose items file under the target repo" rule, since lftomo is the unification target B10 is moving onto. |
 | 20 | hatmehyt packaging baseline | hatmehyt | 1 | Add `pyproject.toml` + `hatchling` metadata before CLI pivot work. |
 | 21 | hatmehyt recon-cli-pivot: strip stubs and audit CLI concepts | hatmehyt | 1 | Preserve ideas, repair defects instead of copying blindly. Issue body to enumerate known defects to audit: (a) config-merge correctness in `GroupWithConfigsWrapper` / `--configs` handling; (b) `Window` / `Slider` iteration semantics in `cli.py:310` and `window.py`; (c) `scan_prep()` placement (currently `capture/general.py:48`, needs to move to the CLI ingest side); (d) packaging gaps (covered separately by #20). Each defect gets a yes/no "fixable in pivot" call as audit output. |
 | 22 | Top-level recon command-surface stubs | hatmehyt | 1 | `ingest`, `prep flats`, `run`, `convert`, `export`. |
