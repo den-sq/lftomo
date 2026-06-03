@@ -1,0 +1,12 @@
+--- B10Scripts/print_times.py
++++ B10Scripts/print_times.py
+@@ -31,8 +31,8 @@
+ 
+ 	flats_dict = {}
+ 	for x in range(0, len(sorted_scan_list)):
+-		writer.writerow(v)
+ 		k, v = sorted_scan_list[x]
++		writer.writerow(v)
+ 
+ 		flats_dict["gain"] = np.mean(h5py.File(k, 'r')['exchange']['data_white'][:], axis=0)
+ 		flats_dict["dark"] = np.mean(h5py.File(k, 'r')['exchange']['data_dark'][:], axis=0)
