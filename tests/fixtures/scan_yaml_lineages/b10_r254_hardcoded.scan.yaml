@@ -1,0 +1,35 @@
+energy_keV: 24.0
+pixel_size_um: 1.172
+ssd_cm: 14.0
+n_projections: 1501
+degrees_per_fov: 180.0
+n_fov: 2
+helical:
+  enabled: true
+  start_um: -500.0
+  stop_um: 500.0
+  pitch_um_per_projection: 0.666
+detector:
+  pixel_size_um: 1.172
+  rows: 2048
+  columns: 2048
+  name: B10-pco
+acquisition:
+  n_projections: 1501
+  rotation_start_deg: 0.0
+  rotation_end_deg: 180.0
+  exposure_ms: 100.0
+projections:
+  format: hdf5_dxchange
+  path: b10_scan.h5
+  data_path: exchange/data
+  white_path: exchange/data_white
+  dark_path: exchange/data_dark
+metadata:
+  lineage: B10 R2.54
+  source_shape: top-of-file hardcoded block
+  legacy_fields:
+    script: R2.54_Berkeley8_hpc_v1.81.py
+    hoto_tomo_algo_list:
+      - gridrec
+      - sirt_cuda

@@ -1,0 +1,33 @@
+energy_keV: 32.0
+pixel_size_um: 0.65
+ssd_cm: 45.0
+n_projections: 2400
+degrees_per_fov: 180.0
+n_fov: 1
+helical:
+  enabled: false
+  start_um: null
+  stop_um: null
+  pitch_um_per_projection: null
+detector:
+  pixel_size_um: 0.65
+  rows: 2160
+  columns: 2560
+  name: synchrotron-detector
+acquisition:
+  n_projections: 2400
+  rotation_start_deg: 0.0
+  rotation_end_deg: 180.0
+  exposure_ms: 20.0
+projections:
+  format: hdf5_dxchange
+  path: scan.h5
+  data_path: exchange/data
+  white_path: exchange/data_white
+  dark_path: exchange/data_dark
+metadata:
+  lineage: ChengLabResearch/phase_contrast
+  source_shape: init_*.ini sections
+  legacy_fields:
+    algorithm: BAC holotomography
+    config_file: init_phase_contrast.ini

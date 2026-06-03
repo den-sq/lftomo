@@ -1,0 +1,32 @@
+energy_keV: 35.0
+pixel_size_um: 2.5
+ssd_cm: 8.0
+n_projections: 1200
+degrees_per_fov: 360.0
+n_fov: 1
+helical:
+  enabled: true
+  start_um: 0.0
+  stop_um: 600.0
+  pitch_um_per_projection: 0.5
+detector:
+  pixel_size_um: 2.5
+  rows: 2448
+  columns: 2048
+  name: lab-camera
+acquisition:
+  n_projections: 1200
+  rotation_start_deg: 0.0
+  rotation_end_deg: 360.0
+  exposure_ms: 75.0
+projections:
+  format: tiff_stack
+  path: raw/projections
+  pattern: '*.tiff'
+metadata:
+  lineage: den-sq/hatmehyt
+  source_shape: handle/meta.py sample and scan records
+  legacy_fields:
+    sample_source: GSHEET
+    sample_record: AAA001
+    scan_prep_source: capture/general.py
