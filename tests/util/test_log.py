@@ -1,11 +1,8 @@
 from datetime import datetime
 import io
 import os
-from pathlib import Path
 
 from lftomo.util.log import LOG, Logger, log
-
-log.set_logdir("data/logs/")
 
 
 def test_LOG():
@@ -20,10 +17,11 @@ def attach_test(step, pid):
 	assert pid == os.getpid()
 
 
-def test_log(capfd):
+def test_log(capfd, tmp_path):
 	assert isinstance(log, Logger)
-	log.set_logdir("../testlog/")
-	assert Path("../testlog/").exists()
+	log_dir = tmp_path / "testlog"
+	log.set_logdir(log_dir)
+	assert log_dir.exists()
 
 	# Header Test
 	log.header()
@@ -71,12 +69,12 @@ def test_log(capfd):
 	assert out[-12:] == "\"Ignore Me\"\n"
 
 
-def test_confirm(monkeypatch):
+def test_confirm(monkeypatch, tmp_path):
 	new_log = Logger(log_screen={
 				"stdout": LOG.STATUS | LOG.TIME | LOG.INFO | LOG.DEBUG,
 				"stderr": LOG.ERROR | LOG.WARN
 			}, log_files={
-				"general": (Path(f"imaging_log_{datetime.now()}.txt"), ~(LOG.INFO))
+				"general": (tmp_path / f"imaging_log_{datetime.now()}.txt", ~(LOG.INFO))
 			})
 
 	# Attach func for testing attach calls.
@@ -96,12 +94,12 @@ def test_confirm(monkeypatch):
 	assert new_log.prompt("PROMPT TEST", "What is on my head?") == "My Hat"
 
 
-def test_out_set(capfd):
+def test_out_set(capfd, tmp_path):
 	new_log = Logger(log_screen={
 				"stdout": None,
 				"stderr": LOG.ERROR | LOG.WARN
 			}, log_files={
-				"general": (Path(f"imaging_log_{datetime.now()}.txt"), ~(LOG.INFO))
+				"general": (tmp_path / f"imaging_log_{datetime.now()}.txt", ~(LOG.INFO))
 			})
 
 	x = io.StringIO()

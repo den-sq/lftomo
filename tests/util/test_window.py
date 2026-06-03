@@ -7,6 +7,7 @@ from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, D
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
 
 
+@pytest.mark.integration
 def test_file_load():
 	tds = disk_dataset()
 
