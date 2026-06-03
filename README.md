@@ -36,6 +36,7 @@ pytest -q
 pytest -q --run-integration
 ```
 
-`--run-integration` is intended for Yarrkha or another machine with the expected
-local data mounts. The default test run keeps those checks skipped so a clean
-checkout can run without lab-local files.
+`--run-integration` runs lab-local tests on Yarrkha. On other hosts those tests
+remain skipped unless `LFTOMO_RUN_INTEGRATION=1` is set explicitly. The default
+test run keeps those checks skipped so a clean checkout can run without
+lab-local files.
