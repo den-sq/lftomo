@@ -20,6 +20,8 @@ dependencies = [
 	"numexpr",
 	"natsort",
 	"scikit-image",
+	"pydantic>=2",
+	"PyYAML",
 ]
 
 [project.optional-dependencies]

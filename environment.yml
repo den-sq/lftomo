@@ -17,6 +17,8 @@ dependencies:
   - numexpr
   - natsort
   - scikit-image
+  - pydantic>=2
+  - pyyaml
   - pytest
   - hatchling
   - pip
