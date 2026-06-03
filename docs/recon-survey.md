@@ -262,7 +262,7 @@ Archived monoliths — `recon_dan_v1.py` is the ancestor of B10 R2.54. Shows pre
 
 ## 5. B10 scripts (`B10Scripts.tar.gz`)
 
-**Headline:** Two acquisition systems × energies × VOIs, each holding a per-VOI hand-edited fork of `R2.54_Berkeley8_hpc_v1.81.py` (3,240 lines, descendant of `ReconChengLab/original/recon_dan_v1.py`). **Each VOI dir also contains a `b10_recon.py` (~150 lines)** that imports `lftomo` against an older utility API (`DataWindowSet`, `SharedNP`, `distribute_read`) — a migration prototype, not a runnable consumer of current lftomo. The intent is to migrate off R2.54 onto lftomo; the path to that endpoint requires porting (or shimming) b10_recon to the current lftomo names first.
+**Headline:** Two acquisition systems × energies × VOIs, each holding a per-VOI hand-edited fork of `R2.54_Berkeley8_hpc_v1.81.py` (3,240 lines, descendant of `ReconChengLab/original/recon_dan_v1.py`). **Each VOI dir also contains a `b10_recon.py` (~150 lines)** that imports `lftomo` against an older utility API (`DataWindowSet`, `SharedNP`, `distribute_read`) — a migration prototype, not a runnable consumer of current lftomo. The intent is to migrate off R2.54 onto lftomo; the plan decision is to port b10_recon immediately to the current lftomo names rather than add old-name shims.
 
 ### Canonical script
 
@@ -282,7 +282,7 @@ Fork-by-edit-in-place pattern.
 - `_alt`: aggressive memory tuning (chunk_size 24), output to `32bit_reconstructed_FS_baseline`, narrowed α/β search, `find_center_pc=False`.
 - `_h5_support` (voi1/14kev only): adds `read_h5=True` flag (l.76) + H5 branch in `parallel_sectional_write_…` (ll.1076–1100) using `h5py.File['exchange']['data'][idx]`. Outputs bin4 16-bit.
 - `_used_to_moveCor` (RedBox_Octo3 only): differs in one line — `movement_correction=[False, 0.0, -1.0376]` vs base `[False, 0.26…, -1.707…]`. Historical experiment.
-- `b10_recon.py`: **completely different lineage**. ~150 lines. Sorotassu's own lftomo-based rewrite of the R2.54 monolith (author path `/home/dnorthover/Cheng Code/lftomo`; `dnorthover` is Sorotassu). Imports `lftomo` against an **older utility API**: uses `SharedNP` (now `SharedNPArray` in current lftomo), `DataWindowSet` (now `TomoDataSet`), and `distribute_read` (no longer present). Structured logging, native H5 (`/exchange/data`), `hotopy.holo.BronnikovAidedCorrection` with empirical γ computation (ll.84–94). **As of 2026-05-29 this file will not run against checked-out lftomo without porting or a compatibility shim** — it documents migration intent, not a working consumer.
+- `b10_recon.py`: **completely different lineage**. ~150 lines. Sorotassu's own lftomo-based rewrite of the R2.54 monolith (author path `/home/dnorthover/Cheng Code/lftomo`; `dnorthover` is Sorotassu). Imports `lftomo` against an **older utility API**: uses `SharedNP` (now `SharedNPArray` in current lftomo), `DataWindowSet` (now `TomoDataSet`), and `distribute_read` (no longer present). Structured logging, native H5 (`/exchange/data`), `hotopy.holo.BronnikovAidedCorrection` with empirical γ computation (ll.84–94). **As of 2026-05-29 this file will not run against checked-out lftomo without porting to the current API** — it documents migration intent, not a working consumer; the unification plan chooses immediate porting over a compatibility shim.
 
 ### Pipeline (canonical R2.54)
 
