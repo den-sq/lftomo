@@ -354,7 +354,7 @@ Rationale:
 
 ## Pipeline specification
 
-Different sources do different things to the data — R2.54 runs BAC + skew correction + movement correction + gridrec; `recon_minimal.py` runs Paganin + entropy-local centering + gridrec/ASTRA; `b10_recon.py` runs BAC + gridrec on H5; `phase_contrast/recon_v1.py` runs gain blending + skew + movement + BAC + gridrec. Each one is a **specific sequence of Stages with specific algorithm choices**, and the unified tool needs to specify that sequence cleanly in `recon.yaml`. This matters in three places: writing recon configs by hand, ingesting legacy configs (R2.54, INI, hardcoded blocks) into the unified form, and pinning the pipeline shape inside a reference recon's `params.yaml` for regression assertion.
+Different sources do different things to the data — R2.54 runs BAC + skew correction + movement correction + gridrec; `recon_minimal.py` runs Paganin + entropy-local centering + gridrec/ASTRA; `b10_recon.py` runs BAC + gridrec on H5; `phase_contrast/recon_v1.py` runs gain blending + skew + movement + BAC + gridrec. Each one is a **specific sequence of Stages with specific algorithm choices**, and the unified tool needs to specify that sequence cleanly in `recon.yaml`. This matters in three places: writing recon configs by hand, ingesting legacy configs (R2.54, INI, hardcoded blocks) into the unified form, and pinning the pipeline shape inside a reference recon's `pipeline.yaml` for regression assertion.
 
 ### Shape
 
@@ -427,10 +427,10 @@ A user invokes one via `recon run <session> --pipeline-template r254-canonical` 
 
 ### Versioning
 
-Templates are versioned with the library (`r254-canonical@v1.0`). A reference recon's `params.yaml` records the resolved template version explicitly so reproduction is stable even if the template later evolves:
+Templates are versioned with the library (`r254-canonical@v1.0`). A reference recon's `pipeline.yaml` records the resolved template version explicitly so reproduction is stable even if the template later evolves:
 
 ```yaml
-# inside reference/params.yaml
+# inside reference/<producer>/pipeline.yaml
 resolved_from: r254-canonical@v1.0
 pipeline:
   # ... the full expanded pipeline as-resolved, not just the template ref.
