@@ -35,14 +35,14 @@ Updated after local review of the checked-out `lftomo`, `hatmehyt`, `dan_scripts
 | 19 | Catalog `recon_minimal.py` TomoPy-fix wrappers | lftomo | 1.5 | Gates `recon`, `center`, and `phase` Stage canonicalization. |
 | 20 | Fix B10 `print_times.py` pre-assignment bug | lftomo or local B10 tracking | 0 | `writer.writerow(v)` before `v` is assigned; not part of algorithm unification. |
 | 21 | hatmehyt packaging baseline | hatmehyt | 1 | Add `pyproject.toml` + `hatchling` metadata before CLI pivot work. |
-| 22 | hatmehyt recon-cli-pivot: strip stubs and audit CLI concepts | hatmehyt | 1 | Preserve ideas, repair config/window/scan_prep defects instead of copying blindly. |
+| 22 | hatmehyt recon-cli-pivot: strip stubs and audit CLI concepts | hatmehyt | 1 | Preserve ideas, repair defects instead of copying blindly. Issue body to enumerate known defects to audit: (a) config-merge correctness in `GroupWithConfigsWrapper` / `--configs` handling; (b) `Window` / `Slider` iteration semantics in `cli.py:310` and `window.py`; (c) `scan_prep()` placement (currently `capture/general.py:48`, needs to move to the CLI ingest side); (d) packaging gaps (covered separately by #21). Each defect gets a yes/no "fixable in pivot" call as audit output. |
 | 23 | Top-level recon command-surface stubs | hatmehyt | 1 | `ingest`, `prep flats`, `run`, `convert`, `export`. |
 | 24 | Canonical-layout ingester | hatmehyt | 1 | Depends on schema validation. |
 | 25 | Config importers | hatmehyt | 1 | `from-recon-minimal-yaml`, `from-phase-contrast-ini`, `from-r254-hardcoded`, `from-b10-recon`. |
 | 26 | Add lfcapture package skeleton and console script | lfcapture | 1/3 | Repo exists; add README, package layout, `pyproject.toml` + `hatchling`, and `lfcapture` entry point. |
 | 27 | Migrate capture sources into lfcapture | lfcapture | 3 | `dan_scripts/capture.py`, hatmehyt `capture/`, selected localCT hardware abstractions after consent. |
 | 28 | Self-hosted GitHub Actions runner on Yarrkha | lftomo | 1 | Enables non-public Tier-2/Tier-3 reference workflows. |
-| 29 | Tier-2 datasets: placement, `scan.yaml`, reference recons | lftomo | 1/2 | Three small real datasets, generated with current production scripts. |
+| 29 | Tier-2 datasets: placement, `scan.yaml`, producer-suite reference recons | lftomo | 1/2 | Three small real datasets. For each dataset, identify which legacy producers apply (R2.54, `recon_minimal.py`, `phase_contrast/recon_v1.py`, `b10_recon.py` once ported) and generate one reference per applicable producer. Reference layout per dataset includes `reference/<producer>/recon/` + `pipeline.yaml`. **Depends on #18** for pinning producer-specific pipeline order before references are frozen. |
 | E1 | Phase 2: algorithm composition as Stages | lftomo | 2 | Epic checklist of Stage classes and algorithm options. |
 | E2 | Phase 3: lfcapture build-out and hatmehyt capture wrapper | lfcapture / hatmehyt | 3 | Epic after capture package skeleton exists. |
 | E3 | Phase 4: retire and redirect legacy scripts | varies | 4 | Deprecation READMEs, import shims, tagged legacy releases. |
@@ -57,7 +57,10 @@ Recommended common labels:
 
 ## Notes for filing
 
-- Add a tracker comment on the Phase 2 epic for ChengLab consent around `localCT/recon/super_recon/` (`drht`, `ldm`) and any `localCT/hardware/` lift into `lfcapture`.
+- **No issues are to be filed against `ChengLabResearch/*` repos** (including `ReconChengLab` and any `localCT/` work). Pulling code in is fine; pushing back is not, and tracking lives on the lftomo/hatmehyt/lfcapture project board with cross-repo references where useful. Backend-switch work touching `localCT` itself stays on a local branch or a fork.
+- Add a tracker comment on the Phase 2 epic for ChengLab consent around `localCT/recon/super_recon/` (`drht`, `ldm`) and any `localCT/hardware/` lift into `lfcapture`. The consent thread is a tracker note, not an issue.
 - Do not turn every Phase 2 algorithm option into a detailed issue until the Stage ABC and validator have landed.
-- B10's `b10_recon.py` remains a strong migration signal, but issue text should call it a prototype pinned to an older lftomo API, not a current working consumer of this checkout.
+- B10's `b10_recon.py` remains a strong migration signal, but issue text should call it a prototype pinned to an older lftomo API (`SharedNP` / `DataWindowSet` / `distribute_read`), not a current working consumer of this checkout.
+- Reference recons are organized as a producer suite (R2.54, `recon_minimal.py`, `phase_contrast/recon_v1.py`, `b10_recon.py` once ported) — one reference per (producer × dataset) combination, not one per dataset. Issues that reference Tier-2/3 references should make the multi-producer shape explicit.
 - Issue text should not promise uv-only installs. The supported path is conda/mamba first for compiled scientific and hardware dependencies, then `uv pip` or pip for editable local packages and PyPI-only extras inside that env.
+- `hatmehyt` is not a transitional CLI. Per the 2026-06-03 decision, it stays as the canonical CLI long-term; no Phase-4 retirement issue against the hatmehyt repo itself.

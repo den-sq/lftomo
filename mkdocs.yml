@@ -2,6 +2,10 @@ site_name: lftomo:  Library for Large-format Tomography Computation
 
 nav:
  - Home: index.md
+ - Plans:
+   - Survey: recon-survey.md
+   - Unification plan: recon-unification-plan.md
+   - Buildout: Buildout.md
 
 plugins:
   - mkdocs-jupyter

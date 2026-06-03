@@ -121,7 +121,7 @@ Final merge of "implement-window-handling" branch (Sep 2022). All recon/seg/anal
 
 ## 3. `den-sq/lftomo` — more recent library
 
-**Headline:** Library, no CLI. Strong shared-memory + windowing + I/O infrastructure. TomoPy backend. **Already in use** by B10's `b10_recon.py` (concrete consumer exists).
+**Headline:** Library, no CLI. Strong shared-memory + windowing + I/O infrastructure. TomoPy backend. **Migration prototype exists** in B10's `b10_recon.py`, but it imports older lftomo names (`DataWindowSet`, `SharedNP`, `distribute_read`) that are not present in the current package — strong intent signal, not a current working consumer.
 
 ### Modules
 
@@ -262,7 +262,7 @@ Archived monoliths — `recon_dan_v1.py` is the ancestor of B10 R2.54. Shows pre
 
 ## 5. B10 scripts (`B10Scripts.tar.gz`)
 
-**Headline:** Two acquisition systems × energies × VOIs, each holding a per-VOI hand-edited fork of `R2.54_Berkeley8_hpc_v1.81.py` (3,240 lines, descendant of `ReconChengLab/original/recon_dan_v1.py`). **Critically: each VOI dir also contains a `b10_recon.py` (~150 lines) that calls `lftomo` for everything.** The lab is migrating off R2.54 onto lftomo organically.
+**Headline:** Two acquisition systems × energies × VOIs, each holding a per-VOI hand-edited fork of `R2.54_Berkeley8_hpc_v1.81.py` (3,240 lines, descendant of `ReconChengLab/original/recon_dan_v1.py`). **Each VOI dir also contains a `b10_recon.py` (~150 lines)** that imports `lftomo` against an older utility API (`DataWindowSet`, `SharedNP`, `distribute_read`) — a migration prototype, not a runnable consumer of current lftomo. The intent is to migrate off R2.54 onto lftomo; the path to that endpoint requires porting (or shimming) b10_recon to the current lftomo names first.
 
 ### Canonical script
 
@@ -282,7 +282,7 @@ Fork-by-edit-in-place pattern.
 - `_alt`: aggressive memory tuning (chunk_size 24), output to `32bit_reconstructed_FS_baseline`, narrowed α/β search, `find_center_pc=False`.
 - `_h5_support` (voi1/14kev only): adds `read_h5=True` flag (l.76) + H5 branch in `parallel_sectional_write_…` (ll.1076–1100) using `h5py.File['exchange']['data'][idx]`. Outputs bin4 16-bit.
 - `_used_to_moveCor` (RedBox_Octo3 only): differs in one line — `movement_correction=[False, 0.0, -1.0376]` vs base `[False, 0.26…, -1.707…]`. Historical experiment.
-- `b10_recon.py`: **completely different lineage**. ~150 lines. Imports `lftomo`, uses `SharedNP`, structured logging, native H5 (`/exchange/data`), `hotopy.holo.BronnikovAidedCorrection` with empirical γ computation (ll.84–94). Author path: `/home/dnorthover/Cheng Code/lftomo`.
+- `b10_recon.py`: **completely different lineage**. ~150 lines. Sorotassu's own lftomo-based rewrite of the R2.54 monolith (author path `/home/dnorthover/Cheng Code/lftomo`; `dnorthover` is Sorotassu). Imports `lftomo` against an **older utility API**: uses `SharedNP` (now `SharedNPArray` in current lftomo), `DataWindowSet` (now `TomoDataSet`), and `distribute_read` (no longer present). Structured logging, native H5 (`/exchange/data`), `hotopy.holo.BronnikovAidedCorrection` with empirical γ computation (ll.84–94). **As of 2026-05-29 this file will not run against checked-out lftomo without porting or a compatibility shim** — it documents migration intent, not a working consumer.
 
 ### Pipeline (canonical R2.54)
 
@@ -328,8 +328,8 @@ TomoPy main; pyfftw; hotopy (`hotopy.holo.BronnikovAidedCorrection`); cv2; ASTRA
 | File | Purpose |
 |---|---|
 | `httpserver.py` (28 lines) | CORS-enabled static HTTP server, port 8080 — Neuroglancer hosting |
-| `print_and_flats.py` (62 lines) | Extracts pre/post flats from H5, writes medians to `yolo_flats/`. **Has bug:** `writer.writerow(v)` called before `v` defined (l.34) |
-| `print_times.py` | Identical to `print_and_flats.py` (likely copy) |
+| `print_and_flats.py` (62 lines) | Extracts pre/post flats from H5, writes **medians** (`np.median`) to `yolo_flats/`. No bug — `k, v = sorted_scan_list[x]` is assigned (l.36) before `writer.writerow(v)` is called (l.37). |
+| `print_times.py` | **Sibling-but-not-identical** to `print_and_flats.py`: writes **means** (`np.mean`), and **has bug** — `writer.writerow(v)` at l.38 runs *before* `k, v = sorted_scan_list[x]` at l.39, so `v` is unbound on the first iteration and stale on subsequent ones. (Survey originally misattributed the bug to `print_and_flats.py`; the actually-buggy file is `print_times.py`.) |
 | `ng_transformed/remove_gz.py` (10 lines) | Decompresses Neuroglancer precomputed `.gz` chunks in-place |
 
 ### Lineage relative to dan_scripts

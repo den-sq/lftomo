@@ -2,8 +2,8 @@
 
 **Date:** 2026-05-29
 **Author:** Tava (assisted analysis for Sorotassu)
-**Companion document:** `recon-survey-2026-05-29.md` (per-source findings)
-**Status:** Initial proposal, opinionated. Revised twice after Sorotassu feedback (2026-05-29), then amended after a local code review of the checked-out repos. Not yet vetted against the lab's actual constraints, ops calendar, or ChengLab consent for `localCT` super-res lifts.
+**Companion document:** `recon-survey.md` (per-source findings)
+**Status:** Initial proposal, opinionated. Revised twice after Sorotassu feedback (2026-05-29), then amended after a local code review of the checked-out repos, then amended again on 2026-06-03 to capture the reference-producer-suite test-data framing, the no-push/no-issues posture toward `ChengLabResearch/ReconChengLab`, and the Phase-4 decision that hatmehyt remains the canonical CLI (not retired). Not yet vetted against the lab's actual constraints or ops calendar.
 
 This plan is the synthesis half of the survey. The survey describes what exists; this describes what to do with it.
 
@@ -130,6 +130,7 @@ Decisions to lock before any code:
   - **DRHT / LDM super-res** from `localCT/recon/super_recon/`.
   - Anything else specifically pulled from the `localCT/` subtree (e.g. its modular `recon/pipeline.py` patterns, hardware abstractions if `lfcapture` wants them).
 - (No consent needed for **BAC** — it lives in `phase_contrast/funcs.py` not `localCT/`, which is in the "do whatever with" bucket. Same for `Neuroglancer/ct_to_ng.py`.)
+- **Posture toward `ChengLabResearch/ReconChengLab` (including `localCT`):** pulling code in is fine and expected; **pushing anything back is not**. Any work that would change `localCT` itself (e.g. switching its recon path to lftomo backends) lives on a local branch, or — only if pushing is unavoidable — in a fork, and is a separate maintainer-side conversation. **No issues are to be filed against `ChengLabResearch/*` repos** as part of this unification work; track the consent thread and any localCT-side conversations either in the lftomo project board (as cross-repo references) or in private notes.
 - Decide on hatmehyt's repo name. **Recommendation: keep the name** for lineage; the scope is narrowed but the lab fennec-naming convention is preserved. Renaming to `lftomo-cli` is cheap on GitHub but breaks any pip-install name continuity if one was planned.
 - Decide which `localCT` patterns are safe/valuable to lift without adopting the full localCT architecture: especially `ReconstructionRequest`/result dataclasses, JSON run summaries, folder inspection, TomoPy runtime bootstrap, and tiny generated TIFF tests.
 
@@ -208,12 +209,14 @@ Confirmed with Sorotassu on 2026-05-29:
 
 **Data hosting.** All Tier-2 and Tier-3 datasets are non-public for now. They live on Yarrkha (or other lab-internal storage). The CI architecture follows: **a self-hosted GitHub Actions runner registered on Yarrkha** picks up Tier-2 and Tier-3 workflows via `runs-on: [self-hosted, yarrkha]`; Tier-1 synthetic tests stay on GitHub-hosted runners. If/when datasets become publishable, lifting them to Zenodo/S3/LFS is a test-harness config change with no test-code impact.
 
-**Reference recons.** Each Tier-2 (and the Tier-3) dataset needs a frozen reference reconstruction it asserts against. This is the contract regression tests check.
+**Reference recons — the producer-suite model.** There is no single canonical producer script for the lab right now; each lineage (R2.54, `recon_minimal.py`, `phase_contrast/recon_v1.py`, `b10_recon.py` once ported, …) is a distinct, sometimes-overlapping producer. The references are organized as a **producer suite**, not one-frozen-recon-per-dataset:
 
-- **When generated:** any time before Phase 2 starts. Recommended now, with the script that's considered canonical production for that dataset (R2.54 for B10 lineage, `b10_recon.py` for the in-flight migration, `recon_minimal.py` for Sorotassu's own work).
+- **The suite is the merged set of legacy producers.** Each Tier-2 (and the Tier-3) dataset is run through every producer in the suite that applies to it (R2.54 makes sense for the B10 lineage dataset; `recon_minimal.py` makes sense for Sorotassu's TIFF-stack dataset; `phase_contrast/recon_v1.py` makes sense for the BAC dataset; etc.). Each producer × dataset combination yields one frozen reference. A dataset covered by N producers therefore yields N references and N regression assertions — that's intentional, since each producer is a distinct behavioral contract.
+- **The test asserts the target library reproduces each reference.** Regression tests run from the target library (`lftomo` for recon, `lfcapture` for capture) — load the dataset, load the reference's `pipeline.yaml`, run the unified pipeline with that exact spec, compare the output to the producer-generated reference. The unified library is considered correct on a dataset when it matches *every* applicable producer's reference for that dataset's `pipeline.yaml`.
+- **When generated:** any time before Phase 2 starts. Recommended now, generated by running each producer's script directly against the relevant Tier-2 dataset. `b10_recon.py` is in the producer set in principle but cannot generate references until the lftomo-API porting work lands; for B10 lineage data, R2.54 stays the active producer until then.
 - **When asserted:** regression-against-reference assertions only start mattering at the start of Phase 2 (when Stages begin replacing real algorithm impls). Phase 1 ABC work uses Tier-1 synthetic data; no reference recons needed there.
-- **Immutability:** the reference is the contract with the past. Do not re-run the producing script later to "refresh" it. If the unified pipeline diverges from a reference, the burden is on the unified pipeline to prove the divergence is intentional and an improvement.
-- **Exact ordering is part of the reference.** BAC/stripe/log/skew ordering differs across lineages (`b10_recon.py` vs. R2.54 vs. `phase_contrast`), so `pipeline.yaml` must pin the stage order literally. Do not normalize those differences away in templates until reference tests prove equivalence.
+- **Immutability:** each reference is the contract with the past for that producer × dataset combination. Do not re-run the producing script later to "refresh" the reference. If the unified pipeline diverges from a reference, the burden is on the unified pipeline to prove the divergence is intentional and an improvement.
+- **Exact ordering is part of the reference.** BAC/stripe/log/skew ordering differs across lineages (`b10_recon.py` vs. R2.54 vs. `phase_contrast`), so each producer's `pipeline.yaml` must pin the stage order literally. Do not normalize those differences away in templates until reference tests prove equivalence across producers.
 
 **Reference-archive shape**, dropped alongside each dataset:
 
@@ -279,9 +282,10 @@ Each lineage gets:
 Order of retirement (least disruptive first):
 1. `recon_minimal.py` — config importer is mechanical; this one is your own; lowest political cost.
 2. B10 R2.54 family — once `b10_recon.py`'s author signs off and the BAC + helical Stages exist, the R2.54 forks become redundant.
-3. `phase_contrast/recon_v1.py` — needs BAC Stage to be a perfect drop-in.
-4. `original/recon_dan_v1.py` — keep available; document as historical.
-5. `hatmehyt` — archive the repo with a README pointing at where its CLI patterns landed.
+3. `phase_contrast/recon_v1.py` — needs BAC Stage to be a perfect drop-in. (No upstream push to `ChengLabResearch/ReconChengLab`; deprecation README sits on a local branch or fork, and is a separate maintainer-side conversation.)
+4. `original/recon_dan_v1.py` — keep available; document as historical. (Same upstream-push constraint as #3.)
+
+**`hatmehyt` is not retired.** Per the 2026-06-03 decision, hatmehyt remains the canonical CLI (`hatmehyt recon …` + `hatmehyt capture …` with `[capture]` extras) for the long term; it is the active sibling of lftomo and lfcapture, not a transitional source. The Phase-0 "decide on hatmehyt's repo name" item resolves to keeping the name.
 
 ---
 
