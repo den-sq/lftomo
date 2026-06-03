@@ -6,7 +6,7 @@ Updated after local review of the checked-out `lftomo`, `hatmehyt`, `dan_scripts
 
 - File detailed issues for Phase 0, Phase 1, Phase 1.5, and foundational test-data work.
 - Keep Phase 2 / 3 / 4 as epics until the Phase 1 API and Stage contracts settle.
-- `lfcapture` now exists, but is effectively an empty initial commit. File `lfcapture` work directly in `den-sq/lfcapture` rather than using `hatmehyt` as a temporary home.
+- `lfcapture` now exists and has its initial package/CLI skeleton in `den-sq/lfcapture@449fe1a`; file remaining `lfcapture` migration work directly in that repo rather than using `hatmehyt` as a temporary home.
 - Package management decision is settled: use `pyproject.toml` + `hatchling` for package metadata/builds, keep conda/mamba environment files as the recon/capture runtime contract, and treat `uv pip` as optional fast glue inside those envs.
 - If project-board linkage is required, the GitHub token still needs `read:project` / `project` scope. Repo issues can be filed without that linkage.
 
@@ -15,8 +15,8 @@ Updated after local review of the checked-out `lftomo`, `hatmehyt`, `dan_scripts
 | # | Title | Repo | Phase | Notes |
 |---|---|---|---|---|
 | 1 | Standardize lftomo packaging and conda-first runtime envs | lftomo | 0/1 | Move to `pyproject.toml` + `hatchling`, update conda/mamba env docs, document optional `uv pip install -e ".[dev]"`, and add import smoke tests. |
-| 2a | Port `lftomo/prep/{flat,phase,stripe}.py` to current utility API | lftomo | 0/1 | Self-contained inside lftomo: replace `DataWindowSet` / `SharedNP` / `distribute_read` with `TomoDataSet` / `TomoWindow` / `SharedNPArray` across the three prep modules. No old-name compatibility shim. Update or add prep-module tests against the new API. |
-| 2b | Port `lftomo/notebook/*.ipynb` to current utility API | lftomo | 1 | Same renames as #2a, applied to example notebooks. Smoke-runnable end-to-end in the documented conda env. Split from #2a because notebook diffs are noisy. |
+| 2a | Port `lftomo/prep/{flat,phase,stripe}.py` to current utility API | lftomo | 0/1 | Self-contained inside lftomo: replace stale `SharedNP`, `DataWindow`, `ImgShape`, and `ThetaSlice` usage with the current `SharedNPArray`, `TomoWindow` / `TomoDataSet`, and `DataShape`-family APIs across the three prep modules. No old-name compatibility shim. Update or add prep-module tests against the new API. |
+| 2b | Port `notebook/*.ipynb` to current utility API | lftomo | 1 | Notebook-specific old imports/usages include `DataWindowSet`, `SharedNP`, and `distribute_read`; port them to current APIs and keep the notebooks smoke-runnable end-to-end in the documented conda env. Split from #2a because notebook diffs are noisy. |
 | 2c | Port `b10_recon.py` to current lftomo API (active-use copy) | lftomo | 1 | Produces a current-API copy of `b10_recon.py` for ongoing development against checked-out lftomo. **Independent of the snapshot-frozen reference at `lftomo@ddfcdf6`** (which #28e uses to generate the b10_recon producer reference and which must NOT be modified). Coordinate filename / branch convention so the two copies of `b10_recon.py` do not collide. |
 | 3 | Define Stage / PipelineState / Pipeline ABCs with explicit contracts | lftomo | 1 | Include shape, mutability, window axes, required metadata, artifacts, resource hints, and Dask stub backend. |
 | 4 | Pipeline-spec validator: shape and contract compatibility | lftomo | 1 | Depends on #3; validates ordering, mutation/fork semantics, artifacts, and backend choice. |
@@ -26,7 +26,7 @@ Updated after local review of the checked-out `lftomo`, `hatmehyt`, `dan_scripts
 | 8 | Tier-1 synthetic fixtures and hermetic tiny-TIFF tests | lftomo | 1 | Shepp-Logan, striped, misaligned, and flat/gain fixtures generated in `tmp_path`. |
 | 9 | Convert machine-specific lftomo tests to hermetic or integration-only | lftomo | 1 | Existing absolute-path data references should not run in normal CI. |
 | 10 | Re-express `weighted_normalize` as first Stage proof | lftomo | 1 | Depends on #2a (prep ports), #3 (ABCs), #4 (validator). |
-| 11 | Re-express Paganin phase-retrieval algorithms as two Stages + tests | lftomo | 1/2 | **Two distinct algorithms, both kept as separate algorithm options under the `phase` Stage class** (not multiple impls of the same algorithm): (a) **standard phase retrieval** — Paganin filter for phase-only retrieval; (b) **one-shot phase/absorption** — coupled phase+absorption retrieval, Sorotassu's canonical re-implementation. Each lands as its own `phase` algorithm option with its own canonical impl. No benchmark exercise — there is one canonical impl per algorithm. Depends on #3 (ABCs), #4 (validator). |
+| 11 | Re-express Paganin phase-retrieval algorithms as `phase` options + tests | lftomo | 1/2 | **Two distinct algorithms, both kept as separate algorithm options under the `phase` Stage class** (not multiple impls of the same algorithm): (a) **standard phase retrieval** — Paganin filter for phase-only retrieval; (b) **one-shot phase/absorption** — coupled phase+absorption retrieval, Sorotassu's canonical re-implementation. Each lands as its own `phase` algorithm option with its own canonical impl. No benchmark exercise — there is one canonical impl per algorithm. Depends on #3 (ABCs), #4 (validator). |
 | 12 | Re-express Vo stripe algorithms as Stages + tests | lftomo | 1/2 | `remove_sort_vo`, `remove_dead_vo`, `remove_large_vo`. |
 | 13 | Re-express Fourier-wavelet stripe removal as Stage + tests | lftomo | 1/2 | `remove_stripe_fw`. |
 | 14 | First-class TIFF stack read Stage | lftomo | 1/2 | Benchmark current `byteread_helper` against `recon_minimal.distribute_read`. |
