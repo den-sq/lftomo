@@ -11,6 +11,15 @@ from lftomo.pipeline.core import (
 	Stage,
 	StageContract,
 )
+from lftomo.pipeline.validation import (
+	BackendCompatibilityError,
+	MissingArtifactError,
+	MissingMetadataError,
+	MutationForkError,
+	PipelineValidationError,
+	ShapeCompatibilityError,
+	validate_pipeline,
+)
 
 __all__ = [
 	"Backend",
@@ -20,6 +29,13 @@ __all__ = [
 	"Pipeline",
 	"PipelineState",
 	"ResourceHints",
+	"BackendCompatibilityError",
+	"MissingArtifactError",
+	"MissingMetadataError",
+	"MutationForkError",
+	"PipelineValidationError",
+	"ShapeCompatibilityError",
 	"Stage",
 	"StageContract",
+	"validate_pipeline",
 ]
