@@ -24,7 +24,7 @@ DATASETS = {
 		name="striping_tiff",
 		environment_variable="LFTOMO_DATASET_STRIPING_TIFF",
 		default_path=Path(
-			"/gpfs/Influenza_APS_2022/Mouse_Lungs/AAA588_25.45kV/Scan/"
+			"/mnt/z/gpfs/Influenza_APS_2022/Mouse_Lungs/AAA588_25.45kV/Scan/"
 			"1651106162_77000projs_90000us_Mouse_Lung_PTA_Normal_Real_Scan"
 		),
 		producers=("r254", "recon_minimal"),
@@ -39,7 +39,7 @@ DATASETS = {
 		name="helical_tiff",
 		environment_variable="LFTOMO_DATASET_HELICAL_TIFF",
 		default_path=Path(
-			"/gpfs/phenome/Argonne/2022_April/initial_setup/AAAPhantom_25.45kV/scan/"
+			"/mnt/z/gpfs/phenome/Argonne/2022_April/initial_setup/AAAPhantom_25.45kV/scan/"
 			"1650859932_32000projs_60000us_Helical_Whole_Phantom_Scan"
 		),
 		producers=("r254",),

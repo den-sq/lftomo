@@ -49,6 +49,11 @@ def test_tier2_path_honors_mount_override(tmp_path):
 	assert tier2_path(dataset, {dataset.environment_variable: str(tmp_path)}) == tmp_path
 
 
+@pytest.mark.parametrize("dataset_name", ["striping_tiff", "helical_tiff"])
+def test_network_dataset_defaults_use_z_drive_mount(dataset_name):
+	assert DATASETS[dataset_name].default_path.is_relative_to("/mnt/z/gpfs")
+
+
 def test_validate_canonical_layout_accepts_empty_reference_slot(tmp_path):
 	root = _canonical_dataset(tmp_path)
 	assert validate_canonical_layout(root).metadata["tier"] == 2

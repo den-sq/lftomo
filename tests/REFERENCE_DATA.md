@@ -8,9 +8,9 @@ layout validation, not the projection data itself.
 
 | Fixture | Stable path on the Linux runner | Acquisition notes | Applicable producers |
 | --- | --- | --- | --- |
-| `dataset_striping_tiff` | `/gpfs/Influenza_APS_2022/Mouse_Lungs/AAA588_25.45kV/Scan/1651106162_77000projs_90000us_Mouse_Lung_PTA_Normal_Real_Scan` | 25.45 keV, 77,000 TIFF projections, 90 ms exposure, 14,192 × 2,960 pixels; deliberately heavy striping. Existing recon: `Z:\gpfs\Influenza_APS_2022\COVID_Influenza_Progression\AAA588\data\20kV_mouse2_lung_untreated_PTA_afterbeamup_recon_p26`. | `r254`, `recon_minimal` |
+| `dataset_striping_tiff` | `/mnt/z/gpfs/Influenza_APS_2022/Mouse_Lungs/AAA588_25.45kV/Scan/1651106162_77000projs_90000us_Mouse_Lung_PTA_Normal_Real_Scan` | 25.45 keV, 77,000 TIFF projections, 90 ms exposure, 14,192 × 2,960 pixels; deliberately heavy striping. Existing recon: `Z:\gpfs\Influenza_APS_2022\COVID_Influenza_Progression\AAA588\data\20kV_mouse2_lung_untreated_PTA_afterbeamup_recon_p26`. | `r254`, `recon_minimal` |
 | `dataset_phase_contrast_hdf5` | `/mnt/wsl/PHYSICALDRIVE2p1/B10/PCRBox_Octo0/20kev/voi2.1` | B10 dxchange HDF5, 20.0003 keV, 1,969 projections over 180°, 2,560 × 2,160 pixels, 0.637 µm effective pixel size. Existing recon: `alt_recon/recon`. | `phase_contrast`, `r254`, `b10_recon` (old lftomo pinned as documented in the unification plan) |
-| `dataset_helical_tiff` | `/gpfs/phenome/Argonne/2022_April/initial_setup/AAAPhantom_25.45kV/scan/1650859932_32000projs_60000us_Helical_Whole_Phantom_Scan` | 25.45 keV, 32,000 TIFF projections, 60 ms exposure, 7,968 × 3,056 pixels; helical motion is approximately 2,792 detector rows per 360°. Put generated reconstructions below this dataset root. | `r254` |
+| `dataset_helical_tiff` | `/mnt/z/gpfs/phenome/Argonne/2022_April/initial_setup/AAAPhantom_25.45kV/scan/1650859932_32000projs_60000us_Helical_Whole_Phantom_Scan` | 25.45 keV, 32,000 TIFF projections, 60 ms exposure, 7,968 × 3,056 pixels; helical motion is approximately 2,792 detector rows per 360°. Put generated reconstructions below this dataset root. | `r254` |
 
 Each path can be overridden without changing the tests:
 
@@ -18,8 +18,18 @@ Each path can be overridden without changing the tests:
 - `LFTOMO_DATASET_PHASE_CONTRAST_HDF5`
 - `LFTOMO_DATASET_HELICAL_TIFF`
 
-The Windows `Z:` share maps to `/gpfs` on the Yarrkha runner. A workstation
-with a different mount should set the corresponding environment variables.
+The Windows `Z:` drive maps to
+`\\main.vast.pennstatehealth.net\Files\Labs\Keith_Cheng_Lab` and is exposed to
+WSL as `/mnt/z` with DrvFS. From Windows PowerShell, mount it with:
+
+```powershell
+wsl -d Ubuntu -u root -- mkdir -p /mnt/z
+wsl -d Ubuntu -u root -- mount -t drvfs Z: /mnt/z
+```
+
+The existing Windows logon supplies the share credentials. A Yarrkha runner
+with the data mounted directly at `/gpfs`, or any workstation with a different
+mount point, should set the corresponding environment variables.
 
 ## Canonical layout
 
