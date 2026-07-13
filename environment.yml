@@ -21,4 +21,8 @@ dependencies:
   - pyyaml
   - pytest
   - hatchling
+  - mkdocs
+  - mkdocs-jupyter
+  - mkdocstrings
+  - mkdocstrings-python
   - pip

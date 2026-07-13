@@ -1,4 +1,4 @@
-site_name: lftomo:  Library for Large-format Tomography Computation
+site_name: "lftomo: Library for Large-format Tomography Computation"
 
 nav:
  - Home: index.md
@@ -6,9 +6,18 @@ nav:
    - Survey: recon-survey.md
    - Unification plan: recon-unification-plan.md
    - Buildout: Buildout.md
+ - API reference:
+   - Configuration models: api/config.md
 
 plugins:
   - mkdocs-jupyter
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+            members_order: source
 
 theme: readthedocs
 

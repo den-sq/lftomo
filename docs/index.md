@@ -21,4 +21,4 @@ $$DSC = 2\frac{|X \cap Y|}{|X| + |Y|}$$
 
 ## Notebook Examples
 
-- [Reconstruction](../notebook/recon.ipynb)
+- [Reconstruction notebook](https://github.com/den-sq/lftomo/blob/master/notebook/recon.ipynb)

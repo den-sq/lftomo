@@ -27,6 +27,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
 	"pytest",
+	"coverage",
+]
+docs = [
+	"mkdocs",
+	"mkdocs-jupyter",
+	"mkdocstrings[python]",
 ]
 
 [tool.hatch.build.targets.wheel]
