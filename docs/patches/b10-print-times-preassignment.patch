@@ -8,5 +8,14 @@
  		k, v = sorted_scan_list[x]
 +		writer.writerow(v)
  
- 		flats_dict["gain"] = np.mean(h5py.File(k, 'r')['exchange']['data_white'][:], axis=0)
- 		flats_dict["dark"] = np.mean(h5py.File(k, 'r')['exchange']['data_dark'][:], axis=0)
+		flats_dict["gain"] = np.mean(h5py.File(k, 'r')['exchange']['data_white'][:], axis=0)
+		flats_dict["dark"] = np.mean(h5py.File(k, 'r')['exchange']['data_dark'][:], axis=0)
+@@ -44,7 +44,7 @@
+ 		flats_dict["gain_post"] = flats_dict["gain"]
+ 		flats_dict["dark_post"] = flats_dict["dark"]
+ 
+-		flat_target = fname.parent.joinpath(new_flats_dir)
++		flat_target = k.parent.joinpath(new_flats_dir)
+ 		flat_target.mkdir(parents=True, exist_ok=True)
+ 		for flat_name, flat_data in flats_dict.items():
+ 			tf.imwrite(flat_target.joinpath(f"{flat_name}.tif"), flat_data)
