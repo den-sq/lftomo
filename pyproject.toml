@@ -44,4 +44,5 @@ addopts = [
 ]
 markers = [
 	"integration: requires local lab data or hardware; skipped unless --run-integration is set",
+	"tier2: requires lab-internal Tier-2 reference data; skipped unless --run-tier2 is set",
 ]
