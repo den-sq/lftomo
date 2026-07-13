@@ -54,6 +54,11 @@ def test_network_dataset_defaults_use_z_drive_mount(dataset_name):
 	assert DATASETS[dataset_name].default_path.is_relative_to("/mnt/z/gpfs")
 
 
+@pytest.mark.parametrize("dataset_name", ["striping_tiff", "helical_tiff"])
+def test_argonne_tiff_pixel_size(dataset_name):
+	assert DATASETS[dataset_name].pixel_size_um == pytest.approx(0.7046)
+
+
 def test_validate_canonical_layout_accepts_empty_reference_slot(tmp_path):
 	root = _canonical_dataset(tmp_path)
 	assert validate_canonical_layout(root).metadata["tier"] == 2

@@ -16,6 +16,7 @@ class Tier2Dataset:
 	name: str
 	environment_variable: str
 	default_path: Path
+	pixel_size_um: float
 	producers: tuple[str, ...]
 
 
@@ -27,12 +28,14 @@ DATASETS = {
 			"/mnt/z/gpfs/Influenza_APS_2022/Mouse_Lungs/AAA588_25.45kV/Scan/"
 			"1651106162_77000projs_90000us_Mouse_Lung_PTA_Normal_Real_Scan"
 		),
+		pixel_size_um=0.7046,
 		producers=("r254", "recon_minimal"),
 	),
 	"phase_contrast_hdf5": Tier2Dataset(
 		name="phase_contrast_hdf5",
 		environment_variable="LFTOMO_DATASET_PHASE_CONTRAST_HDF5",
 		default_path=Path("/mnt/wsl/PHYSICALDRIVE2p1/B10/PCRBox_Octo0/20kev/voi2.1"),
+		pixel_size_um=0.637,
 		producers=("phase_contrast", "r254", "b10_recon"),
 	),
 	"helical_tiff": Tier2Dataset(
@@ -42,6 +45,7 @@ DATASETS = {
 			"/mnt/z/gpfs/phenome/Argonne/2022_April/initial_setup/AAAPhantom_25.45kV/scan/"
 			"1650859932_32000projs_60000us_Helical_Whole_Phantom_Scan"
 		),
+		pixel_size_um=0.7046,
 		producers=("r254",),
 	),
 }

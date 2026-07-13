@@ -21,8 +21,11 @@ pytestmark = pytest.mark.tier2
 def test_tier2_dataset_layout(request, fixture_name: str, dataset_name: str):
 	root: Path = request.getfixturevalue(fixture_name)
 	scan = validate_canonical_layout(root)
+	dataset = DATASETS[dataset_name]
 	assert scan.metadata.get("tier") == 2
 	assert scan.metadata.get("dataset") == dataset_name
+	assert scan.pixel_size_um == pytest.approx(dataset.pixel_size_um)
+	assert scan.detector.pixel_size_um == pytest.approx(dataset.pixel_size_um)
 
 
 @pytest.mark.parametrize("dataset", DATASETS.values(), ids=lambda dataset: dataset.name)
