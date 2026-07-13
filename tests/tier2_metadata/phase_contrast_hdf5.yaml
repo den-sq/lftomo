@@ -1,0 +1,24 @@
+energy_keV: 20.0003
+pixel_size_um: 0.637
+ssd_cm: 8.1795
+n_projections: 1969
+degrees_per_fov: 180.0
+n_fov: 1
+helical:
+  enabled: false
+detector:
+  pixel_size_um: 0.637
+  rows: 2160
+  columns: 2560
+  name: PCO Edge
+acquisition:
+  n_projections: 1969
+  rotation_start_deg: 0.0
+  rotation_end_deg: 180.0
+projections:
+  format: hdf5_dxchange
+  path: projections/20241205_120252_octo_0_centerradula_fov2_scan4.h5
+metadata:
+  tier: 2
+  dataset: phase_contrast_hdf5
+  source: B10 PCRBox Octo0 20keV voi2.1

@@ -2,7 +2,9 @@
 
 Tier-2 data remains on lab-internal storage and is exercised only by the
 `[self-hosted, yarrkha]` workflow. The repository contains path fixtures and
-layout validation, not the projection data itself.
+layout validation, not the projection data itself. The exact installed
+metadata is versioned in `tests/tier2_metadata/`; each file is copied to its
+dataset root as `scan.yaml`.
 
 ## Dataset registry
 

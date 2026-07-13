@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from lftomo.config import Scan
 from tests.tier2 import DATASETS, tier2_path, validate_canonical_layout
 
 
@@ -57,6 +58,15 @@ def test_network_dataset_defaults_use_z_drive_mount(dataset_name):
 @pytest.mark.parametrize("dataset_name", ["striping_tiff", "helical_tiff"])
 def test_argonne_tiff_pixel_size(dataset_name):
 	assert DATASETS[dataset_name].pixel_size_um == pytest.approx(0.7046)
+
+
+@pytest.mark.parametrize("dataset_name", DATASETS)
+def test_installed_scan_template_validates(dataset_name):
+	template = Path(__file__).with_name("tier2_metadata") / f"{dataset_name}.yaml"
+	scan = Scan.from_yaml(template.read_text(encoding="utf-8"))
+	assert scan.metadata["tier"] == 2
+	assert scan.metadata["dataset"] == dataset_name
+	assert scan.pixel_size_um == pytest.approx(DATASETS[dataset_name].pixel_size_um)
 
 
 def test_validate_canonical_layout_accepts_empty_reference_slot(tmp_path):
