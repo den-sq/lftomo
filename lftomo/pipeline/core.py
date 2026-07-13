@@ -26,8 +26,8 @@ class StageContract:
 
 	``expected_input`` and ``produced_output`` are shape classes, usually from
 	``lftomo.util.shapes`` such as ``ProjOrder``, ``SinoOrder``, or
-	``ReconOrder``. The Pipeline validator checks adjacent Stages before any
-	work executes.
+	``ReconOrder``. These contract fields are consumed by the Pipeline validator
+	defined by issue #18 / PR #42.
 	"""
 
 	expected_input: type[Any] | None = None
