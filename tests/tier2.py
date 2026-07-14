@@ -33,7 +33,17 @@ DATASETS = {
 		environment_variable="LFTOMO_DATASET_PHASE_CONTRAST_HDF5",
 		default_path=Path("/mnt/wsl/PHYSICALDRIVE2p1/B10/PCRBox_Octo0/20kev/voi2.1"),
 		pixel_size_um=0.637,
-		producers=("phase_contrast", "r254", "b10_recon"),
+		producers=("r254", "b10_recon"),
+	),
+	"phase_contrast_tiff": Tier2Dataset(
+		name="phase_contrast_tiff",
+		environment_variable="LFTOMO_DATASET_PHASE_CONTRAST_TIFF",
+		default_path=Path(
+			"/mnt/z/gpfs/Daphnia_Phase_ALS_B8_Oct_2023/AAA523_110mm_20keV/"
+			"1696573090_1969projs_175000ussection2_projections_tiff"
+		),
+		pixel_size_um=0.365,
+		producers=("phase_contrast",),
 	),
 	"helical_tiff": Tier2Dataset(
 		name="helical_tiff",

@@ -1,43 +1,45 @@
 # Producer: ReconChengLab/phase_contrast/recon_v1.py
 # Survey source: docs/recon-survey.md lines 191-235 (canonical pipeline narration).
-# Representative defaults follow the INI-driven ALS/B10 path; disabled optional
-# steps remain present so their exact position cannot drift.
+# Representative defaults follow the completed AAA523 ALS B8 TIFF run at
+# ReconChengLab@6791a4a. Disabled optional steps remain present so their exact
+# position cannot drift. BAC occurs during inline sinogram generation, before
+# skew, movement, and the later chunk-level stripe pass.
 pipeline_template: phase-contrast-canonical
 output_path: reference/phase_contrast/recon
 metadata:
   producer: phase_contrast
-  representative_dataset: phase_contrast_hdf5
+  representative_dataset: phase_contrast_tiff
 pipeline:
   - kind: read
-    algorithm: hdf5_dxchange
-    params: {order: sinogram, calibration_policy: required}
+    algorithm: tiff_stack
+    params: {order: projection, pattern: "proj_*.tif", projection_count: 1969, sinogram_chunk_size: 140, chunk_overlap: 30}
   - kind: normalize
     algorithm: taper_blended
-    params: {pre_weight: linear, post_weight: linear}
+    params: {pre_gain: gains/gain.tif, post_gain: gains/gain_post.tif, pre_dark: gains/dark.tif, post_dark: gains/dark_post.tif, pre_weight: linear, post_weight: linear}
   - kind: geometry
     algorithm: helical_pitch
-    params: {enabled_from_scan: true}
-  - kind: geometry
-    algorithm: affine_skew
-    params: {degrees: 0.0}
-  - kind: geometry
-    algorithm: movement
-    params: {enabled: false, y: 0.0, x: 0.0}
-  - kind: stripe
-    algorithm: all_of_the_stripe_removal
-    params: {wavelet: db25, sigma: 2.4, sorting_size: 31, filtering_size: 31}
+    params: {enabled: false, vertical_velocity_px: 0, going_up: false}
   - kind: phase
     algorithm: bronnikov_aided
-    params: {enabled: true, alpha: 0.0006, gamma_from_scan: true}
+    params: {enabled: true, alpha: 2.0, gamma: 1.25, invert: false}
   - kind: filter
     algorithm: bilateral
-    params: {enabled: false, diameter: 5, sigma_color: 75, sigma_space: 75}
+    params: {enabled: false, diameter: 3, sigma_color: 1, sigma_space: 1}
+  - kind: geometry
+    algorithm: affine_skew
+    params: {degrees: 0.149, center_px: 2216.0, interpolation: cubic}
+  - kind: geometry
+    algorithm: movement
+    params: {enabled: false, y: -28.83299763005425, x: -3.0}
+  - kind: stripe
+    algorithm: fw
+    params: {wavelet: db25, sigma: 2.4}
   - kind: center
     algorithm: manual
-    params: {pc_fallback: true, vo_fallback: true}
+    params: {value_px: 2216.0, find_center: false, pc_fallback: false, vo_fallback: false}
   - kind: recon
     algorithm: gridrec
-    params: {ncore_from_machine: true}
+    params: {ncore_from_machine: true, edge_buffer_left: 100, edge_buffer_right: 100}
   - kind: write
     algorithm: tiff_slices
-    params: {dtype: float32, naming_template: "{sample_id}_{slice:05d}"}
+    params: {dtype: float32, naming_template: "rec_{slice:05d}.tif", write_full: true, write_bin2: false, write_bin4: false}

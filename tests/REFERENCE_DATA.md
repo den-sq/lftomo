@@ -11,13 +11,15 @@ dataset root as `scan.yaml`.
 | Fixture | Stable path on the Linux runner | Acquisition notes | Applicable producers |
 | --- | --- | --- | --- |
 | `dataset_striping_tiff` | `/mnt/wsl/PHYSICALDRIVE2p1/data/AAA592` | Berkeley B7 AAA592 center section 6, 24 keV, 3,937 projections over 180°, 11,648 × 3,000 pixels, 0.5 µm pixel size. This is the `striping_tiff` / `recon_minimal` reference dataset, replacing the earlier AAA588 candidate whose raw scan and cited historical reconstruction did not match. The recovered thresholded copy contains 3,935 TIFFs; the historical job used all 3,937 and recorded no dropped frames. Exact run configuration and producer commit are archived on `Z:` under `AAA592/data/history/24keV_center_section_6/7`. | `r254`, `recon_minimal` |
-| `dataset_phase_contrast_hdf5` | `/mnt/wsl/PHYSICALDRIVE2p1/B10/PCRBox_Octo0/20kev/voi2.1` | B10 dxchange HDF5, 20.0003 keV, 1,969 projections over 180°, 2,560 × 2,160 pixels, 0.637 µm effective pixel size. Existing recon: `alt_recon/recon`. | `phase_contrast`, `r254`, `b10_recon` (old lftomo pinned as documented in the unification plan) |
+| `dataset_phase_contrast_hdf5` | `/mnt/wsl/PHYSICALDRIVE2p1/B10/PCRBox_Octo0/20kev/voi2.1` | B10 dxchange HDF5, 20.0003 keV, 1,969 projections over 180°, 2,560 × 2,160 pixels, 0.637 µm effective pixel size. Existing recon: `alt_recon/recon`. | `r254`, `b10_recon` (old lftomo pinned as documented in the unification plan) |
+| `dataset_phase_contrast_tiff` | `/mnt/z/gpfs/Daphnia_Phase_ALS_B8_Oct_2023/AAA523_110mm_20keV/1696573090_1969projs_175000ussection2_projections_tiff` | AAA523 Daphnia ALS B8 sectional TIFF scan, 20 keV, 1,969 projections over 180°, 5,008 × 4,440 pixels, 0.365 µm pixel size, 110 mm propagation distance. Completed phase_contrast BAC 2/1.25 output is present beside the input. | `phase_contrast` |
 | `dataset_helical_tiff` | `/mnt/z/gpfs/phenome/Argonne/2022_April/initial_setup/AAAPhantom_25.45kV/scan/1650859932_32000projs_60000us_Helical_Whole_Phantom_Scan` | 25.45 keV, 32,000 TIFF projections, 60 ms exposure, 7,968 × 3,056 pixels, 0.7046 µm pixel size; helical motion is approximately 2,792 detector rows per 360°. Put generated reconstructions below this dataset root. | `r254` |
 
 Each path can be overridden without changing the tests:
 
 - `LFTOMO_DATASET_STRIPING_TIFF`
 - `LFTOMO_DATASET_PHASE_CONTRAST_HDF5`
+- `LFTOMO_DATASET_PHASE_CONTRAST_TIFF`
 - `LFTOMO_DATASET_HELICAL_TIFF`
 
 The Windows `Z:` drive maps to
@@ -77,6 +79,7 @@ expanded stage order and parameter set used by that producer.
 | `phase_contrast_hdf5` | `r254` | 1076–1085 | 2026-07-13 | `tests/tier2_metadata/references/phase_contrast_hdf5/r254/` |
 | `phase_contrast_hdf5` | `b10_recon` | 1076–1085 | 2026-07-13 | `tests/tier2_metadata/references/phase_contrast_hdf5/b10_recon/` |
 | `striping_tiff` | `recon_minimal` | 1800–1809 | 2026-07-13 | `tests/tier2_metadata/references/striping_tiff/recon_minimal/` |
+| `phase_contrast_tiff` | `phase_contrast` | 2000–2009 | 2026-07-14 | `tests/tier2_metadata/references/phase_contrast_tiff/phase_contrast/` |
 
 These archives were lifted from completed historical volumes rather than
 rerunning their producers. The recon_minimal archive has exact producer and
