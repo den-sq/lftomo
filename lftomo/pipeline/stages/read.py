@@ -6,14 +6,101 @@ from pathlib import Path
 from uuid import uuid4
 
 from natsort import natsorted
+import h5py
 import numpy as np
 import tifffile as tf
 
-from lftomo.config import StageConfig, TIFFStackProjections
+from lftomo.config import HDF5DxchangeProjections, StageConfig, TIFFStackProjections
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
 from lftomo.util.io import distribute_tiff_read
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import ProjOrder, SinoOrder
+
+
+def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_multiplier: float) -> StageContract:
+	if order not in ("projection", "sinogram"):
+		raise ValueError("read order must be 'projection' or 'sinogram'")
+	return StageContract(
+		produced_output=ProjOrder if order == "projection" else SinoOrder,
+		window_axes=("Theta", "Y"),
+		required_metadata=required_metadata,
+		resources=ResourceHints(memory_multiplier=memory_multiplier),
+	)
+
+
+class HDF5DxchangeReadStage(Stage):
+	"""Read projections and optional calibration fields from dxchange HDF5."""
+
+	name = "read.hdf5_dxchange"
+
+	def __init__(self, order: str = "projection", theta_start: int = 0,
+				theta_stop: int | None = None, y_start: int = 0,
+				y_stop: int | None = None, calibration_policy: str = "optional"):
+		if calibration_policy not in ("ignore", "optional", "required"):
+			raise ValueError("calibration_policy must be 'ignore', 'optional', or 'required'")
+		self.order = order
+		self.theta_start = theta_start
+		self.theta_stop = theta_stop
+		self.y_start = y_start
+		self.y_stop = y_stop
+		self.calibration_policy = calibration_policy
+		self.contract = _output_contract(
+			order,
+			required_metadata=("projections.path", "projections.data_path"),
+			memory_multiplier=1.0,
+		)
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "HDF5DxchangeReadStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if state.backend.name != "numpy":
+			raise TypeError("HDF5DxchangeReadStage currently requires the NumPy backend")
+		source = state.scan.projections
+		if not isinstance(source, HDF5DxchangeProjections):
+			raise TypeError("read.hdf5_dxchange requires HDF5DxchangeProjections scan metadata")
+
+		with h5py.File(source.path, "r") as handle:
+			if source.data_path not in handle:
+				raise ValueError(
+					f"dxchange projection dataset {source.data_path!r} is missing from {source.path}"
+				)
+			data = handle[source.data_path]
+			if data.ndim != 3:
+				raise ValueError(f"{source.data_path!r} must have (Theta, Y, X) dimensions")
+			theta_count, rows, _columns = data.shape
+			if theta_count != state.scan.n_projections:
+				raise ValueError(
+					f"scan declares {state.scan.n_projections} projections but HDF5 contains {theta_count}"
+				)
+			theta_stop = theta_count if self.theta_stop is None else self.theta_stop
+			y_stop = rows if self.y_stop is None else self.y_stop
+			if not 0 <= self.theta_start < theta_stop <= theta_count:
+				raise ValueError("invalid HDF5 Theta window")
+			if not 0 <= self.y_start < y_stop <= rows:
+				raise ValueError("invalid HDF5 Y window")
+			working = data[self.theta_start:theta_stop, self.y_start:y_stop, :]
+
+			artifacts = dict(state.artifacts)
+			if self.calibration_policy != "ignore":
+				missing = [
+					path for path in (source.white_path, source.dark_path) if path not in handle
+				]
+				if missing and self.calibration_policy == "required":
+					raise ValueError(
+						"dxchange calibration dataset(s) missing: " + ", ".join(missing)
+					)
+				if not missing:
+					artifacts["white_fields"] = handle[source.white_path][:, self.y_start:y_stop, :]
+					artifacts["dark_fields"] = handle[source.dark_path][:, self.y_start:y_stop, :]
+
+		working = np.asarray(working)
+		if self.order == "sinogram":
+			working = np.transpose(working, (1, 0, 2)).copy()
+		result = state.with_array(working)
+		result.artifacts = artifacts
+		return result
 
 
 class TIFFStackReadStage(Stage):
@@ -29,12 +116,10 @@ class TIFFStackReadStage(Stage):
 		self.threads = threads
 		self.y_start = y_start
 		self.y_stop = y_stop
-		output = ProjOrder if order == "projection" else SinoOrder
-		self.contract = StageContract(
-			produced_output=output,
-			window_axes=("Y",),
+		self.contract = _output_contract(
+			order,
 			required_metadata=("projections.path", "projections.pattern"),
-			resources=ResourceHints(memory_multiplier=2.0),
+			memory_multiplier=2.0,
 		)
 
 	@classmethod
