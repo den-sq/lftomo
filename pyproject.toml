@@ -42,3 +42,6 @@ packages = ["lftomo"]
 addopts = [
     "--import-mode=importlib",
 ]
+markers = [
+	"integration: requires local lab data or hardware; skipped unless --run-integration is set",
+]

@@ -16,7 +16,10 @@ from lftomo.util.shapes import X, Y, DataRange, ProjOrder, XSlice
 from lftomo.util.mem import SharedNPArray, SharedNPManager
 from lftomo.util.window import TomoWindow, TomoDataSet, CTFov
 
-log.set_logdir("data/logs/")
+
+@pytest.fixture(autouse=True)
+def _test_logdir(tmp_path):
+	log.set_logdir(tmp_path / "logs")
 
 
 def test_np_convert():
@@ -32,9 +35,9 @@ def test_np_convert():
 	assert np.all(np_convert(np.uint8, float_array) == np.arange(0, 256, dtype=np.uint8))
 
 
-def test_byteread_helper():
+def test_byteread_helper(tmp_path):
 	x = SharedNPArray("ByteReadTest", X(2048), np.uint16, allocate=True)
-	image_path = Path("data/output/brhelp.tif")
+	image_path = tmp_path / "brhelp.tif"
 	tf.imwrite(image_path, np.ones((2048), np.uint16), dtype=np.uint16)
 	with tf.TiffFile(image_path) as tif:
 		source_offset = tif.pages[0].dataoffsets[0]
@@ -89,6 +92,7 @@ def test_file_interval_pad():
 	assert astuple(result) == astuple(base)
 
 
+@pytest.mark.integration
 def test_get_file_set():
 	shape = ProjOrder
 
@@ -115,22 +119,22 @@ def test_get_file_set():
 	assert offset == 168206858
 
 
-def test_write_slice():
+def test_write_slice(tmp_path):
 	array_mem = SharedNPArray("SliceTest", ProjOrder(5, 24, 2048), np.float32, allocate=True)
 
 	with array_mem as st:
 		st[:] = 0.5
 
 	# No data conversion during write.
-	image_path = "slice_test_32bit.tif"
+	image_path = tmp_path / "slice_test_32bit.tif"
 	write_slice(array_mem, image_path, np.s_[1, :, :])
-	floatimg = tf.imread("slice_test_32bit.tif")
+	floatimg = tf.imread(image_path)
 	assert np.all(floatimg == np.full((24, 2048), 0.5, dtype=np.float32))
 
 	# Data conversion during write.
-	image_path = "slice_test_16bit.tif"
+	image_path = tmp_path / "slice_test_16bit.tif"
 	write_slice(array_mem, image_path, np.s_[2:4, :, :], out_type=np.uint16)
-	intimg = tf.imread("slice_test_16bit.tif")
+	intimg = tf.imread(image_path)
 	assert np.all(intimg == np.full((2, 24, 2048), 32767, dtype=np.uint16))
 
 
@@ -138,6 +142,7 @@ def test_write_centers():
 	pass
 
 
+@pytest.mark.integration
 def test_read_file():
 	source_files = list(Path("data/input/Sam19").iterdir())
 	shape = ProjOrder(Theta=1501, Y=96, X=2048)
@@ -175,6 +180,7 @@ def test_read_file():
 											for i in tw.int_iter()])
 
 
+@pytest.mark.integration
 def test_read_window():
 	shape = ProjOrder(Theta=1501, Y=96, X=2048)
 	dtype = np.uint16
@@ -194,6 +200,7 @@ def test_read_window():
 											for i in tw.int_iter()])
 
 
+@pytest.mark.integration
 def test_file_loader():
 	fov = CTFov(1501, 180, 1)
 	over = Y(48)

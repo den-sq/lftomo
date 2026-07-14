@@ -4,11 +4,8 @@ import numpy as np
 
 from dataclasses import astuple, asdict
 from functools import partial
-from lftomo.util.log import log
 from lftomo.util.shapes import ProjOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
 from lftomo.util.shapes import IntIter, ContigMemIter, MemAddressIter, SliceIter
-
-log.set_logdir("data/logs/")
 
 
 def test_shape_casting():

@@ -23,3 +23,20 @@ uv pip install -e ".[dev]"
 Do not treat a uv-only virtualenv as the supported deployment path for
 TomoPy-heavy reconstruction work. Use it only as pip-compatible glue inside the
 conda environment.
+
+## Tests
+
+Unit tests should be hermetic: generate any required files under `tmp_path` or
+load static fixtures from `tests/`. Tests that require local beamline data,
+machine-mounted paths, or hardware are integration tests and must be marked with
+`@pytest.mark.integration`.
+
+```shell
+pytest -q
+pytest -q --run-integration
+```
+
+`--run-integration` runs lab-local tests on Yarrkha. On other hosts those tests
+remain skipped unless `LFTOMO_RUN_INTEGRATION=1` is set explicitly. The default
+test run keeps those checks skipped so a clean checkout can run without
+lab-local files.
