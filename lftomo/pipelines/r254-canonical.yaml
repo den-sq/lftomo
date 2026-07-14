@@ -1,0 +1,34 @@
+# Producer: B10Scripts/PCRBox_Octo0/14kev/voi1/R2.54_Berkeley8_hpc_v1.81.py
+# Survey source: docs/recon-survey.md lines 265-315 (canonical R2.54 narration).
+# Parameters pin the representative B10 voi2 defaults; per-VOI center/skew changes
+# belong in reference-specific overrides, without changing this literal order.
+pipeline_template: r254-canonical
+output_path: reference/r254/recon
+metadata:
+  producer: r254
+  representative_dataset: b10-voi2
+pipeline:
+  - kind: read
+    algorithm: hdf5_dxchange
+    params: {order: sinogram, calibration_policy: required}
+  - kind: normalize
+    algorithm: theta_switch
+    params: {switch_fraction: 0.5, pre_subtracted: false}
+  - kind: stripe
+    algorithm: remove_all_stripe
+    params: {snr: 3.0, large_size: 51, small_size: 21, drop_ratio: 0.1, dim: 1}
+  - kind: phase
+    algorithm: bronnikov_aided
+    params: {enabled: true, alpha: 1.6, gamma: 1.2}
+  - kind: geometry
+    algorithm: affine_skew_movement
+    params: {skew_degrees: 0.0, movement_enabled: false, movement_y: 0.0, movement_x: 0.0}
+  - kind: center
+    algorithm: manual
+    params: {value_px: 1271.5, pc_fallback: true}
+  - kind: recon
+    algorithm: gridrec
+    params: {ncore: 32}
+  - kind: write
+    algorithm: tiff_slices
+    params: {dtype: float32, naming_template: "rec_{slice:05d}"}
