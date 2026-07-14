@@ -7,7 +7,19 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
 from lftomo.prep.flat import _weighted_normalize_projection
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
+
+
+def _order_shape(order: str):
+	if order == "projection":
+		return ProjOrder
+	if order == "sinogram":
+		return SinoOrder
+	raise ValueError("array order must be 'projection' or 'sinogram'")
+
+
+def _projection(data: np.ndarray, order: str, index: int) -> np.ndarray:
+	return data[index, :, :] if order == "projection" else data[:, index, :]
 
 
 class WeightedNormalizeStage(Stage):
@@ -58,24 +70,31 @@ class WeightedNormalizeStage(Stage):
 		return state if working is state.working_array else state.with_array(working)
 
 
-def _flat_fields(state: PipelineState, data: np.ndarray) -> np.ndarray:
+def _flat_fields(state: PipelineState, data: np.ndarray, order: str = "sinogram") -> np.ndarray:
 	flats = np.asarray(state.scan.metadata["flat_fields"])
-	if flats.shape != (4, data.shape[0], data.shape[2]):
+	y_size = data.shape[1] if order == "projection" else data.shape[0]
+	if flats.shape != (4, y_size, data.shape[2]):
 		raise ValueError("flat_fields must have shape (4, Y, X) matching the working array")
 	return flats
 
 
 def _normalize_with_maps(projection: np.ndarray, gain: np.ndarray, dark: np.ndarray,
-				pre_subtracted: bool) -> np.ndarray:
+				pre_subtracted: bool, floor_nonpositive: bool = False,
+				floor_value: float = 1.0) -> np.ndarray:
 	denominator = gain if pre_subtracted else gain - dark
 	denominator = denominator.copy()
+	numerator = projection - dark
+	if floor_nonpositive:
+		numerator = numerator.copy()
+		numerator[numerator <= 0] = floor_value
+		denominator[denominator <= 0] = floor_value
 	zero = denominator == 0
 	if zero.any():
 		nonzero = np.abs(denominator[~zero])
 		if nonzero.size == 0:
 			raise ValueError("normalization gain map contains only zeros")
 		denominator[zero] = nonzero.min()
-	return np.divide(projection - dark, denominator)
+	return np.divide(numerator, denominator)
 
 
 class ThetaSwitchNormalizeStage(Stage):
@@ -93,7 +112,21 @@ class ThetaSwitchNormalizeStage(Stage):
 
 	def __init__(self, gain_averaging: bool = False, pre_subtracted: bool = False,
 				pre_gain: str | None = None, post_gain: str | None = None,
-				pre_dark: str | None = None, post_dark: str | None = None):
+				pre_dark: str | None = None, post_dark: str | None = None,
+				order: str = "sinogram", floor_nonpositive: bool = False,
+				floor_value: float = 1.0):
+		shape = _order_shape(order)
+		self.contract = StageContract(
+			expected_input=shape,
+			produced_output=shape,
+			mutates_input=True,
+			window_axes=("Y", "Theta"),
+			required_metadata=("metadata.flat_fields",),
+			resources=ResourceHints(memory_multiplier=2.0),
+		)
+		self.order = order
+		self.floor_nonpositive = floor_nonpositive
+		self.floor_value = floor_value
 		self.gain_averaging = gain_averaging
 		self.pre_subtracted = pre_subtracted
 		self.calibration_paths = {
@@ -112,21 +145,26 @@ class ThetaSwitchNormalizeStage(Stage):
 			raise TypeError("ThetaSwitchNormalizeStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array).astype(np.float32, copy=False)
 		if data.ndim != 3:
-			raise ValueError("normalize.theta_switch expects a (Y, Theta, X) sinogram array")
-		flats = _flat_fields(state, data)
+			raise ValueError("normalize.theta_switch expects a three-dimensional tomography array")
+		flats = _flat_fields(state, data, self.order)
 		pre_gain, post_gain, pre_dark, post_dark = flats
-		count = data.shape[1]
-		for projection in range(count):
+		batch_count = data.shape[0] if self.order == "projection" else data.shape[1]
+		total_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
+		projection_start = int(state.artifacts.get("projection_start", 0))
+		for local_projection in range(batch_count):
+			projection = projection_start + local_projection
 			if self.gain_averaging:
-				weight = projection / count
+				weight = projection / total_count
 				gain = pre_gain * (1 - weight) + post_gain * weight
 				dark = pre_dark * (1 - weight) + post_dark * weight
-			elif projection > count / 2:
+			elif projection > total_count / 2:
 				gain, dark = post_gain, post_dark
 			else:
 				gain, dark = pre_gain, pre_dark
-			data[:, projection, :] = _normalize_with_maps(
-				data[:, projection, :], gain, dark, self.pre_subtracted
+			image = _projection(data, self.order, local_projection)
+			image[:] = _normalize_with_maps(
+				image, gain, dark, self.pre_subtracted,
+				self.floor_nonpositive, self.floor_value,
 			)
 		return state if data is state.working_array else state.with_array(data)
 
@@ -138,9 +176,11 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 
 	def __init__(self, pre_subtracted: bool = False,
 				pre_gain: str | None = None, post_gain: str | None = None,
-				pre_dark: str | None = None, post_dark: str | None = None,
-				pre_weight: str = "linear", post_weight: str = "linear",
-				gain_averaging: bool = True, gain_movement_enabled: bool = False):
+			pre_dark: str | None = None, post_dark: str | None = None,
+			pre_weight: str = "linear", post_weight: str = "linear",
+				gain_averaging: bool = True, gain_movement_enabled: bool = False,
+				order: str = "sinogram", floor_nonpositive: bool = False,
+				floor_value: float = 1.0):
 		if pre_weight != "linear" or post_weight != "linear":
 			raise ValueError("taper-blended normalization currently supports linear weights")
 		if not gain_averaging:
@@ -154,6 +194,9 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 			post_gain=post_gain,
 			pre_dark=pre_dark,
 			post_dark=post_dark,
+			order=order,
+			floor_nonpositive=floor_nonpositive,
+			floor_value=floor_value,
 		)
 
 	@classmethod

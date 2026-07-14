@@ -12,7 +12,7 @@ from lftomo.prep.stripe import (
 	_remove_sort_array,
 	_remove_stripe_fw_array,
 )
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 def _contract(memory_multiplier: float) -> StageContract:
@@ -155,16 +155,25 @@ class FourierWaveletStripeStage(Stage):
 
 	def __init__(self, level: int | None = None, wname: str = "db5",
 				sigma: float = 2.0, zero_pad: bool = False,
-				wavelet: str | None = None, ncore: int | None = None):
+				wavelet: str | None = None, ncore: int | None = None,
+				order: str = "sinogram"):
 		if level is not None and level < 1:
 			raise ValueError("Fourier-wavelet level must be positive")
 		if sigma <= 0:
 			raise ValueError("Fourier-wavelet sigma must be positive")
+		if order not in ("projection", "sinogram"):
+			raise ValueError("Fourier-wavelet order must be 'projection' or 'sinogram'")
+		shape = ProjOrder if order == "projection" else SinoOrder
+		self.contract = StageContract(
+			expected_input=shape, produced_output=shape, mutates_input=True,
+			window_axes=("Y",), resources=ResourceHints(memory_multiplier=2.0),
+		)
 		self.level = level
 		self.wname = wavelet or wname
 		self.sigma = sigma
 		self.zero_pad = zero_pad
 		self.ncore = ncore
+		self.order = order
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "FourierWaveletStripeStage":
@@ -176,10 +185,13 @@ class FourierWaveletStripeStage(Stage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("stripe.fw expects a (Y, Theta, X) sinogram array")
-		level = self.level or int(np.ceil(np.log2(max(data.shape[1:]))))
-		for y_index in range(data.shape[0]):
+		theta_size = data.shape[0] if self.order == "projection" else data.shape[1]
+		y_size = data.shape[1] if self.order == "projection" else data.shape[0]
+		level = self.level or int(np.ceil(np.log2(max(theta_size, data.shape[2]))))
+		for y_index in range(y_size):
+			sinogram = data[:, y_index, :] if self.order == "projection" else data[y_index]
 			_remove_stripe_fw_array(
-				data[y_index], level=level, wname=self.wname,
+				sinogram, level=level, wname=self.wname,
 				sigma=self.sigma, zero_pad=self.zero_pad,
 			)
 		return state

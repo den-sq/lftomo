@@ -30,7 +30,9 @@ class GridrecStage(Stage):
 		iterations: int | None = None,
 		edge_buffer_left: int = 0,
 		edge_buffer_right: int = 0,
+		edge_buffer_input: bool = False,
 		output_width: int | None = None,
+		angle_endpoint: bool = False,
 	):
 		if ncore is not None and ncore < 1:
 			raise ValueError("gridrec ncore must be positive")
@@ -52,7 +54,9 @@ class GridrecStage(Stage):
 		self.filter_parameters = filter_parameters
 		self.edge_buffer_left = edge_buffer_left
 		self.edge_buffer_right = edge_buffer_right
+		self.edge_buffer_input = edge_buffer_input
 		self.output_width = output_width
+		self.angle_endpoint = angle_endpoint
 		self.contract = StageContract(
 			expected_input=SinoOrder if sinogram_order else ProjOrder,
 			produced_output=ReconOrder,
@@ -73,7 +77,7 @@ class GridrecStage(Stage):
 				np.deg2rad(acquisition.rotation_start_deg),
 				np.deg2rad(acquisition.rotation_end_deg),
 				theta_count,
-				endpoint=False,
+				endpoint=self.angle_endpoint,
 				dtype=np.float32,
 			)
 		angles = np.asarray(angles, dtype=np.float32)
@@ -92,12 +96,23 @@ class GridrecStage(Stage):
 			raise ValueError(f"gridrec center array must contain one value for each of {slice_count} slices")
 		return values
 
-	def _crop(self, reconstruction: np.ndarray) -> np.ndarray:
+	def _prepare_input(self, data: np.ndarray,
+			center: float | np.ndarray) -> tuple[np.ndarray, float | np.ndarray]:
+		if not self.edge_buffer_input:
+			return data, center
 		left = self.edge_buffer_left
-		right = reconstruction.shape[2] - self.edge_buffer_right
+		right = data.shape[2] - self.edge_buffer_right
 		if left >= right:
 			raise ValueError("gridrec edge buffers remove the entire reconstruction width")
-		reconstruction = reconstruction[:, :, left:right]
+		return data[:, :, left:right], center
+
+	def _crop(self, reconstruction: np.ndarray) -> np.ndarray:
+		if not self.edge_buffer_input:
+			left = self.edge_buffer_left
+			right = reconstruction.shape[2] - self.edge_buffer_right
+			if left >= right:
+				raise ValueError("gridrec edge buffers remove the entire reconstruction width")
+			reconstruction = reconstruction[:, :, left:right]
 		if self.output_width is not None:
 			if self.output_width > reconstruction.shape[2]:
 				raise ValueError("gridrec output_width exceeds the reconstructed width")
@@ -116,6 +131,7 @@ class GridrecStage(Stage):
 		slice_axis = 0 if self.sinogram_order else 1
 		angles = self._angles(state, data.shape[theta_axis])
 		center = self._center(state, data.shape[slice_axis])
+		data, center = self._prepare_input(data, center)
 
 		import tomopy
 

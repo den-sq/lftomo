@@ -4,7 +4,22 @@ import numpy as np
 import pytest
 import tifffile as tf
 
-from lftomo.reference import NumericalTolerance, checksum_manifest, compare_slice, sha256_file
+from lftomo.reference import (
+	NumericalTolerance,
+	aligned_producer_window,
+	checksum_manifest,
+	compare_slice,
+	sha256_file,
+)
+
+
+def test_phase_contrast_rows_use_aligned_inclusive_producer_chunk():
+	window, core = aligned_producer_window(
+		list(range(2000, 2010)), row_count=4440, chunk_size=140, overlap=30,
+	)
+
+	assert window == (1920, 2060)
+	assert core == (1950, 2030)
 
 
 def test_checksum_manifest_and_streaming_hash(tmp_path):
@@ -32,8 +47,26 @@ def test_bounded_memory_numerical_comparison_passes_small_perturbations(tmp_path
 	)
 
 	assert result.passed
+	assert type(result.passed) is bool
 	assert result.nrmse == pytest.approx(0.01 / 6)
 	assert result.correlation == pytest.approx(1)
+
+
+def test_numerical_comparison_opens_frozen_reference_read_only(tmp_path, monkeypatch):
+	reference = np.arange(12, dtype=np.float32).reshape(3, 4)
+	path = tmp_path / "reference.tif"
+	tf.imwrite(path, reference)
+	modes = []
+	real_memmap = tf.memmap
+
+	def recording_memmap(filename, *args, **kwargs):
+		modes.append(kwargs.get("mode"))
+		return real_memmap(filename, *args, **kwargs)
+
+	monkeypatch.setattr(tf, "memmap", recording_memmap)
+	compare_slice(reference, path, NumericalTolerance())
+
+	assert modes == ["r"]
 
 
 def test_numerical_comparison_rejects_unrelated_output(tmp_path):

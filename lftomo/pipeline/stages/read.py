@@ -115,6 +115,7 @@ class TIFFStackReadStage(Stage):
 
 	def __init__(self, order: str = "projection", threads: int | None = None,
 				y_start: int = 0, y_stop: int | None = None,
+				theta_start: int = 0, theta_stop: int | None = None,
 				pattern: str | None = None, projection_count: int | None = None,
 				sinogram_chunk_size: int | None = None, chunk_overlap: int = 0):
 		if order not in ("projection", "sinogram"):
@@ -123,6 +124,8 @@ class TIFFStackReadStage(Stage):
 		self.threads = threads
 		self.y_start = y_start
 		self.y_stop = y_stop
+		self.theta_start = theta_start
+		self.theta_stop = theta_stop
 		self.pattern = pattern
 		self.projection_count = projection_count
 		self.sinogram_chunk_size = sinogram_chunk_size
@@ -169,12 +172,20 @@ class TIFFStackReadStage(Stage):
 		stop = rows if self.y_stop is None else self.y_stop
 		if not 0 <= self.y_start < stop <= rows:
 			raise ValueError(f"invalid TIFF Y window [{self.y_start}, {stop}) for {rows} rows")
-		shape = ProjOrder(Theta=count, Y=stop - self.y_start, X=columns)
+		theta_stop = count if self.theta_stop is None else self.theta_stop
+		if not 0 <= self.theta_start < theta_stop <= count:
+			raise ValueError(
+				f"invalid TIFF Theta window [{self.theta_start}, {theta_stop}) for {count} projections"
+			)
+		selected_files = files[self.theta_start:theta_stop]
+		if len(files) == 1 and (self.theta_start != 0 or theta_stop != count):
+			raise ValueError("Theta-windowed TIFF reads currently require one file per projection")
+		shape = ProjOrder(Theta=theta_stop - self.theta_start, Y=stop - self.y_start, X=columns)
 		memory = SharedNPArray(f"tiff-read-{uuid4().hex}", shape, dtype, allocate=True)
 		try:
 			kwargs = {} if self.threads is None else {"thread_max": self.threads}
 			distribute_tiff_read(
-				files, memory, y_start=self.y_start, y_stop=stop, **kwargs
+				selected_files, memory, y_start=self.y_start, y_stop=stop, **kwargs
 			)
 			with memory as values:
 				working = values.copy()

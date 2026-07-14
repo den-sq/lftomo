@@ -67,6 +67,7 @@ def test_gridrec_projection_order_accepts_center_param_and_crops(monkeypatch):
 			"circle_mask": False,
 			"edge_buffer_left": 1,
 			"edge_buffer_right": 1,
+			"edge_buffer_input": True,
 			"output_width": 2,
 			"filter_name": "butterworth",
 			"filter_parameters": [0.2, 2],
@@ -75,9 +76,10 @@ def test_gridrec_projection_order_accepts_center_param_and_crops(monkeypatch):
 	working = np.ones((3, 2, 5), dtype=np.float32)
 	calls = {}
 
-	def recon(_data, _angles, **kwargs):
+	def recon(data, _angles, **kwargs):
+		calls["data_shape"] = data.shape
 		calls.update(kwargs)
-		return np.arange(50, dtype=np.float32).reshape(2, 5, 5)
+		return np.arange(18, dtype=np.float32).reshape(2, 3, 3)
 
 	monkeypatch.setattr("tomopy.recon", recon)
 	stage = create_stage(config)
@@ -86,10 +88,31 @@ def test_gridrec_projection_order_accepts_center_param_and_crops(monkeypatch):
 	assert stage.contract.expected_input is ProjOrder
 	assert stage.contract.consumes_artifacts == ()
 	assert calls["sinogram_order"] is False
+	assert calls["data_shape"] == (3, 2, 3)
 	np.testing.assert_allclose(calls["center"], [2.0, 2.1])
 	assert calls["filter_name"] == "butterworth"
 	assert calls["filter_par"] == [0.2, 2]
-	assert result.working_array.shape == (2, 5, 2)
+	assert result.working_array.shape == (2, 3, 2)
+
+
+def test_gridrec_edge_buffers_crop_output_by_default(monkeypatch):
+	config = StageConfig(
+		kind="recon", algorithm="gridrec",
+		params={"center": 2.0, "circle_mask": False,
+			"edge_buffer_left": 1, "edge_buffer_right": 1},
+	)
+	working = np.ones((3, 2, 5), dtype=np.float32)
+	calls = {}
+
+	def recon(data, _angles, **_kwargs):
+		calls["data_shape"] = data.shape
+		return np.ones((2, 5, 5), dtype=np.float32)
+
+	monkeypatch.setattr("tomopy.recon", recon)
+	result = create_stage(config).run(_state(working, config))
+
+	assert calls["data_shape"] == (3, 2, 5)
+	assert result.working_array.shape == (2, 5, 3)
 
 
 def test_gridrec_rejects_missing_or_wrong_length_center(monkeypatch):

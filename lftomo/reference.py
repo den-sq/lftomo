@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
+import os
 from pathlib import Path
+from tempfile import TemporaryDirectory, gettempdir
 from typing import Any
 
 import numpy as np
@@ -50,6 +52,9 @@ class ReferenceReport:
 	producer: str
 	pipeline: str
 	window: tuple[int, int]
+	core_window: tuple[int, int]
+	layout: str
+	theta_batch_size: int | None
 	tolerance: NumericalTolerance
 	comparisons: tuple[SliceComparison, ...]
 
@@ -104,7 +109,7 @@ def checksum_manifest(path: Path) -> dict[str, str]:
 def compare_slice(generated: np.ndarray, reference_path: Path,
 			tolerance: NumericalTolerance, tile_rows: int = 256) -> SliceComparison:
 	"""Compare one generated slice to a TIFF using bounded-memory row tiles."""
-	reference = tf.memmap(reference_path)
+	reference = tf.memmap(reference_path, mode="r")
 	generated = np.asarray(generated)
 	if generated.shape != reference.shape:
 		raise ValueError(
@@ -136,7 +141,7 @@ def compare_slice(generated: np.ndarray, reference_path: Path,
 	gen_variance = sum_gen2 - sum_gen * sum_gen / count
 	denominator = np.sqrt(max(ref_variance, 0) * max(gen_variance, 0))
 	correlation = (sum_cross - sum_ref * sum_gen / count) / denominator if denominator else 0.0
-	passed = (
+	passed = bool(
 		nrmse <= tolerance.max_nrmse
 		and correlation >= tolerance.min_correlation
 		and bias <= tolerance.max_normalized_bias
@@ -171,6 +176,114 @@ def _processing_halo(recon) -> int:
 	return max(values)
 
 
+def aligned_producer_window(selected: list[int] | tuple[int, ...], row_count: int,
+			chunk_size: int, overlap: int, start: int = 0) -> tuple[tuple[int, int], tuple[int, int]]:
+	"""Return the producer chunk and retained core containing selected detector rows."""
+	if chunk_size <= 0 or overlap < 0 or chunk_size <= 2 * overlap:
+		raise ValueError("producer chunk must be larger than its two overlaps")
+	if not selected:
+		raise ValueError("selected detector rows cannot be empty")
+	first, last = min(selected), max(selected)
+	stride = chunk_size - 2 * overlap
+	index = (first - start - overlap) // stride
+	if index < 0:
+		raise ValueError("selected rows precede the first retained producer core")
+	window_start = start + index * stride
+	window_stop = min(window_start + chunk_size, row_count)
+	core_start = window_start + overlap
+	core_stop = window_stop - overlap
+	if first < core_start or last >= core_stop:
+		raise ValueError(
+			f"selected rows [{first}, {last + 1}) do not fit one producer core "
+			f"[{core_start}, {core_stop})"
+		)
+	return (window_start, window_stop), (core_start, core_stop)
+
+
+def _phase_contrast_configs(recon, window: tuple[int, int]):
+	"""Configure the AAA523 lineage to retain its recorded projection layout."""
+	result = recon.model_copy(deep=True)
+	window_start, window_stop = window
+	for stage in result.pipeline:
+		if stage.kind == "read":
+			stage.params.update({
+				"order": "projection", "y_start": window_start, "y_stop": window_stop,
+			})
+		elif stage.kind in {"normalize", "phase", "filter", "stripe", "center"}:
+			stage.params["order"] = "projection"
+		elif stage.kind == "geometry":
+			if stage.algorithm == "movement":
+				stage.params["array_order"] = "projection"
+			else:
+				stage.params["order"] = "projection"
+			if stage.algorithm == "affine_skew":
+				stage.params["center_y_px"] = -window_start
+		elif stage.kind == "recon":
+			stage.params["sinogram_order"] = False
+	return result
+
+
+def _run_phase_contrast_projection_order(root: Path, scan, recon,
+			selected: list[int], theta_batch_size: int) -> np.ndarray:
+	"""Execute AAA523 in bounded Theta batches backed by a projection-order memmap."""
+	if theta_batch_size < 1:
+		raise ValueError("Theta batch size must be positive")
+	configs = [config for config in recon.pipeline if config.kind != "write"]
+	stages = [create_stage(config) for config in configs]
+	validate_pipeline(stages, scan, NumpyBackend())
+	stripe_index = next(
+		(index for index, config in enumerate(configs) if config.kind == "stripe")
+	)
+	read_config = configs[0]
+	if read_config.kind != "read":
+		raise ValueError("phase-contrast pipeline must begin with a read Stage")
+	pre_configs = configs[1:stripe_index]
+	stripe_config = configs[stripe_index]
+	post_configs = configs[stripe_index + 1:]
+	projection_count = scan.n_projections
+
+	scratch_root = Path(os.environ.get("LFTOMO_TIER2_SCRATCH", gettempdir()))
+	scratch_root.mkdir(parents=True, exist_ok=True)
+	with TemporaryDirectory(prefix=".lftomo-reference-", dir=scratch_root) as temporary:
+		volume = None
+		for theta_start in range(0, projection_count, theta_batch_size):
+			theta_stop = min(theta_start + theta_batch_size, projection_count)
+			batch_read = read_config.model_copy(deep=True)
+			batch_read.params.update({"theta_start": theta_start, "theta_stop": theta_stop})
+			state = PipelineState(
+				working_array=np.empty((0,), dtype=np.float32), scan=scan, recon=recon,
+				artifacts={"projection_start": theta_start, "projection_count": projection_count},
+				backend=NumpyBackend(),
+			)
+			state = create_stage(batch_read).run(state)
+			for config in pre_configs:
+				state = create_stage(config).run(state)
+			batch = np.asarray(state.working_array, dtype=np.float32)
+			if volume is None:
+				shape = (projection_count, batch.shape[1], batch.shape[2])
+				volume = np.memmap(
+					Path(temporary) / "projection-order.float32", mode="w+",
+					dtype=np.float32, shape=shape,
+				)
+			volume[theta_start:theta_stop] = batch
+			volume.flush()
+
+		if volume is None:
+			raise ValueError("phase-contrast input contains no projections")
+		state = PipelineState(
+			working_array=volume, scan=scan, recon=recon, backend=NumpyBackend(),
+		)
+		state = create_stage(stripe_config).run(state)
+		volume.flush()
+		read_start = int(read_config.params["y_start"])
+		local_start = min(selected) - read_start
+		local_stop = max(selected) - read_start + 1
+		state = state.with_array(volume[:, local_start:local_stop, :])
+		for config in post_configs:
+			state = create_stage(config).run(state)
+		return np.asarray(state.working_array, dtype=np.float32).copy()
+
+
 def _cap_parallelism(recon, workers: int = 2) -> None:
 	"""Avoid multiplying large row windows across producer-era worker counts."""
 	for stage in recon.pipeline:
@@ -182,7 +295,8 @@ def _cap_parallelism(recon, workers: int = 2) -> None:
 
 def run_reference_archive(root: str | Path, producer: str,
 			tolerance: NumericalTolerance | None = None,
-			slices: list[int] | tuple[int, ...] | None = None) -> ReferenceReport:
+			slices: list[int] | tuple[int, ...] | None = None,
+			theta_batch_size: int | None = None) -> ReferenceReport:
 	"""Regenerate selected rows with their canonical producer and compare them."""
 	root = Path(root)
 	archive = root / "reference" / producer
@@ -205,38 +319,56 @@ def run_reference_archive(root: str | Path, producer: str,
 	except KeyError as error:
 		raise ValueError(f"no canonical template registered for producer {producer!r}") from error
 	recon, pipeline_path = load_recon(template)
-	recon = _make_executable(recon)
-	_cap_parallelism(recon)
 	scan, _ = load_scan(root / "scan.yaml")
-	halo = _processing_halo(recon)
-	window_start = max(0, min(selected) - halo)
-	window_stop = min(scan.detector.rows or max(selected) + halo + 1, max(selected) + halo + 1)
-	for config in recon.pipeline:
-		if config.kind == "read":
-			config.params.update({"y_start": window_start, "y_stop": window_stop, "order": "sinogram"})
-		elif config.kind == "recon":
-			config.params["sinogram_order"] = True
-	_resolve_flat_fields(scan, recon)
-	configs = [config for config in recon.pipeline if config.kind != "write"]
-	stages = [create_stage(config) for config in configs]
-	validate_pipeline(stages, scan, NumpyBackend())
-	state = PipelineState(
-		working_array=np.empty((0,), dtype=np.float32),
-		scan=scan,
-		recon=recon,
-		backend=NumpyBackend(),
-	)
-	cropped = False
-	for config, stage in zip(configs, stages, strict=True):
-		if not cropped and config.kind in {"center", "recon"}:
-			start = min(selected) - window_start
-			stop = max(selected) - window_start + 1
-			state = state.with_array(np.asarray(state.working_array)[start:stop].copy())
-			cropped = True
-		state = stage.run(state)
-	if not cropped:
-		raise ValueError("canonical pipeline has no reconstruction boundary")
-	generated = np.asarray(state.working_array)
+	_cap_parallelism(recon)
+	if producer == "phase_contrast":
+		read = next(config for config in recon.pipeline if config.kind == "read")
+		chunk_size = int(read.params["sinogram_chunk_size"])
+		overlap = int(read.params.get("chunk_overlap", 0))
+		(window_start, window_stop), core_window = aligned_producer_window(
+			selected, int(scan.detector.rows), chunk_size, overlap,
+		)
+		recon = _phase_contrast_configs(recon, (window_start, window_stop))
+		_resolve_flat_fields(scan, recon)
+		batch_size = theta_batch_size or int(os.environ.get("LFTOMO_REFERENCE_THETA_BATCH", "4"))
+		generated = _run_phase_contrast_projection_order(
+			root, scan, recon, selected, batch_size,
+		)
+		layout = "projection"
+	else:
+		recon = _make_executable(recon)
+		halo = _processing_halo(recon)
+		window_start = max(0, min(selected) - halo)
+		window_stop = min(scan.detector.rows or max(selected) + halo + 1, max(selected) + halo + 1)
+		core_window = (min(selected), max(selected) + 1)
+		for config in recon.pipeline:
+			if config.kind == "read":
+				config.params.update({"y_start": window_start, "y_stop": window_stop, "order": "sinogram"})
+			elif config.kind == "recon":
+				config.params["sinogram_order"] = True
+		_resolve_flat_fields(scan, recon)
+		configs = [config for config in recon.pipeline if config.kind != "write"]
+		stages = [create_stage(config) for config in configs]
+		validate_pipeline(stages, scan, NumpyBackend())
+		state = PipelineState(
+			working_array=np.empty((0,), dtype=np.float32),
+			scan=scan,
+			recon=recon,
+			backend=NumpyBackend(),
+		)
+		cropped = False
+		for config, stage in zip(configs, stages, strict=True):
+			if not cropped and config.kind in {"center", "recon"}:
+				start = min(selected) - window_start
+				stop = max(selected) - window_start + 1
+				state = state.with_array(np.asarray(state.working_array)[start:stop].copy())
+				cropped = True
+			state = stage.run(state)
+		if not cropped:
+			raise ValueError("canonical pipeline has no reconstruction boundary")
+		generated = np.asarray(state.working_array)
+		layout = "sinogram"
+		batch_size = None
 	if generated.shape[0] != len(selected):
 		raise ValueError(f"reconstruction returned {generated.shape[0]} rows for {len(selected)} selected rows")
 
@@ -267,6 +399,9 @@ def run_reference_archive(root: str | Path, producer: str,
 		producer=producer,
 		pipeline=str(pipeline_path),
 		window=(window_start, window_stop),
+		core_window=core_window,
+		layout=layout,
+		theta_batch_size=batch_size,
 		tolerance=tolerance,
 		comparisons=tuple(comparisons),
 	)
