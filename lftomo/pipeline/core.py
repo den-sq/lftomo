@@ -37,6 +37,7 @@ class StageContract:
 	required_metadata: tuple[str, ...] = ()
 	consumes_artifacts: tuple[str, ...] = ()
 	produces_artifacts: tuple[str, ...] = ()
+	forks_pipeline: bool = False
 	resources: ResourceHints = field(default_factory=ResourceHints)
 
 
@@ -139,14 +140,26 @@ class Stage(ABC):
 class Pipeline:
 	"""Sequential Pipeline over an ordered list of Stages."""
 
-	def __init__(self, stages: list[Stage], backend: Backend | None = None):
+	def __init__(self, stages: list[Stage], backend: Backend | None = None, scan: Scan | None = None, validate: bool = True):
 		self.stages = tuple(stages)
 		self.backend = backend or NumpyBackend()
+		self.validate = validate
+		self._validated = False
+		if validate and scan is not None:
+			from lftomo.pipeline.validation import validate_pipeline
+
+			validate_pipeline(self.stages, scan, self.backend)
+			self._validated = True
 
 	def run(self, state: PipelineState) -> PipelineState:
 		"""Run each Stage sequentially; individual Stages own concurrency."""
 
 		state.backend = self.backend
+		if self.validate and not self._validated:
+			from lftomo.pipeline.validation import validate_pipeline
+
+			validate_pipeline(self.stages, state.scan, self.backend)
+			self._validated = True
 		for stage in self.stages:
 			state = stage.run(state)
 		return state
