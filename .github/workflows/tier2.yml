@@ -17,9 +17,9 @@ jobs:
       - name: Create the pinned numerical runtime
         run: |
           runtime="$RUNNER_TEMP/lftomo-tier2"
-          python -m venv --system-site-packages "$runtime"
-          "$runtime/bin/python" -m pip install "numpy<2"
-          echo "TIER2_PYTHON=$runtime/bin/python" >> "$GITHUB_ENV"
+          python -m pip install --target "$runtime" "numpy<2"
+          echo "TIER2_PYTHON=python" >> "$GITHUB_ENV"
+          echo "PYTHONPATH=$runtime${PYTHONPATH:+:$PYTHONPATH}" >> "$GITHUB_ENV"
       - name: Install the checkout without replacing the runner environment
         run: >-
           "$TIER2_PYTHON" -m pip install --no-deps -e .
