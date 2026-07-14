@@ -21,6 +21,7 @@ from .recon import (
 	SIRTCudaStage,
 )
 from .stripe import AllOfTheStripeStage, FourierWaveletStripeStage, VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
+from .super_resolve import DRHTStage, LDMStage
 from .write import TIFFSlicesWriteStage
 
 
@@ -59,6 +60,8 @@ STAGE_REGISTRY = {
 	"stripe.vo_dead": VoDeadStripeStage,
 	"stripe.vo_large": VoLargeStripeStage,
 	"stripe.vo_sort": VoSortStripeStage,
+	"super_resolve.drht": DRHTStage,
+	"super_resolve.ldm": LDMStage,
 	"skew_correct.cv2_affine": SkewCorrectStage,
 	"write.tiff_slices": TIFFSlicesWriteStage,
 }
@@ -84,6 +87,7 @@ __all__ = [
 	"BilateralFilterStage",
 	"BronnikovAidedCorrectionStage",
 	"CGLSCudaStage",
+	"DRHTStage",
 	"EMCudaStage",
 	"EntropyLocalCenterStage",
 	"HDF5DxchangeReadStage",
@@ -92,6 +96,7 @@ __all__ = [
 	"FPCudaStage",
 	"GridrecStage",
 	"HelicalIndexRemapStage",
+	"LDMStage",
 	"ManualCenterStage",
 	"MovementCorrectStage",
 	"PaganinPhaseAbsorptionStage",

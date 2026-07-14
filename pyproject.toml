@@ -38,6 +38,9 @@ docs = [
 	"mkdocs-jupyter",
 	"mkdocstrings[python]",
 ]
+super-resolution = [
+	"torch",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["lftomo"]
