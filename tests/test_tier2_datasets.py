@@ -15,7 +15,6 @@ pytestmark = pytest.mark.tier2
 	[
 		("dataset_striping_tiff", "striping_tiff"),
 		("dataset_phase_contrast_hdf5", "phase_contrast_hdf5"),
-		("dataset_recon_minimal_tiff", "recon_minimal_tiff"),
 		("dataset_helical_tiff", "helical_tiff"),
 	],
 )

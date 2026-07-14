@@ -3,7 +3,7 @@ resolved_from: recon-minimal-canonical@f584683b40593eecb6b9529f65e2b5f6cd4c4b15
 output_path: reference/recon_minimal/recon
 metadata:
   producer: recon_minimal
-  dataset: recon_minimal_tiff
+  dataset: striping_tiff
 pipeline:
   - kind: read
     algorithm: tiff_stack

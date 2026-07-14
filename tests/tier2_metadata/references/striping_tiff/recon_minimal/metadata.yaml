@@ -1,6 +1,6 @@
 schema_version: 1
 producer: recon_minimal
-dataset: recon_minimal_tiff
+dataset: striping_tiff
 status: frozen_historical_output
 immutable: true
 source:

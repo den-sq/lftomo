@@ -1,20 +1,21 @@
-energy_keV: 25.45
-pixel_size_um: 0.7046
-n_projections: 77000
+energy_keV: 24.0
+pixel_size_um: 0.5
+ssd_cm: 3.0
+n_projections: 3937
 degrees_per_fov: 180.0
-n_fov: 14
+n_fov: 1
 helical:
   enabled: false
 detector:
-  pixel_size_um: 0.7046
-  rows: 2960
-  columns: 14192
+  pixel_size_um: 0.5
+  rows: 3000
+  columns: 11648
   name: Vieworks VT-16K3.5
 acquisition:
-  n_projections: 77000
+  n_projections: 3937
   rotation_start_deg: 0.0
-  rotation_end_deg: 2520.0
-  exposure_ms: 90.0
+  rotation_end_deg: 180.0
+  exposure_ms: 275.0
 projections:
   format: tiff_stack
   path: projections
@@ -22,4 +23,8 @@ projections:
 metadata:
   tier: 2
   dataset: striping_tiff
-  source: AAA588 Mouse Lung PTA Normal Real Scan
+  source: AAA592 Berkeley B7 center section 6
+  recovered_projection_variant: thresholded
+  recovered_projection_count: 3935
+  historical_projection_count: 3937
+  historical_dropped_frames: 0

@@ -50,14 +50,20 @@ def test_tier2_path_honors_mount_override(tmp_path):
 	assert tier2_path(dataset, {dataset.environment_variable: str(tmp_path)}) == tmp_path
 
 
-@pytest.mark.parametrize("dataset_name", ["striping_tiff", "helical_tiff"])
+@pytest.mark.parametrize("dataset_name", ["helical_tiff"])
 def test_network_dataset_defaults_use_z_drive_mount(dataset_name):
 	assert DATASETS[dataset_name].default_path.is_relative_to("/mnt/z/gpfs")
 
 
-@pytest.mark.parametrize("dataset_name", ["striping_tiff", "helical_tiff"])
+@pytest.mark.parametrize("dataset_name", ["helical_tiff"])
 def test_argonne_tiff_pixel_size(dataset_name):
 	assert DATASETS[dataset_name].pixel_size_um == pytest.approx(0.7046)
+
+
+def test_striping_reference_uses_aaa592_physical_drive_dataset():
+	dataset = DATASETS["striping_tiff"]
+	assert dataset.default_path == Path("/mnt/wsl/PHYSICALDRIVE2p1/data/AAA592")
+	assert dataset.pixel_size_um == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize("dataset_name", DATASETS)
