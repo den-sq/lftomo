@@ -79,3 +79,48 @@ def test_phase_contrast_alias_accepts_pinned_path_parameters():
 	assert isinstance(stage, TaperBlendedNormalizeStage)
 	assert STAGE_REGISTRY["normalize.phase_contrast"] is TaperBlendedNormalizeStage
 	assert stage.calibration_paths["pre_gain"] == "gains/gain.tif"
+
+
+def test_frozen_r254_theta_switch_parameters_construct():
+	config = StageConfig(
+		kind="normalize",
+		algorithm="theta_switch",
+		params={
+			"gain_averaging": True,
+			"pre_gain": "gains/gain.tif",
+			"post_gain": "gains/gain_post.tif",
+			"pre_dark": "gains/dark.tif",
+			"post_dark": "gains/dark_post.tif",
+			"pre_subtracted": False,
+		},
+	)
+
+	stage = create_stage(config)
+
+	assert isinstance(stage, ThetaSwitchNormalizeStage)
+	assert stage.calibration_paths == {
+		"pre_gain": "gains/gain.tif",
+		"post_gain": "gains/gain_post.tif",
+		"pre_dark": "gains/dark.tif",
+		"post_dark": "gains/dark_post.tif",
+	}
+
+
+def test_frozen_phase_contrast_taper_parameters_construct():
+	config = StageConfig(
+		kind="normalize",
+		algorithm="taper_blended",
+		params={
+			"pre_gain": "gains/gain.tif",
+			"post_gain": "gains/gain_post.tif",
+			"pre_dark": "gains/dark.tif",
+			"post_dark": "gains/dark_post.tif",
+			"gain_averaging": True,
+			"gain_movement_enabled": False,
+		},
+	)
+
+	stage = create_stage(config)
+
+	assert isinstance(stage, TaperBlendedNormalizeStage)
+	assert stage.gain_averaging is True

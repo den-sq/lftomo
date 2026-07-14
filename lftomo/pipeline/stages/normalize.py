@@ -89,9 +89,17 @@ class ThetaSwitchNormalizeStage(Stage):
 		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
-	def __init__(self, gain_averaging: bool = False, pre_subtracted: bool = False):
+	def __init__(self, gain_averaging: bool = False, pre_subtracted: bool = False,
+				pre_gain: str | None = None, post_gain: str | None = None,
+				pre_dark: str | None = None, post_dark: str | None = None):
 		self.gain_averaging = gain_averaging
 		self.pre_subtracted = pre_subtracted
+		self.calibration_paths = {
+			"pre_gain": pre_gain,
+			"post_gain": post_gain,
+			"pre_dark": pre_dark,
+			"post_dark": post_dark,
+		}
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "ThetaSwitchNormalizeStage":
@@ -129,16 +137,22 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 	def __init__(self, pre_subtracted: bool = False,
 				pre_gain: str | None = None, post_gain: str | None = None,
 				pre_dark: str | None = None, post_dark: str | None = None,
-				pre_weight: str = "linear", post_weight: str = "linear"):
+				pre_weight: str = "linear", post_weight: str = "linear",
+				gain_averaging: bool = True, gain_movement_enabled: bool = False):
 		if pre_weight != "linear" or post_weight != "linear":
 			raise ValueError("taper-blended normalization currently supports linear weights")
-		super().__init__(gain_averaging=True, pre_subtracted=pre_subtracted)
-		self.calibration_paths = {
-			"pre_gain": pre_gain,
-			"post_gain": post_gain,
-			"pre_dark": pre_dark,
-			"post_dark": post_dark,
-		}
+		if not gain_averaging:
+			raise ValueError("taper-blended normalization requires gain_averaging")
+		if gain_movement_enabled:
+			raise ValueError("gain movement correction must be a separate geometry Stage")
+		super().__init__(
+			gain_averaging=True,
+			pre_subtracted=pre_subtracted,
+			pre_gain=pre_gain,
+			post_gain=post_gain,
+			pre_dark=pre_dark,
+			post_dark=post_dark,
+		)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "TaperBlendedNormalizeStage":
