@@ -20,11 +20,19 @@ dependencies = [
 	"numexpr",
 	"natsort",
 	"scikit-image",
+	"pydantic>=2",
+	"PyYAML",
 ]
 
 [project.optional-dependencies]
 dev = [
 	"pytest",
+	"coverage",
+]
+docs = [
+	"mkdocs",
+	"mkdocs-jupyter",
+	"mkdocstrings[python]",
 ]
 
 [tool.hatch.build.targets.wheel]

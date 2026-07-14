@@ -17,6 +17,12 @@ dependencies:
   - numexpr
   - natsort
   - scikit-image
+  - pydantic>=2
+  - pyyaml
   - pytest
   - hatchling
+  - mkdocs
+  - mkdocs-jupyter
+  - mkdocstrings
+  - mkdocstrings-python
   - pip
