@@ -67,6 +67,54 @@ def byteread_helper(target: str, image: PathLike, source_offsets: int | ArrayLik
 	sm.close()
 
 
+def distribute_tiff_read(source_files: Sequence[PathLike], target_mem: SharedNPArray,
+							y_start: int = 0, y_stop: int | None = None,
+							thread_max: int = cpu_count() * 2) -> None:
+	"""Read an uncompressed TIFF stack using recon_minimal's per-file dispatch.
+
+	Unlike ``read_window``, TIFF metadata is inspected once and each worker gets
+	one contiguous source/target pair. Multi-page TIFFs use one source offset per
+	page. This is the canonical TIFF-stack path selected by the Tier-2 benchmark
+	for issue #23.
+	"""
+	files = [Path(path) for path in source_files]
+	if not files:
+		raise ValueError("TIFF source list is empty")
+	with tf.TiffFile(files[0]) as tif:
+		pages = tif.pages
+		page = pages[0]
+		if page.compression != 1 or not page.is_contiguous:
+			raise ValueError("direct TIFF reading requires uncompressed contiguous pages")
+		rows, columns = page.shape
+		dtype = np.dtype(page.dtype)
+		stop = rows if y_stop is None else y_stop
+		if not 0 <= y_start < stop <= rows:
+			raise ValueError(f"invalid TIFF Y window [{y_start}, {stop}) for {rows} rows")
+		page_offsets = [entry.dataoffsets[0] for entry in pages]
+
+	count = len(files) if len(files) > 1 else len(page_offsets)
+	window_rows = stop - y_start
+	expected = ProjOrder(Theta=count, Y=window_rows, X=columns)
+	if target_mem.shape != expected or target_mem.dtype != dtype:
+		raise ValueError(
+			f"target must have shape {expected} and dtype {dtype}, got {target_mem.shape} and {target_mem.dtype}"
+		)
+	row_bytes = columns * dtype.itemsize
+	image_bytes = window_rows * row_bytes
+
+	if len(files) == 1:
+		source_offsets = [offset + y_start * row_bytes for offset in page_offsets]
+		calls = [(target_mem.name, files[0], source_offsets, 0, image_bytes)]
+	else:
+		base_offset = page_offsets[0] + y_start * row_bytes
+		calls = [
+			(target_mem.name, path, base_offset, index * image_bytes, image_bytes)
+			for index, path in enumerate(files)
+		]
+	with ThreadPool(min(thread_max, count)) as pool:
+		pool.starmap(byteread_helper, calls)
+
+
 def get_file_set(source_files: ArrayLike, shape: type = ProjOrder):
 	# TODO: Handle 4D
 	# TODO: Handle limited iteration over theta
