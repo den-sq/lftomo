@@ -17,6 +17,7 @@ dependencies:
   - pywavelets
   - numexpr
   - natsort
+  - opencv
   - scikit-image
   - pydantic>=2
   - pyyaml
