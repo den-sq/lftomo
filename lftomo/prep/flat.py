@@ -48,6 +48,30 @@ def _axis_slice(window: TomoWindow, axis: str) -> slice:
 	return window.index[axis_index]
 
 
+def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats: np.ndarray,
+									projection: int, projection_count: int, pre_sub: bool = False) -> None:
+	"""Normalize one projection in array views shared by the function and Stage APIs."""
+	weights = [projection_count - projection, projection]
+	dark_map = np.average(
+		flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1], axis=0, weights=weights
+	)
+	gain_map = np.average(
+		flats[FLAT.PREGAIN.index:FLAT.POSTGAIN.index + 1], axis=0, weights=weights
+	)
+	if not pre_sub:
+		gain_map = np.subtract(gain_map, dark_map)
+	temp = np.subtract(source[:, projection, :].astype(target.dtype), dark_map)
+
+	gain_zero = gain_map == 0
+	if gain_zero.any():
+		nonzero = np.abs(gain_map[np.invert(gain_zero)])
+		if nonzero.size == 0:
+			raise ValueError("weighted normalization gain map contains only zeros")
+		gain_map[gain_zero] = np.min(nonzero)
+
+	target[:, projection, :] = np.divide(temp, gain_map)
+
+
 # Normalziation cacluation using weighted pre/post.
 def weighted_normalize(sino_mem: SharedNPArray, flats_mem: SharedNPArray, sino_read: SharedNPArray,
 						window: TomoWindow, projection: int, pre_sub: bool = False):
@@ -64,21 +88,14 @@ def weighted_normalize(sino_mem: SharedNPArray, flats_mem: SharedNPArray, sino_r
 	internal_y = _axis_slice(window.internal, "Y")
 	window_y = _axis_slice(window, "Y")
 	with sino_mem[internal_y] as sino, sino_read[internal_y] as sino_sm, flats_mem as flats:
-		dark_map = np.average(flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1, window_y, :], axis=0,
-								weights=[window.shape.Theta - projection, projection])
-		if pre_sub:
-			gain_map = np.average(flats[FLAT.PREGAIN.index:FLAT.POSTGAIN.index + 1, window_y, :], axis=0,
-									weights=[window.shape.Theta - projection, projection])
-		else:
-			gain_map = np.subtract(np.average(flats[FLAT.PREGAIN.index:FLAT.POSTGAIN.index + 1, window_y, :], axis=0,
-									weights=[window.shape.Theta - projection, projection]), dark_map)
-		temp = np.subtract(sino_sm[:, projection, :].astype(sino_mem.dtype), dark_map)
-
-		gain_zero = (gain_map == 0).reshape(gain_map.shape)
-		if gain_zero.sum() > 0:
-			gain_map[gain_zero] = np.min(np.abs(gain_map[np.invert(gain_zero)]))
-
-		sino[:, projection, :] = np.divide(temp, gain_map)
+		_weighted_normalize_projection(
+			sino,
+			sino_sm,
+			flats[:, window_y, :],
+			projection,
+			window.shape.Theta,
+			pre_sub,
+		)
 
 
 def shift_normalize():
