@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from multiprocessing.pool import ThreadPool
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
@@ -103,4 +104,70 @@ class PaganinPhaseAbsorptionStage(Stage):
 			transmission = np.real(np.fft.ifft2(complex_image))
 			absorption = -np.log(np.clip(transmission, self.epsilon, 0.99999999))
 			data[:, projection, :] = absorption / beta_scale
+		return state
+
+
+class BronnikovAidedCorrectionStage(Stage):
+	"""Apply hotopy Bronnikov-aided correction to each projection image."""
+
+	name = "phase.bac"
+	contract = StageContract(
+		expected_input=SinoOrder,
+		produced_output=SinoOrder,
+		mutates_input=True,
+		window_axes=("Y", "Theta"),
+		resources=ResourceHints(memory_multiplier=2.0),
+	)
+
+	def __init__(self, alpha: float, gamma: float = 1.0, enabled: bool = True,
+				invert: bool = False, processes: int = 1, device: str | None = None):
+		if alpha <= 0 or gamma <= 0:
+			raise ValueError("BAC alpha and gamma must be positive")
+		if processes < 1:
+			raise ValueError("BAC processes must be positive")
+		self.alpha = alpha
+		self.gamma = gamma
+		self.enabled = enabled
+		self.invert = invert
+		self.processes = processes
+		self.device = device
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "BronnikovAidedCorrectionStage":
+		return cls(**config.params)
+
+	def _correct(self, image: np.ndarray) -> np.ndarray:
+		try:
+			from hotopy.holo import BronnikovAidedCorrection
+		except ImportError as error:
+			raise RuntimeError(
+				"phase.bac requires the optional hotopy dependency; "
+				"install lftomo with the 'bac' extra"
+			) from error
+
+		operator = BronnikovAidedCorrection(
+			image.shape,
+			alpha=self.alpha,
+			gamma=self.gamma,
+			device=self.device,
+		)
+		corrected = np.asarray(operator(image), dtype=np.float32)
+		return -corrected if self.invert else corrected
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if state.backend.name != "numpy":
+			raise TypeError("BronnikovAidedCorrectionStage currently requires the NumPy backend")
+		data = np.asarray(state.working_array)
+		if data.ndim != 3:
+			raise ValueError("phase.bac expects a (Y, Theta, X) sinogram array")
+		if not self.enabled:
+			return state
+		images = [data[:, projection, :].copy() for projection in range(data.shape[1])]
+		if self.processes == 1:
+			corrected = map(self._correct, images)
+		else:
+			with ThreadPool(self.processes) as pool:
+				corrected = pool.map(self._correct, images)
+		for projection, image in enumerate(corrected):
+			data[:, projection, :] = image
 		return state

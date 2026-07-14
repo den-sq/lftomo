@@ -25,6 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+bac = [
+	"hotopy",
+]
 dev = [
 	"pytest",
 	"coverage",
