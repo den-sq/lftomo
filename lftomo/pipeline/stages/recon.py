@@ -141,3 +141,139 @@ class GridrecStage(Stage):
 				ncore=self.ncore,
 			)
 		return state.with_array(self._crop(np.asarray(reconstruction, dtype=np.float32)))
+
+
+class AstraCudaStage(GridrecStage):
+	"""Base Stage for TomoPy's ASTRA CUDA bridge."""
+
+	method = ""
+	iterative = False
+
+	def __init__(
+		self,
+		center: float | list[float] | None = None,
+		sinogram_order: bool = False,
+		iterations: int = 1,
+		proj_type: str = "cuda",
+		extra_options: dict | None = None,
+		circle_mask: bool = True,
+		circle_mask_ratio: float = 1.0,
+		circle_mask_value: float = 0.0,
+		filter_name: str = "butterworth",
+		filter_parameters: list[float] | tuple[float, ...] | None = (0.2, 2),
+		edge_buffer_left: int = 0,
+		edge_buffer_right: int = 0,
+		output_width: int | None = None,
+	):
+		if iterations < 1:
+			raise ValueError("ASTRA iterations must be positive")
+		super().__init__(
+			center=center,
+			sinogram_order=sinogram_order,
+			ncore=1,
+			circle_mask=circle_mask,
+			circle_mask_ratio=circle_mask_ratio,
+			circle_mask_value=circle_mask_value,
+			filter_name=filter_name,
+			filter_parameters=filter_parameters,
+			edge_buffer_left=edge_buffer_left,
+			edge_buffer_right=edge_buffer_right,
+			output_width=output_width,
+		)
+		self.iterations = iterations
+		self.proj_type = proj_type
+		self.extra_options = extra_options or {}
+		self.contract = StageContract(
+			expected_input=self.contract.expected_input,
+			produced_output=ReconOrder,
+			window_axes=("Y",),
+			consumes_artifacts=self.contract.consumes_artifacts,
+			resources=ResourceHints(memory_multiplier=3.0, preferred_cpus=1, requires_gpu=True),
+		)
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "AstraCudaStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if not state.backend.supports_gpu:
+			raise TypeError(f"{self.name} requires a GPU-capable backend")
+		data = np.asarray(state.working_array)
+		if data.ndim != 3:
+			raise ValueError(f"{self.name} expects a three-dimensional tomography array")
+		theta_axis = 1 if self.sinogram_order else 0
+		slice_axis = 0 if self.sinogram_order else 1
+		angles = self._angles(state, data.shape[theta_axis])
+		center = self._center(state, data.shape[slice_axis])
+
+		import tomopy
+
+		options = {
+			"proj_type": self.proj_type,
+			"method": self.method,
+			"extra_options": dict(self.extra_options),
+		}
+		if self.iterative:
+			options["num_iter"] = self.iterations
+		kwargs = {"filter_name": self.filter_name}
+		if self.filter_parameters is not None:
+			kwargs["filter_par"] = self.filter_parameters
+		reconstruction = tomopy.recon(
+			data,
+			angles,
+			center=center,
+			sinogram_order=self.sinogram_order,
+			algorithm=tomopy.astra,
+			ncore=1,
+			options=options,
+			**kwargs,
+		)
+		reconstruction = np.asarray(reconstruction, dtype=np.float32)
+		if self.circle_mask:
+			reconstruction = tomopy.circ_mask(
+				reconstruction,
+				axis=0,
+				ratio=self.circle_mask_ratio,
+				val=self.circle_mask_value,
+				ncore=1,
+			)
+		return state.with_array(self._crop(np.asarray(reconstruction, dtype=np.float32)))
+
+
+class FPCudaStage(AstraCudaStage):
+	name = "recon.fp_cuda"
+	method = "FP_CUDA"
+
+
+class BPCudaStage(AstraCudaStage):
+	name = "recon.bp_cuda"
+	method = "BP_CUDA"
+
+
+class FBPCudaStage(AstraCudaStage):
+	name = "recon.fbp_cuda"
+	method = "FBP_CUDA"
+
+
+class SIRTCudaStage(AstraCudaStage):
+	name = "recon.sirt_cuda"
+	method = "SIRT_CUDA"
+	iterative = True
+
+
+class SARTCudaStage(AstraCudaStage):
+	name = "recon.sart_cuda"
+	method = "SART_CUDA"
+	iterative = True
+
+
+class CGLSCudaStage(AstraCudaStage):
+	name = "recon.cgls_cuda"
+	method = "CGLS_CUDA"
+	iterative = True
+
+
+class EMCudaStage(AstraCudaStage):
+	name = "recon.em_cuda"
+	method = "EM_CUDA"
+	iterative = True
