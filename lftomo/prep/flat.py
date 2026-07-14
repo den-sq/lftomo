@@ -1,12 +1,14 @@
 from collections import namedtuple
+from dataclasses import fields
 from enum import Enum
 from pathlib import Path
 
 import numpy as np
 import tifffile as tf
 
-from lftomo.util.mem import SharedNP
-from lftomo.util.window import DataWindow, ImgShape
+from lftomo.util.mem import SharedNPArray
+from lftomo.util.shapes import ImgSlice
+from lftomo.util.window import TomoWindow
 from lftomo.util.log import log
 
 
@@ -40,9 +42,15 @@ class FLAT(Enum):
 		return self._value_.Offset
 
 
+def _axis_slice(window: TomoWindow, axis: str) -> slice:
+	"""Return the current-API index for one named window axis."""
+	axis_index = [field.name for field in fields(window.shape)].index(axis)
+	return window.index[axis_index]
+
+
 # Normalziation cacluation using weighted pre/post.
-def weighted_normalize(sino_mem: SharedNP, flats_mem: SharedNP, sino_read: SharedNP,
-						window: DataWindow, projection: int, pre_sub: bool = False):
+def weighted_normalize(sino_mem: SharedNPArray, flats_mem: SharedNPArray, sino_read: SharedNPArray,
+						window: TomoWindow, projection: int, pre_sub: bool = False):
 	"""Normalizes single projection using gain and dark flats, weighing pre and post darks based on projection #.
 
 		:param sino_mem: Shared memory metadata for sinogram.
@@ -53,14 +61,16 @@ def weighted_normalize(sino_mem: SharedNP, flats_mem: SharedNP, sino_read: Share
 		:param pre_sub: Whether darks have already been subtracted from flats.
 	"""
 
-	with sino_mem[window.internal.Y()] as sino, sino_read[window.internal.Y()] as sino_sm, flats_mem as flats:
-		dark_map = np.average(flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1, window.Y(), :], axis=0,
+	internal_y = _axis_slice(window.internal, "Y")
+	window_y = _axis_slice(window, "Y")
+	with sino_mem[internal_y] as sino, sino_read[internal_y] as sino_sm, flats_mem as flats:
+		dark_map = np.average(flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1, window_y, :], axis=0,
 								weights=[window.shape.Theta - projection, projection])
 		if pre_sub:
-			gain_map = np.average(flats[FLAT.PREGAIN.index:FLAT.POSTGAIN.index + 1, window.Y(), :], axis=0,
+			gain_map = np.average(flats[FLAT.PREGAIN.index:FLAT.POSTGAIN.index + 1, window_y, :], axis=0,
 									weights=[window.shape.Theta - projection, projection])
 		else:
-			gain_map = np.subtract(np.average(flats[FLAT.PREGAIN.index:FLAT.POSTGAIN.index + 1, window.Y(), :], axis=0,
+			gain_map = np.subtract(np.average(flats[FLAT.PREGAIN.index:FLAT.POSTGAIN.index + 1, window_y, :], axis=0,
 									weights=[window.shape.Theta - projection, projection]), dark_map)
 		temp = np.subtract(sino_sm[:, projection, :].astype(sino_mem.dtype), dark_map)
 
@@ -75,7 +85,7 @@ def shift_normalize():
 	pass
 
 
-def calculate_shift(flats: np.ndarray, scope: ImgShape = ImgShape(Y=20, X=20),
+def calculate_shift(flats: np.ndarray, scope: ImgSlice = ImgSlice(Y=20, X=20),
 					interval: int = 20, presub: bool = False):
 	""" Calculate location of beam movement.
 
