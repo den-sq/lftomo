@@ -5,7 +5,8 @@ Design spec for the pipeline layout/ordering contract tracked in **#97**.
 This is the consolidated, implementable specification. The rationale, measurements,
 and back-and-forth that produced it live in the #97 comment thread; this document
 is the version-controlled reference the implementing PRs (A–D) update as reality
-diverges from the sketch. Verified against master `53ea83d`.
+diverges from the sketch. Verified against master `c775826`, after #91, #92, and
+#98 were merged.
 
 ## 1. Problem
 
@@ -20,10 +21,20 @@ frozen producers prove the efficient layout is producer-specific:
   there needlessly moves ~5.15 GiB and risks a numerically different partition
   being mistaken for an algorithm failure.
 
-On master today, **every non-recon stage declares `SinoOrder → SinoOrder`**
-(normalize, phase incl. BAC, stripe, center, geometry, helical); only
-`recon.gridrec`/ASTRA is order-flexible. That is exactly the universal-`SinoOrder`
-assumption this work removes.
+Master no longer has one uniform behavior. #91 added working, per-instance
+`order`/`array_order` branches for theta-switch/taper normalization, BAC,
+bilateral, skew, movement, helical remap, Fourier-wavelet stripe removal,
+manual center, and both readers. The Tier-2 AAA523 runner uses those branches
+successfully in ProjOrder. Weighted normalization, both Paganin variants,
+Vo-family stripe removal, `all_of_the_stripe`, and the automatic center stages
+remain SinoOrder-only. Gridrec/ASTRA can be configured for either layout.
+
+Those ad-hoc flags solve individual algorithms but not the architectural
+problem: layout is not carried in `PipelineState`, contracts describe one
+constructor-selected layout rather than capabilities, the runner still rewrites
+producer configurations through `_make_executable`, and no plan records explicit
+or hidden conversions. This work replaces the flags as the source of truth while
+preserving them as compatibility inputs during migration.
 
 ## 2. Two contract axes
 
@@ -36,17 +47,35 @@ current contracts keep their meaning unchanged).
 Storage layout of the working array: `ProjOrder`, `SinoOrder`, `ReconOrder`.
 
 ```python
-PRESERVE = object()  # sentinel: produced layout/domain == the consumed one
+from enum import Enum, auto
+
+class ContractEffect(Enum):
+    PRESERVE = auto()
+
+PRESERVE = ContractEffect.PRESERVE
+
+class Locality(Enum):
+    PROJECTION = auto()
+    SINOGRAM = auto()
+    VOLUME = auto()
+    METADATA = auto()
 
 @dataclass(frozen=True)
 class StageContract:
     # ... existing fields unchanged ...
     accepts: tuple[type, ...] | None = None   # consumable layouts; None -> (expected_input,)
     prefers: type | None = None               # planner tiebreak; None -> accepts[0]
-    produces: type | object | None = None     # shape class | PRESERVE | None(=produced_output)
-    scratch_from: dict[type, type] | None = None   # {ProjOrder: SinoOrder}: bounded per-sinogram scratch
+    produces: type | ContractEffect | None = None  # shape class | PRESERVE | None(=produced_output)
+    locality: Locality | None = None
+    bounded_views_from: tuple[type, ...] = ()      # full-volume layouts supporting bounded locality views
     fused_transition: bool = False            # rewrite already touches every voxel; layout change rides free
+    resamples_detector: bool = False           # irreversible detector-space interpolation
+    requires_row_identity: bool = False        # invalid after detector resampling
 ```
+
+Use the enum singleton rather than a bare `object()` so identity remains clear
+through imports, test diagnostics, and future plan serialization. A frozen
+contract must not contain a mutable `dict`.
 
 ### 2.2 Domain axis (ordering)
 
@@ -56,9 +85,19 @@ Data domain progresses one way only:
 raw counts → transmission (flat/dark) → attenuation (log / phase-retrieved) → recon
 ```
 
+Domains live in a separate `lftomo/pipeline/domains.py`; they are processing
+state, not array shapes:
+
 ```python
-    accepts_domain: tuple[type, ...] | None = None
-    produces_domain: type | object | None = None   # domain | PRESERVE
+class DataDomain(Enum):
+    RAW = auto()
+    TRANSMISSION = auto()
+    ATTENUATION = auto()
+    RECON = auto()
+
+# StageContract fields
+accepts_domain: tuple[DataDomain, ...] | None = None
+produces_domain: DataDomain | ContractEffect | None = None
 ```
 
 The two axes share the `PRESERVE` sentinel, the validator plumbing, and the test
@@ -70,14 +109,19 @@ structure — implement them together (PR A).
 @dataclass
 class PipelineState:
     ...
-    layout: type = SinoOrder   # set by the read stage from its `order` param
-    domain: type = RAW         # advanced by domain-producing stages
+    layout: type = SinoOrder                  # set by read or supplied by a fragment caller
+    domain: DataDomain = DataDomain.RAW       # advanced by domain-producing stages
 ```
 
 Stages consult `state.layout`/`state.domain` for axis mapping instead of hardcoding
-`(Y, Theta, X)`. A small `lftomo/pipeline/stages/_layout.py` provides the helpers
+`(Y, Theta, X)`. `PipelineState.with_array()` must preserve both fields unless a
+stage explicitly changes them. A small `lftomo/pipeline/stages/_layout.py` provides the helpers
 (`projection_view`, `sinogram_view`, `sinogram_scratch`, `n_projections`,
 `n_rows`) so per-stage migrations are mechanical.
+
+Constructor `order` flags remain accepted during migration but are checked
+against `state.layout`; they do not override it silently. Canonical YAML should
+ultimately omit redundant per-stage order declarations.
 
 ## 3. The tomopy recon boundary (verified)
 
@@ -91,29 +135,55 @@ if not sinogram_order:
 tomo = np.require(tomo, requirements="AC")  # materializes a full contiguous copy
 ```
 
-- `sinogram_order=True` (SinoOrder in) → **zero-copy**.
-- `sinogram_order=False` (ProjOrder in) → the swap is free but `np.require("AC")`
-  **copies the whole volume** (the swapped view isn't C-contiguous).
+- `sinogram_order=True` with contiguous SinoOrder input → **zero-copy**.
+- `sinogram_order=False` with contiguous ProjOrder input → the swap is free but
+  `np.require("AC")` **copies the whole volume** (the swapped view is not
+  C-contiguous).
 - **ASTRA is identical** — `AstraCudaStage` drives the same `init_tomo` path;
   `wrappers.py::astra_rec` consumes `tomo[i]` per sinogram.
 
 So recon is `accepts=(ProjOrder, SinoOrder)`, **`prefers=SinoOrder`** — flexible
-but asymmetric, not free both ways. For the retained-ProjOrder lineage the one
-unavoidable conversion happens **once, inside tomopy**; an extra explicit transpose
-earlier would make it two. The planner should surface this hidden boundary copy so
-"conversions are explicit" holds even though the copy lives in tomopy.
+but asymmetric, not free both ways. Copy accounting must distinguish a view from
+a materialized transition:
+
+| input to recon | lftomo copy | TomoPy copy | total full-volume copies |
+|---|---:|---:|---:|
+| contiguous ProjOrder, `sinogram_order=False` | 0 | 1 | 1 |
+| non-contiguous SinoOrder transpose view, `sinogram_order=True` | 0 | 1 | 1 |
+| contiguous SinoOrder produced by explicit copy, `sinogram_order=True` | 1 | 0 | 1 |
+| contiguous SinoOrder produced during an already-required fused rewrite | 0 additional | 0 | 0 layout-only |
+
+An explicit, contiguous Proj→Sino conversion therefore **replaces** TomoPy's
+copy; it does not inherently add a second one. Two copies occur only if lftomo
+materializes a conversion and then supplies the wrong layout flag, or otherwise
+hands TomoPy another non-contiguous representation. The planner must surface the
+hidden TomoPy copy and choose where the one required materialization occurs based
+on lifetime, scratch storage, fusion opportunities, and downstream locality.
 
 ## 4. Ordering invariants
 
-Encoded via the **domain axis**, not a stage-order table. The planner **never**
-reorders algorithms to reduce conversions.
+Most are encoded via the **domain axis**. Row-identity constraints that cannot be
+expressed by the four domains use explicit contract capabilities. The planner
+**never** reorders algorithms to reduce conversions.
+
+Validation has two modes:
+
+- **complete pipeline** (runner/YAML): enforces read-first and exactly-once
+  boundary rules;
+- **fragment** (Stage unit tests, reusable sub-pipelines, callers supplying an
+  existing array): validates composition from the caller-supplied initial
+  layout/domain but does not require read, normalize, attenuation, recon, or
+  write to be present.
+
+This distinction is required for backward compatibility with existing Stage
+tests and legitimate pipeline fragments.
 
 **Hard (validator-enforced):**
 
-1. `read` first — sets initial domain + layout.
-2. `normalize.*` is the only raw-consumer → first after read, **exactly once**
+1. In complete mode, `read` first — sets initial domain + layout.
+2. In complete mode, `normalize.*` is the only raw-consumer → first after read, **exactly once**
    (the `beam_*` variants #93–#96 belong here too, authored order-aware).
-3. **Transmission → attenuation exactly once.** `phase.paganin` embeds its own
+3. In complete reconstruction mode, **Transmission → attenuation exactly once.** `phase.paganin` embeds its own
    `-log`, so Paganin / BAC / a future standalone `minus_log` are *alternatives at
    the same boundary*, not composable steps. The exactly-once rule catches both
    "forgot to normalize" and "double log".
@@ -122,8 +192,16 @@ reorders algorithms to reduce conversions.
 5. `recon` → recon domain; `super_resolve.*`, recon-space filters, and `write.*`
    can only follow.
 6. Geometry stages exclude `raw` from `accepts_domain` (flats are detector-aligned;
-   never resample before normalization). Helical index-remap must precede any warp
-   (it re-indexes rows; resampling first destroys row identity).
+   never resample before normalization). Helical index-remap declares
+   `requires_row_identity=True`; the validator rejects it after any stage with
+   `resamples_detector=True` because resampling destroys row identity. The
+   four-value domain axis alone cannot encode this ordering.
+
+Contracts are parameter-dependent. A disabled Stage that returns without
+changing data declares `produces_domain=PRESERVE`, does not claim a fused layout
+transition, and does not satisfy an exactly-once boundary. The same applies to
+zero-effect configuration branches generally; validation describes what the
+concrete Stage instance will execute, not what its class could execute.
 
 **Preferences (planner *warnings*, never rules — the frozen lineages disagree):**
 
@@ -139,7 +217,7 @@ necessity:
 
 | function | necessity |
 |---|---|
-| **skew/rotation** | **data-conditional.** Every pinned lineage records tilt `0.0` (`SkewCorrectStage` early-returns at 0°), so today it is a pass-through everywhere. When nonzero it is `cv2.warpAffine` cubic — an **irreversible resample**; never run for convenience. For small tilts the resample-free path is `center.vo(tilt_fit=polynomial)` → per-row center array → gridrec per-slice center. |
+| **skew/rotation** | **data-conditional.** Recon-minimal and the frozen B10 compatibility lineages record zero skew at their relevant boundary, but AAA523 phase contrast records and numerically reproduces a nonzero **0.149°** affine skew after BAC and before Fourier-wavelet stripe removal. When nonzero it is `cv2.warpAffine` cubic — an **irreversible resample**; never run for layout convenience. For lineages that permit it, the resample-free small-tilt path is `center.vo(tilt_fit=polynomial)` → per-row center array → gridrec per-slice center. It is not a substitute when reproducing AAA523's recorded producer order. |
 | **padding** | required by gridrec window handling. |
 | **transpose** | pure performance, never correctness. |
 
@@ -152,13 +230,16 @@ recon_minimal: read sino[:, p, :] → rotate/pad → write rotated[p, :, :]   (S
 mirror:        read proj[p]       → rotate/pad → write sino[:, p, :]       (Proj → Sino)
 ```
 
+For configurations that request the boundary transition, the fused Stage
 `accepts` either layout, `produces` the other, `fused_transition=True`, and it
-**must special-case tilt=0 as transpose+pad with no interpolation** (as the producer
-does). This yields the recommended ProjOrder shape (stripe on detector-aligned data,
-one volume rewrite, zero-copy recon):
+**must special-case tilt=0 as transpose+pad with no interpolation** (as the
+recon-minimal producer does). It must not force every ordinary affine-skew Stage
+to flip layout: AAA523's separate nonzero affine skew preserves ProjOrder. This
+yields the recommended ProjOrder shape for a lineage choosing the fused boundary
+(stripe on detector-aligned data, one volume rewrite, zero-copy recon):
 
 ```
-ProjOrder:  read → normalize → stripe.vo_* (scratch_from, detector-aligned)
+ProjOrder:  read → normalize → stripe.vo_* (bounded views, detector-aligned)
          →  fused skew+transpose (Proj → Sino)     ← the one full-volume rewrite
 SinoOrder:  → center → recon (zero-copy into tomopy)
 ```
@@ -182,22 +263,31 @@ discrete. Neither order is "correct" — the recorded lineage order is truth. ~1
 global is inside the Tier-2 NRMSE≤0.15 tolerance, but ~20% edge-local differences
 are a real reproducibility hazard at exactly the features people measure.
 
-## 6. `scratch_from` semantics + the open benchmark
+## 6. Bounded-view semantics, segment execution, and the open benchmark
 
-`scratch_from={ProjOrder: SinoOrder}` **never runs the algorithm on ProjOrder
-data.** Per detector row `y`: gather `data[:, y, :]` into contiguous `(Theta, X)`
-scratch → run the whole sinogram-local **chain** (`vo_dead → vo_large → vo_sort`)
-on the buffer, one gather/scatter per row (not per stage) → scatter back. Rows are
-independent → bounded-concurrency parallelism. tomopy's `remove_all_stripe` works
-this way internally.
+`locality=SINOGRAM, bounded_views_from=(ProjOrder,)` declares a capability; it
+does not select an execution strategy and does not claim that a sinogram-local
+kernel can consume the full ProjOrder array directly. Per detector row `y`, the
+bounded-view executor may gather `data[:, y, :]` into contiguous `(Theta, X)`
+scratch → run the whole sinogram-local **segment**
+(`vo_dead → vo_large → vo_sort`) on the buffer, one gather/scatter per row (not
+per Stage) → scatter back. Rows are independent → bounded-concurrency
+parallelism. TomoPy's `remove_all_stripe` works this way internally.
+
+`StageContract` declares locality and bounded-view capability. `PipelinePlan`
+groups adjacent compatible Stages into execution segments and selects bounded
+views versus a materialized conversion. `Pipeline.run` (or a dedicated segment
+executor) executes that plan. Merely adding a mapping to each Stage contract is
+insufficient: the current sequential `Pipeline.run` would otherwise gather and
+scatter once per Stage, defeating the chain-sharing requirement.
 
 In theory one shared scratch pass ≈ one transpose in total traffic, with peak
 memory of one sinogram (~MBs) vs a second volume (~GiBs). **Open empirical
 question:** the recon_minimal straight-to-sino rewrite was a *significant measured*
 speedup, so "gather/scatter is a small fraction of Vo runtime" is a **hypothesis,
 not a fact** (cache/TLB behavior at scale, mmap, tomopy sharedmem fan-out could all
-favor the rewrite). Therefore `scratch_from` is a **capability declaration, not a
-planner default**, decided by the AC-7 benchmark with three arms:
+favor the rewrite). Therefore bounded-view support is a **capability declaration,
+not a planner default**, decided by the AC-7 benchmark with three arms:
 
 1. shared per-row scratch (chain-grouped, bounded concurrency),
 2. fused/explicit transition → contiguous SinoOrder processing (recon_minimal),
@@ -205,57 +295,73 @@ planner default**, decided by the AC-7 benchmark with three arms:
 
 measured at the ~5 GiB AAA523 window and a full 1100-row stack (wall-clock + peak
 RSS). If (2) wins decisively at scale, planner guidance flips to "prefer the fused
-transition whenever a sinogram-local segment exists," and scratch stays as the
-bounded-memory fallback.
+transition whenever a sinogram-local segment exists," and bounded views remain
+the bounded-memory fallback.
 
-## 7. Stage migration list (verified iteration patterns on `53ea83d`)
+## 7. Stage migration list (verified on `c775826`)
 
 Effort: **A** = contract + helper swap (mechanical); **B** = A plus a
-scratch/writeback path; **C** = behavioral redesign.
+bounded-view/writeback path; **C** = behavioral redesign. “Order branch present”
+means #91 already supplied working Proj/Sino iteration but the Stage still needs
+to adopt `state.layout`, capability contracts, and domain declarations.
 
-| Stage(s) | locality | target contract | class |
-|---|---|---|---|
-| `normalize.weighted/theta_switch/taper_blended` | projection-local (`data[:, p, :]`) | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
-| `phase.paganin` / `paganin_phase_absorption` | projection-local | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
-| **`phase.bac`** | projection-local | accepts (Proj, Sino), prefers **Proj**, PRESERVE; one `(Y,X)` projection at a time, bounded concurrency, in-place writeback | A |
-| `filter.bilateral` | projection-local (already has `order` param) | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
-| `geometry.skew` / `movement` | projection-local | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
-| **`geometry.affine_skew_movement`** | the boundary rewrite | accepts either, **produces the other, `fused_transition=True`** | C |
-| `helical.index_remap` | per-projection row shifts | accepts (Proj, Sino), prefers Proj, PRESERVE | A |
-| `stripe.vo_dead/large/sort/family`, `stripe.fw` | **sinogram-local** (`data[y]`) | accepts Sino, prefers Sino, PRESERVE, **`scratch_from={Proj: Sino}`** | B |
-| `stripe.all_of_the_stripe` | batched tomopy (transposes internally) | accepts (Proj, Sino); derive from `state.layout` | A |
-| `center.manual` | no data access | accepts (Proj, Sino), PRESERVE | A |
-| `center.vo/pc/entropy_local` | sinogram/projection reads | accepts (Proj, Sino) via per-view extraction; PRESERVE | B |
-| `recon.gridrec` + ASTRA family | both (tomopy native) | accepts (Proj, Sino), **prefers Sino**; flag from `state.layout` | A |
-| `read.tiff_stack` / `read.hdf5_dxchange` | — | set `state.layout` from `order`; stop forcing sinogram at read | A |
-| `write.*`, `super_resolve.*` | recon-domain | unaffected | — |
-| `normalize.beam_*` (#93–#96) | projection-local | **author order-aware from the start** | — |
+| Stage(s) | locality | master status | target contract | class |
+|---|---|---|---|---|
+| `normalize.weighted/theta_switch/taper_blended` | projection-local | theta/taper order branch present; weighted Sino-only | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
+| `phase.paganin` / `paganin_phase_absorption` | projection-local | Sino-only | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
+| **`phase.bac`** | projection-local | order branch present and AAA523-validated | accepts (Proj, Sino), prefers **Proj**; one `(Y,X)` projection at a time, bounded concurrency, in-place writeback | A |
+| `filter.bilateral` | projection-local | order branch present | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
+| `geometry.skew` / `movement` | projection-local | order branches present | accepts (Proj, Sino), prefers **Proj**, PRESERVE; skew sets `resamples_detector` when enabled/nonzero | A |
+| **`geometry.affine_skew_movement`** | optional boundary rewrite | Sino-only compatibility wrapper | accepts either; when transition configured, **produces the other, `fused_transition=True`** | C |
+| `helical.index_remap` | per-projection row shifts | order branch present | accepts (Proj, Sino), prefers Proj, PRESERVE; `requires_row_identity=True` | A |
+| `stripe.vo_dead/large/sort/family` | **sinogram-local** (`data[y]`) | Sino-only | accepts Sino, prefers Sino, PRESERVE; `locality=SINOGRAM`, bounded views from Proj | B |
+| `stripe.fw` | sinogram-local | order branch directly iterates Proj strided views | same bounded-view segment contract as other sinogram-local kernels | B |
+| `stripe.all_of_the_stripe` | batched TomoPy | Sino-only | accepts (Proj, Sino); derive TomoPy flag from `state.layout` | A |
+| `center.manual` | no data access | order branch present | accepts (Proj, Sino), PRESERVE | A |
+| `center.vo/pc/entropy_local` | sinogram/projection reads | Sino-only | accepts (Proj, Sino) through bounded view extraction; PRESERVE | B |
+| `recon.gridrec` + ASTRA family | both (TomoPy native) | constructor-selected layout | accepts (Proj, Sino), **prefers Sino**; flag from `state.layout` | A |
+| `read.tiff_stack` / `read.hdf5_dxchange` | — | already emit either layout | set `state.layout` from `order`; remove runner's universal `_make_executable` rewrite | A |
+| `write.*`, `super_resolve.*` | recon-domain | unaffected | recon domain only | — |
+| `normalize.beam_*` (#93–#96) | projection-local | not present on master | author directly against the state-driven order-aware contract | A |
 
-Net: ~10 class-A (mechanical — and the projection-local ones get *faster* in
-ProjOrder: strided `data[:, p, :]` → contiguous slices), 2 class-B, 1 class-C.
+The algorithmic ProjOrder work already merged in #91 reduces Phase B risk, but
+does not remove it: the migration must delete special reference-runner layout
+injection and prove ordinary YAML execution selects the same layout.
 
 ## 8. Phasing → sub-issues
 
-- **A — mechanism:** contract fields (both axes) + `PipelineState.layout/domain` +
-  `_layout.py` helpers + validator rules (layout composition, domain monotonicity,
-  exactly-once normalize + transmission→attenuation) + `layout.convert` stage +
-  gridrec layout derivation. Backward-compatible; **gates B/C/D**. Also lands this
-  doc.
+- **A — mechanism:** contract fields (both axes, locality, row-identity flags) +
+  `PipelineState.layout/domain` + `_layout.py` helpers + complete/fragment
+  validator modes (layout composition, domain monotonicity, exactly-once
+  normalize + transmission→attenuation in complete mode) + `PipelinePlan` records
+  and warnings + `layout.convert` stage + gridrec layout derivation. Every
+  YAML-authored `layout.convert` requires a non-empty `reason:`. Backward-compatible;
+  **gates B/C/D**. Also updates this doc as implementation details settle.
 - **B — projection-local migrations:** the class-A stages above.
-  **Independently unblocks the AAA523 ProjOrder producer path**, with the corrected
-  140-row BAC window (80 core + 2×30 overlap).
-- **C — sinogram-local scratch + AC-7 benchmark:** the `scratch_from` path and the
-  three-arm benchmark that settles scratch-vs-rewrite.
+  #91 already proved the AAA523 ProjOrder algorithms with the corrected 140-row
+  BAC window (80 core + 2×30 overlap); B moves that behavior from ad-hoc order
+  flags/reference-runner injection into the common state/contract mechanism and
+  covers the remaining projection-local Stages.
+- **C — sinogram-local bounded views + segment executor + AC-7 benchmark:** add
+  locality kernels, plan adjacent compatible Stages as one gather/scatter segment,
+  implement bounded concurrency, and run the three-arm benchmark that settles
+  bounded-view-vs-rewrite guidance.
 - **D — fused boundary + lineage tests:** `geometry.affine_skew_movement` → fused
-  direction-parametric Sino↔Proj rewrite; lineage tests pinning recon_minimal's
-  `Sino→Proj` and phase_contrast's retained `Proj`.
+  direction-parametric Sino↔Proj rewrite when configured as a transition; add the
+  missing fused Stage to the recon-minimal canonical YAML; lineage tests pin
+  recon-minimal's `Sino→Proj`, AAA523's nonzero 0.149° Proj-preserving skew and
+  retained `Proj`, and the absence of an extra lftomo layout conversion before
+  AAA523 recon (TomoPy's recorded boundary copy remains visible in the plan).
 
-## 9. Open questions for the maintainer
+## 9. Resolved design decisions
 
-1. Is `scratch_from` acceptable as a contract field, or is it a pure
-   execution-planner concern?
-2. Should `layout.convert` refuse to run unless the YAML carries an explicit
-   `reason:` param, to keep full-volume conversions deliberate?
-3. `RAW`/`TRANSMISSION`/`ATTENUATION`/`RECON` as marker classes in
-   `lftomo/util/shapes.py` alongside the layout classes, or a separate `domains`
-   module?
+1. Contracts declare locality and `bounded_views_from`; the planner chooses and
+   the segment executor implements gather/scatter. Scratch strategy is not a
+   per-Stage mutable mapping.
+2. A YAML-authored `layout.convert` refuses to run without a non-empty `reason:`.
+   Planner-generated conversions carry a generated rationale in `PipelinePlan`.
+3. Domains use `DataDomain` in a separate `lftomo/pipeline/domains.py` module.
+4. `PRESERVE` is an enum singleton, not a bare object.
+5. Complete-pipeline invariants are opt-in to complete validation; fragment
+   validation composes from caller-supplied layout/domain without requiring a
+   read/normalize/recon skeleton.
