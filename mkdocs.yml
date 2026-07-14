@@ -8,6 +8,7 @@ nav:
    - Buildout: Buildout.md
  - API reference:
    - Configuration models: api/config.md
+   - Pipeline: api-pipeline.md
 
 plugins:
   - mkdocs-jupyter
