@@ -3,6 +3,9 @@ name: Recon-data Tier-2 validation
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   validate-reference-data:
     runs-on: [self-hosted, recon-data]
