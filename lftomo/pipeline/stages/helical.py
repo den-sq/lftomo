@@ -7,6 +7,7 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.stages._layout import configured_layout, n_projections, n_rows, resolve_layout
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -31,19 +32,19 @@ class HelicalIndexRemapStage(Stage):
 				enabled: bool = True, going_up: bool = False,
 				projection_start: int = 0, crop_valid: bool = True,
 				fill_value: float = 0.0, vertical_velocity_px: float | None = None,
-				order: str = "sinogram"):
+				order: str | None = None):
 		if pitch_px_per_projection is not None and vertical_velocity_px is not None:
 			raise ValueError("provide pitch_px_per_projection or vertical_velocity_px, not both")
 		if vertical_velocity_px is not None:
 			pitch_px_per_projection = vertical_velocity_px
 		if projection_start < 0:
 			raise ValueError("helical projection_start cannot be negative")
-		if order not in ("projection", "sinogram"):
-			raise ValueError("helical order must be 'projection' or 'sinogram'")
-		shape = ProjOrder if order == "projection" else SinoOrder
+		compatibility = configured_layout(order)
+		shape = compatibility or SinoOrder
 		self.contract = StageContract(
 			expected_input=shape, produced_output=shape, window_axes=("Y", "Theta"),
 			produces=PRESERVE,
+			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
@@ -77,14 +78,15 @@ class HelicalIndexRemapStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("HelicalIndexRemapStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
+		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("helical_correct.index_remap expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
 		pitch = self._pitch(state)
 		direction = -1 if self.going_up else 1
-		count = data.shape[0] if self.order == "projection" else data.shape[1]
-		y_size = data.shape[1] if self.order == "projection" else data.shape[0]
+		count = n_projections(data, layout)
+		y_size = n_rows(data, layout)
 		projection_indices = self.projection_start + np.arange(count)
 		shifts = np.rint(direction * pitch * projection_indices).astype(int)
 
@@ -94,10 +96,10 @@ class HelicalIndexRemapStage(Stage):
 			if start >= stop:
 				raise ValueError("helical pitch leaves no detector rows valid across all projections")
 			output_rows = np.arange(start, stop)
-			shape = (count, len(output_rows), data.shape[2]) if self.order == "projection" else (len(output_rows), count, data.shape[2])
+			shape = (count, len(output_rows), data.shape[2]) if layout is ProjOrder else (len(output_rows), count, data.shape[2])
 			remapped = np.empty(shape, dtype=data.dtype)
 			for projection, shift_px in enumerate(shifts):
-				if self.order == "projection":
+				if layout is ProjOrder:
 					remapped[projection, :, :] = data[projection, output_rows + shift_px, :]
 				else:
 					remapped[:, projection, :] = data[output_rows + shift_px, projection, :]
@@ -107,7 +109,7 @@ class HelicalIndexRemapStage(Stage):
 			for projection, shift_px in enumerate(shifts):
 				source = rows + shift_px
 				valid = (source >= 0) & (source < y_size)
-				if self.order == "projection":
+				if layout is ProjOrder:
 					remapped[projection, valid, :] = data[projection, source[valid], :]
 				else:
 					remapped[valid, projection, :] = data[source[valid], projection, :]

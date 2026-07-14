@@ -7,20 +7,14 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.stages._layout import (
+	configured_layout,
+	n_projections,
+	projection_view,
+	resolve_layout,
+)
 from lftomo.prep.flat import _weighted_normalize_projection
 from lftomo.util.shapes import ProjOrder, SinoOrder
-
-
-def _order_shape(order: str):
-	if order == "projection":
-		return ProjOrder
-	if order == "sinogram":
-		return SinoOrder
-	raise ValueError("array order must be 'projection' or 'sinogram'")
-
-
-def _projection(data: np.ndarray, order: str, index: int) -> np.ndarray:
-	return data[index, :, :] if order == "projection" else data[:, index, :]
 
 
 class WeightedNormalizeStage(Stage):
@@ -39,6 +33,8 @@ class WeightedNormalizeStage(Stage):
 		accepts_domain=(DataDomain.RAW,),
 		produces_domain=DataDomain.TRANSMISSION,
 		locality=Locality.PROJECTION,
+		accepts=(ProjOrder, SinoOrder),
+		prefers=ProjOrder,
 		mutates_input=True,
 		window_axes=("Y",),
 		required_metadata=("metadata.flat_fields",),
@@ -46,9 +42,11 @@ class WeightedNormalizeStage(Stage):
 	)
 
 	def __init__(self, pre_sub: bool = False, pre_subtracted: bool | None = None,
-				timing_source: str | None = None):
+				timing_source: str | None = None, order: str | None = None):
+		configured_layout(order)
 		self.pre_sub = pre_sub if pre_subtracted is None else pre_subtracted
 		self.timing_source = timing_source
+		self.order = order
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
@@ -56,28 +54,31 @@ class WeightedNormalizeStage(Stage):
 
 		working = np.asarray(state.working_array).astype(np.float32, copy=False)
 		flats = np.asarray(state.scan.metadata["flat_fields"])
+		layout = resolve_layout(state, self.order, self.name)
 		if working.ndim != 3:
 			raise ValueError("weighted-normalize expects a (Y, Theta, X) working array")
-		if flats.shape != (4, working.shape[0], working.shape[2]):
+		y_size = working.shape[1] if layout is ProjOrder else working.shape[0]
+		if flats.shape != (4, y_size, working.shape[2]):
 			raise ValueError(
 				"flat_fields must have shape (4, Y, X) matching the working array"
 			)
 
-		for projection in range(working.shape[1]):
+		sinogram_view = working if layout is SinoOrder else np.transpose(working, (1, 0, 2))
+		for projection in range(n_projections(working, layout)):
 			_weighted_normalize_projection(
-				working,
-				working,
+				sinogram_view,
+				sinogram_view,
 				flats,
 				projection,
-				working.shape[1],
+				n_projections(working, layout),
 				self.pre_sub,
 			)
 		return state if working is state.working_array else state.with_array(working)
 
 
-def _flat_fields(state: PipelineState, data: np.ndarray, order: str = "sinogram") -> np.ndarray:
+def _flat_fields(state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
 	flats = np.asarray(state.scan.metadata["flat_fields"])
-	y_size = data.shape[1] if order == "projection" else data.shape[0]
+	y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
 	if flats.shape != (4, y_size, data.shape[2]):
 		raise ValueError("flat_fields must have shape (4, Y, X) matching the working array")
 	return flats
@@ -118,13 +119,16 @@ class ThetaSwitchNormalizeStage(Stage):
 	def __init__(self, gain_averaging: bool = False, pre_subtracted: bool = False,
 				pre_gain: str | None = None, post_gain: str | None = None,
 				pre_dark: str | None = None, post_dark: str | None = None,
-				order: str = "sinogram", floor_nonpositive: bool = False,
+				order: str | None = None, floor_nonpositive: bool = False,
 				floor_value: float = 1.0):
-		shape = _order_shape(order)
+		compatibility = configured_layout(order)
+		shape = compatibility or SinoOrder
 		self.contract = StageContract(
 			expected_input=shape,
 			produced_output=shape,
 			produces=PRESERVE,
+			accepts=(ProjOrder, SinoOrder),
+			prefers=ProjOrder,
 			accepts_domain=(DataDomain.RAW,),
 			produces_domain=DataDomain.TRANSMISSION,
 			locality=Locality.PROJECTION,
@@ -153,11 +157,12 @@ class ThetaSwitchNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("ThetaSwitchNormalizeStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array).astype(np.float32, copy=False)
+		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("normalize.theta_switch expects a three-dimensional tomography array")
-		flats = _flat_fields(state, data, self.order)
+		flats = _flat_fields(state, data, layout)
 		pre_gain, post_gain, pre_dark, post_dark = flats
-		batch_count = data.shape[0] if self.order == "projection" else data.shape[1]
+		batch_count = n_projections(data, layout)
 		total_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
 		projection_start = int(state.artifacts.get("projection_start", 0))
 		for local_projection in range(batch_count):
@@ -170,7 +175,7 @@ class ThetaSwitchNormalizeStage(Stage):
 				gain, dark = post_gain, post_dark
 			else:
 				gain, dark = pre_gain, pre_dark
-			image = _projection(data, self.order, local_projection)
+			image = projection_view(data, layout, local_projection)
 			image[:] = _normalize_with_maps(
 				image, gain, dark, self.pre_subtracted,
 				self.floor_nonpositive, self.floor_value,
@@ -188,7 +193,7 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 			pre_dark: str | None = None, post_dark: str | None = None,
 			pre_weight: str = "linear", post_weight: str = "linear",
 				gain_averaging: bool = True, gain_movement_enabled: bool = False,
-				order: str = "sinogram", floor_nonpositive: bool = False,
+				order: str | None = None, floor_nonpositive: bool = False,
 				floor_value: float = 1.0):
 		if pre_weight != "linear" or post_weight != "linear":
 			raise ValueError("taper-blended normalization currently supports linear weights")
