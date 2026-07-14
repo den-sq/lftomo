@@ -41,6 +41,9 @@ docs = [
 super-resolution = [
 	"torch",
 ]
+neuroglancer = [
+	"cloud-volume",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["lftomo"]

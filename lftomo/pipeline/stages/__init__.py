@@ -22,7 +22,7 @@ from .recon import (
 )
 from .stripe import AllOfTheStripeStage, FourierWaveletStripeStage, VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
 from .super_resolve import DRHTStage, LDMStage
-from .write import TIFFSlicesWriteStage
+from .write import HDF5VolumeWriteStage, NeuroglancerWriteStage, TIFFSlicesWriteStage
 
 
 STAGE_REGISTRY = {
@@ -62,6 +62,8 @@ STAGE_REGISTRY = {
 	"stripe.vo_sort": VoSortStripeStage,
 	"super_resolve.drht": DRHTStage,
 	"super_resolve.ldm": LDMStage,
+	"write.hdf5_volume": HDF5VolumeWriteStage,
+	"write.neuroglancer": NeuroglancerWriteStage,
 	"skew_correct.cv2_affine": SkewCorrectStage,
 	"write.tiff_slices": TIFFSlicesWriteStage,
 }
@@ -96,9 +98,11 @@ __all__ = [
 	"FPCudaStage",
 	"GridrecStage",
 	"HelicalIndexRemapStage",
+	"HDF5VolumeWriteStage",
 	"LDMStage",
 	"ManualCenterStage",
 	"MovementCorrectStage",
+	"NeuroglancerWriteStage",
 	"PaganinPhaseAbsorptionStage",
 	"PaganinStage",
 	"PhaseCorrelationCenterStage",
