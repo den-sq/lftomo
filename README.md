@@ -49,6 +49,10 @@ CUDA dependencies required by a selected GPU Stage.
 Angle sampling, gridrec defaults, and the optional TomoPy/NumPy compatibility
 contract are documented in
 [`docs/reconstruction-conventions.md`](docs/reconstruction-conventions.md).
+Filtering dtype behavior is recorded in
+[`docs/filtering-conventions.md`](docs/filtering-conventions.md), and operators
+using DRHT/LDM must follow
+[`docs/super-resolution-security.md`](docs/super-resolution-security.md).
 
 ## Tests
 
