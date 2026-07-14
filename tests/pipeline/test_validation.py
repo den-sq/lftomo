@@ -106,6 +106,14 @@ def test_artifact_producer_allows_downstream_consumer():
 	validate_pipeline(stages, scan_config())
 
 
+def test_initial_pipeline_state_artifact_allows_consumer():
+	stages = [
+		ContractStage("recon", StageContract(consumes_artifacts=("center",))),
+	]
+
+	validate_pipeline(stages, scan_config(), available_artifacts={"center": 2.5})
+
+
 def test_gpu_stage_rejects_cpu_backend():
 	stages = [
 		ContractStage("astra", StageContract(resources=ResourceHints(requires_gpu=True))),

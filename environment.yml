@@ -6,7 +6,8 @@ channels:
   - defaults
 dependencies:
   - python>=3.11
-  - numpy
+  # TomoPy 1.14 still uses NumPy 1.x copy semantics internally.
+  - numpy<2
   - click
   - psutil
   - h5py
