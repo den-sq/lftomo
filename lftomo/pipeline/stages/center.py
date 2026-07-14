@@ -1,0 +1,296 @@
+"""Center-of-rotation stages."""
+
+from __future__ import annotations
+
+import numpy as np
+from skimage.measure import shannon_entropy
+
+from lftomo.config import StageConfig
+from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.util.shapes import SinoOrder
+
+
+def _contract(memory_multiplier: float = 1.0) -> StageContract:
+	return StageContract(
+		expected_input=SinoOrder,
+		produced_output=SinoOrder,
+		window_axes=("Y",),
+		produces_artifacts=("center",),
+		resources=ResourceHints(memory_multiplier=memory_multiplier),
+	)
+
+
+def _sinograms(state: PipelineState) -> np.ndarray:
+	if state.backend.name != "numpy":
+		raise TypeError("center Stages currently require the NumPy backend")
+	data = np.asarray(state.working_array)
+	if data.ndim != 3:
+		raise ValueError("center Stages expect a (Y, Theta, X) sinogram array")
+	return data
+
+
+def _angles(state: PipelineState, theta_count: int) -> np.ndarray:
+	angles = state.artifacts.get("angles")
+	if angles is None:
+		acquisition = state.scan.acquisition
+		angles = np.linspace(
+			np.deg2rad(acquisition.rotation_start_deg),
+			np.deg2rad(acquisition.rotation_end_deg),
+			theta_count,
+			endpoint=False,
+			dtype=np.float32,
+		)
+	angles = np.asarray(angles, dtype=np.float32)
+	if angles.ndim != 1 or len(angles) != theta_count:
+		raise ValueError(f"center Stage requires {theta_count} one-dimensional projection angles")
+	return angles
+
+
+def _store_center(state: PipelineState, center: float | np.ndarray) -> PipelineState:
+	values = np.asarray(center, dtype=np.float32)
+	state.artifacts["center"] = float(values) if values.ndim == 0 else values
+	return state
+
+
+class ManualCenterStage(Stage):
+	"""Provide a fixed center, optionally varying linearly with detector row."""
+
+	name = "center.manual"
+	contract = _contract()
+
+	def __init__(
+		self,
+		value_px: float,
+		tilt: float = 0.0,
+		tilt_radians: float | None = None,
+		reference_y: float = 0.0,
+		find_center: bool = False,
+		pc_fallback: bool = False,
+		vo_fallback: bool = False,
+		center_dump: bool = False,
+		center_samples_per_job: int | None = None,
+	):
+		if tilt_radians is not None and tilt != 0:
+			raise ValueError("center.manual accepts either tilt or tilt_radians, not both")
+		if find_center or pc_fallback or vo_fallback:
+			raise ValueError("automatic center finding must use a center.vo or center.pc Stage")
+		if center_samples_per_job is not None and center_samples_per_job < 1:
+			raise ValueError("center_samples_per_job must be positive")
+		self.value_px = value_px
+		self.slope = np.tan(tilt_radians) if tilt_radians is not None else tilt
+		self.reference_y = reference_y
+		self.center_dump = center_dump
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "ManualCenterStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		data = _sinograms(state)
+		if self.slope == 0:
+			return _store_center(state, self.value_px)
+		rows = np.arange(data.shape[0], dtype=np.float32)
+		return _store_center(state, self.value_px + (rows - self.reference_y) * self.slope)
+
+
+class EntropyLocalCenterStage(Stage):
+	"""Select the lowest-entropy gridrec result from a local center sweep."""
+
+	name = "center.entropy_local"
+	contract = _contract(memory_multiplier=2.0)
+
+	def __init__(
+		self,
+		start: float | None = None,
+		range: float = 5.0,
+		step: float = 0.25,
+		slice_index: int | None = None,
+		filter_name: str = "butterworth",
+		filter_parameters: list[float] | tuple[float, ...] = (0.2, 2),
+		ncore: int | None = None,
+		circle_mask_ratio: float = 1.0,
+	):
+		if range < 0:
+			raise ValueError("center.entropy_local range cannot be negative")
+		if step <= 0:
+			raise ValueError("center.entropy_local step must be positive")
+		if ncore is not None and ncore < 1:
+			raise ValueError("center.entropy_local ncore must be positive")
+		if not 0 < circle_mask_ratio <= 1:
+			raise ValueError("center.entropy_local circle_mask_ratio must be in (0, 1]")
+		self.start = start
+		self.range = range
+		self.step = step
+		self.slice_index = slice_index
+		self.filter_name = filter_name
+		self.filter_parameters = filter_parameters
+		self.ncore = ncore
+		self.circle_mask_ratio = circle_mask_ratio
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "EntropyLocalCenterStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		data = _sinograms(state)
+		index = data.shape[0] // 2 if self.slice_index is None else self.slice_index
+		if not 0 <= index < data.shape[0]:
+			raise ValueError("center.entropy_local slice_index is outside the sinogram window")
+		start = data.shape[2] / 2 if self.start is None else self.start
+		candidates = np.arange(
+			start - self.range,
+			start + self.range + self.step / 2,
+			self.step,
+			dtype=np.float32,
+		)
+		angles = _angles(state, data.shape[1])
+
+		import tomopy
+
+		entropies = []
+		for center in candidates:
+			reconstruction = tomopy.recon(
+				data[index:index + 1],
+				angles,
+				center=float(center),
+				sinogram_order=True,
+				algorithm="gridrec",
+				filter_name=self.filter_name,
+				filter_par=self.filter_parameters,
+				ncore=self.ncore,
+			)
+			reconstruction = tomopy.circ_mask(
+				reconstruction,
+				axis=0,
+				ratio=self.circle_mask_ratio,
+				ncore=self.ncore,
+			)
+			entropies.append(float(shannon_entropy(reconstruction)))
+		best = int(np.argmin(entropies))
+		state.artifacts["center_entropy"] = {
+			"candidates": candidates,
+			"entropies": np.asarray(entropies, dtype=np.float64),
+			"slice_index": index,
+		}
+		return _store_center(state, candidates[best])
+
+
+class VoCenterStage(Stage):
+	"""Find center with TomoPy's Vo method, optionally fitting row tilt."""
+
+	name = "center.vo"
+	contract = _contract(memory_multiplier=2.0)
+
+	def __init__(
+		self,
+		ind: int | None = None,
+		smin: float = -50,
+		smax: float = 50,
+		srad: float = 6,
+		step: float = 0.25,
+		ratio: float = 0.5,
+		drop: int = 20,
+		ncore: int | None = None,
+		tilt_fit: str | None = None,
+		tilt_samples: int = 5,
+		fit_degree: int = 1,
+		fallback: str | None = None,
+		fallback_params: dict | None = None,
+	):
+		if tilt_fit not in (None, "polynomial"):
+			raise ValueError("center.vo tilt_fit must be 'polynomial' or omitted")
+		if tilt_samples < 2:
+			raise ValueError("center.vo tilt_samples must be at least two")
+		if fit_degree < 1:
+			raise ValueError("center.vo fit_degree must be positive")
+		if fallback not in (None, "entropy_local"):
+			raise ValueError("center.vo fallback must be entropy_local or omitted")
+		self.ind = ind
+		self.kwargs = {
+			"smin": smin,
+			"smax": smax,
+			"srad": srad,
+			"step": step,
+			"ratio": ratio,
+			"drop": drop,
+			"ncore": ncore,
+		}
+		self.tilt_fit = tilt_fit
+		self.tilt_samples = tilt_samples
+		self.fit_degree = fit_degree
+		self.fallback = fallback
+		self.fallback_params = fallback_params or {}
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "VoCenterStage":
+		return cls(**config.params)
+
+	def _find(self, projection_order: np.ndarray, index: int) -> float:
+		import tomopy
+
+		center = float(tomopy.find_center_vo(projection_order, ind=index, **self.kwargs))
+		if not np.isfinite(center):
+			raise ValueError("center.vo returned a non-finite center")
+		return center
+
+	def run(self, state: PipelineState) -> PipelineState:
+		data = _sinograms(state)
+		projection_order = np.transpose(data, (1, 0, 2))
+		try:
+			if self.tilt_fit == "polynomial":
+				count = min(self.tilt_samples, data.shape[0])
+				indices = np.unique(np.linspace(0, data.shape[0] - 1, count).round().astype(int))
+				if len(indices) <= self.fit_degree:
+					raise ValueError("center.vo needs more sampled rows than the polynomial degree")
+				centers = np.asarray([self._find(projection_order, int(index)) for index in indices])
+				coefficients = np.polyfit(indices, centers, self.fit_degree)
+				center = np.polyval(coefficients, np.arange(data.shape[0])).astype(np.float32)
+				state.artifacts["center_fit"] = {
+					"indices": indices,
+					"centers": centers,
+					"coefficients": coefficients,
+				}
+			else:
+				index = data.shape[0] // 2 if self.ind is None else self.ind
+				if not 0 <= index < data.shape[0]:
+					raise ValueError("center.vo ind is outside the sinogram window")
+				center = self._find(projection_order, index)
+		except Exception:
+			if self.fallback != "entropy_local":
+				raise
+			return EntropyLocalCenterStage(**self.fallback_params).run(state)
+		return _store_center(state, center)
+
+
+class PhaseCorrelationCenterStage(Stage):
+	"""Find center from the first and last projections by phase correlation."""
+
+	name = "center.pc"
+	contract = _contract()
+
+	def __init__(self, tol: float = 0.5, rotc_guess: float | None = None):
+		if tol <= 0:
+			raise ValueError("center.pc tol must be positive")
+		self.tol = tol
+		self.rotc_guess = rotc_guess
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "PhaseCorrelationCenterStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		data = _sinograms(state)
+		if data.shape[1] < 2:
+			raise ValueError("center.pc requires at least two projections")
+
+		import tomopy
+
+		center = tomopy.find_center_pc(
+			data[:, 0, :],
+			data[:, -1, :],
+			tol=self.tol,
+			rotc_guess=self.rotc_guess,
+		)
+		if not np.isfinite(center):
+			raise ValueError("center.pc returned a non-finite center")
+		return _store_center(state, center)
