@@ -37,7 +37,7 @@ class WeightedNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("WeightedNormalizeStage currently requires the NumPy backend")
 
-		working = np.asarray(state.working_array)
+		working = np.asarray(state.working_array).astype(np.float32, copy=False)
 		flats = np.asarray(state.scan.metadata["flat_fields"])
 		if working.ndim != 3:
 			raise ValueError("weighted-normalize expects a (Y, Theta, X) working array")
@@ -55,7 +55,7 @@ class WeightedNormalizeStage(Stage):
 				working.shape[1],
 				self.pre_sub,
 			)
-		return state
+		return state if working is state.working_array else state.with_array(working)
 
 
 def _flat_fields(state: PipelineState, data: np.ndarray) -> np.ndarray:
@@ -110,7 +110,7 @@ class ThetaSwitchNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("ThetaSwitchNormalizeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = np.asarray(state.working_array).astype(np.float32, copy=False)
 		if data.ndim != 3:
 			raise ValueError("normalize.theta_switch expects a (Y, Theta, X) sinogram array")
 		flats = _flat_fields(state, data)
@@ -128,7 +128,7 @@ class ThetaSwitchNormalizeStage(Stage):
 			data[:, projection, :] = _normalize_with_maps(
 				data[:, projection, :], gain, dark, self.pre_subtracted
 			)
-		return state
+		return state if data is state.working_array else state.with_array(data)
 
 
 class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):

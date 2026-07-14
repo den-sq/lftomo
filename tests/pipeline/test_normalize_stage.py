@@ -85,3 +85,21 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 	assert WeightedNormalizeStage.contract.consumes_artifacts == ()
 	assert WeightedNormalizeStage.contract.produces_artifacts == ()
 	np.testing.assert_allclose(result.working_array, expected, rtol=1e-6)
+
+
+def test_weighted_normalize_promotes_integer_projections_to_float32():
+	working = np.full((2, 3, 2), 10, dtype=np.uint16)
+	flats = np.stack([
+		np.full((2, 2), 20), np.full((2, 2), 20),
+		np.zeros((2, 2)), np.zeros((2, 2)),
+	]).astype(np.float32)
+	state = PipelineState(
+		working_array=working,
+		scan=_scan(flats),
+		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
+	)
+
+	result = WeightedNormalizeStage().run(state)
+
+	assert result.working_array.dtype == np.float32
+	np.testing.assert_allclose(result.working_array, 0.5)
