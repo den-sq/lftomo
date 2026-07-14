@@ -2,6 +2,7 @@
 
 from lftomo.config import StageConfig
 
+from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
 from .normalize import WeightedNormalizeStage
 from .phase import PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
@@ -11,6 +12,10 @@ from .write import TIFFSlicesWriteStage
 
 
 STAGE_REGISTRY = {
+	"center.entropy_local": EntropyLocalCenterStage,
+	"center.manual": ManualCenterStage,
+	"center.pc": PhaseCorrelationCenterStage,
+	"center.vo": VoCenterStage,
 	"normalize.weighted": WeightedNormalizeStage,
 	"phase.paganin": PaganinStage,
 	"phase.paganin_phase_absorption": PaganinPhaseAbsorptionStage,
@@ -38,16 +43,20 @@ def create_stage(config: StageConfig):
 
 __all__ = [
 	"STAGE_REGISTRY",
+	"EntropyLocalCenterStage",
 	"HDF5DxchangeReadStage",
 	"FourierWaveletStripeStage",
 	"GridrecStage",
+	"ManualCenterStage",
 	"PaganinPhaseAbsorptionStage",
 	"PaganinStage",
+	"PhaseCorrelationCenterStage",
 	"TIFFStackReadStage",
 	"TIFFSlicesWriteStage",
 	"VoDeadStripeStage",
 	"VoLargeStripeStage",
 	"VoSortStripeStage",
+	"VoCenterStage",
 	"WeightedNormalizeStage",
 	"create_stage",
 ]
