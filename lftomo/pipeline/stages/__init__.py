@@ -3,12 +3,15 @@
 from lftomo.config import StageConfig
 
 from .normalize import WeightedNormalizeStage
+from .phase import PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
 from .write import TIFFSlicesWriteStage
 
 
 STAGE_REGISTRY = {
 	"normalize.weighted": WeightedNormalizeStage,
+	"phase.paganin": PaganinStage,
+	"phase.paganin_phase_absorption": PaganinPhaseAbsorptionStage,
 	"read.hdf5_dxchange": HDF5DxchangeReadStage,
 	"read.tiff_stack": TIFFStackReadStage,
 	"write.tiff_slices": TIFFSlicesWriteStage,
@@ -29,6 +32,8 @@ def create_stage(config: StageConfig):
 __all__ = [
 	"STAGE_REGISTRY",
 	"HDF5DxchangeReadStage",
+	"PaganinPhaseAbsorptionStage",
+	"PaganinStage",
 	"TIFFStackReadStage",
 	"TIFFSlicesWriteStage",
 	"WeightedNormalizeStage",
