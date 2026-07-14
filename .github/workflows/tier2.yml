@@ -21,7 +21,8 @@ jobs:
           "$runtime/bin/python" -m pip install "numpy<2"
           echo "TIER2_PYTHON=$runtime/bin/python" >> "$GITHUB_ENV"
       - name: Install the checkout without replacing the runner environment
-        run: "$TIER2_PYTHON" -m pip install --no-deps -e .
+        run: >-
+          "$TIER2_PYTHON" -m pip install --no-deps -e .
       - name: Verify the pinned numerical runtime
         run: >-
           "$TIER2_PYTHON" -c
