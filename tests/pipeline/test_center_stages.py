@@ -166,3 +166,16 @@ def test_vo_can_fall_back_to_entropy_local(monkeypatch):
 	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
 
 	assert result.artifacts["center"] == pytest.approx(4)
+
+
+def test_vo_fallback_does_not_hide_unexpected_programming_errors(monkeypatch):
+	working = np.ones((3, 4, 8), dtype=np.float32)
+	config = StageConfig(
+		kind="center",
+		algorithm="vo",
+		params={"fallback": "entropy_local"},
+	)
+	monkeypatch.setattr("tomopy.find_center_vo", lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyError("bug")))
+
+	with pytest.raises(KeyError, match="bug"):
+		Pipeline([create_stage(config)]).run(_state(working, [config]))

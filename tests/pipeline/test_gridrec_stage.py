@@ -56,6 +56,8 @@ def test_gridrec_is_registered_and_uses_center_artifact(monkeypatch):
 	assert calls["mask"] == {"axis": 0, "ratio": 1.0, "val": 0.0, "ncore": 2}
 	assert result.working_array.dtype == np.float32
 	np.testing.assert_array_equal(result.working_array, 4)
+	assert stage.filter_name == "shepp"
+	assert stage.circle_mask_ratio == 1.0
 
 
 def test_gridrec_projection_order_accepts_center_param_and_crops(monkeypatch):
