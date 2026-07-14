@@ -1,0 +1,31 @@
+# Producer: B10Scripts/PCRBox_Octo0/20kev/voi2/b10_recon.py at lftomo@ddfcdf6
+# Survey source: docs/recon-survey.md lines 265-315, especially lines 285-287.
+# This spec belongs to the snapshot producer, not examples/b10_recon_current.py.
+pipeline_template: b10-recon-canonical
+output_path: reference/b10_recon/recon
+metadata:
+  producer: b10_recon
+  lftomo_snapshot: ddfcdf628254f0dadd219b076fa01da527ca6123
+  representative_dataset: phase_contrast_hdf5
+pipeline:
+  - kind: read
+    algorithm: hdf5_dxchange
+    params: {order: sinogram, calibration_policy: required}
+  - kind: normalize
+    algorithm: weighted
+    params: {pre_sub: true}
+  - kind: stripe
+    algorithm: vo
+    params: {method: remove_sort_vo, size: 31, dim: 1}
+  - kind: phase
+    algorithm: bronnikov_aided
+    params: {enabled: true, alpha: 35.0, gamma_source: empirical_energy_distance_pixel_size}
+  - kind: center
+    algorithm: manual
+    params: {value_px: 1279.25, search_count: 20}
+  - kind: recon
+    algorithm: gridrec
+    params: {sinogram_order: false}
+  - kind: write
+    algorithm: tiff_slices
+    params: {dtype: float32, naming_template: "{slice:05d}"}
