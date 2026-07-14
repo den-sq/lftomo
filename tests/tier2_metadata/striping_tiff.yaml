@@ -1,0 +1,25 @@
+energy_keV: 25.45
+pixel_size_um: 0.7046
+n_projections: 77000
+degrees_per_fov: 180.0
+n_fov: 14
+helical:
+  enabled: false
+detector:
+  pixel_size_um: 0.7046
+  rows: 2960
+  columns: 14192
+  name: Vieworks VT-16K3.5
+acquisition:
+  n_projections: 77000
+  rotation_start_deg: 0.0
+  rotation_end_deg: 2520.0
+  exposure_ms: 90.0
+projections:
+  format: tiff_stack
+  path: projections
+  pattern: proj_*.tif
+metadata:
+  tier: 2
+  dataset: striping_tiff
+  source: AAA588 Mouse Lung PTA Normal Real Scan

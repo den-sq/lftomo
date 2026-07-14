@@ -1,0 +1,29 @@
+energy_keV: 25.45
+pixel_size_um: 0.7046
+n_projections: 32000
+degrees_per_fov: 360.0
+n_fov: 4
+helical:
+  enabled: true
+  start_um: 0.0
+  stop_um: 7868.9728
+  pitch_um_per_projection: 0.2459054
+detector:
+  pixel_size_um: 0.7046
+  rows: 3056
+  columns: 7968
+  name: Vieworks VT-16K3.5
+acquisition:
+  n_projections: 32000
+  rotation_start_deg: 0.0
+  rotation_end_deg: 1440.0
+  exposure_ms: 60.0
+projections:
+  format: tiff_stack
+  path: projections
+  pattern: proj_*.tif
+metadata:
+  tier: 2
+  dataset: helical_tiff
+  source: AAA Phantom Helical Whole Phantom Scan
+  detector_rows_per_rotation: 2792

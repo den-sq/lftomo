@@ -1,15 +1,17 @@
 import os
-import socket
 
 import pytest
+
+from tests.tier2 import DATASETS, tier2_path
 
 
 def _integration_host_enabled():
 	"""Return whether this host should run lab-local integration tests."""
 
-	if os.environ.get("LFTOMO_RUN_INTEGRATION") == "1":
-		return True
-	return "yarrkha" in socket.gethostname().lower()
+	return (
+		os.environ.get("LFTOMO_RUNNER_CAPABILITY") == "recon-data"
+		or os.environ.get("LFTOMO_RUN_INTEGRATION") == "1"
+	)
 
 
 def pytest_addoption(parser):
@@ -19,6 +21,12 @@ def pytest_addoption(parser):
 		default=False,
 		help="run integration tests that require local lab data or hardware",
 	)
+	parser.addoption(
+		"--run-tier2",
+		action="store_true",
+		default=False,
+		help="run tests that require the lab-internal Tier-2 datasets",
+	)
 
 
 def pytest_configure(config):
@@ -26,17 +34,36 @@ def pytest_configure(config):
 		"markers",
 		"integration: requires local lab data or hardware; skipped unless --run-integration is set",
 	)
+	config.addinivalue_line(
+		"markers",
+		"tier2: requires lab-internal Tier-2 reference data; skipped unless --run-tier2 is set",
+	)
 
 
 def pytest_collection_modifyitems(config, items):
-	if config.getoption("--run-integration") and _integration_host_enabled():
-		return
-
-	if config.getoption("--run-integration"):
-		reason = "integration tests run only on Yarrkha unless LFTOMO_RUN_INTEGRATION=1"
+	run_integration = config.getoption("--run-integration")
+	integration_enabled = run_integration and _integration_host_enabled()
+	if run_integration:
+		reason = "integration tests require the recon-data capability or LFTOMO_RUN_INTEGRATION=1"
 	else:
 		reason = "need --run-integration to run"
 	skip_integration = pytest.mark.skip(reason=reason)
+	skip_tier2 = pytest.mark.skip(reason="need --run-tier2 to run")
 	for item in items:
-		if "integration" in item.keywords:
+		if "integration" in item.keywords and not integration_enabled:
 			item.add_marker(skip_integration)
+		if "tier2" in item.keywords and not config.getoption("--run-tier2"):
+			item.add_marker(skip_tier2)
+
+
+def _dataset_fixture(dataset_name):
+	@pytest.fixture(name=f"dataset_{dataset_name}")
+	def fixture():
+		return tier2_path(DATASETS[dataset_name], os.environ)
+
+	return fixture
+
+
+dataset_striping_tiff = _dataset_fixture("striping_tiff")
+dataset_phase_contrast_hdf5 = _dataset_fixture("phase_contrast_hdf5")
+dataset_helical_tiff = _dataset_fixture("helical_tiff")
