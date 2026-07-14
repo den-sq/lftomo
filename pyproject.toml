@@ -9,7 +9,7 @@ description = "Large-format tomography reconstruction utilities."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-	"numpy",
+	"numpy<2",
 	"click",
 	"psutil",
 	"h5py",

@@ -56,11 +56,16 @@ def _has_path(obj: Any, dotted_path: str) -> bool:
 	return True
 
 
-def validate_pipeline(stages: tuple[Stage, ...] | list[Stage], scan: Any, backend: Backend | None = None) -> None:
+def validate_pipeline(
+	stages: tuple[Stage, ...] | list[Stage],
+	scan: Any,
+	backend: Backend | None = None,
+	available_artifacts: Any = (),
+) -> None:
 	"""Validate an ordered Stage sequence before execution."""
 
 	backend = backend or NumpyBackend()
-	produced_artifacts: set[str] = set()
+	produced_artifacts = set(available_artifacts)
 	previous_stage: Stage | None = None
 	upstream_mutated = False
 

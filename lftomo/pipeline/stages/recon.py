@@ -1,0 +1,143 @@
+"""Tomographic reconstruction stages."""
+
+from __future__ import annotations
+
+import os
+
+import numpy as np
+
+from lftomo.config import StageConfig
+from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+
+
+class GridrecStage(Stage):
+	"""Reconstruct projection or sinogram-order data with TomoPy gridrec."""
+
+	name = "recon.gridrec"
+
+	def __init__(
+		self,
+		center: float | list[float] | None = None,
+		sinogram_order: bool = False,
+		ncore: int | None = None,
+		ncore_from_machine: bool = False,
+		circle_mask: bool = True,
+		circle_mask_ratio: float = 1.0,
+		circle_mask_value: float = 0.0,
+		filter_name: str = "shepp",
+		filter_parameters: list[float] | tuple[float, ...] | None = None,
+		iterations: int | None = None,
+		edge_buffer_left: int = 0,
+		edge_buffer_right: int = 0,
+		output_width: int | None = None,
+	):
+		if ncore is not None and ncore < 1:
+			raise ValueError("gridrec ncore must be positive")
+		if not 0 < circle_mask_ratio <= 1:
+			raise ValueError("gridrec circle_mask_ratio must be in (0, 1]")
+		if iterations not in (None, 1):
+			raise ValueError("gridrec is non-iterative; iterations may only be 1")
+		if edge_buffer_left < 0 or edge_buffer_right < 0:
+			raise ValueError("gridrec edge buffers cannot be negative")
+		if output_width is not None and output_width < 1:
+			raise ValueError("gridrec output_width must be positive")
+		self.center = center
+		self.sinogram_order = sinogram_order
+		self.ncore = (os.cpu_count() or 1) if ncore_from_machine else ncore
+		self.circle_mask = circle_mask
+		self.circle_mask_ratio = circle_mask_ratio
+		self.circle_mask_value = circle_mask_value
+		self.filter_name = filter_name
+		self.filter_parameters = filter_parameters
+		self.edge_buffer_left = edge_buffer_left
+		self.edge_buffer_right = edge_buffer_right
+		self.output_width = output_width
+		self.contract = StageContract(
+			expected_input=SinoOrder if sinogram_order else ProjOrder,
+			produced_output=ReconOrder,
+			window_axes=("Y",),
+			consumes_artifacts=() if center is not None else ("center",),
+			resources=ResourceHints(memory_multiplier=2.0, preferred_cpus=self.ncore),
+		)
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "GridrecStage":
+		return cls(**config.params)
+
+	def _angles(self, state: PipelineState, theta_count: int) -> np.ndarray:
+		angles = state.artifacts.get("angles")
+		if angles is None:
+			acquisition = state.scan.acquisition
+			angles = np.linspace(
+				np.deg2rad(acquisition.rotation_start_deg),
+				np.deg2rad(acquisition.rotation_end_deg),
+				theta_count,
+				endpoint=False,
+				dtype=np.float32,
+			)
+		angles = np.asarray(angles, dtype=np.float32)
+		if angles.ndim != 1 or len(angles) != theta_count:
+			raise ValueError(f"gridrec requires {theta_count} one-dimensional projection angles")
+		return angles
+
+	def _center(self, state: PipelineState, slice_count: int) -> float | np.ndarray:
+		center = self.center if self.center is not None else state.artifacts.get("center")
+		if center is None:
+			raise ValueError("recon.gridrec requires a center parameter or center artifact")
+		values = np.asarray(center, dtype=np.float32)
+		if values.ndim == 0:
+			return float(values)
+		if values.ndim != 1 or len(values) != slice_count:
+			raise ValueError(f"gridrec center array must contain one value for each of {slice_count} slices")
+		return values
+
+	def _crop(self, reconstruction: np.ndarray) -> np.ndarray:
+		left = self.edge_buffer_left
+		right = reconstruction.shape[2] - self.edge_buffer_right
+		if left >= right:
+			raise ValueError("gridrec edge buffers remove the entire reconstruction width")
+		reconstruction = reconstruction[:, :, left:right]
+		if self.output_width is not None:
+			if self.output_width > reconstruction.shape[2]:
+				raise ValueError("gridrec output_width exceeds the reconstructed width")
+			extra = reconstruction.shape[2] - self.output_width
+			start = extra // 2
+			reconstruction = reconstruction[:, :, start:start + self.output_width]
+		return reconstruction
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if state.backend.name != "numpy":
+			raise TypeError("GridrecStage currently requires the NumPy backend")
+		data = np.asarray(state.working_array)
+		if data.ndim != 3:
+			raise ValueError("recon.gridrec expects a three-dimensional tomography array")
+		theta_axis = 1 if self.sinogram_order else 0
+		slice_axis = 0 if self.sinogram_order else 1
+		angles = self._angles(state, data.shape[theta_axis])
+		center = self._center(state, data.shape[slice_axis])
+
+		import tomopy
+
+		kwargs = {"filter_name": self.filter_name}
+		if self.filter_parameters is not None:
+			kwargs["filter_par"] = self.filter_parameters
+		reconstruction = tomopy.recon(
+			data,
+			angles,
+			center=center,
+			sinogram_order=self.sinogram_order,
+			algorithm="gridrec",
+			ncore=self.ncore,
+			**kwargs,
+		)
+		reconstruction = np.asarray(reconstruction, dtype=np.float32)
+		if self.circle_mask:
+			reconstruction = tomopy.circ_mask(
+				reconstruction,
+				axis=0,
+				ratio=self.circle_mask_ratio,
+				val=self.circle_mask_value,
+				ncore=self.ncore,
+			)
+		return state.with_array(self._crop(np.asarray(reconstruction, dtype=np.float32)))

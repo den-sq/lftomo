@@ -158,7 +158,12 @@ class Pipeline:
 		if self.validate and not self._validated:
 			from lftomo.pipeline.validation import validate_pipeline
 
-			validate_pipeline(self.stages, state.scan, self.backend)
+			validate_pipeline(
+				self.stages,
+				state.scan,
+				self.backend,
+				available_artifacts=state.artifacts,
+			)
 			self._validated = True
 		for stage in self.stages:
 			state = stage.run(state)
