@@ -4,10 +4,10 @@ import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import NumpyBackend, Pipeline, PipelineState, Stage, StageContract
-from lftomo.pipeline.stages.normalize import WeightedNormalizeStage
+from lftomo.pipeline.stages.normalize import TaperBlendedNormalizeStage, WeightedNormalizeStage
 from lftomo.prep.flat import weighted_normalize
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import GenericOrder, SinoOrder, Y
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
 from lftomo.util.window import TomoWindow
 
 
@@ -85,3 +85,44 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 	assert WeightedNormalizeStage.contract.consumes_artifacts == ()
 	assert WeightedNormalizeStage.contract.produces_artifacts == ()
 	np.testing.assert_allclose(result.working_array, expected, rtol=1e-6)
+
+
+def test_weighted_normalize_promotes_integer_projections_to_float32():
+	working = np.full((2, 3, 2), 10, dtype=np.uint16)
+	flats = np.stack([
+		np.full((2, 2), 20), np.full((2, 2), 20),
+		np.zeros((2, 2)), np.zeros((2, 2)),
+	]).astype(np.float32)
+	state = PipelineState(
+		working_array=working,
+		scan=_scan(flats),
+		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
+	)
+
+	result = WeightedNormalizeStage().run(state)
+
+	assert result.working_array.dtype == np.float32
+	np.testing.assert_allclose(result.working_array, 0.5)
+
+
+def test_taper_normalize_projection_batch_uses_global_theta_weights():
+	working = np.full((2, 2, 2), 10, dtype=np.uint16)
+	flats = np.stack([
+		np.full((2, 2), 20), np.full((2, 2), 40),
+		np.zeros((2, 2)), np.zeros((2, 2)),
+	]).astype(np.float32)
+	scan = _scan(flats)
+	scan.n_projections = 4
+	state = PipelineState(
+		working_array=working,
+		scan=scan,
+		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
+		artifacts={"projection_start": 2, "projection_count": 4},
+	)
+	stage = TaperBlendedNormalizeStage(order="projection")
+
+	result = stage.run(state)
+
+	assert stage.contract.expected_input is ProjOrder
+	np.testing.assert_allclose(result.working_array[0], 10 / 30)
+	np.testing.assert_allclose(result.working_array[1], 10 / 35)

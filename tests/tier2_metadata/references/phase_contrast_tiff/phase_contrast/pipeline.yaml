@@ -10,13 +10,13 @@ pipeline:
     params: {path: projections, pattern: "proj_*.tif", order: projection, projection_count: 1969, sinogram_chunk_size: 140, chunk_overlap: 30}
   - kind: normalize
     algorithm: taper_blended
-    params: {pre_gain: gains/gain.tif, post_gain: gains/gain_post.tif, pre_dark: gains/dark.tif, post_dark: gains/dark_post.tif, gain_averaging: true, gain_movement_enabled: false}
+    params: {pre_gain: gains/gain.tif, post_gain: gains/gain_post.tif, pre_dark: gains/dark.tif, post_dark: gains/dark_post.tif, gain_averaging: true, gain_movement_enabled: false, floor_nonpositive: true, floor_value: 1.0}
   - kind: geometry
     algorithm: helical_pitch
     params: {enabled: false, vertical_velocity_px: 0, going_up: false}
   - kind: phase
     algorithm: bronnikov_aided
-    params: {enabled: true, alpha: 2.0, gamma: 1.25, invert: false}
+    params: {enabled: true, alpha: 2.0, gamma: 1.25, invert: false, clip_input: true, clip_minimum: 1.0e-9, clip_threshold: 2.0, clip_high_value: 1.0}
   - kind: filter
     algorithm: bilateral
     params: {enabled: false, diameter: 3, sigma_color: 1, sigma_space: 1}
@@ -34,7 +34,7 @@ pipeline:
     params: {value_px: 2216.0, find_center: false}
   - kind: recon
     algorithm: gridrec
-    params: {edge_buffer_left: 100, edge_buffer_right: 100, output_width: 4808}
+    params: {edge_buffer_left: 100, edge_buffer_right: 100, edge_buffer_input: true, output_width: 4808, circle_mask: false, angle_endpoint: true}
   - kind: write
     algorithm: tiff_slices
     params: {dtype: float32, naming_template: "rec_{slice:05d}.tif", write_full: true, write_bin2: false, write_bin4: false}

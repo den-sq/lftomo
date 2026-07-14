@@ -4,6 +4,7 @@ import pytest
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import Pipeline, PipelineState
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
+from lftomo.util.shapes import ProjOrder
 
 
 def _state(array, config):
@@ -51,3 +52,24 @@ def test_registered_vo_stage_mutates_tier1_striped_sinogram(algorithm, params):
 	assert result.working_array is working
 	assert np.isfinite(working).all()
 	assert not np.array_equal(working, before)
+
+
+def test_fourier_wavelet_projection_order_matches_sinogram_order():
+	sinogram_order = _striped_fixture()
+	projection_order = np.transpose(sinogram_order.copy(), (1, 0, 2))
+	sino_config = StageConfig(
+		kind="stripe", algorithm="fw", params={"level": 2, "wavelet": "db2"},
+	)
+	proj_config = StageConfig(
+		kind="stripe", algorithm="fw",
+		params={"level": 2, "wavelet": "db2", "order": "projection"},
+	)
+
+	create_stage(sino_config).run(_state(sinogram_order, sino_config))
+	proj_stage = create_stage(proj_config)
+	proj_state = _state(np.transpose(projection_order, (1, 0, 2)), proj_config)
+	proj_state.working_array = projection_order
+	proj_stage.run(proj_state)
+
+	assert proj_stage.contract.expected_input is ProjOrder
+	np.testing.assert_allclose(projection_order, np.transpose(sinogram_order, (1, 0, 2)))

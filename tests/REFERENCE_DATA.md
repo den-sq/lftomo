@@ -84,8 +84,9 @@ expanded stage order and parameter set used by that producer.
 These archives were lifted from completed historical volumes rather than
 rerunning their producers. The recon_minimal archive has exact producer and
 configuration provenance; the unversioned R2.54 and b10_recon archives record
-their provenance limitation explicitly. Frozen references are immutable: do
-not rerun a producer to refresh them.
+that their surviving scripts were modified after the historical runs and are
+therefore not executable numerical contracts. Frozen references are immutable:
+do not rerun a producer to refresh them.
 
 ## Running the checks
 

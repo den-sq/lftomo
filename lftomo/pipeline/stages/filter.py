@@ -7,7 +7,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 class BilateralFilterStage(Stage):
@@ -24,16 +24,24 @@ class BilateralFilterStage(Stage):
 
 	def __init__(self, diameter: int = 3, sigma_color: float = 1,
 				sigma_space: float = 1, enabled: bool = True,
-				border_type: int = cv2.BORDER_DEFAULT):
+				border_type: int = cv2.BORDER_DEFAULT, order: str = "sinogram"):
 		if diameter < 1:
 			raise ValueError("bilateral diameter must be positive")
 		if sigma_color <= 0 or sigma_space <= 0:
 			raise ValueError("bilateral sigma values must be positive")
+		if order not in ("projection", "sinogram"):
+			raise ValueError("bilateral order must be 'projection' or 'sinogram'")
+		shape = ProjOrder if order == "projection" else SinoOrder
+		self.contract = StageContract(
+			expected_input=shape, produced_output=shape, mutates_input=True,
+			window_axes=("Y", "Theta"), resources=ResourceHints(memory_multiplier=2.0),
+		)
 		self.diameter = diameter
 		self.sigma_color = sigma_color
 		self.sigma_space = sigma_space
 		self.enabled = enabled
 		self.border_type = border_type
+		self.order = order
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "BilateralFilterStage":
@@ -47,9 +55,11 @@ class BilateralFilterStage(Stage):
 			raise ValueError("filter.bilateral expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
-		for projection in range(data.shape[1]):
-			data[:, projection, :] = cv2.bilateralFilter(
-				data[:, projection, :].astype(np.float32, copy=False),
+		count = data.shape[0] if self.order == "projection" else data.shape[1]
+		for projection in range(count):
+			image = data[projection, :, :] if self.order == "projection" else data[:, projection, :]
+			image[:] = cv2.bilateralFilter(
+				image.astype(np.float32, copy=False),
 				self.diameter,
 				self.sigma_color,
 				self.sigma_space,

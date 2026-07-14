@@ -8,13 +8,16 @@ from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
-def _contract() -> StageContract:
+def _contract(order: str = "sinogram") -> StageContract:
+	if order not in ("projection", "sinogram"):
+		raise ValueError("geometry order must be 'projection' or 'sinogram'")
+	shape = ProjOrder if order == "projection" else SinoOrder
 	return StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
+		expected_input=shape,
+		produced_output=shape,
 		mutates_input=True,
 		window_axes=("Y", "Theta"),
 		resources=ResourceHints(memory_multiplier=2.0),
@@ -46,7 +49,8 @@ class SkewCorrectStage(Stage):
 
 	def __init__(self, degrees: float = 0.0, center_px: float | None = None,
 				interpolation: str = "cubic", enabled: bool = True,
-				skew_degrees: float | None = None):
+				skew_degrees: float | None = None, center_y_px: float | None = None,
+				order: str = "sinogram"):
 		if skew_degrees is not None:
 			if degrees != 0:
 				raise ValueError("provide degrees or skew_degrees, not both")
@@ -57,7 +61,10 @@ class SkewCorrectStage(Stage):
 			raise ValueError(f"unknown skew interpolation {interpolation!r}") from error
 		self.degrees = degrees
 		self.center_px = center_px
+		self.center_y_px = center_y_px
 		self.enabled = enabled
+		self.order = order
+		self.contract = _contract(order)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "SkewCorrectStage":
@@ -67,12 +74,18 @@ class SkewCorrectStage(Stage):
 		data = _array(state, self.name)
 		if not self.enabled or self.degrees == 0:
 			return state
-		height, _, width = data.shape
-		center = (width / 2 if self.center_px is None else self.center_px, height / 2)
+		height = data.shape[1] if self.order == "projection" else data.shape[0]
+		width = data.shape[2]
+		center = (
+			width / 2 if self.center_px is None else self.center_px,
+			height / 2 if self.center_y_px is None else self.center_y_px,
+		)
 		matrix = cv2.getRotationMatrix2D(center, self.degrees, 1.0)
-		for projection in range(data.shape[1]):
-			data[:, projection, :] = cv2.warpAffine(
-				data[:, projection, :],
+		count = data.shape[0] if self.order == "projection" else data.shape[1]
+		for projection in range(count):
+			image = data[projection, :, :] if self.order == "projection" else data[:, projection, :]
+			image[:] = cv2.warpAffine(
+				image,
 				matrix,
 				(width, height),
 				flags=self.interpolation,
@@ -88,7 +101,8 @@ class MovementCorrectStage(Stage):
 
 	def __init__(self, y: float = 0.0, x: float = 0.0, enabled: bool = True,
 				order: int = 3, mode: str = "constant", cval: float = 0.0,
-				movement_y: float | None = None, movement_x: float | None = None):
+				movement_y: float | None = None, movement_x: float | None = None,
+				array_order: str = "sinogram"):
 		if movement_y is not None:
 			y = movement_y
 		if movement_x is not None:
@@ -101,6 +115,8 @@ class MovementCorrectStage(Stage):
 		self.order = order
 		self.mode = mode
 		self.cval = cval
+		self.array_order = array_order
+		self.contract = _contract(array_order)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "MovementCorrectStage":
@@ -110,11 +126,12 @@ class MovementCorrectStage(Stage):
 		data = _array(state, self.name)
 		if not self.enabled or (self.y == 0 and self.x == 0):
 			return state
-		count = data.shape[1]
+		count = data.shape[0] if self.array_order == "projection" else data.shape[1]
 		for projection in range(count):
 			fraction = projection / count
-			data[:, projection, :] = shift(
-				data[:, projection, :],
+			image = data[projection, :, :] if self.array_order == "projection" else data[:, projection, :]
+			image[:] = shift(
+				image,
 				(self.y * fraction, self.x * fraction),
 				order=self.order,
 				mode=self.mode,

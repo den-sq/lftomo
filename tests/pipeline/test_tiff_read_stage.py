@@ -84,3 +84,20 @@ def test_tiff_stack_stage_reads_bounded_y_window(tmp_path):
 	)
 
 	np.testing.assert_array_equal(result.working_array, stack[:, 2:4, :])
+
+
+def test_tiff_stack_stage_reads_bounded_theta_and_y_window(tmp_path):
+	count, size = 5, 6
+	projection_dir = tmp_path / "projections"
+	projection_dir.mkdir()
+	stack = np.arange(count * size * size, dtype=np.uint16).reshape(count, size, size)
+	for index, image in enumerate(stack):
+		tf.imwrite(projection_dir / f"projection_{index}.tif", image)
+	config = StageConfig(
+		kind="read", algorithm="tiff_stack",
+		params={"theta_start": 1, "theta_stop": 4, "y_start": 2, "y_stop": 5},
+	)
+
+	result = create_stage(config).run(_state(projection_dir, count, size, config))
+
+	np.testing.assert_array_equal(result.working_array, stack[1:4, 2:5, :])

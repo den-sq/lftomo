@@ -7,7 +7,7 @@ from skimage.measure import shannon_entropy
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 def _contract(memory_multiplier: float = 1.0) -> StageContract:
@@ -69,6 +69,7 @@ class ManualCenterStage(Stage):
 		vo_fallback: bool = False,
 		center_dump: bool = False,
 		center_samples_per_job: int | None = None,
+		order: str = "sinogram",
 	):
 		if tilt_radians is not None and tilt != 0:
 			raise ValueError("center.manual accepts either tilt or tilt_radians, not both")
@@ -76,20 +77,33 @@ class ManualCenterStage(Stage):
 			raise ValueError("automatic center finding must use a center.vo or center.pc Stage")
 		if center_samples_per_job is not None and center_samples_per_job < 1:
 			raise ValueError("center_samples_per_job must be positive")
+		if order not in ("projection", "sinogram"):
+			raise ValueError("manual center order must be 'projection' or 'sinogram'")
+		shape = ProjOrder if order == "projection" else SinoOrder
+		self.contract = StageContract(
+			expected_input=shape, produced_output=shape, window_axes=("Y",),
+			produces_artifacts=("center",), resources=ResourceHints(),
+		)
 		self.value_px = value_px
 		self.slope = np.tan(tilt_radians) if tilt_radians is not None else tilt
 		self.reference_y = reference_y
 		self.center_dump = center_dump
+		self.order = order
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "ManualCenterStage":
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		data = _sinograms(state)
+		if state.backend.name != "numpy":
+			raise TypeError("center.manual currently requires the NumPy backend")
+		data = np.asarray(state.working_array)
+		if data.ndim != 3:
+			raise ValueError("center.manual expects a three-dimensional tomography array")
 		if self.slope == 0:
 			return _store_center(state, self.value_px)
-		rows = np.arange(data.shape[0], dtype=np.float32)
+		y_size = data.shape[1] if self.order == "projection" else data.shape[0]
+		rows = np.arange(y_size, dtype=np.float32)
 		return _store_center(state, self.value_px + (rows - self.reference_y) * self.slope)
 
 

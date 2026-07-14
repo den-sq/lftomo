@@ -5,6 +5,7 @@ import pytest
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import Pipeline, PipelineState
 from lftomo.pipeline.stages import BronnikovAidedCorrectionStage, STAGE_REGISTRY, create_stage
+from lftomo.util.shapes import ProjOrder
 
 
 def _state(array, config):
@@ -68,6 +69,36 @@ def test_disabled_bac_is_noop(monkeypatch):
 
 	assert result.working_array is working
 	np.testing.assert_array_equal(working, 1)
+
+
+def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch):
+	config = StageConfig(
+		kind="phase", algorithm="bac",
+		params={"alpha": 2, "gamma": 1.25, "order": "projection"},
+	)
+	working = np.arange(4 * 3 * 5, dtype=np.float32).reshape(4, 3, 5)
+	before = working.copy()
+	shapes = []
+
+	class FakeBAC:
+		def __init__(self, shape, **_kwargs):
+			shapes.append(shape)
+
+		def __call__(self, image):
+			assert image.flags.c_contiguous
+			return image + 1
+
+	monkeypatch.setattr("hotopy.holo.BronnikovAidedCorrection", FakeBAC)
+	state = _state(np.transpose(working, (1, 0, 2)), config)
+	state.working_array = working
+	state.scan.n_projections = working.shape[0]
+	stage = create_stage(config)
+
+	result = stage.run(state)
+
+	assert stage.contract.expected_input is ProjOrder
+	assert shapes == [(3, 5)] * 4
+	np.testing.assert_array_equal(result.working_array, before + 1)
 
 
 def test_bac_reports_missing_optional_dependency(monkeypatch):

@@ -7,7 +7,7 @@ from multiprocessing.pool import ThreadPool
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 PLANCK_CONSTANT = 6.58211928e-19  # keV s
@@ -125,17 +125,35 @@ class BronnikovAidedCorrectionStage(Stage):
 	)
 
 	def __init__(self, alpha: float, gamma: float = 1.0, enabled: bool = True,
-				invert: bool = False, processes: int = 1, device: str | None = None):
+				invert: bool = False, processes: int = 1, device: str | None = None,
+				order: str = "sinogram", clip_input: bool = False,
+				clip_minimum: float = 1e-9, clip_threshold: float = 2.0,
+				clip_high_value: float = 1.0):
 		if alpha <= 0 or gamma <= 0:
 			raise ValueError("BAC alpha and gamma must be positive")
 		if processes < 1:
 			raise ValueError("BAC processes must be positive")
+		if order not in ("projection", "sinogram"):
+			raise ValueError("BAC order must be 'projection' or 'sinogram'")
+		shape = ProjOrder if order == "projection" else SinoOrder
+		self.contract = StageContract(
+			expected_input=shape,
+			produced_output=shape,
+			mutates_input=True,
+			window_axes=("Y", "Theta"),
+			resources=ResourceHints(memory_multiplier=2.0),
+		)
 		self.alpha = alpha
 		self.gamma = gamma
 		self.enabled = enabled
 		self.invert = invert
 		self.processes = processes
 		self.device = device
+		self.order = order
+		self.clip_input = clip_input
+		self.clip_minimum = clip_minimum
+		self.clip_threshold = clip_threshold
+		self.clip_high_value = clip_high_value
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "BronnikovAidedCorrectionStage":
@@ -150,6 +168,10 @@ class BronnikovAidedCorrectionStage(Stage):
 				"install lftomo with the 'bac' extra"
 			) from error
 
+		if self.clip_input:
+			image[~np.isfinite(image)] = self.clip_minimum
+			image[image <= 0] = self.clip_minimum
+			image[image >= self.clip_threshold] = self.clip_high_value
 		operator = BronnikovAidedCorrection(
 			image.shape,
 			alpha=self.alpha,
@@ -164,15 +186,27 @@ class BronnikovAidedCorrectionStage(Stage):
 			raise TypeError("BronnikovAidedCorrectionStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
-			raise ValueError("phase.bac expects a (Y, Theta, X) sinogram array")
+			raise ValueError("phase.bac expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		images = [data[:, projection, :].copy() for projection in range(data.shape[1])]
+		count = data.shape[0] if self.order == "projection" else data.shape[1]
+		def image(index: int) -> np.ndarray:
+			values = data[index, :, :] if self.order == "projection" else data[:, index, :]
+			return values.copy()
 		if self.processes == 1:
-			corrected = map(self._correct, images)
+			corrected = (self._correct(image(index)) for index in range(count))
 		else:
 			with ThreadPool(self.processes) as pool:
-				corrected = pool.map(self._correct, images)
-		for projection, image in enumerate(corrected):
-			data[:, projection, :] = image
+				corrected = pool.imap(self._correct, (image(index) for index in range(count)))
+				for projection, result in enumerate(corrected):
+					if self.order == "projection":
+						data[projection, :, :] = result
+					else:
+						data[:, projection, :] = result
+			return state
+		for projection, result in enumerate(corrected):
+			if self.order == "projection":
+				data[projection, :, :] = result
+			else:
+				data[:, projection, :] = result
 		return state
