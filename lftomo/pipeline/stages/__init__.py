@@ -6,7 +6,7 @@ from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelation
 from .filter import BilateralFilterStage
 from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrectStage
 from .helical import HelicalIndexRemapStage
-from .normalize import WeightedNormalizeStage
+from .normalize import TaperBlendedNormalizeStage, ThetaSwitchNormalizeStage, WeightedNormalizeStage
 from .phase import BronnikovAidedCorrectionStage, PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
 from .recon import (
@@ -36,6 +36,9 @@ STAGE_REGISTRY = {
 	"geometry.helical_pitch": HelicalIndexRemapStage,
 	"helical_correct.index_remap": HelicalIndexRemapStage,
 	"movement_correct.linear_shift": MovementCorrectStage,
+	"normalize.phase_contrast": TaperBlendedNormalizeStage,
+	"normalize.taper_blended": TaperBlendedNormalizeStage,
+	"normalize.theta_switch": ThetaSwitchNormalizeStage,
 	"normalize.weighted": WeightedNormalizeStage,
 	"phase.bac": BronnikovAidedCorrectionStage,
 	"phase.bronnikov_aided": BronnikovAidedCorrectionStage,
@@ -99,6 +102,8 @@ __all__ = [
 	"SkewCorrectStage",
 	"TIFFStackReadStage",
 	"TIFFSlicesWriteStage",
+	"TaperBlendedNormalizeStage",
+	"ThetaSwitchNormalizeStage",
 	"VoDeadStripeStage",
 	"VoLargeStripeStage",
 	"VoSortStripeStage",
