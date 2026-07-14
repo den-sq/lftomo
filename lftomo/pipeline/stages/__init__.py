@@ -3,6 +3,7 @@
 from lftomo.config import StageConfig
 
 from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
+from .filter import BilateralFilterStage
 from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrectStage
 from .helical import HelicalIndexRemapStage
 from .normalize import WeightedNormalizeStage
@@ -28,6 +29,7 @@ STAGE_REGISTRY = {
 	"center.manual": ManualCenterStage,
 	"center.pc": PhaseCorrelationCenterStage,
 	"center.vo": VoCenterStage,
+	"filter.bilateral": BilateralFilterStage,
 	"geometry.affine_skew": SkewCorrectStage,
 	"geometry.affine_skew_movement": AffineSkewMovementStage,
 	"geometry.movement": MovementCorrectStage,
@@ -76,6 +78,7 @@ __all__ = [
 	"AllOfTheStripeStage",
 	"AffineSkewMovementStage",
 	"BPCudaStage",
+	"BilateralFilterStage",
 	"BronnikovAidedCorrectionStage",
 	"CGLSCudaStage",
 	"EMCudaStage",
