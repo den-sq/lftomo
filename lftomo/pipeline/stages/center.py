@@ -8,6 +8,7 @@ from skimage.measure import shannon_entropy
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -18,6 +19,9 @@ def _contract(memory_multiplier: float = 1.0) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
+		produces=PRESERVE,
+		accepts_domain=(DataDomain.ATTENUATION,),
+		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("center",),
 		resources=ResourceHints(memory_multiplier=memory_multiplier),
@@ -86,6 +90,9 @@ class ManualCenterStage(Stage):
 		shape = ProjOrder if order == "projection" else SinoOrder
 		self.contract = StageContract(
 			expected_input=shape, produced_output=shape, window_axes=("Y",),
+			produces=PRESERVE,
+			accepts_domain=(DataDomain.ATTENUATION,),
+			produces_domain=PRESERVE,
 			produces_artifacts=("center",), resources=ResourceHints(),
 		)
 		self.value_px = value_px

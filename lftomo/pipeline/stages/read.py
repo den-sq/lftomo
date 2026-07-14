@@ -12,6 +12,7 @@ import tifffile as tf
 
 from lftomo.config import HDF5DxchangeProjections, StageConfig, TIFFStackProjections
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain
 from lftomo.util.io import distribute_tiff_read
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -22,6 +23,7 @@ def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_m
 		raise ValueError("read order must be 'projection' or 'sinogram'")
 	return StageContract(
 		produced_output=ProjOrder if order == "projection" else SinoOrder,
+		produces_domain=DataDomain.RAW,
 		window_axes=("Theta", "Y"),
 		required_metadata=required_metadata,
 		resources=ResourceHints(memory_multiplier=memory_multiplier),
@@ -103,7 +105,8 @@ class HDF5DxchangeReadStage(Stage):
 		working = np.asarray(working)
 		if self.order == "sinogram":
 			working = np.transpose(working, (1, 0, 2)).copy()
-		result = state.with_array(working)
+		layout = ProjOrder if self.order == "projection" else SinoOrder
+		result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
 		result.artifacts = artifacts
 		return result
 
@@ -194,4 +197,5 @@ class TIFFStackReadStage(Stage):
 
 		if self.order == "sinogram":
 			working = np.transpose(working, (1, 0, 2)).copy()
-		return state.with_array(working)
+		layout = ProjOrder if self.order == "projection" else SinoOrder
+		return state.with_array(working, layout=layout, domain=DataDomain.RAW)

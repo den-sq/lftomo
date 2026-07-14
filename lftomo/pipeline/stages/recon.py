@@ -7,8 +7,20 @@ import os
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+
+
+def _state_sinogram_order(state: PipelineState, configured: bool | None, name: str) -> bool:
+	"""Resolve the TomoPy flag from state, retaining unknown-fragment compatibility."""
+
+	if state.layout is None:
+		return configured or False
+	resolved = state.layout is SinoOrder
+	if configured is not None and configured != resolved:
+		raise ValueError(f"{name} sinogram_order compatibility flag disagrees with PipelineState.layout")
+	return resolved
 
 
 class GridrecStage(Stage):
@@ -19,7 +31,7 @@ class GridrecStage(Stage):
 	def __init__(
 		self,
 		center: float | list[float] | None = None,
-		sinogram_order: bool = False,
+		sinogram_order: bool | None = None,
 		ncore: int | None = None,
 		ncore_from_machine: bool = False,
 		circle_mask: bool = True,
@@ -60,6 +72,12 @@ class GridrecStage(Stage):
 		self.contract = StageContract(
 			expected_input=SinoOrder if sinogram_order else ProjOrder,
 			produced_output=ReconOrder,
+			accepts=(ProjOrder, SinoOrder),
+			prefers=SinoOrder,
+			produces=ReconOrder,
+			accepts_domain=(DataDomain.ATTENUATION,),
+			produces_domain=DataDomain.RECON,
+			locality=Locality.SINOGRAM,
 			window_axes=("Y",),
 			consumes_artifacts=() if center is not None else ("center",),
 			resources=ResourceHints(memory_multiplier=2.0, preferred_cpus=self.ncore),
@@ -127,8 +145,9 @@ class GridrecStage(Stage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("recon.gridrec expects a three-dimensional tomography array")
-		theta_axis = 1 if self.sinogram_order else 0
-		slice_axis = 0 if self.sinogram_order else 1
+		sinogram_order = _state_sinogram_order(state, self.sinogram_order, self.name)
+		theta_axis = 1 if sinogram_order else 0
+		slice_axis = 0 if sinogram_order else 1
 		angles = self._angles(state, data.shape[theta_axis])
 		center = self._center(state, data.shape[slice_axis])
 		data, center = self._prepare_input(data, center)
@@ -142,7 +161,7 @@ class GridrecStage(Stage):
 			data,
 			angles,
 			center=center,
-			sinogram_order=self.sinogram_order,
+			sinogram_order=sinogram_order,
 			algorithm="gridrec",
 			ncore=self.ncore,
 			**kwargs,
@@ -168,7 +187,7 @@ class AstraCudaStage(GridrecStage):
 	def __init__(
 		self,
 		center: float | list[float] | None = None,
-		sinogram_order: bool = False,
+		sinogram_order: bool | None = None,
 		iterations: int = 1,
 		proj_type: str = "cuda",
 		extra_options: dict | None = None,
@@ -200,8 +219,14 @@ class AstraCudaStage(GridrecStage):
 		self.proj_type = proj_type
 		self.extra_options = extra_options or {}
 		self.contract = StageContract(
-			expected_input=self.contract.expected_input,
+			expected_input=SinoOrder if sinogram_order else ProjOrder,
 			produced_output=ReconOrder,
+			accepts=(ProjOrder, SinoOrder),
+			prefers=SinoOrder,
+			produces=ReconOrder,
+			accepts_domain=(DataDomain.ATTENUATION,),
+			produces_domain=DataDomain.RECON,
+			locality=Locality.SINOGRAM,
 			window_axes=("Y",),
 			consumes_artifacts=self.contract.consumes_artifacts,
 			resources=ResourceHints(memory_multiplier=3.0, preferred_cpus=1, requires_gpu=True),
@@ -217,8 +242,9 @@ class AstraCudaStage(GridrecStage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError(f"{self.name} expects a three-dimensional tomography array")
-		theta_axis = 1 if self.sinogram_order else 0
-		slice_axis = 0 if self.sinogram_order else 1
+		sinogram_order = _state_sinogram_order(state, self.sinogram_order, self.name)
+		theta_axis = 1 if sinogram_order else 0
+		slice_axis = 0 if sinogram_order else 1
 		angles = self._angles(state, data.shape[theta_axis])
 		center = self._center(state, data.shape[slice_axis])
 
@@ -238,7 +264,7 @@ class AstraCudaStage(GridrecStage):
 			data,
 			angles,
 			center=center,
-			sinogram_order=self.sinogram_order,
+			sinogram_order=sinogram_order,
 			algorithm=tomopy.astra,
 			ncore=1,
 			options=options,

@@ -6,6 +6,7 @@ from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelation
 from .filter import BilateralFilterStage
 from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrectStage
 from .helical import HelicalIndexRemapStage
+from .layout import LayoutConvertStage
 from .normalize import TaperBlendedNormalizeStage, ThetaSwitchNormalizeStage, WeightedNormalizeStage
 from .phase import BronnikovAidedCorrectionStage, PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
@@ -43,6 +44,7 @@ STAGE_REGISTRY = {
 	"geometry.movement": MovementCorrectStage,
 	"geometry.helical_pitch": HelicalIndexRemapStage,
 	"helical_correct.index_remap": HelicalIndexRemapStage,
+	"layout.convert": LayoutConvertStage,
 	"movement_correct.linear_shift": MovementCorrectStage,
 	"normalize.phase_contrast": TaperBlendedNormalizeStage,
 	"normalize.taper_blended": TaperBlendedNormalizeStage,
@@ -108,6 +110,7 @@ __all__ = [
 	"HelicalIndexRemapStage",
 	"HDF5VolumeWriteStage",
 	"LDMStage",
+	"LayoutConvertStage",
 	"ManualCenterStage",
 	"MovementCorrectStage",
 	"NeuroglancerWriteStage",

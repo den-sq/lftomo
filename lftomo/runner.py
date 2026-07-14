@@ -124,7 +124,7 @@ def _resolve_flat_fields(scan: Scan, recon: Recon) -> None:
 
 
 def _make_executable(recon: Recon) -> Recon:
-	"""Make producer-oriented canonical order declarations internally consistent."""
+	"""Legacy compatibility rewrite removed by the Phase-B Stage migration."""
 	result = recon.model_copy(deep=True)
 	uses_sinograms = any(stage.kind in {"normalize", "phase", "stripe", "center", "geometry", "filter"}
 		for stage in result.pipeline)
@@ -162,7 +162,9 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			recon=concrete,
 			backend=backend,
 		)
-		state = Pipeline(stages, backend=backend, scan=state.scan).run(state)
+		state = Pipeline(
+			stages, backend=backend, scan=state.scan, validation_mode="complete",
+		).run(state)
 		results.append(RunResult(run.index, run.parameters, concrete.output_path, dict(state.artifacts)))
 	return results
 

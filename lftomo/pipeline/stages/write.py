@@ -11,6 +11,7 @@ import h5py
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.io import np_convert
 from lftomo.util.shapes import ReconOrder
 
@@ -35,6 +36,9 @@ class TIFFSlicesWriteStage(Stage):
 	contract = StageContract(
 		expected_input=ReconOrder,
 		produced_output=ReconOrder,
+		produces=PRESERVE,
+		accepts_domain=(DataDomain.RECON,),
+		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files",),
 		resources=ResourceHints(memory_multiplier=1.0),
@@ -106,6 +110,9 @@ class HDF5VolumeWriteStage(Stage):
 	contract = StageContract(
 		expected_input=ReconOrder,
 		produced_output=ReconOrder,
+		produces=PRESERVE,
+		accepts_domain=(DataDomain.RECON,),
+		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files",),
 		resources=ResourceHints(memory_multiplier=1.0),
@@ -166,6 +173,9 @@ class NeuroglancerWriteStage(Stage):
 	contract = StageContract(
 		expected_input=ReconOrder,
 		produced_output=ReconOrder,
+		produces=PRESERVE,
+		accepts_domain=(DataDomain.RECON,),
+		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files", "neuroglancer_source"),
 		resources=ResourceHints(memory_multiplier=2.0),

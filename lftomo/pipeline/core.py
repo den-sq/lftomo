@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from typing import Any, Protocol
 
 import numpy as np
 
 from lftomo.config import Recon, Scan
+from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,15 @@ class ResourceHints:
 	memory_multiplier: float = 1.0
 	preferred_cpus: int | None = None
 	requires_gpu: bool = False
+
+
+class Locality(Enum):
+	"""Smallest independent unit on which a Stage operates."""
+
+	PROJECTION = auto()
+	SINOGRAM = auto()
+	VOLUME = auto()
+	METADATA = auto()
 
 
 @dataclass(frozen=True)
@@ -39,6 +50,51 @@ class StageContract:
 	produces_artifacts: tuple[str, ...] = ()
 	forks_pipeline: bool = False
 	resources: ResourceHints = field(default_factory=ResourceHints)
+	accepts: tuple[type[Any], ...] | None = None
+	prefers: type[Any] | None = None
+	produces: type[Any] | ContractEffect | None = None
+	locality: Locality | None = None
+	bounded_views_from: tuple[type[Any], ...] = ()
+	fused_transition: bool = False
+	accepts_domain: tuple[DataDomain, ...] | None = None
+	produces_domain: DataDomain | ContractEffect | None = None
+	resamples_detector: bool = False
+	requires_row_identity: bool = False
+
+	@property
+	def accepted_layouts(self) -> tuple[type[Any], ...] | None:
+		"""Return explicit capabilities or the legacy expected shape."""
+
+		if self.accepts is not None:
+			return self.accepts
+		if self.expected_input is not None:
+			return (self.expected_input,)
+		return None
+
+	@property
+	def preferred_layout(self) -> type[Any] | None:
+		"""Return the planner preference derived from accepted layouts."""
+
+		if self.prefers is not None:
+			return self.prefers
+		accepted = self.accepted_layouts
+		return None if not accepted else accepted[0]
+
+	def output_layout(self, input_layout: type[Any] | None) -> type[Any] | None:
+		"""Resolve the concrete output layout for ``input_layout``."""
+
+		effect = self.produced_output if self.produces is None else self.produces
+		if effect is PRESERVE:
+			return input_layout
+		return effect
+
+	def output_domain(self, input_domain: DataDomain | None) -> DataDomain | None:
+		"""Resolve the concrete output domain for ``input_domain``."""
+
+		effect = PRESERVE if self.produces_domain is None else self.produces_domain
+		if effect is PRESERVE:
+			return input_domain
+		return effect
 
 
 @dataclass(frozen=True)
@@ -113,8 +169,18 @@ class PipelineState:
 	recon: Recon
 	artifacts: dict[str, Any] = field(default_factory=dict)
 	backend: Backend = field(default_factory=NumpyBackend)
+	# Fragment callers may omit axes for legacy compatibility. Complete pipelines
+	# always acquire both from their read Stage before data processing begins.
+	layout: type[Any] | None = None
+	domain: DataDomain | None = None
 
-	def with_array(self, working_array: Any) -> "PipelineState":
+	def with_array(
+		self,
+		working_array: Any,
+		*,
+		layout: type[Any] | None = None,
+		domain: DataDomain | None = None,
+	) -> "PipelineState":
 		"""Return a shallow-copy state with a different working array."""
 
 		return PipelineState(
@@ -123,6 +189,8 @@ class PipelineState:
 			recon=self.recon,
 			artifacts=dict(self.artifacts),
 			backend=self.backend,
+			layout=self.layout if layout is None else layout,
+			domain=self.domain if domain is None else domain,
 		)
 
 
@@ -140,15 +208,27 @@ class Stage(ABC):
 class Pipeline:
 	"""Sequential Pipeline over an ordered list of Stages."""
 
-	def __init__(self, stages: list[Stage], backend: Backend | None = None, scan: Scan | None = None, validate: bool = True):
+	def __init__(self, stages: list[Stage], backend: Backend | None = None,
+			scan: Scan | None = None, validate: bool = True,
+			validation_mode: str = "fragment",
+			initial_layout: type[Any] | None = None,
+			initial_domain: DataDomain | None = None):
 		self.stages = tuple(stages)
 		self.backend = backend or NumpyBackend()
 		self.validate = validate
+		self.validation_mode = validation_mode
+		self.initial_layout = initial_layout
+		self.initial_domain = initial_domain
+		self.plan = None
 		self._validated = False
 		if validate and scan is not None:
 			from lftomo.pipeline.validation import validate_pipeline
 
-			validate_pipeline(self.stages, scan, self.backend)
+			self.plan = validate_pipeline(
+				self.stages, scan, self.backend, mode=self.validation_mode,
+				initial_layout=self.initial_layout,
+				initial_domain=self.initial_domain,
+			)
 			self._validated = True
 
 	def run(self, state: PipelineState) -> PipelineState:
@@ -158,13 +238,24 @@ class Pipeline:
 		if self.validate and not self._validated:
 			from lftomo.pipeline.validation import validate_pipeline
 
-			validate_pipeline(
+			self.plan = validate_pipeline(
 				self.stages,
 				state.scan,
 				self.backend,
 				available_artifacts=state.artifacts,
+				mode=self.validation_mode,
+				initial_layout=self.initial_layout,
+				initial_domain=self.initial_domain,
 			)
 			self._validated = True
 		for stage in self.stages:
+			input_layout = state.layout
+			input_domain = state.domain
 			state = stage.run(state)
+			output_layout = stage.contract.output_layout(input_layout)
+			output_domain = stage.contract.output_domain(input_domain)
+			if output_layout is not None:
+				state.layout = output_layout
+			if output_domain is not None:
+				state.domain = output_domain
 		return state

@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -42,6 +43,11 @@ class HelicalIndexRemapStage(Stage):
 		shape = ProjOrder if order == "projection" else SinoOrder
 		self.contract = StageContract(
 			expected_input=shape, produced_output=shape, window_axes=("Y", "Theta"),
+			produces=PRESERVE,
+			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+			produces_domain=PRESERVE,
+			locality=Locality.PROJECTION,
+			requires_row_identity=enabled,
 			resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.pitch_px_per_projection = pitch_px_per_projection

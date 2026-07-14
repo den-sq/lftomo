@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.prep.flat import _weighted_normalize_projection
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -30,10 +31,14 @@ class WeightedNormalizeStage(Stage):
 	pre-dark, post-dark order.
 	"""
 
-	name = "weighted-normalize"
+	name = "normalize.weighted"
 	contract = StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
+		produces=PRESERVE,
+		accepts_domain=(DataDomain.RAW,),
+		produces_domain=DataDomain.TRANSMISSION,
+		locality=Locality.PROJECTION,
 		mutates_input=True,
 		window_axes=("Y",),
 		required_metadata=("metadata.flat_fields",),
@@ -119,6 +124,10 @@ class ThetaSwitchNormalizeStage(Stage):
 		self.contract = StageContract(
 			expected_input=shape,
 			produced_output=shape,
+			produces=PRESERVE,
+			accepts_domain=(DataDomain.RAW,),
+			produces_domain=DataDomain.TRANSMISSION,
+			locality=Locality.PROJECTION,
 			mutates_input=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("metadata.flat_fields",),
