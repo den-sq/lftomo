@@ -177,33 +177,30 @@ def _compounding_dwt2(sli, wname, mode, level):
 
 
 def _remove_stripe_fw(sino_mem, i, level, wname, sigma, zero_pad=False):
-	extension_mode = "zero" if zero_pad else "symmetric"
-
 	with sino_mem[i] as sino:
-		sino_indexing = np.s_[0:sino_mem.shape.Theta, 0:sino_mem.shape.X]
-		sli = sino[:, :]
-		cWavelet = []
+		_remove_stripe_fw_array(sino, level=level, wname=wname, sigma=sigma, zero_pad=zero_pad)
 
-		# Wavelet decomposition
-		for _j in range(level):
-			sli, coeff = pywt.dwt2(sli, wname, mode=extension_mode)
-			cWavelet = [DetailCoeff(*coeff)] + cWavelet
 
-		# Ring artifact removal in FFT space.
-		def fft_space_removal(j):
-			fcV = np.fft.fftshift(np.fft.fft(cWavelet[j].cV, axis=0))
-			my, mx = fcV.shape
+def _remove_stripe_fw_array(sino: np.ndarray, level: int, wname: str = "db5",
+							sigma: float = 2.0, zero_pad: bool = False) -> None:
+	"""Apply Fourier-wavelet stripe suppression to one ``(Theta, X)`` sinogram."""
+	extension_mode = "zero" if zero_pad else "symmetric"
+	sino_indexing = np.s_[0:sino.shape[0], 0:sino.shape[1]]
+	sli = sino[:, :]
+	wavelets = []
 
-			# Damping of ring artifact information.
-			y_hat = (np.arange(-my, my, 2, dtype='float32') + 1) / 2
-			damp = -np.expm1(-np.square(y_hat) / (2 * np.square(sigma)))
-			fcV *= np.transpose(np.tile(damp, (mx, 1)))
+	for _ in range(level):
+		sli, coeff = pywt.dwt2(sli, wname, mode=extension_mode)
+		wavelets = [DetailCoeff(*coeff)] + wavelets
 
-			# Inverse FFT.
-			cWavelet[j] = cWavelet[j]._replace(cV=np.real(np.fft.ifft(np.fft.ifftshift(fcV), axis=0)))
+	for index, wavelet in enumerate(wavelets):
+		vertical = np.fft.fftshift(np.fft.fft(wavelet.cV, axis=0))
+		my, mx = vertical.shape
+		y_hat = (np.arange(-my, my, 2, dtype="float32") + 1) / 2
+		damp = -np.expm1(-np.square(y_hat) / (2 * np.square(sigma)))
+		vertical *= np.transpose(np.tile(damp, (mx, 1)))
+		wavelets[index] = wavelet._replace(
+			cV=np.real(np.fft.ifft(np.fft.ifftshift(vertical), axis=0))
+		)
 
-		# map doesn't execute by default, so let's just do this
-		[fft_space_removal(x) for x in range(0, len(cWavelet))]
-
-		# Multilevel Wavelet Reconstruction
-		sino[:, :] = pywt.waverec2([sli] + cWavelet, wname, mode=extension_mode)[sino_indexing]
+	sino[:, :] = pywt.waverec2([sli] + wavelets, wname, mode=extension_mode)[sino_indexing]

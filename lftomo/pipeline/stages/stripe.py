@@ -6,7 +6,12 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
-from lftomo.prep.stripe import _remove_dead_array, _remove_large_array, _remove_sort_array
+from lftomo.prep.stripe import (
+	_remove_dead_array,
+	_remove_large_array,
+	_remove_sort_array,
+	_remove_stripe_fw_array,
+)
 from lftomo.util.shapes import SinoOrder
 
 
@@ -94,5 +99,39 @@ class VoLargeStripeStage(Stage):
 			_remove_large_array(
 				data[y_index], snr=self.snr, size=self.size,
 				drop_ratio=self.drop_ratio, norm=self.norm,
+			)
+		return state
+
+
+class FourierWaveletStripeStage(Stage):
+	name = "stripe.fw"
+	contract = _contract(2.0)
+
+	def __init__(self, level: int | None = None, wname: str = "db5",
+				sigma: float = 2.0, zero_pad: bool = False):
+		if level is not None and level < 1:
+			raise ValueError("Fourier-wavelet level must be positive")
+		if sigma <= 0:
+			raise ValueError("Fourier-wavelet sigma must be positive")
+		self.level = level
+		self.wname = wname
+		self.sigma = sigma
+		self.zero_pad = zero_pad
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "FourierWaveletStripeStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if state.backend.name != "numpy":
+			raise TypeError("FourierWaveletStripeStage currently requires the NumPy backend")
+		data = np.asarray(state.working_array)
+		if data.ndim != 3:
+			raise ValueError("stripe.fw expects a (Y, Theta, X) sinogram array")
+		level = self.level or int(np.ceil(np.log2(max(data.shape[1:]))))
+		for y_index in range(data.shape[0]):
+			_remove_stripe_fw_array(
+				data[y_index], level=level, wname=self.wname,
+				sigma=self.sigma, zero_pad=self.zero_pad,
 			)
 		return state

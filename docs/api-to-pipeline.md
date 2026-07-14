@@ -16,3 +16,11 @@ implementations to benchmark against one another: sorting, dead-line
 interpolation, and large-stripe correction solve different artifact classes.
 The function and Stage paths share array kernels so fixes cannot drift between
 the APIs.
+
+## Fourier-wavelet stripe removal
+
+`prep.stripe.remove_stripe_fw` maps to `stripe.fw`. It mutates `(Y, Theta, X)`
+sinograms by Y window, consumes no metadata or artifacts, produces no artifacts,
+and declares a 2× memory hint for the wavelet/FFT coefficients. Its parameters
+remain `level`, `wname`, `sigma`, and `zero_pad`. This is the Münch et al.
+Fourier-wavelet method and remains separate from every Vo option.
