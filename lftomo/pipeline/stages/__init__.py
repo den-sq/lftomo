@@ -4,6 +4,7 @@ from lftomo.config import StageConfig
 
 from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
 from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrectStage
+from .helical import HelicalIndexRemapStage
 from .normalize import WeightedNormalizeStage
 from .phase import BronnikovAidedCorrectionStage, PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
@@ -30,6 +31,8 @@ STAGE_REGISTRY = {
 	"geometry.affine_skew": SkewCorrectStage,
 	"geometry.affine_skew_movement": AffineSkewMovementStage,
 	"geometry.movement": MovementCorrectStage,
+	"geometry.helical_pitch": HelicalIndexRemapStage,
+	"helical_correct.index_remap": HelicalIndexRemapStage,
 	"movement_correct.linear_shift": MovementCorrectStage,
 	"normalize.weighted": WeightedNormalizeStage,
 	"phase.bac": BronnikovAidedCorrectionStage,
@@ -82,6 +85,7 @@ __all__ = [
 	"FBPCudaStage",
 	"FPCudaStage",
 	"GridrecStage",
+	"HelicalIndexRemapStage",
 	"ManualCenterStage",
 	"MovementCorrectStage",
 	"PaganinPhaseAbsorptionStage",
