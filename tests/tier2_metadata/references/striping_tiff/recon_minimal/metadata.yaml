@@ -1,0 +1,56 @@
+schema_version: 1
+producer: recon_minimal
+dataset: striping_tiff
+status: frozen_historical_output
+immutable: true
+source:
+  repository: https://github.com/den-sq/dan_scripts
+  path: recon_minimal.py
+  commit: f584683b40593eecb6b9529f65e2b5f6cd4c4b15
+  commit_date: "2023-07-06T10:11:06-07:00"
+  script_sha256: e97f27b8d49fd118b2985306f4aa23d38b9cd34ed0ee58c9ebe7a550ed81f7a5
+  provenance_note: >-
+    The saved reconstruct_parameters.yaml records this exact dan_scripts
+    commit. No recon_minimal.py commit intervened between it and the October
+    2023 output, and the archived sbatch command matches the saved YAML triplet.
+input:
+  original_path: /gpfs/Labs/Cheng/phenome/Berkeley/B7_2023_June/COVID_Influenza_Progression/AAA592_24keV/1687760485_3937projs_275000us_center_section_6_scan_tiff
+  recovered_path: projections
+  historical_projections: 3937
+  historical_dropped_frames: 0
+  recovered_variant: thresholded
+  recovered_projections: 3935
+  recovered_input_note: >-
+    The restored physical-drive copy is not byte-identical to the original
+    input directory: it is a later thresholded variant with two fewer TIFFs.
+    The historical output remains authoritative; an exact producer rerun
+    requires restoration of the original 3,937 projection files.
+  shape: [3000, 11648]
+  dtype: uint16
+  flats:
+    pregain: flats/pregain
+    postgain: flats/postgain
+    predark: flats/predark
+    postdark: flats/postdark
+historical_run:
+  config_archive: /mnt/z/gpfs/Influenza_APS_2022/COVID_Influenza_Progression/AAA592/data/history/24keV_center_section_6/7
+  output_path: /mnt/z/gpfs/Influenza_APS_2022/COVID_Influenza_Progression/AAA592/data/24keV_center_section_6_recon_p7
+  job_id: 7
+  job_segments: 5
+  window_size: 64
+  dropped_frame_log_entries: 3937
+  dropped_frames_recorded: 0
+  host: Penn State Health dense Slurm partition; node unrecorded
+  operator: dnorthover
+  environment: historical `recon` conda environment; exact package lock unrecorded
+reference_selection:
+  slices: [1800, 1801, 1802, 1803, 1804, 1805, 1806, 1807, 1808, 1809]
+  rationale: contiguous central specimen region from the completed historical volume
+  shape: [11648, 11648]
+  dtype: float32
+freeze:
+  host: PSH1VS12J3
+  operator: dnorthover
+  date: "2026-07-13"
+  method: copied from completed historical volume; producer not rerun
+  rule: do not rerun or refresh this reference

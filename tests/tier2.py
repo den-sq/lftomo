@@ -24,11 +24,8 @@ DATASETS = {
 	"striping_tiff": Tier2Dataset(
 		name="striping_tiff",
 		environment_variable="LFTOMO_DATASET_STRIPING_TIFF",
-		default_path=Path(
-			"/mnt/z/gpfs/Influenza_APS_2022/Mouse_Lungs/AAA588_25.45kV/Scan/"
-			"1651106162_77000projs_90000us_Mouse_Lung_PTA_Normal_Real_Scan"
-		),
-		pixel_size_um=0.7046,
+		default_path=Path("/mnt/wsl/PHYSICALDRIVE2p1/data/AAA592"),
+		pixel_size_um=0.5,
 		producers=("r254", "recon_minimal"),
 	),
 	"phase_contrast_hdf5": Tier2Dataset(
