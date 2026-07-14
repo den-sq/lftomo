@@ -3,6 +3,7 @@
 from lftomo.config import StageConfig
 
 from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
+from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrectStage
 from .normalize import WeightedNormalizeStage
 from .phase import BronnikovAidedCorrectionStage, PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
@@ -26,6 +27,10 @@ STAGE_REGISTRY = {
 	"center.manual": ManualCenterStage,
 	"center.pc": PhaseCorrelationCenterStage,
 	"center.vo": VoCenterStage,
+	"geometry.affine_skew": SkewCorrectStage,
+	"geometry.affine_skew_movement": AffineSkewMovementStage,
+	"geometry.movement": MovementCorrectStage,
+	"movement_correct.linear_shift": MovementCorrectStage,
 	"normalize.weighted": WeightedNormalizeStage,
 	"phase.bac": BronnikovAidedCorrectionStage,
 	"phase.bronnikov_aided": BronnikovAidedCorrectionStage,
@@ -46,6 +51,7 @@ STAGE_REGISTRY = {
 	"stripe.vo_dead": VoDeadStripeStage,
 	"stripe.vo_large": VoLargeStripeStage,
 	"stripe.vo_sort": VoSortStripeStage,
+	"skew_correct.cv2_affine": SkewCorrectStage,
 	"write.tiff_slices": TIFFSlicesWriteStage,
 }
 
@@ -65,6 +71,7 @@ __all__ = [
 	"STAGE_REGISTRY",
 	"AstraCudaStage",
 	"AllOfTheStripeStage",
+	"AffineSkewMovementStage",
 	"BPCudaStage",
 	"BronnikovAidedCorrectionStage",
 	"CGLSCudaStage",
@@ -76,11 +83,13 @@ __all__ = [
 	"FPCudaStage",
 	"GridrecStage",
 	"ManualCenterStage",
+	"MovementCorrectStage",
 	"PaganinPhaseAbsorptionStage",
 	"PaganinStage",
 	"PhaseCorrelationCenterStage",
 	"SARTCudaStage",
 	"SIRTCudaStage",
+	"SkewCorrectStage",
 	"TIFFStackReadStage",
 	"TIFFSlicesWriteStage",
 	"VoDeadStripeStage",

@@ -19,6 +19,7 @@ dependencies = [
 	"PyWavelets",
 	"numexpr",
 	"natsort",
+	"opencv-python",
 	"scikit-image",
 	"pydantic>=2",
 	"PyYAML",
