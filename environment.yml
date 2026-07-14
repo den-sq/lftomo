@@ -1,0 +1,22 @@
+name: lftomo
+channels:
+  - conda-forge
+  - bioconda
+  - astra-toolbox
+  - defaults
+dependencies:
+  - python>=3.11
+  - numpy
+  - click
+  - psutil
+  - h5py
+  - tifffile
+  - tomopy
+  - scipy
+  - pywavelets
+  - numexpr
+  - natsort
+  - scikit-image
+  - pytest
+  - hatchling
+  - pip
