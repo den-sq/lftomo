@@ -16,6 +16,13 @@ class MaterializationKind(Enum):
 	TOMOPY_BOUNDARY = auto()
 
 
+class ExecutionKind(Enum):
+	"""Execution strategy selected for a contiguous Stage segment."""
+
+	SEQUENTIAL = auto()
+	BOUNDED_SINOGRAM = auto()
+
+
 @dataclass(frozen=True)
 class Materialization:
 	"""One explicit or library-boundary full-volume copy."""
@@ -40,10 +47,21 @@ class PlanStep:
 
 
 @dataclass(frozen=True)
+class PlanSegment:
+	"""Adjacent Stages sharing one execution strategy."""
+
+	start: int
+	stop: int
+	kind: ExecutionKind
+	stage_names: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class PipelinePlan:
-	"""Validated ordered Stage plan; later phases may add grouped segments."""
+	"""Validated ordered Stage plan with concrete execution segments."""
 
 	steps: tuple[PlanStep, ...]
+	segments: tuple[PlanSegment, ...] = ()
 	warnings: tuple[str, ...] = ()
 
 	@property

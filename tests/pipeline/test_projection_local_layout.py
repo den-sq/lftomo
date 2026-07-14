@@ -64,11 +64,16 @@ def state(array, layout, config=None):
 	SkewCorrectStage(),
 	MovementCorrectStage(),
 	HelicalIndexRemapStage(enabled=False),
-	FourierWaveletStripeStage(level=2),
 	ManualCenterStage(value_px=2),
 ])
 def test_projection_local_migrations_advertise_both_layouts(stage):
 	assert stage.contract.accepts == (ProjOrder, SinoOrder)
+
+
+def test_fourier_wavelet_declares_bounded_projection_view_capability():
+	contract = FourierWaveletStripeStage(level=2).contract
+	assert contract.accepts == (SinoOrder,)
+	assert contract.bounded_views_from == (ProjOrder,)
 
 
 def test_state_layout_drives_normalization_without_constructor_order():

@@ -316,6 +316,26 @@ run reproduced it within tolerance. The benchmark should measure against that
 recorded configuration rather than only a synthetic arm-3, so its baseline is
 grounded in a real producer.
 
+The Phase-C implementation provides `benchmarks/order_layout.py`. It runs one
+arm per process, reports wall time and peak RSS, and requires `--scratch` for
+arrays larger than 1 GiB so the large cases use memmap storage rather than
+risk another WSL OOM. Run all three arms for each required shape:
+
+```text
+python -m benchmarks.order_layout --arm bounded    --shape 1969,140,5008 --workers 4 --scratch /fast/ac7
+python -m benchmarks.order_layout --arm transition --shape 1969,140,5008 --workers 4 --scratch /fast/ac7
+python -m benchmarks.order_layout --arm strided    --shape 1969,140,5008 --workers 4 --scratch /fast/ac7
+
+python -m benchmarks.order_layout --arm bounded    --shape 1969,1100,5008 --workers 4 --scratch /fast/ac7
+python -m benchmarks.order_layout --arm transition --shape 1969,1100,5008 --workers 4 --scratch /fast/ac7
+python -m benchmarks.order_layout --arm strided    --shape 1969,1100,5008 --workers 4 --scratch /fast/ac7
+```
+
+The large empirical result is deliberately not fabricated in unit CI. Planner
+guidance remains neutral until all six isolated Tier-2 runs are recorded; the
+bounded strategy is an explicit selection/capability and the safe default uses
+one row worker.
+
 ## 7. Stage migration list (verified on `c775826`)
 
 Effort: **A** = contract + helper swap (mechanical); **B** = A plus a

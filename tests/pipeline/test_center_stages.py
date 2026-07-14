@@ -86,15 +86,14 @@ def test_vo_center_transposes_data_and_fits_tilt(monkeypatch):
 	)
 	calls = []
 
-	def find_center_vo(data, ind, **kwargs):
-		calls.append((data.shape, ind, kwargs))
-		return 4 + 0.1 * ind
+	def find_center_vo(data, **kwargs):
+		calls.append((data.shape, kwargs))
+		return 4 + 0.2 * (len(calls) - 1)
 
 	monkeypatch.setattr("tomopy.find_center_vo", find_center_vo)
 	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
 
-	assert [call[1] for call in calls] == [0, 2, 4]
-	assert all(call[0] == (3, 5, 8) for call in calls)
+	assert all(call[0] == (3, 8) for call in calls)
 	np.testing.assert_allclose(result.artifacts["center"], 4 + 0.1 * np.arange(5), rtol=1e-6)
 	assert result.artifacts["center_fit"]["coefficients"].shape == (2,)
 

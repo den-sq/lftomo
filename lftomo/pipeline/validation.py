@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from lftomo.pipeline.core import Backend, NumpyBackend, Stage
+from lftomo.pipeline.core import Backend, Locality, NumpyBackend, Stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.planning import (
 	Materialization,
 	MaterializationKind,
+	ExecutionKind,
 	PipelinePlan,
+	PlanSegment,
 	PlanStep,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -146,7 +148,12 @@ def validate_pipeline(
 		input_domain = current_domain
 
 		accepted = contract.accepted_layouts
-		if current_layout is not None and accepted is not None and current_layout not in accepted:
+		if (
+			current_layout is not None
+			and accepted is not None
+			and current_layout not in accepted
+			and current_layout not in contract.bounded_views_from
+		):
 			expected = ", ".join(item.__name__ for item in accepted)
 			field = "accepts" if contract.accepts is not None else "expected_input"
 			raise ShapeCompatibilityError(
@@ -279,4 +286,54 @@ def validate_pipeline(
 				message=f"expected exactly one transmission-to-attenuation transition, found {attenuation_transitions}",
 			)
 
-	return PipelinePlan(steps=tuple(steps), warnings=tuple(warnings))
+	segments: list[PlanSegment] = []
+	index = 0
+	while index < len(stages):
+		stage = stages[index]
+		step = steps[index]
+		contract = stage.contract
+		bounded = (
+			step.input_layout is ProjOrder
+			and contract.locality is Locality.SINOGRAM
+			and ProjOrder in contract.bounded_views_from
+			and step.output_layout is step.input_layout
+			and step.output_domain is step.input_domain
+			and not contract.consumes_artifacts
+			and not contract.produces_artifacts
+			and not contract.forks_pipeline
+			and callable(getattr(stage, "run_sinogram", None))
+		)
+		if not bounded:
+			segments.append(PlanSegment(
+				start=index, stop=index + 1, kind=ExecutionKind.SEQUENTIAL,
+				stage_names=(stage.name,),
+			))
+			index += 1
+			continue
+		stop = index + 1
+		while stop < len(stages):
+			next_stage = stages[stop]
+			next_step = steps[stop]
+			next_contract = next_stage.contract
+			if not (
+				next_step.input_layout is ProjOrder
+				and next_contract.locality is Locality.SINOGRAM
+				and ProjOrder in next_contract.bounded_views_from
+				and next_step.output_layout is next_step.input_layout
+				and next_step.output_domain is next_step.input_domain
+				and not next_contract.consumes_artifacts
+				and not next_contract.produces_artifacts
+				and not next_contract.forks_pipeline
+				and callable(getattr(next_stage, "run_sinogram", None))
+			):
+				break
+			stop += 1
+		segments.append(PlanSegment(
+			start=index, stop=stop, kind=ExecutionKind.BOUNDED_SINOGRAM,
+			stage_names=tuple(item.name for item in stages[index:stop]),
+		))
+		index = stop
+
+	return PipelinePlan(
+		steps=tuple(steps), segments=tuple(segments), warnings=tuple(warnings),
+	)
