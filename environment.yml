@@ -27,5 +27,3 @@ dependencies:
   - mkdocstrings
   - mkdocstrings-python
   - pip
-  - pip:
-      - hotopy

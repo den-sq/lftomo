@@ -13,7 +13,6 @@ dependencies = [
 	"click",
 	"psutil",
 	"h5py",
-	"hotopy",
 	"tifffile",
 	"tomopy",
 	"scipy",
@@ -26,6 +25,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+bac = [
+	"hotopy",
+]
 dev = [
 	"pytest",
 	"coverage",

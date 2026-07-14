@@ -1,4 +1,6 @@
 import numpy as np
+import builtins
+import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import Pipeline, PipelineState
@@ -66,3 +68,18 @@ def test_disabled_bac_is_noop(monkeypatch):
 
 	assert result.working_array is working
 	np.testing.assert_array_equal(working, 1)
+
+
+def test_bac_reports_missing_optional_dependency(monkeypatch):
+	config = StageConfig(kind="phase", algorithm="bac", params={"alpha": 2})
+	stage = create_stage(config)
+	original_import = builtins.__import__
+
+	def without_hotopy(name, *args, **kwargs):
+		if name == "hotopy.holo":
+			raise ImportError("not installed")
+		return original_import(name, *args, **kwargs)
+
+	monkeypatch.setattr(builtins, "__import__", without_hotopy)
+	with pytest.raises(RuntimeError, match="'bac' extra"):
+		stage.run(_state(np.ones((1, 1, 2), dtype=np.float32), config))

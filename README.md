@@ -20,6 +20,13 @@ uv pip install -e ".[dev]"
 # or: pip install -e ".[dev]"
 ```
 
+Bronnikov-aided correction is optional because it executes through hotopy.
+Install it only on deployments that use `phase.bac`:
+
+```shell
+pip install -e ".[bac]"
+```
+
 Do not treat a uv-only virtualenv as the supported deployment path for
 TomoPy-heavy reconstruction work. Use it only as pip-compatible glue inside the
 conda environment.

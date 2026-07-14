@@ -137,7 +137,13 @@ class BronnikovAidedCorrectionStage(Stage):
 		return cls(**config.params)
 
 	def _correct(self, image: np.ndarray) -> np.ndarray:
-		from hotopy.holo import BronnikovAidedCorrection
+		try:
+			from hotopy.holo import BronnikovAidedCorrection
+		except ImportError as error:
+			raise RuntimeError(
+				"phase.bac requires the optional hotopy dependency; "
+				"install lftomo with the 'bac' extra"
+			) from error
 
 		operator = BronnikovAidedCorrection(
 			image.shape,
