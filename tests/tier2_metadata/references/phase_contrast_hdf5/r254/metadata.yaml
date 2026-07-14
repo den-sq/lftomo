@@ -1,0 +1,39 @@
+schema_version: 1
+producer: r254
+dataset: phase_contrast_hdf5
+status: frozen_historical_output
+immutable: true
+source:
+  path: B10/PCRBox_Octo0/20kev/voi2.1/R2.54_Berkeley8_hpc_v1.81_alt.py
+  surviving_copy_sha256: 7ef0c00b8020ce327bb850cb8a49d4338c6e8159521e046c3bb44e5943abf1ab
+  surviving_copy_modified_at: "2025-01-17T17:27:13-05:00"
+  provenance_note: >-
+    B10Scripts is not version-controlled and the surviving script copy was
+    modified after this output was produced. The output directory name and
+    surviving script agree on the dataset, center, BAC parameters, stripe
+    algorithms, and reconstruction settings; the surviving hash must not be
+    represented as the exact bytes executed in the historical run.
+input:
+  path: projections/20241205_120252_octo_0_centerradula_fov2_scan4.h5
+  dataset: /exchange/data
+  shape: [1969, 2160, 2560]
+  dtype: uint16
+historical_output:
+  path: 32bit_reconstructed_FS_baseline_BAC_2.4_1.2_20kev
+  first_slice_written_at: "2025-01-03T16:50:25-05:00"
+  last_slice_written_at: "2025-01-03T18:28:17-05:00"
+  runtime: "approximately 01:37:51, inferred from output timestamps"
+  host: unknown
+  operator: unknown
+  environment: unrecorded historical environment
+reference_selection:
+  slices: [1076, 1077, 1078, 1079, 1080, 1081, 1082, 1083, 1084, 1085]
+  rationale: contiguous feature-rich region with internal specimen anatomy
+  shape: [2560, 2560]
+  dtype: float32
+freeze:
+  host: PSH1VS12J3
+  operator: dnorthover
+  date: "2026-07-13T22:57:20-04:00"
+  method: copied from completed historical volume; producer not rerun
+  rule: do not rerun or refresh this reference

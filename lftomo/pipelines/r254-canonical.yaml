@@ -1,34 +1,42 @@
-# Producer: B10Scripts/PCRBox_Octo0/14kev/voi1/R2.54_Berkeley8_hpc_v1.81.py
-# Survey source: docs/recon-survey.md lines 265-315 (canonical R2.54 narration).
-# Parameters pin the representative B10 voi2 defaults; per-VOI center/skew changes
-# belong in reference-specific overrides, without changing this literal order.
+# Producer: B10/PCRBox_Octo0/20kev/voi2.1/R2.54_Berkeley8_hpc_v1.81_alt.py
+# Survey source: docs/recon-survey.md lines 265-315, corrected by the frozen voi2.1 run manifest.
+# Frozen reference: phase_contrast_hdf5, slices 1076-1085 (lftomo#27).
+# BAC is applied while the sinogram is generated, before the two stripe passes.
 pipeline_template: r254-canonical
 output_path: reference/r254/recon
 metadata:
   producer: r254
-  representative_dataset: b10-voi2
+  representative_dataset: phase_contrast_hdf5
 pipeline:
   - kind: read
     algorithm: hdf5_dxchange
-    params: {order: sinogram, calibration_policy: required}
+    params:
+      order: projection
+      calibration_policy: required
+      theta_count: 1969
+      theta_start_degrees: 0.0
+      theta_stop_degrees: 180.0
   - kind: normalize
     algorithm: theta_switch
-    params: {switch_fraction: 0.5, pre_subtracted: false}
-  - kind: stripe
-    algorithm: remove_all_stripe
-    params: {snr: 3.0, large_size: 51, small_size: 21, drop_ratio: 0.1, dim: 1}
+    params: {gain_averaging: true, pre_subtracted: false}
   - kind: phase
     algorithm: bronnikov_aided
-    params: {enabled: true, alpha: 1.6, gamma: 1.2}
+    params: {alpha: 2.4, gamma: 1.2}
   - kind: geometry
     algorithm: affine_skew_movement
-    params: {skew_degrees: 0.0, movement_enabled: false, movement_y: 0.0, movement_x: 0.0}
+    params: {skew_degrees: 0.0, movement_enabled: false, movement_y: 0.26351930523856, movement_x: -1.707958799447738}
+  - kind: stripe
+    algorithm: fw
+    params: {wavelet: db25, sigma: 2.4, ncore: 12}
+  - kind: stripe
+    algorithm: vo_sort
+    params: {size: 21, ncore: 12}
   - kind: center
     algorithm: manual
-    params: {value_px: 1271.5, pc_fallback: true}
+    params: {value_px: 1282.75, find_center: false}
   - kind: recon
     algorithm: gridrec
-    params: {ncore: 32}
+    params: {ncore: 32, sinogram_order: false, circle_mask: false}
   - kind: write
     algorithm: tiff_slices
-    params: {dtype: float32, naming_template: "rec_{slice:05d}"}
+    params: {dtype: float32, naming_template: "rec_{slice:05d}.tif"}

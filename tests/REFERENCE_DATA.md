@@ -70,6 +70,17 @@ find recon -type f -print0 | sort -z | xargs -0 sha256sum > recon.sha256
 operator, runtime, and environment notes. `pipeline.yaml` is the complete,
 expanded stage order and parameter set used by that producer.
 
+## Frozen reference inventory
+
+| Dataset | Producer | Slices | Frozen | Versioned manifest |
+| --- | --- | --- | --- | --- |
+| `phase_contrast_hdf5` | `r254` | 1076–1085 | 2026-07-13 | `tests/tier2_metadata/references/phase_contrast_hdf5/r254/` |
+
+The R2.54 archive was lifted from the completed historical volume rather than
+rerunning its later-edited, unversioned producer. Its metadata records this
+provenance limitation explicitly. Frozen references are immutable: do not
+rerun a producer to refresh them.
+
 ## Running the checks
 
 The default test run collects but skips Tier-2 tests. On a host with the three

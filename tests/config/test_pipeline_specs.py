@@ -8,7 +8,9 @@ from lftomo.config import Recon
 PIPELINES = Path(__file__).parents[2] / "lftomo" / "pipelines"
 
 EXPECTED_ORDERS = {
-	"r254-canonical.yaml": ["read", "normalize", "stripe", "phase", "geometry", "center", "recon", "write"],
+	"r254-canonical.yaml": [
+		"read", "normalize", "phase", "geometry", "stripe", "stripe", "center", "recon", "write",
+	],
 	"recon-minimal-canonical.yaml": ["read", "normalize", "stripe", "phase", "center", "recon", "write"],
 	"phase-contrast-canonical.yaml": [
 		"read", "normalize", "geometry", "geometry", "geometry", "stripe", "phase", "filter", "center", "recon", "write",
