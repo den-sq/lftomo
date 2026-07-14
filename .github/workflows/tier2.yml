@@ -14,19 +14,26 @@ jobs:
       LFTOMO_RUNNER_CAPABILITY: recon-data
     steps:
       - uses: actions/checkout@v7
+      - name: Create the pinned numerical runtime
+        run: |
+          runtime="$RUNNER_TEMP/lftomo-tier2"
+          python -m venv --system-site-packages "$runtime"
+          "$runtime/bin/python" -m pip install "numpy<2"
+          echo "TIER2_PYTHON=$runtime/bin/python" >> "$GITHUB_ENV"
       - name: Install the checkout without replacing the runner environment
-        run: python -m pip install --no-deps -e .
+        run: "$TIER2_PYTHON" -m pip install --no-deps -e .
       - name: Verify the pinned numerical runtime
         run: >-
-          python -c
-          "import numpy as np;
+          "$TIER2_PYTHON" -c
+          "import hotopy, numpy as np, tomopy;
           assert int(np.__version__.split('.')[0]) < 2,
-          f'TomoPy requires NumPy <2, found {np.__version__}'"
+          f'TomoPy requires NumPy <2, found {np.__version__}';
+          print(f'NumPy {np.__version__}, TomoPy {tomopy.__version__}, Hotopy available')"
       - name: Validate canonical datasets and reproduce frozen references
         env:
           LFTOMO_TIER2_REPORT_DIR: tier2-reports
         run: >-
-          python -m pytest
+          "$TIER2_PYTHON" -m pytest
           tests/test_tier2_datasets.py
           tests/test_tier2_numerical.py
           --run-tier2 -ra
