@@ -10,7 +10,13 @@ from lftomo.util.shapes import SinoOrder
 
 
 class HelicalIndexRemapStage(Stage):
-	"""Remap detector rows along the helical trajectory for each projection."""
+	"""Remap detector rows along the helical trajectory for each projection.
+
+	The rounded linear row selection is adapted from
+	``dan_scripts/berkeley_2021/allinwonderful_v1.5_A1_Helical.py`` at
+	``8d324b270ab6c569acde246a01ea4572924cbab0``. The Stage generalizes that
+	producer's one-row-at-a-time reader to an already-loaded sinogram window.
+	"""
 
 	name = "helical_correct.index_remap"
 	contract = StageContract(

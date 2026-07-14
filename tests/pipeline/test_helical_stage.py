@@ -65,3 +65,24 @@ def test_disabled_helical_alias_is_noop_without_pitch():
 	result = Pipeline([create_stage(config)]).run(_state(working, config, pitch_um=None))
 
 	assert result.working_array is working
+
+
+def test_berkeley_source_bottom_row_equation_is_preserved():
+	"""Source reads height - round(pitch * projection) - 1 when going up."""
+	config = StageConfig(
+		kind="helical_correct",
+		algorithm="index_remap",
+		params={
+			"pitch_px_per_projection": 1,
+			"going_up": True,
+			"crop_valid": False,
+			"fill_value": -1,
+		},
+	)
+	working = np.broadcast_to(np.arange(6)[:, None, None], (6, 3, 1)).copy()
+
+	result = Pipeline([create_stage(config)]).run(_state(working, config))
+
+	for projection in range(3):
+		expected_row = working.shape[0] - round(projection) - 1
+		assert result.working_array[-1, projection, 0] == working[expected_row, projection, 0]
