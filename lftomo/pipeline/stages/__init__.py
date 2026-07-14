@@ -4,7 +4,7 @@ from lftomo.config import StageConfig
 
 from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
 from .normalize import WeightedNormalizeStage
-from .phase import PaganinPhaseAbsorptionStage, PaganinStage
+from .phase import BronnikovAidedCorrectionStage, PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
 from .recon import (
 	AstraCudaStage,
@@ -27,6 +27,8 @@ STAGE_REGISTRY = {
 	"center.pc": PhaseCorrelationCenterStage,
 	"center.vo": VoCenterStage,
 	"normalize.weighted": WeightedNormalizeStage,
+	"phase.bac": BronnikovAidedCorrectionStage,
+	"phase.bronnikov_aided": BronnikovAidedCorrectionStage,
 	"phase.paganin": PaganinStage,
 	"phase.paganin_phase_absorption": PaganinPhaseAbsorptionStage,
 	"read.hdf5_dxchange": HDF5DxchangeReadStage,
@@ -64,6 +66,7 @@ __all__ = [
 	"AstraCudaStage",
 	"AllOfTheStripeStage",
 	"BPCudaStage",
+	"BronnikovAidedCorrectionStage",
 	"CGLSCudaStage",
 	"EMCudaStage",
 	"EntropyLocalCenterStage",
