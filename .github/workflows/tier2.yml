@@ -1,12 +1,14 @@
-name: Tier-2 dataset validation
+name: Recon-data Tier-2 validation
 
 on:
   workflow_dispatch:
 
 jobs:
   validate-reference-data:
-    runs-on: [self-hosted, yarrkha]
+    runs-on: [self-hosted, recon-data]
     timeout-minutes: 30
+    env:
+      LFTOMO_RUNNER_CAPABILITY: recon-data
     steps:
       - uses: actions/checkout@v4
       - name: Install the checkout without replacing the runner environment

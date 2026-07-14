@@ -1,7 +1,7 @@
 # Tier-2 reference data
 
-Tier-2 data remains on lab-internal storage and is exercised only by the
-`[self-hosted, yarrkha]` workflow. The repository contains path fixtures and
+Tier-2 data remains on lab-internal storage and is exercised only by a runner
+with `[self-hosted, recon-data]`. The repository contains path fixtures and
 layout validation, not the projection data itself. The exact installed
 metadata is versioned in `tests/tier2_metadata/`; each file is copied to its
 dataset root as `scan.yaml`.
@@ -79,5 +79,5 @@ datasets mounted and canonical metadata installed, run:
 pytest tests/test_tier2_datasets.py --run-tier2
 ```
 
-The manually dispatched `Tier-2 dataset validation` workflow runs the same
-command on `[self-hosted, yarrkha]`.
+The manually dispatched `Recon-data Tier-2 validation` workflow runs the same
+command on `[self-hosted, recon-data]`.

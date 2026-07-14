@@ -1,5 +1,4 @@
 import os
-import socket
 
 import pytest
 
@@ -9,9 +8,10 @@ from tests.tier2 import DATASETS, tier2_path
 def _integration_host_enabled():
 	"""Return whether this host should run lab-local integration tests."""
 
-	if os.environ.get("LFTOMO_RUN_INTEGRATION") == "1":
-		return True
-	return "yarrkha" in socket.gethostname().lower()
+	return (
+		os.environ.get("LFTOMO_RUNNER_CAPABILITY") == "recon-data"
+		or os.environ.get("LFTOMO_RUN_INTEGRATION") == "1"
+	)
 
 
 def pytest_addoption(parser):
@@ -44,7 +44,7 @@ def pytest_collection_modifyitems(config, items):
 	run_integration = config.getoption("--run-integration")
 	integration_enabled = run_integration and _integration_host_enabled()
 	if run_integration:
-		reason = "integration tests run only on Yarrkha unless LFTOMO_RUN_INTEGRATION=1"
+		reason = "integration tests require the recon-data capability or LFTOMO_RUN_INTEGRATION=1"
 	else:
 		reason = "need --run-integration to run"
 	skip_integration = pytest.mark.skip(reason=reason)

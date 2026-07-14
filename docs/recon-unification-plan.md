@@ -204,9 +204,9 @@ Confirmed with Sorotassu on 2026-05-29:
   2. strong phase contrast — HDF5 dxchange
   3. helical scan — either format, smallest available
 - Optional broader coverage: one more per {acquisition system × energy} combination from B10 (PCRBox 14keV, PCRBox 20keV, RedBox 14keV).
-- **Tier 3 — one full-scale reference dataset.** TB-scale, single representative volume. Powers Phase-2 perf benchmarks (the ≤10% regression gate), Dask out-of-core validation, end-to-end sanity. In-place on Yarrkha; test harness takes `--ref-dataset <path>`.
+- **Tier 3 — one full-scale reference dataset.** TB-scale, single representative volume. Powers Phase-2 perf benchmarks (the ≤10% regression gate), Dask out-of-core validation, end-to-end sanity. In-place on lab-internal storage; test harness takes `--ref-dataset <path>`.
 
-**Data hosting.** All Tier-2 and Tier-3 datasets are non-public for now. They live on Yarrkha (or other lab-internal storage). The CI architecture follows: **a self-hosted GitHub Actions runner registered on Yarrkha** picks up Tier-2 and Tier-3 workflows via `runs-on: [self-hosted, yarrkha]`; Tier-1 synthetic tests stay on GitHub-hosted runners. If/when datasets become publishable, lifting them to Zenodo/S3/LFS is a test-harness config change with no test-code impact.
+**Data hosting.** All Tier-2 and Tier-3 datasets are non-public for now. They live on lab-internal storage. The CI architecture follows: **a self-hosted GitHub Actions runner with the `recon-data` capability** picks up Tier-2 and Tier-3 workflows via `runs-on: [self-hosted, recon-data]`; Tier-1 synthetic tests stay on GitHub-hosted runners. The current WSL host has local capacity at `/mnt/wsl/PHYSICALDRIVE2p1`, while dataset-specific environment variables continue to support other mounts. If/when datasets become publishable, lifting them to Zenodo/S3/LFS is a test-harness config change with no test-code impact.
 
 **Reference recons — the producer-suite model.** There is no single canonical producer script for the lab right now; each lineage (R2.54, `recon_minimal.py`, `phase_contrast/recon_v1.py`, `b10_recon.py` against pinned-old-lftomo, …) is a distinct, sometimes-overlapping producer. The references are organized as a **producer suite**, not one-frozen-recon-per-dataset:
 
