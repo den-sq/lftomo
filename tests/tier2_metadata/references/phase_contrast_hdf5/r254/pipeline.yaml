@@ -1,0 +1,35 @@
+schema_version: 1
+resolved_from: r254-canonical@historical-voi2.1
+output_path: reference/r254/recon
+metadata:
+  producer: r254
+  dataset: phase_contrast_hdf5
+  source_variant: R2.54_Berkeley8_hpc_v1.81_alt.py
+pipeline:
+  - kind: read
+    algorithm: hdf5_dxchange
+    params: {path: projections/20241205_120252_octo_0_centerradula_fov2_scan4.h5, dataset: /exchange/data, order: projection, theta_count: 1969, theta_start_degrees: 0.0, theta_stop_degrees: 180.0}
+  - kind: normalize
+    algorithm: theta_switch
+    params: {gain_averaging: true, pre_gain: gains/gain.tif, post_gain: gains/gain_post.tif, pre_dark: gains/dark.tif, post_dark: gains/dark_post.tif, pre_subtracted: false}
+  - kind: phase
+    algorithm: bronnikov_aided
+    params: {alpha: 2.4, gamma: 1.2}
+  - kind: geometry
+    algorithm: affine_skew_movement
+    params: {skew_degrees: 0.0, movement_enabled: false, movement_y: 0.26351930523856, movement_x: -1.707958799447738}
+  - kind: stripe
+    algorithm: fw
+    params: {wavelet: db25, sigma: 2.4, ncore: 12}
+  - kind: stripe
+    algorithm: vo_sort
+    params: {size: 21, ncore: 12}
+  - kind: center
+    algorithm: manual
+    params: {value_px: 1282.75, find_center: false}
+  - kind: recon
+    algorithm: gridrec
+    params: {ncore: 32, sinogram_order: false, circle_mask: false}
+  - kind: write
+    algorithm: tiff_slices
+    params: {dtype: float32, naming_template: "rec_{slice:05d}.tif"}
