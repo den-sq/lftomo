@@ -20,7 +20,7 @@ reuse.
 | Local source | `dan_scripts/prep/phase.py:22-144` |
 | Entry point | `phase_retrieval(i, work_mem, phase_mem, pixel_size, energy, dist, tp=False, height_pad=False, thread_fallback=cpu_count())` |
 | Window/memory behavior | Worker `i` mutates one `(Y, X)` projection in `SharedNP` storage. A read-only filter is created once in separate shared memory and reused by all workers. Optional vertical edge padding is derived from the physical propagation parameters. Horizontal padding is supplied earlier by the rotation/window path. |
-| Phase-2 destination | `phase.paganin` for the corrected-paper mode (`tp=False`); `phase.paganin_tomopy_legacy` for the compatibility mode (`tp=True`). |
+| Phase-2 destination | The corrected-paper beta-valued path is the source for `phase.paganin_phase_absorption`; the standard phase-only option is registered separately as `phase.paganin`. The historical `tp=True` coefficient remains catalog evidence, not a third Stage option. |
 
 Specific correctness behavior that was not in the upstream behavior when this
 implementation was last checked:
@@ -114,8 +114,9 @@ is retained without falsely claiming a forked algorithm.
 
 ## Canonicalization rules
 
-- Maintain the corrected-paper and TomoPy-legacy Paganin choices as separate
-  algorithm names; do not hide the `tp` behavior behind a backend flag.
+- Maintain standard phase-only Paganin and the corrected-paper beta-valued
+  phase/absorption path as separate algorithm names; do not hide the physical
+  output difference behind a backend flag.
 - Lift the three Vo implementations with their paired-work-buffer strategy and
   Tier-1 equivalence fixtures before composing `stripe.vo_family`.
 - Keep TomoPy gridrec/CUDA and Vo/PC center kernels where they are direct calls;
