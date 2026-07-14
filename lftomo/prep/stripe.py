@@ -9,7 +9,6 @@ from scipy.signal import medfilt2d
 from scipy.ndimage import median_filter
 from scipy.ndimage import binary_dilation
 from scipy.ndimage import uniform_filter1d
-from scipy import interpolate
 from tomopy.util import mproc
 
 
@@ -28,20 +27,24 @@ def remove_sort_vo(dw: TomoWindow, sino_mem: SharedNPArray, size: int = 21, dim:
 
 def _remove_sort_vo(sino_mem: SharedNPArray, i: int, size: int = 21, dim: int = 1):
 	with (sino_mem[i] as sino):
+		_remove_sort_array(sino, size=size, dim=dim)
 
-		f_shape = (size, 1 if dim == 1 else size)
 
-		sino_mod = np.transpose(sino[:, :])
-		sort_idx = sino_mod.argsort(axis=1) 			# Track index separately to sort back.
-		sino_mod[:, :] = np.take_along_axis(sino_mod, sort_idx, axis=1)
-		sort_idx[:, :] = sort_idx.argsort(axis=1) 	# Now transition it to sort back index.
+def _remove_sort_array(sino: np.ndarray, size: int = 21, dim: int = 1) -> None:
+	"""Apply the local Vo sorting algorithm to one ``(Theta, X)`` sinogram."""
+	f_shape = (size, 1 if dim == 1 else size)
 
-		# Apply filter to sorted memory.
-		sino_mod[:, :] = medfilt2d(sino_mod, f_shape)
+	sino_mod = np.transpose(sino[:, :]).copy()
+	sort_idx = sino_mod.argsort(axis=1) 			# Track index separately to sort back.
+	sino_mod[:, :] = np.take_along_axis(sino_mod, sort_idx, axis=1)
+	sort_idx[:, :] = sort_idx.argsort(axis=1) 	# Now transition it to sort back index.
 
-		# sort back and assign.
-		sino_mod[:, :] = np.take_along_axis(sino_mod, sort_idx, axis=1)
-		sino[:, :] = np.transpose(sino_mod)
+	# Apply filter to sorted memory.
+	sino_mod[:, :] = medfilt2d(sino_mod, f_shape)
+
+	# sort back and assign.
+	sino_mod[:, :] = np.take_along_axis(sino_mod, sort_idx, axis=1)
+	sino[:, :] = np.transpose(sino_mod)
 
 
 def _detect_stripe(listdata, snr):
@@ -72,42 +75,40 @@ def _detect_stripe(listdata, snr):
 def remove_large_vo(sino_mem: SharedNPArray, i: int, snr: int = 3, size: int = 51, drop_ratio: float = 0.1,
 					norm: bool = True):
 	with sino_mem[i] as sino_base:
+		_remove_large_array(sino_base, snr=snr, size=size, drop_ratio=drop_ratio, norm=norm)
 
-		sino = sino_base.copy()
 
-		# Calculate # of outliers to drop.
-		drop_ratio = np.clip(drop_ratio, 0.0, 0.8)
-		nrow = sino_mem.shape.Theta
-		ndrop = int(0.5 * drop_ratio * nrow)
+def _remove_large_array(sino_base: np.ndarray, snr: int = 3, size: int = 51,
+						drop_ratio: float = 0.1, norm: bool = True) -> None:
+	"""Apply the local Vo large-stripe algorithm to one sinogram."""
+	sino = sino_base.copy()
 
-		# Get Sort Index (so sortback is easy)
-		sort_idx = sino.argsort(axis=0)
+	# Calculate # of outliers to drop.
+	drop_ratio = np.clip(drop_ratio, 0.0, 0.8)
+	nrow = sino.shape[0]
+	ndrop = int(0.5 * drop_ratio * nrow)
+	kept = slice(ndrop, -ndrop if ndrop else None)
 
-		# Get mean of original and smoothed values after throwing out outliers.
-		sino_smooth = np.take_along_axis(sino, sort_idx, axis=0)
-		sort_mean = np.mean(sino_smooth[ndrop:-ndrop, :], axis=0)
-		sino_smooth[:, :] = medfilt2d(sino_smooth, (1, size))
-		smooth_mean = np.mean(sino_smooth[ndrop:-ndrop, :], axis=0)
+	# Get Sort Index (so sortback is easy)
+	sort_idx = sino.argsort(axis=0)
 
-		# Sort back sino_smooth.
-		sort_idx[:, :] = sort_idx.argsort(axis=0)
-		sino_smooth[:, :] = np.take_along_axis(sino_smooth[:, :], sort_idx, axis=0)
+	# Get mean of original and smoothed values after throwing out outliers.
+	sino_smooth = np.take_along_axis(sino, sort_idx, axis=0)
+	sort_mean = np.mean(sino_smooth[kept, :], axis=0)
+	sino_smooth[:, :] = medfilt2d(sino_smooth, (1, size))
+	smooth_mean = np.mean(sino_smooth[kept, :], axis=0)
 
-		# Locate stripes
-		factor = np.divide(sort_mean, smooth_mean, out=np.ones_like(sort_mean), where=smooth_mean != 0)
-		sino_mask = _detect_stripe(factor, snr)
-		sino_mask = binary_dilation(sino_mask, iterations=1)
+	# Sort back sino_smooth.
+	sort_idx[:, :] = sort_idx.argsort(axis=0)
+	sino_smooth[:, :] = np.take_along_axis(sino_smooth[:, :], sort_idx, axis=0)
 
-		# Alt Version - Test Speed - meaningful speed impact unlikely
-		# sino[v_slice] = np.divide(sino[v_slice], np.tile(factor, (nrow, 1)), out=smooth_sino[v_slice],
-		# 							where=~np.tile(sino_mask, (nrow, 1))))
+	# Locate stripes
+	factor = np.divide(sort_mean, smooth_mean, out=np.ones_like(sort_mean), where=smooth_mean != 0)
+	sino_mask = binary_dilation(_detect_stripe(factor, snr), iterations=1)
 
-		# Normalize  - Why separate to mask application (?)
-		if norm:
-			np.divide(sino, np.tile(factor, (nrow, 1)), out=sino_base[:, :])
-
-		# Apply mask.  I DO NOT KNOW WHY TRANSPOSE IS NECESSARY, NP ADVANCED INDEXING IS WEIRD
-		sino_base[:, sino_mask] = sino_smooth[:, sino_mask]
+	if norm:
+		np.divide(sino, np.tile(factor, (nrow, 1)), out=sino_base[:, :])
+	sino_base[:, sino_mask] = sino_smooth[:, sino_mask]
 
 
 def remove_dead_vo(dw: TomoWindow, sino_mem: SharedNPArray, snr: int = 3, size: int = 51, norm: float = True,
@@ -118,36 +119,30 @@ def remove_dead_vo(dw: TomoWindow, sino_mem: SharedNPArray, snr: int = 3, size: 
 
 def _remove_dead_vo(sino_mem: SharedNPArray, i: int, snr: int = 3, size: int = 51, norm: float = True):
 	with sino_mem[i] as sino_base:
-		# Portion used for binary dilation.
-		mask_cut = np.s_[2:-2]
-
-		# Copy sinogram into contigous array.  Not strictly necessary but will allow multiple orders in future.
-		# So leave it here for now.
-		sino = np.ascontiguousarray(sino_base[:, :], dtype=sino_mem.dtype)
-
-		# Find areas that deviate from smoothed setup.
-		smooth_diff = np.sum(np.abs(sino - np.apply_along_axis(uniform_filter1d, 0, sino, 10)), axis=0)
-		median_diff = median_filter(smooth_diff, size)
-		factor = np.divide(smooth_diff, median_diff, out=np.ones_like(smooth_diff), where=median_diff != 0)
-
-		# Dilate deviated areas, as a boolean mask.
-		mask = np.full(factor.shape, False)
-		mask[mask_cut] = binary_dilation(_detect_stripe(factor, snr), iterations=1)[mask_cut]
-		x_change = mask.nonzero()[0]
-
-		y_index = np.arange(sino_mem.shape.Theta)
-
-		# Use correct areas as an interpolated mask to apply to bad areas.
-		x_keep = np.invert(mask).nonzero()[0]
-		func_inter = interpolate.interp2d(x_keep, y_index, sino[:, x_keep], kind='linear')
-
-		if len(x_change) > 0:
-			# I DO NOT KNOW WHY TRANSPOSE IS NECESSARY, NP ADVANCED INDEXING IS WEIRD
-			sino_base[:, mask] = func_inter(x_change, y_index)
+		_remove_dead_array(sino_base, snr=snr, size=size)
 
 	# Remove residual stripes
 	if norm is True:
 		remove_large_vo(sino_mem, i, snr, size, norm=norm)
+
+
+def _remove_dead_array(sino_base: np.ndarray, snr: int = 3, size: int = 51) -> None:
+	"""Apply the local Vo dead-line interpolation to one sinogram."""
+	mask_cut = np.s_[2:-2]
+	sino = np.ascontiguousarray(sino_base[:, :], dtype=sino_base.dtype)
+
+	smooth_diff = np.sum(np.abs(sino - np.apply_along_axis(uniform_filter1d, 0, sino, 10)), axis=0)
+	median_diff = median_filter(smooth_diff, size)
+	factor = np.divide(smooth_diff, median_diff, out=np.ones_like(smooth_diff), where=median_diff != 0)
+
+	mask = np.full(factor.shape, False)
+	mask[mask_cut] = binary_dilation(_detect_stripe(factor, snr), iterations=1)[mask_cut]
+	x_change = mask.nonzero()[0]
+	x_keep = np.invert(mask).nonzero()[0]
+
+	if len(x_change) > 0:
+		for theta in range(sino.shape[0]):
+			sino_base[theta, x_change] = np.interp(x_change, x_keep, sino[theta, x_keep])
 
 
 def remove_stripe_fw(dw: TomoWindow, sino_mem: SharedNPArray, level: int = None, wname: str = 'db5', sigma: float = 2.0,

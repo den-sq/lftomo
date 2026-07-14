@@ -5,6 +5,7 @@ from lftomo.config import StageConfig
 from .normalize import WeightedNormalizeStage
 from .phase import PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
+from .stripe import VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
 from .write import TIFFSlicesWriteStage
 
 
@@ -14,6 +15,9 @@ STAGE_REGISTRY = {
 	"phase.paganin_phase_absorption": PaganinPhaseAbsorptionStage,
 	"read.hdf5_dxchange": HDF5DxchangeReadStage,
 	"read.tiff_stack": TIFFStackReadStage,
+	"stripe.vo_dead": VoDeadStripeStage,
+	"stripe.vo_large": VoLargeStripeStage,
+	"stripe.vo_sort": VoSortStripeStage,
 	"write.tiff_slices": TIFFSlicesWriteStage,
 }
 
@@ -36,6 +40,9 @@ __all__ = [
 	"PaganinStage",
 	"TIFFStackReadStage",
 	"TIFFSlicesWriteStage",
+	"VoDeadStripeStage",
+	"VoLargeStripeStage",
+	"VoSortStripeStage",
 	"WeightedNormalizeStage",
 	"create_stage",
 ]
