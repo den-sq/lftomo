@@ -86,7 +86,12 @@ def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> P
 
 
 class DRHTStage(Stage):
-	"""Dense residual hierarchical transformer sinogram restoration."""
+	"""Dense residual hierarchical transformer sinogram restoration.
+
+	``repo_path`` is imported as Python code and ``checkpoint_path`` is loaded
+	through ``torch.load``. Both inputs must come from a trusted operator source;
+	see ``docs/super-resolution-security.md``.
+	"""
 
 	name = "super_resolve.drht"
 	contract = _contract()
@@ -197,7 +202,12 @@ class DRHTStage(Stage):
 
 
 class LDMStage(Stage):
-	"""Adapter for the separately restored physics-guided LDM repository."""
+	"""Adapter for the separately restored physics-guided LDM repository.
+
+	The configured repository module is arbitrary Python code. Its repository,
+	configuration, and checkpoint must be treated as trusted executable inputs;
+	see ``docs/super-resolution-security.md``.
+	"""
 
 	name = "super_resolve.ldm"
 	contract = _contract()

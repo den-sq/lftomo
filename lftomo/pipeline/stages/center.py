@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import numpy as np
 from skimage.measure import shannon_entropy
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
 from lftomo.util.shapes import ProjOrder, SinoOrder
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _contract(memory_multiplier: float = 1.0) -> StageContract:
@@ -269,9 +273,14 @@ class VoCenterStage(Stage):
 				if not 0 <= index < data.shape[0]:
 					raise ValueError("center.vo ind is outside the sinogram window")
 				center = self._find(projection_order, index)
-		except Exception:
+		except (ValueError, RuntimeError, ArithmeticError) as error:
 			if self.fallback != "entropy_local":
 				raise
+			LOGGER.warning(
+				"center.vo failed with %s; using center.entropy_local fallback",
+				error,
+				exc_info=True,
+			)
 			return EntropyLocalCenterStage(**self.fallback_params).run(state)
 		return _store_center(state, center)
 

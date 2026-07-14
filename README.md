@@ -16,8 +16,8 @@ Then install the local checkout into the activated environment. `uv pip` is the
 fast editable-install path when it is available; plain `pip` is also fine.
 
 ```shell
-uv pip install -e ".[dev]"
-# or: pip install -e ".[dev]"
+uv pip install -e ".[dev,tomopy]"
+# or: pip install -e ".[dev,tomopy]"
 ```
 
 Bronnikov-aided correction is optional because it executes through hotopy.
@@ -45,6 +45,14 @@ lftomo-run phase-contrast-canonical scan.yaml --output recon/ --json-output
 Stage sweeps expand automatically. Multiple concrete runs are written beneath
 `sweep-0000`, `sweep-0001`, and so on. Use `--gpu` only when the runtime has the
 CUDA dependencies required by a selected GPU Stage.
+
+Angle sampling, gridrec defaults, and the optional TomoPy/NumPy compatibility
+contract are documented in
+[`docs/reconstruction-conventions.md`](docs/reconstruction-conventions.md).
+Filtering dtype behavior is recorded in
+[`docs/filtering-conventions.md`](docs/filtering-conventions.md), and operators
+using DRHT/LDM must follow
+[`docs/super-resolution-security.md`](docs/super-resolution-security.md).
 
 ## Tests
 

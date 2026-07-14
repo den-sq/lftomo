@@ -11,7 +11,13 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 class BilateralFilterStage(Stage):
-	"""Apply OpenCV edge-preserving bilateral filtering per projection."""
+	"""Apply OpenCV edge-preserving bilateral filtering per projection.
+
+	OpenCV's bilateral implementation does not accept float64 images. Each
+	projection is therefore evaluated at float32 precision, then assigned back
+	into the original working array. A float64 working array remains float64,
+	but the filtered values have float32 computational precision.
+	"""
 
 	name = "filter.bilateral"
 	contract = StageContract(
@@ -58,6 +64,8 @@ class BilateralFilterStage(Stage):
 		count = data.shape[0] if self.order == "projection" else data.shape[1]
 		for projection in range(count):
 			image = data[projection, :, :] if self.order == "projection" else data[:, projection, :]
+			# This conversion is intentional and is part of the Stage's public
+			# numerical behavior; cv2.bilateralFilter rejects float64 inputs.
 			image[:] = cv2.bilateralFilter(
 				image.astype(np.float32, copy=False),
 				self.diameter,
