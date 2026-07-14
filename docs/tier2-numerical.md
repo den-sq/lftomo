@@ -48,6 +48,9 @@ correlation from `0.96259` to `0.96363`, and normalized bias from `0.00117` to
 By default the recon-data workflow evaluates every selected reference slice.
 For a diagnostic smoke run, `LFTOMO_TIER2_SLICES=N` limits each contiguous
 selection to its first `N` rows. A reference is skipped, with its archival reason
-reported, when metadata explicitly says that the exact producer input is no
-longer available. This currently applies to AAA592's recovered thresholded
-variant, which has 3,935 projections rather than the historical 3,937 inputs.
+reported, when metadata explicitly says that the exact producer or its input is
+no longer available. This applies to AAA592's recovered thresholded variant,
+which has 3,935 projections rather than the historical 3,937 inputs, and to the
+B10 R2.54 and `b10_recon.py` outputs, whose surviving unversioned scripts were
+modified after their historical runs. Their immutable outputs remain useful
+archives, but later script bytes are not presented as exact regression inputs.

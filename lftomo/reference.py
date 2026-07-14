@@ -19,7 +19,7 @@ from lftomo.runner import _make_executable, _resolve_flat_fields, load_recon, lo
 
 
 class ReferenceNotReproducible(RuntimeError):
-	"""The archived metadata records that the exact producer input is absent."""
+	"""The archived metadata records that the exact producer or input is absent."""
 
 
 class RuntimeEnvironmentError(RuntimeError):
@@ -304,6 +304,16 @@ def run_reference_archive(root: str | Path, producer: str,
 	input_metadata = metadata.get("input") or {}
 	if input_metadata.get("recovered_input_note"):
 		raise ReferenceNotReproducible(str(input_metadata["recovered_input_note"]))
+	source_metadata = metadata.get("source") or {}
+	provenance_note = str(source_metadata.get("provenance_note", ""))
+	exact_producer_unavailable = source_metadata.get("exact_producer_available") is False
+	legacy_unversioned_copy = (
+		"surviving_copy_modified_at" in source_metadata
+		and "modified after" in provenance_note.lower()
+	)
+	if exact_producer_unavailable or legacy_unversioned_copy:
+		reason = source_metadata.get("reproduction_note") or provenance_note
+		raise ReferenceNotReproducible(str(reason))
 	if np.lib.NumpyVersion(np.__version__) >= np.lib.NumpyVersion("2.0.0"):
 		raise RuntimeEnvironmentError(
 			f"TomoPy numerical reproduction requires NumPy <2; found {np.__version__}. "

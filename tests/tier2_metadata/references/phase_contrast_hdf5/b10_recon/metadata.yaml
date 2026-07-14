@@ -4,6 +4,11 @@ dataset: phase_contrast_hdf5
 status: frozen_historical_output
 immutable: true
 source:
+  exact_producer_available: false
+  reproduction_note: >-
+    The exact b10_recon.py bytes executed in this historical run are not
+    available. The surviving unversioned script was modified after the output
+    was produced and cannot be used as an exact numerical regression contract.
   path: B10/PCRBox_Octo0/20kev/voi2.1/b10_recon.py
   surviving_copy_sha256: 7d87ba43e550fc5c83b518bee89a3427ca762a0fc2be2d94f2078daf63b41492
   surviving_copy_modified_at: "2025-01-14T18:18:09-05:00"

@@ -6,9 +6,11 @@ import tifffile as tf
 
 from lftomo.reference import (
 	NumericalTolerance,
+	ReferenceNotReproducible,
 	aligned_producer_window,
 	checksum_manifest,
 	compare_slice,
+	run_reference_archive,
 	sha256_file,
 )
 
@@ -20,6 +22,21 @@ def test_phase_contrast_rows_use_aligned_inclusive_producer_chunk():
 
 	assert window == (1920, 2060)
 	assert core == (1950, 2030)
+
+
+def test_reference_with_post_run_unversioned_producer_is_not_reproducible(tmp_path):
+	archive = tmp_path / "reference" / "r254"
+	archive.mkdir(parents=True)
+	(archive / "metadata.yaml").write_text(
+		"""source:
+  surviving_copy_modified_at: '2025-01-17T17:27:13-05:00'
+  provenance_note: The surviving script copy was modified after this output was produced.
+""",
+		encoding="utf-8",
+	)
+
+	with pytest.raises(ReferenceNotReproducible, match="modified after"):
+		run_reference_archive(tmp_path, "r254")
 
 
 def test_checksum_manifest_and_streaming_hash(tmp_path):
