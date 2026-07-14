@@ -19,6 +19,9 @@ pipeline:
       order: [remove_dead_vo, remove_large_vo, remove_sort_vo]
       size: 31
       snr: 3.0
+  - kind: geometry
+    algorithm: affine_skew_movement
+    params: {skew_degrees: 0.0, movement_enabled: false, transition_to: projection, pad_x: 0}
   - kind: phase
     algorithm: paganin
     params: {enabled: true, alpha: 0.06, pad_y: true}

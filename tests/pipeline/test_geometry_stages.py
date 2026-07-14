@@ -1,7 +1,8 @@
 import numpy as np
+import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import DataDomain, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	AffineSkewMovementStage,
 	MovementCorrectStage,
@@ -9,6 +10,7 @@ from lftomo.pipeline.stages import (
 	SkewCorrectStage,
 	create_stage,
 )
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 def _state(array, config):
@@ -94,3 +96,93 @@ def test_combined_r254_alias_runs_movement_then_skew(monkeypatch):
 
 	assert isinstance(stage, AffineSkewMovementStage)
 	assert order == ["movement", "movement", "skew", "skew"]
+
+
+def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(monkeypatch):
+	config = StageConfig(
+		kind="geometry", algorithm="affine_skew_movement",
+		params={"transition_to": "projection", "pad_x": 1, "skew_degrees": 0},
+	)
+	working = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+	state = _state(working, config)
+	state.layout = SinoOrder
+	state.domain = DataDomain.ATTENUATION
+	monkeypatch.setattr("cv2.warpAffine", lambda *_args, **_kwargs:
+		(_ for _ in ()).throw(AssertionError("zero skew must not interpolate")))
+
+	stage = create_stage(config)
+	result = stage.run(state)
+
+	assert stage.contract.fused_transition is True
+	assert result.layout is ProjOrder
+	assert result.working_array.flags.c_contiguous
+	expected = np.pad(working.transpose(1, 0, 2), ((0, 0), (0, 0), (1, 1)), mode="edge")
+	np.testing.assert_array_equal(result.working_array, expected)
+
+
+def test_fused_transition_is_direction_parametric():
+	config = StageConfig(
+		kind="geometry", algorithm="affine_skew_movement",
+		params={"transition_to": "sinogram", "pad_x": 0},
+	)
+	working = np.arange(24, dtype=np.float32).reshape(3, 2, 4)
+	state = _state(working.transpose(1, 0, 2), config)
+	state.working_array = working
+	state.layout = ProjOrder
+	state.domain = DataDomain.ATTENUATION
+
+	result = create_stage(config).run(state)
+
+	assert result.layout is SinoOrder
+	np.testing.assert_array_equal(result.working_array, working.transpose(1, 0, 2))
+
+
+def test_nonzero_fused_transition_resamples_once_per_projection(monkeypatch):
+	config = StageConfig(
+		kind="geometry", algorithm="affine_skew_movement",
+		params={"transition_to": "projection", "skew_degrees": 0.2, "pad_x": 1},
+	)
+	working = np.ones((2, 3, 4), dtype=np.float32)
+	state = _state(working, config)
+	state.layout = SinoOrder
+	calls = []
+	monkeypatch.setattr("cv2.getRotationMatrix2D", lambda center, degrees, scale:
+		(center, degrees, scale))
+	def warp(image, matrix, size, flags):
+		calls.append((image.shape, matrix, size, flags))
+		return image
+	monkeypatch.setattr("cv2.warpAffine", warp)
+
+	stage = create_stage(config)
+	result = stage.run(state)
+
+	assert stage.contract.resamples_detector is True
+	assert len(calls) == 3
+	assert calls[0][0] == (2, 6)
+	assert calls[0][2] == (6, 2)
+	assert result.layout is ProjOrder
+
+
+def test_recon_minimal_tilt_radians_is_converted_to_corrective_degrees():
+	stage = AffineSkewMovementStage(
+		transition_to="projection", tilt_radians=-0.003134796238244514,
+	)
+	assert stage.skew_degrees == pytest.approx(0.17961059408489755)
+
+
+def test_nontransition_affine_preserves_aaa523_style_projection_layout():
+	config = StageConfig(
+		kind="geometry", algorithm="affine_skew_movement",
+		params={"skew_degrees": 0, "movement_enabled": False},
+	)
+	working = np.ones((3, 2, 4), dtype=np.float32)
+	state = _state(working.transpose(1, 0, 2), config)
+	state.working_array = working
+	state.layout = ProjOrder
+
+	stage = create_stage(config)
+	result = stage.run(state)
+
+	assert stage.contract.fused_transition is False
+	assert result.layout is ProjOrder
+	assert result.working_array is working
