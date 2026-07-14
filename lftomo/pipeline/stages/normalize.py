@@ -28,8 +28,10 @@ class WeightedNormalizeStage(Stage):
 		resources=ResourceHints(memory_multiplier=1.0),
 	)
 
-	def __init__(self, pre_sub: bool = False):
-		self.pre_sub = pre_sub
+	def __init__(self, pre_sub: bool = False, pre_subtracted: bool | None = None,
+				timing_source: str | None = None):
+		self.pre_sub = pre_sub if pre_subtracted is None else pre_subtracted
+		self.timing_source = timing_source
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":

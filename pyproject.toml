@@ -25,6 +25,9 @@ dependencies = [
 	"PyYAML",
 ]
 
+[project.scripts]
+lftomo-run = "lftomo.runner:main"
+
 [project.optional-dependencies]
 bac = [
 	"hotopy",

@@ -35,15 +35,20 @@ class HDF5DxchangeReadStage(Stage):
 
 	def __init__(self, order: str = "projection", theta_start: int = 0,
 				theta_stop: int | None = None, y_start: int = 0,
-				y_stop: int | None = None, calibration_policy: str = "optional"):
+				y_stop: int | None = None, calibration_policy: str = "optional",
+				theta_count: int | None = None, theta_start_degrees: float | None = None,
+				theta_stop_degrees: float | None = None, window_size: int | None = None):
 		if calibration_policy not in ("ignore", "optional", "required"):
 			raise ValueError("calibration_policy must be 'ignore', 'optional', or 'required'")
 		self.order = order
 		self.theta_start = theta_start
-		self.theta_stop = theta_stop
+		self.theta_stop = theta_count if theta_stop is None else theta_stop
 		self.y_start = y_start
 		self.y_stop = y_stop
 		self.calibration_policy = calibration_policy
+		self.theta_start_degrees = theta_start_degrees
+		self.theta_stop_degrees = theta_stop_degrees
+		self.window_size = window_size
 		self.contract = _output_contract(
 			order,
 			required_metadata=("projections.path", "projections.data_path"),
@@ -109,13 +114,19 @@ class TIFFStackReadStage(Stage):
 	name = "read.tiff_stack"
 
 	def __init__(self, order: str = "projection", threads: int | None = None,
-				y_start: int = 0, y_stop: int | None = None):
+				y_start: int = 0, y_stop: int | None = None,
+				pattern: str | None = None, projection_count: int | None = None,
+				sinogram_chunk_size: int | None = None, chunk_overlap: int = 0):
 		if order not in ("projection", "sinogram"):
 			raise ValueError("TIFF read order must be 'projection' or 'sinogram'")
 		self.order = order
 		self.threads = threads
 		self.y_start = y_start
 		self.y_stop = y_stop
+		self.pattern = pattern
+		self.projection_count = projection_count
+		self.sinogram_chunk_size = sinogram_chunk_size
+		self.chunk_overlap = chunk_overlap
 		self.contract = _output_contract(
 			order,
 			required_metadata=("projections.path", "projections.pattern"),
@@ -128,7 +139,8 @@ class TIFFStackReadStage(Stage):
 
 	def _source_files(self, source: TIFFStackProjections) -> list[Path]:
 		path = Path(source.path)
-		files = natsorted(path.glob(source.pattern)) if path.is_dir() else [path]
+		pattern = self.pattern or source.pattern
+		files = natsorted(path.glob(pattern)) if path.is_dir() else [path]
 		if not files:
 			raise FileNotFoundError(f"no TIFF projections match {path / source.pattern}")
 		return files
@@ -148,6 +160,10 @@ class TIFFStackReadStage(Stage):
 		if count != state.scan.n_projections:
 			raise ValueError(
 				f"scan declares {state.scan.n_projections} projections but TIFF source contains {count}"
+			)
+		if self.projection_count is not None and count != self.projection_count:
+			raise ValueError(
+				f"read stage declares {self.projection_count} projections but TIFF source contains {count}"
 			)
 
 		stop = rows if self.y_stop is None else self.y_stop

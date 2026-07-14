@@ -37,11 +37,14 @@ class PaganinStage(Stage):
 		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
-	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8):
+	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
+				enabled: bool = True, pad_y: bool = False):
 		if alpha <= 0:
 			raise ValueError("Paganin alpha must be positive")
 		self.alpha = alpha
 		self.epsilon = epsilon
+		self.enabled = enabled
+		self.pad_y = pad_y
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "PaganinStage":
@@ -53,6 +56,8 @@ class PaganinStage(Stage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin expects a (Y, Theta, X) sinogram array")
+		if not self.enabled:
+			return state
 		pixel_size_cm = state.scan.pixel_size_um / 10_000
 		wavelength = _wavelength_cm(state.scan.energy_keV)
 		w2 = _angular_frequency_squared((data.shape[0], data.shape[2]), pixel_size_cm)

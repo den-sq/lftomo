@@ -43,7 +43,8 @@ class TIFFSlicesWriteStage(Stage):
 	def __init__(self, dtype: str = "float32",
 				naming_template: str = "{sample_id}_{slice:05d}",
 				processes: int = 1, sample_id: str | None = None,
-				slice_start: int = 0):
+				slice_start: int = 0, write_full: bool = True,
+				write_bin2: bool = False, write_bin4: bool = False):
 		try:
 			self.dtype = _OUTPUT_DTYPES[dtype]
 		except KeyError as error:
@@ -54,6 +55,8 @@ class TIFFSlicesWriteStage(Stage):
 		self.processes = processes
 		self.sample_id = sample_id
 		self.slice_start = slice_start
+		if not write_full or write_bin2 or write_bin4:
+			raise ValueError("TIFF writer currently supports full-resolution output only")
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "TIFFSlicesWriteStage":
