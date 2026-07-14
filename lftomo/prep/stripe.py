@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from collections import namedtuple
+from dataclasses import astuple
 from multiprocessing import Pool
 
 import numpy as np
@@ -12,28 +13,20 @@ from scipy import interpolate
 from tomopy.util import mproc
 
 
-from lftomo.util.mem import SharedNP
-from lftomo.util.window import DataWindow
+from lftomo.util.mem import SharedNPArray
+from lftomo.util.window import TomoWindow
 
 DetailCoeff = namedtuple("DetailCoeff", ["cH", "cV", "cD"])
 
 # Add Copyright Notice
 
 
-def mem_size(mem, swap=None):
-	if swap is None:
-		shape = mem.shape
-	else:
-		shape = [swap[x] if swap[x] is not None else mem.shape[x] for x in range(len(swap))]
-	return int(np.prod(shape, dtype=np.float64) * np.dtype(mem.dtype).itemsize)
-
-
-def remove_sort_vo(dw: DataWindow, sino_mem: SharedNP, size: int = 21, dim: int = 1, proc_count: int = 12):
+def remove_sort_vo(dw: TomoWindow, sino_mem: SharedNPArray, size: int = 21, dim: int = 1, proc_count: int = 12):
 	with Pool(proc_count) as pool:
-		pool.starmap(_remove_sort_vo, [(sino_mem, i, size, dim) for i in dw.internal.y_range])
+		pool.starmap(_remove_sort_vo, [(sino_mem, i, size, dim) for i in dw.internal.int_iter()])
 
 
-def _remove_sort_vo(sino_mem: SharedNP, i: int, size: int = 21, dim: int = 1):
+def _remove_sort_vo(sino_mem: SharedNPArray, i: int, size: int = 21, dim: int = 1):
 	with (sino_mem[i] as sino):
 
 		f_shape = (size, 1 if dim == 1 else size)
@@ -76,7 +69,7 @@ def _detect_stripe(listdata, snr):
 	return listmask
 
 
-def remove_large_vo(sino_mem: SharedNP, i: int, snr: int = 3, size: int = 51, drop_ratio: float = 0.1,
+def remove_large_vo(sino_mem: SharedNPArray, i: int, snr: int = 3, size: int = 51, drop_ratio: float = 0.1,
 					norm: bool = True):
 	with sino_mem[i] as sino_base:
 
@@ -117,13 +110,13 @@ def remove_large_vo(sino_mem: SharedNP, i: int, snr: int = 3, size: int = 51, dr
 		sino_base[:, sino_mask] = sino_smooth[:, sino_mask]
 
 
-def remove_dead_vo(dw: DataWindow, sino_mem: SharedNP, snr: int = 3, size: int = 51, norm: float = True,
+def remove_dead_vo(dw: TomoWindow, sino_mem: SharedNPArray, snr: int = 3, size: int = 51, norm: float = True,
 					proc_count: int = 12):
 	with Pool(proc_count) as pool:
-		pool.starmap(_remove_dead_vo, [(sino_mem, i, snr, size, norm) for i in dw.internal.y_range])
+		pool.starmap(_remove_dead_vo, [(sino_mem, i, snr, size, norm) for i in dw.internal.int_iter()])
 
 
-def _remove_dead_vo(sino_mem: SharedNP, i: int, snr: int = 3, size: int = 51, norm: float = True):
+def _remove_dead_vo(sino_mem: SharedNPArray, i: int, snr: int = 3, size: int = 51, norm: float = True):
 	with sino_mem[i] as sino_base:
 		# Portion used for binary dilation.
 		mask_cut = np.s_[2:-2]
@@ -157,7 +150,7 @@ def _remove_dead_vo(sino_mem: SharedNP, i: int, snr: int = 3, size: int = 51, no
 		remove_large_vo(sino_mem, i, snr, size, norm=norm)
 
 
-def remove_stripe_fw(dw: DataWindow, sino_mem: SharedNP, level: int = None, wname: str = 'db5', sigma: float = 2.0,
+def remove_stripe_fw(dw: TomoWindow, sino_mem: SharedNPArray, level: int = None, wname: str = 'db5', sigma: float = 2.0,
 						zero_pad: bool = False, proc_count: int = 12):
 	"""
 	Remove horizontal stripes from sinogram using the Fourier-Wavelet (FW)
@@ -177,9 +170,10 @@ def remove_stripe_fw(dw: DataWindow, sino_mem: SharedNP, level: int = None, wnam
 	:param proc_count: int, optional
 	"""
 	if level is None:
-		level = int(np.ceil(np.log2(np.max(sino_mem.shape))))
+		level = int(np.ceil(np.log2(np.max(astuple(sino_mem.shape)))))
 	with Pool(proc_count) as pool:
-		pool.starmap(_remove_stripe_fw, [(sino_mem, i, level, wname, sigma, zero_pad) for i in dw.internal.y_range])
+		pool.starmap(_remove_stripe_fw, [(sino_mem, i, level, wname, sigma, zero_pad)
+											for i in dw.internal.int_iter()])
 
 
 def _compounding_dwt2(sli, wname, mode, level):

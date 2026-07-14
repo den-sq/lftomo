@@ -10,7 +10,9 @@ import numpy as np
 import numexpr as ne
 
 from lftomo.util.log import log, LOG
-from lftomo.util.mem import SharedNP, ThetaSlice
+from lftomo.util.mem import SharedNPArray
+from lftomo.util.shapes import ImgSlice
+from lftomo.util.window import TomoWindow
 
 BOLTZMANN_CONSTANT = 1.3806488e-16  # [erg/k]
 SPEED_OF_LIGHT = 299792458e+2  # [cm/s]
@@ -83,12 +85,12 @@ def filter_shape(base_shape, pixel_size, dist, energy, height_pad=False):
 	else:
 		pad_height = 0
 
-	return ThetaSlice(base_shape.Y + 2 * pad_height, base_shape.X)
+	return ImgSlice(base_shape.Y + 2 * pad_height, base_shape.X)
 
 
 def filter_create(mem_name, mem_dtype, base_shape, alpha, pixel_size, dist, energy, tp=False, height_pad=False):
-	phase_mem = SharedNP(mem_name, mem_dtype, create=False,
-						shape=filter_shape(base_shape, pixel_size, dist, energy, height_pad)).create()
+	phase_mem = SharedNPArray(mem_name, filter_shape(base_shape, pixel_size, dist, energy, height_pad),
+						mem_dtype, allocate=True)
 
 	_set_phase_filter(alpha, pixel_size, dist, energy, phase_mem, tp)
 
@@ -110,7 +112,7 @@ def _set_phase_filter(alpha, pixel_size, dist, energy, phase_mem, tp=False):
 			statement=f'Filter: {phase_mem.shape} | {phase_mem} | {pixel_size} | {dist} | {energy} | {np.mean(phase_filter)}')
 
 
-def phase_retrieval(dw, source_mem, phase_alpha, pixel_size, energy, dist, sino_order=True,
+def phase_retrieval(dw: TomoWindow, source_mem: SharedNPArray, phase_alpha, pixel_size, energy, dist, sino_order=True,
 					tp=False, height_pad=False, proc_count=cpu_count()):
 
 	def get_slice(sino_order, i):
@@ -118,13 +120,17 @@ def phase_retrieval(dw, source_mem, phase_alpha, pixel_size, energy, dist, sino_
 
 	phase_mem = filter_create("phase_filter", source_mem.dtype, source_mem.shape, phase_alpha,
 												pixel_size, dist, energy, tp, height_pad)
-	with Pool(proc_count) as pool:
-		pool.starmap(_phase_retrieval, [(get_slice(sino_order, i), source_mem, phase_mem,
-											pixel_size, energy, dist, tp, height_pad)
-											for i in range(dw.shape.Theta)])
+	try:
+		with Pool(proc_count) as pool:
+			pool.starmap(_phase_retrieval, [(get_slice(sino_order, i), source_mem, phase_mem,
+												pixel_size, energy, dist, tp, height_pad)
+												for i in range(dw.shape.Theta)])
+	finally:
+		phase_mem.shutdown()
 
 
-def _phase_retrieval(y_slice, work_mem, phase_mem, pixel_size, energy, dist, tp=False, height_pad=False,
+def _phase_retrieval(y_slice, work_mem: SharedNPArray, phase_mem: SharedNPArray,
+					pixel_size, energy, dist, tp=False, height_pad=False,
 					thread_fallback=cpu_count()):
 
 	with work_mem as tomo, phase_mem as phase_filter:
