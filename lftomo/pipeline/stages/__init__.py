@@ -4,12 +4,14 @@ from lftomo.config import StageConfig
 
 from .normalize import WeightedNormalizeStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
+from .write import TIFFSlicesWriteStage
 
 
 STAGE_REGISTRY = {
 	"normalize.weighted": WeightedNormalizeStage,
 	"read.hdf5_dxchange": HDF5DxchangeReadStage,
 	"read.tiff_stack": TIFFStackReadStage,
+	"write.tiff_slices": TIFFSlicesWriteStage,
 }
 
 
@@ -28,6 +30,7 @@ __all__ = [
 	"STAGE_REGISTRY",
 	"HDF5DxchangeReadStage",
 	"TIFFStackReadStage",
+	"TIFFSlicesWriteStage",
 	"WeightedNormalizeStage",
 	"create_stage",
 ]
