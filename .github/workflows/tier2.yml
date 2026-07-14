@@ -10,7 +10,7 @@ jobs:
     env:
       LFTOMO_RUNNER_CAPABILITY: recon-data
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install the checkout without replacing the runner environment
         run: python -m pip install --no-deps -e .
       - name: Validate canonical datasets and reference slots
