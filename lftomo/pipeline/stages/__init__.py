@@ -17,7 +17,7 @@ from .recon import (
 	SARTCudaStage,
 	SIRTCudaStage,
 )
-from .stripe import FourierWaveletStripeStage, VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
+from .stripe import AllOfTheStripeStage, FourierWaveletStripeStage, VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
 from .write import TIFFSlicesWriteStage
 
 
@@ -39,6 +39,7 @@ STAGE_REGISTRY = {
 	"recon.gridrec": GridrecStage,
 	"recon.sart_cuda": SARTCudaStage,
 	"recon.sirt_cuda": SIRTCudaStage,
+	"stripe.all_of_the_stripe": AllOfTheStripeStage,
 	"stripe.fw": FourierWaveletStripeStage,
 	"stripe.vo_dead": VoDeadStripeStage,
 	"stripe.vo_large": VoLargeStripeStage,
@@ -61,6 +62,7 @@ def create_stage(config: StageConfig):
 __all__ = [
 	"STAGE_REGISTRY",
 	"AstraCudaStage",
+	"AllOfTheStripeStage",
 	"BPCudaStage",
 	"CGLSCudaStage",
 	"EMCudaStage",

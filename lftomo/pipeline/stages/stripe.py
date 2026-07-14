@@ -135,3 +135,50 @@ class FourierWaveletStripeStage(Stage):
 				sigma=self.sigma, zero_pad=self.zero_pad,
 			)
 		return state
+
+
+class AllOfTheStripeStage(Stage):
+	"""Run TomoPy's combined Vo dead, large, and sorting algorithms."""
+
+	name = "stripe.all_of_the_stripe"
+	contract = _contract(3.0)
+
+	def __init__(self, snr: float = 3, la_size: int = 61, sm_size: int = 21,
+				dim: int = 1, ncore: int | None = None, nchunk: int | None = None):
+		if snr <= 0:
+			raise ValueError("all-of-the-stripe snr must be positive")
+		if la_size < 1 or sm_size < 1:
+			raise ValueError("all-of-the-stripe filter sizes must be positive")
+		if dim not in (1, 2):
+			raise ValueError("all-of-the-stripe dim must be 1 or 2")
+		self.snr = snr
+		self.la_size = la_size
+		self.sm_size = sm_size
+		self.dim = dim
+		self.ncore = ncore
+		self.nchunk = nchunk
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "AllOfTheStripeStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if state.backend.name != "numpy":
+			raise TypeError("AllOfTheStripeStage currently requires the NumPy backend")
+		data = np.asarray(state.working_array)
+		if data.ndim != 3:
+			raise ValueError("stripe.all_of_the_stripe expects a (Y, Theta, X) sinogram array")
+
+		import tomopy
+
+		corrected = tomopy.remove_all_stripe(
+			np.transpose(data, (1, 0, 2)),
+			snr=self.snr,
+			la_size=self.la_size,
+			sm_size=self.sm_size,
+			dim=self.dim,
+			ncore=self.ncore,
+			nchunk=self.nchunk,
+		)
+		data[:] = np.transpose(corrected, (1, 0, 2))
+		return state
