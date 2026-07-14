@@ -20,6 +20,7 @@ from lftomo.pipeline.validation import (
 	ShapeCompatibilityError,
 	validate_pipeline,
 )
+from lftomo.pipeline.sweep import SweepRun, expand_recon_sweeps, expand_sweep
 
 __all__ = [
 	"Backend",
@@ -37,5 +38,8 @@ __all__ = [
 	"ShapeCompatibilityError",
 	"Stage",
 	"StageContract",
+	"SweepRun",
+	"expand_recon_sweeps",
+	"expand_sweep",
 	"validate_pipeline",
 ]
