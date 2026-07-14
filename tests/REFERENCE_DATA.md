@@ -75,11 +75,12 @@ expanded stage order and parameter set used by that producer.
 | Dataset | Producer | Slices | Frozen | Versioned manifest |
 | --- | --- | --- | --- | --- |
 | `phase_contrast_hdf5` | `r254` | 1076–1085 | 2026-07-13 | `tests/tier2_metadata/references/phase_contrast_hdf5/r254/` |
+| `phase_contrast_hdf5` | `b10_recon` | 1076–1085 | 2026-07-13 | `tests/tier2_metadata/references/phase_contrast_hdf5/b10_recon/` |
 
-The R2.54 archive was lifted from the completed historical volume rather than
-rerunning its later-edited, unversioned producer. Its metadata records this
-provenance limitation explicitly. Frozen references are immutable: do not
-rerun a producer to refresh them.
+The R2.54 and b10_recon archives were lifted from completed historical volumes
+rather than rerunning their later-edited, unversioned producers. Their metadata
+records this provenance limitation explicitly. Frozen references are
+immutable: do not rerun a producer to refresh them.
 
 ## Running the checks
 

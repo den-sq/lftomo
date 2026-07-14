@@ -1,0 +1,29 @@
+schema_version: 1
+resolved_from: b10-recon-canonical@historical-voi2.1
+output_path: reference/b10_recon/recon
+metadata:
+  producer: b10_recon
+  dataset: phase_contrast_hdf5
+  lftomo_snapshot: ddfcdf628254f0dadd219b076fa01da527ca6123
+pipeline:
+  - kind: read
+    algorithm: hdf5_dxchange
+    params: {path: projections/20241205_120252_octo_0_centerradula_fov2_scan4.h5, dataset: /exchange/data, order: projection, theta_count: 1969, theta_start_degrees: 0.0, theta_stop_degrees: 180.0, window_size: 12}
+  - kind: normalize
+    algorithm: weighted
+    params: {pre_gain: gains/pregain_median.tif, post_gain: gains/postgain_median.tif, pre_dark: gains/predark_median.tif, post_dark: gains/postdark_median.tif, pre_subtracted: true, timing_source: /measurement/instrument/time_stamp}
+  - kind: phase
+    algorithm: bronnikov_aided
+    params: {alpha: 1.6, gamma: 1.2, processes: 12}
+  - kind: stripe
+    algorithm: fw
+    params: {wavelet: sym20, sigma: 2.0, zero_pad: false}
+  - kind: center
+    algorithm: manual
+    params: {value_px: 1282.75, tilt: 0.0}
+  - kind: recon
+    algorithm: gridrec
+    params: {ncore: 12, sinogram_order: false}
+  - kind: write
+    algorithm: tiff_slices
+    params: {dtype: float32, naming_template: "{slice:05d}.tif"}

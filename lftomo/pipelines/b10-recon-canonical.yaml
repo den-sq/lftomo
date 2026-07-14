@@ -1,5 +1,6 @@
-# Producer: B10Scripts/PCRBox_Octo0/20kev/voi2/b10_recon.py at lftomo@ddfcdf6
-# Survey source: docs/recon-survey.md lines 265-315, especially lines 285-287.
+# Producer: B10/PCRBox_Octo0/20kev/voi2.1/b10_recon.py at lftomo@ddfcdf6
+# Survey source: docs/recon-survey.md lines 265-315, corrected by the successful voi2.1 run log.
+# Frozen reference: phase_contrast_hdf5, slices 1076-1085 (lftomo#30).
 # This spec belongs to the snapshot producer, not examples/b10_recon_current.py.
 pipeline_template: b10-recon-canonical
 output_path: reference/b10_recon/recon
@@ -10,22 +11,22 @@ metadata:
 pipeline:
   - kind: read
     algorithm: hdf5_dxchange
-    params: {order: sinogram, calibration_policy: required}
+    params: {order: projection, calibration_policy: required, theta_count: 1969, window_size: 12}
   - kind: normalize
     algorithm: weighted
-    params: {pre_sub: true}
-  - kind: stripe
-    algorithm: vo
-    params: {method: remove_sort_vo, size: 31, dim: 1}
+    params: {pre_subtracted: true, timing_source: /measurement/instrument/time_stamp}
   - kind: phase
     algorithm: bronnikov_aided
-    params: {enabled: true, alpha: 35.0, gamma_source: empirical_energy_distance_pixel_size}
+    params: {alpha: 1.6, gamma: 1.2, processes: 12}
+  - kind: stripe
+    algorithm: fw
+    params: {wavelet: sym20, sigma: 2.0, zero_pad: false}
   - kind: center
     algorithm: manual
-    params: {value_px: 1279.25, search_count: 20}
+    params: {value_px: 1282.75, tilt: 0.0}
   - kind: recon
     algorithm: gridrec
-    params: {sinogram_order: false}
+    params: {ncore: 12, sinogram_order: false}
   - kind: write
     algorithm: tiff_slices
-    params: {dtype: float32, naming_template: "{slice:05d}"}
+    params: {dtype: float32, naming_template: "{slice:05d}.tif"}

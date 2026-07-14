@@ -15,7 +15,7 @@ EXPECTED_ORDERS = {
 	"phase-contrast-canonical.yaml": [
 		"read", "normalize", "geometry", "geometry", "geometry", "stripe", "phase", "filter", "center", "recon", "write",
 	],
-	"b10-recon-canonical.yaml": ["read", "normalize", "stripe", "phase", "center", "recon", "write"],
+	"b10-recon-canonical.yaml": ["read", "normalize", "phase", "stripe", "center", "recon", "write"],
 }
 
 

@@ -1,0 +1,41 @@
+schema_version: 1
+producer: b10_recon
+dataset: phase_contrast_hdf5
+status: frozen_historical_output
+immutable: true
+source:
+  path: B10/PCRBox_Octo0/20kev/voi2.1/b10_recon.py
+  surviving_copy_sha256: 7d87ba43e550fc5c83b518bee89a3427ca762a0fc2be2d94f2078daf63b41492
+  surviving_copy_modified_at: "2025-01-14T18:18:09-05:00"
+  lftomo_snapshot: ddfcdf628254f0dadd219b076fa01da527ca6123
+  provenance_note: >-
+    B10Scripts is not version-controlled and the surviving script copy was
+    modified after the successful run. The completed output and run log are
+    authoritative for the historical behavior; the surviving hash must not be
+    represented as the exact bytes executed in that run.
+input:
+  path: 20241205_120252_octo_0_centerradula_fov2_scan4.h5
+  dataset: /exchange/data
+  shape: [1969, 2160, 2560]
+  dtype: uint16
+historical_run:
+  output_path: alt_recon/recon
+  log_path: logs/imaging_log_2025-01-13 17:23:32.616316.txt
+  log_sha256: cdec556a908f90bda2251444af9196f0adaaac32eeb53387f8e9da10edd8a393
+  started_at: "2025-01-13T17:23:32-05:00"
+  runtime: "00:28:37"
+  peak_memory_observed: "approximately 5 GiB"
+  host: PSH1VS12J3
+  operator: dnorthover
+  environment: historical environment with lftomo old utility API
+reference_selection:
+  slices: [1076, 1077, 1078, 1079, 1080, 1081, 1082, 1083, 1084, 1085]
+  rationale: contiguous feature-rich region with internal specimen anatomy
+  shape: [2560, 2560]
+  dtype: float32
+freeze:
+  host: PSH1VS12J3
+  operator: dnorthover
+  date: "2026-07-13T22:57:20-04:00"
+  method: copied from completed historical volume; producer not rerun
+  rule: do not rerun or refresh this reference
