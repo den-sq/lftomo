@@ -20,7 +20,14 @@ from .recon import (
 	SARTCudaStage,
 	SIRTCudaStage,
 )
-from .stripe import AllOfTheStripeStage, FourierWaveletStripeStage, VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
+from .stripe import (
+	AllOfTheStripeStage,
+	FourierWaveletStripeStage,
+	VoDeadStripeStage,
+	VoFamilyStripeStage,
+	VoLargeStripeStage,
+	VoSortStripeStage,
+)
 from .super_resolve import DRHTStage, LDMStage
 from .write import HDF5VolumeWriteStage, NeuroglancerWriteStage, TIFFSlicesWriteStage
 
@@ -58,6 +65,7 @@ STAGE_REGISTRY = {
 	"stripe.all_of_the_stripe": AllOfTheStripeStage,
 	"stripe.fw": FourierWaveletStripeStage,
 	"stripe.vo_dead": VoDeadStripeStage,
+	"stripe.vo_family": VoFamilyStripeStage,
 	"stripe.vo_large": VoLargeStripeStage,
 	"stripe.vo_sort": VoSortStripeStage,
 	"super_resolve.drht": DRHTStage,
@@ -114,6 +122,7 @@ __all__ = [
 	"TaperBlendedNormalizeStage",
 	"ThetaSwitchNormalizeStage",
 	"VoDeadStripeStage",
+	"VoFamilyStripeStage",
 	"VoLargeStripeStage",
 	"VoSortStripeStage",
 	"VoCenterStage",

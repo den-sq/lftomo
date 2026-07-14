@@ -29,9 +29,10 @@ class VoSortStripeStage(Stage):
 	name = "stripe.vo_sort"
 	contract = _contract(3.0)
 
-	def __init__(self, size: int = 21, dim: int = 1):
+	def __init__(self, size: int = 21, dim: int = 1, ncore: int | None = None):
 		self.size = size
 		self.dim = dim
+		self.ncore = ncore
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "VoSortStripeStage":
@@ -103,20 +104,67 @@ class VoLargeStripeStage(Stage):
 		return state
 
 
+class VoFamilyStripeStage(Stage):
+	"""Execute an explicitly ordered sequence of Vo stripe-removal methods."""
+
+	name = "stripe.vo_family"
+	contract = _contract(3.0)
+
+	def __init__(self, order: list[str] | tuple[str, ...] = (
+				"remove_dead_vo", "remove_large_vo", "remove_sort_vo"),
+				size: int = 31, snr: float = 3.0, dim: int = 1,
+				drop_ratio: float = 0.1, norm: bool = True):
+		known = {"remove_dead_vo", "remove_large_vo", "remove_sort_vo"}
+		unknown = set(order) - known
+		if unknown:
+			raise ValueError(f"unknown Vo-family operation(s): {sorted(unknown)}")
+		self.order = tuple(order)
+		self.size = size
+		self.snr = snr
+		self.dim = dim
+		self.drop_ratio = drop_ratio
+		self.norm = norm
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "VoFamilyStripeStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if state.backend.name != "numpy":
+			raise TypeError("VoFamilyStripeStage currently requires the NumPy backend")
+		data = np.asarray(state.working_array)
+		if data.ndim != 3:
+			raise ValueError("stripe.vo_family expects a (Y, Theta, X) sinogram array")
+		for y_index in range(data.shape[0]):
+			for operation in self.order:
+				if operation == "remove_dead_vo":
+					_remove_dead_array(data[y_index], snr=self.snr, size=self.size)
+				elif operation == "remove_large_vo":
+					_remove_large_array(
+						data[y_index], snr=self.snr, size=self.size,
+						drop_ratio=self.drop_ratio, norm=self.norm,
+					)
+				else:
+					_remove_sort_array(data[y_index], size=self.size, dim=self.dim)
+		return state
+
+
 class FourierWaveletStripeStage(Stage):
 	name = "stripe.fw"
 	contract = _contract(2.0)
 
 	def __init__(self, level: int | None = None, wname: str = "db5",
-				sigma: float = 2.0, zero_pad: bool = False):
+				sigma: float = 2.0, zero_pad: bool = False,
+				wavelet: str | None = None, ncore: int | None = None):
 		if level is not None and level < 1:
 			raise ValueError("Fourier-wavelet level must be positive")
 		if sigma <= 0:
 			raise ValueError("Fourier-wavelet sigma must be positive")
 		self.level = level
-		self.wname = wname
+		self.wname = wavelet or wname
 		self.sigma = sigma
 		self.zero_pad = zero_pad
+		self.ncore = ncore
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "FourierWaveletStripeStage":

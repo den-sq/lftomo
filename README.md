@@ -31,6 +31,21 @@ Do not treat a uv-only virtualenv as the supported deployment path for
 TomoPy-heavy reconstruction work. Use it only as pip-compatible glue inside the
 conda environment.
 
+## Run a pipeline
+
+Pass a pipeline YAML (or a bundled canonical template name) and a Scan YAML to
+the runner. Relative projection paths in the Scan are resolved from the Scan
+file, and `--output` overrides the pipeline's output directory.
+
+```shell
+lftomo-run recon-minimal scan.yaml --output recon/
+lftomo-run phase-contrast-canonical scan.yaml --output recon/ --json-output
+```
+
+Stage sweeps expand automatically. Multiple concrete runs are written beneath
+`sweep-0000`, `sweep-0001`, and so on. Use `--gpu` only when the runtime has the
+CUDA dependencies required by a selected GPU Stage.
+
 ## Tests
 
 Unit tests should be hermetic: generate any required files under `tmp_path` or
