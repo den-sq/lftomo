@@ -263,6 +263,14 @@ discrete. Neither order is "correct" — the recorded lineage order is truth. ~1
 global is inside the Tier-2 NRMSE≤0.15 tolerance, but ~20% edge-local differences
 are a real reproducibility hazard at exactly the features people measure.
 
+**This hazard does not actually bite any pinned lineage** — but note *why*, so
+AAA523's nonzero skew is not mistaken for tripping it. AAA523 applies its 0.149°
+skew **after** BAC, i.e. retrieve-then-warp (the numerically-safe order); the
+warp-then-retrieve case only arises in recon_minimal, whose recorded skew is
+`0.0`. So the non-commutativity is realized in no pinned producer today; it
+becomes live only if a future lineage warps *before* phase retrieval with a
+nonzero skew.
+
 ## 6. Bounded-view semantics, segment execution, and the open benchmark
 
 `locality=SINOGRAM, bounded_views_from=(ProjOrder,)` declares a capability; it
@@ -297,6 +305,13 @@ measured at the ~5 GiB AAA523 window and a full 1100-row stack (wall-clock + pea
 RSS). If (2) wins decisively at scale, planner guidance flips to "prefer the fused
 transition whenever a sinogram-local segment exists," and bounded views remain
 the bounded-memory fallback.
+
+Arm (3) already has a **live, numerically-validated anchor**: post-#91,
+`stripe.fw` in the AAA523 phase-contrast path iterates ProjOrder strided
+sinograms directly (exactly the direct-strided-in-place case), and #91's Tier-2
+run reproduced it within tolerance. The benchmark should measure against that
+recorded configuration rather than only a synthetic arm-3, so its baseline is
+grounded in a real producer.
 
 ## 7. Stage migration list (verified on `c775826`)
 
