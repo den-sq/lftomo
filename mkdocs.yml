@@ -6,6 +6,8 @@ nav:
    - Survey: recon-survey.md
    - Unification plan: recon-unification-plan.md
    - Buildout: Buildout.md
+ - Operations:
+   - Recon-data runner: recon-data-runner.md
  - API reference:
    - Configuration models: api/config.md
    - Pipeline: api-pipeline.md
