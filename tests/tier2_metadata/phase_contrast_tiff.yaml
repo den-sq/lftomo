@@ -1,0 +1,27 @@
+energy_keV: 20.0
+pixel_size_um: 0.365
+ssd_cm: 11.0
+n_projections: 1969
+degrees_per_fov: 180.0
+n_fov: 1
+helical:
+  enabled: false
+detector:
+  pixel_size_um: 0.365
+  rows: 4440
+  columns: 5008
+  name: Vieworks VT-16K3.5
+acquisition:
+  n_projections: 1969
+  rotation_start_deg: 0.0
+  rotation_end_deg: 180.0
+  exposure_ms: 175.0
+projections:
+  format: tiff_stack
+  path: projections
+  pattern: proj_*.tif
+metadata:
+  tier: 2
+  dataset: phase_contrast_tiff
+  source: AAA523 Daphnia ALS B8 section 2
+  propagation_distance_mm: 110.0

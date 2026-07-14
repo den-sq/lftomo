@@ -195,12 +195,12 @@ Load INI → discover/sort projection TIFFs →
 sinogram generation (parallel, memmap):
     gain_averaging (taper-blended pre/post gains)
     helical pitch correction (vertical_velocity per section)
+    [if holo enabled] hotopy.holo.BronnikovAidedCorrection(α, γ)
+    [optional] bilateral filter
     skew correction (cv2.warpAffine)
     movement correction (gain-shift registration)
 sinogram post (per chunk, multiprocess):
-    all_of_the_stripe_removal (multi-algorithm)
-    [if holo enabled] hotopy.holo.BronnikovAidedCorrection(α, γ)
-    [optional] bilateral filter
+    remove_stripe_fw when all_of_the_stripe_removal is enabled
 center finding (TomoPy find_center_pc / find_center_vo / manual) →
 TomoPy gridrec recon (parallel by slice) →
 edge trim → rotation → crop →
