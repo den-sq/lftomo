@@ -1,0 +1,34 @@
+schema_version: 1
+resolved_from: recon-minimal-canonical@f584683b40593eecb6b9529f65e2b5f6cd4c4b15
+output_path: reference/recon_minimal/recon
+metadata:
+  producer: recon_minimal
+  dataset: recon_minimal_tiff
+pipeline:
+  - kind: read
+    algorithm: tiff_stack
+    params: {path: projections, pattern: "proj_*.tif", source_order: projection, working_order: sinogram, projection_count: 3937, dropped_frame_interpolation: false, window_size: 64}
+  - kind: normalize
+    algorithm: weighted
+    params: {pre_gain: flats/pregain, post_gain: flats/postgain, pre_dark: flats/predark, post_dark: flats/postdark, pre_subtracted: false, theta_weighted: true, local_gains: true}
+  - kind: stripe
+    algorithm: vo_family
+    params: {order: [remove_dead_vo, remove_large_vo, remove_sort_vo], dead_snr: 3.0, dead_size: 51}
+  - kind: geometry
+    algorithm: projection_rotation
+    params: {tilt_radians: -0.003134796238244514, center_px: 6235.0}
+  - kind: phase
+    algorithm: paganin
+    params: {enabled: true, alpha: 0.06, pixel_size_um: 0.5, energy_keV: 24.0, distance_cm: 3.0, tomopy_legacy: false, pad_y: false}
+  - kind: center
+    algorithm: manual
+    params: {value_px: 6235.0, tilt_radians: -0.003134796238244514, center_dump: true, center_samples_per_job: 2}
+  - kind: recon
+    algorithm: gridrec
+    params: {sinogram_order: false, filter_name: butterworth, filter_parameters: [0.2, 2]}
+  - kind: normalize_output
+    algorithm: percentile
+    params: {low_percentile: 15.0, high_percentile: 99.0, output_low: 0.0, output_high: 1.0}
+  - kind: write
+    algorithm: tiff_slices
+    params: {dtype: float32, naming_template: "AAA592_{slice:04d}.tif"}

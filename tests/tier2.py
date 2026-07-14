@@ -38,6 +38,13 @@ DATASETS = {
 		pixel_size_um=0.637,
 		producers=("phase_contrast", "r254", "b10_recon"),
 	),
+	"recon_minimal_tiff": Tier2Dataset(
+		name="recon_minimal_tiff",
+		environment_variable="LFTOMO_DATASET_RECON_MINIMAL_TIFF",
+		default_path=Path("/mnt/wsl/PHYSICALDRIVE2p1/data/AAA592"),
+		pixel_size_um=0.5,
+		producers=("recon_minimal",),
+	),
 	"helical_tiff": Tier2Dataset(
 		name="helical_tiff",
 		environment_variable="LFTOMO_DATASET_HELICAL_TIFF",

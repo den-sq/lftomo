@@ -66,4 +66,5 @@ def _dataset_fixture(dataset_name):
 
 dataset_striping_tiff = _dataset_fixture("striping_tiff")
 dataset_phase_contrast_hdf5 = _dataset_fixture("phase_contrast_hdf5")
+dataset_recon_minimal_tiff = _dataset_fixture("recon_minimal_tiff")
 dataset_helical_tiff = _dataset_fixture("helical_tiff")
