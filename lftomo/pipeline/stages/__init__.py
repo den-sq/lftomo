@@ -6,7 +6,17 @@ from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelation
 from .normalize import WeightedNormalizeStage
 from .phase import PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
-from .recon import GridrecStage
+from .recon import (
+	AstraCudaStage,
+	BPCudaStage,
+	CGLSCudaStage,
+	EMCudaStage,
+	FBPCudaStage,
+	FPCudaStage,
+	GridrecStage,
+	SARTCudaStage,
+	SIRTCudaStage,
+)
 from .stripe import FourierWaveletStripeStage, VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
 from .write import TIFFSlicesWriteStage
 
@@ -21,7 +31,14 @@ STAGE_REGISTRY = {
 	"phase.paganin_phase_absorption": PaganinPhaseAbsorptionStage,
 	"read.hdf5_dxchange": HDF5DxchangeReadStage,
 	"read.tiff_stack": TIFFStackReadStage,
+	"recon.bp_cuda": BPCudaStage,
+	"recon.cgls_cuda": CGLSCudaStage,
+	"recon.em_cuda": EMCudaStage,
+	"recon.fbp_cuda": FBPCudaStage,
+	"recon.fp_cuda": FPCudaStage,
 	"recon.gridrec": GridrecStage,
+	"recon.sart_cuda": SARTCudaStage,
+	"recon.sirt_cuda": SIRTCudaStage,
 	"stripe.fw": FourierWaveletStripeStage,
 	"stripe.vo_dead": VoDeadStripeStage,
 	"stripe.vo_large": VoLargeStripeStage,
@@ -43,14 +60,22 @@ def create_stage(config: StageConfig):
 
 __all__ = [
 	"STAGE_REGISTRY",
+	"AstraCudaStage",
+	"BPCudaStage",
+	"CGLSCudaStage",
+	"EMCudaStage",
 	"EntropyLocalCenterStage",
 	"HDF5DxchangeReadStage",
 	"FourierWaveletStripeStage",
+	"FBPCudaStage",
+	"FPCudaStage",
 	"GridrecStage",
 	"ManualCenterStage",
 	"PaganinPhaseAbsorptionStage",
 	"PaganinStage",
 	"PhaseCorrelationCenterStage",
+	"SARTCudaStage",
+	"SIRTCudaStage",
 	"TIFFStackReadStage",
 	"TIFFSlicesWriteStage",
 	"VoDeadStripeStage",
