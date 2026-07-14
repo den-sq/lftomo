@@ -1,0 +1,33 @@
+energy_keV: 24.0
+pixel_size_um: 1.625
+ssd_cm: 10.0
+n_projections: 1969
+degrees_per_fov: 180.0
+n_fov: 1
+helical:
+  enabled: false
+  start_um: null
+  stop_um: null
+  pitch_um_per_projection: null
+detector:
+  pixel_size_um: 1.625
+  rows: 2048
+  columns: 2048
+  name: null
+acquisition:
+  n_projections: 1969
+  rotation_start_deg: 0.0
+  rotation_end_deg: 180.0
+  exposure_ms: null
+projections:
+  format: tiff_stack
+  path: input/Sam19
+  pattern: '*.tif*'
+metadata:
+  lineage: den-sq/lftomo
+  source_shape: CTFov namedtuple plus TomoDataSet shape
+  legacy_fields:
+    CTFov:
+      Theta: 1969
+      Degrees: 180
+      Count: 1
