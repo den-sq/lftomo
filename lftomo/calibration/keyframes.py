@@ -19,6 +19,8 @@ class TIFFRandomFrameSource:
 
 	def __init__(self, path: str | Path, pattern: str = "*.tif*"):
 		path = Path(path).expanduser().resolve()
+		self.path = path
+		self.pattern = pattern
 		self.paths = natsorted(path.glob(pattern)) if path.is_dir() else [path]
 		if not self.paths:
 			raise FileNotFoundError(f"no TIFF frames match {path / pattern}")
@@ -41,12 +43,16 @@ class TIFFRandomFrameSource:
 			raise IndexError(index)
 		if self._stack:
 			try:
-				return np.asarray(tf.memmap(self.paths[0])[index, y_start:y_stop, x_start:x_stop])
+				return np.asarray(tf.memmap(
+					self.paths[0], mode="r",
+				)[index, y_start:y_stop, x_start:x_stop])
 			except (OSError, ValueError):
 				with tf.TiffFile(self.paths[0]) as tif:
 					return tif.pages[index].asarray()[y_start:y_stop, x_start:x_stop]
 		try:
-			return np.asarray(tf.memmap(self.paths[index])[y_start:y_stop, x_start:x_stop])
+			return np.asarray(tf.memmap(
+				self.paths[index], mode="r",
+			)[y_start:y_stop, x_start:x_stop])
 		except (OSError, ValueError):
 			return np.asarray(tf.imread(self.paths[index]))[y_start:y_stop, x_start:x_stop]
 
@@ -124,6 +130,11 @@ def build_flat_series_digest(
 			"sample_centres": centres.tolist(), "median_window": median_window,
 			"source_frame_count": source.frame_count, "crop": [row0, row1, column0, column1],
 			"binning": binning, "camera_segment_boundary": "hard",
+			"source": {
+				"path": str(source.path), "pattern": source.pattern,
+				"frame_count": source.frame_count,
+				"first_frame": str(source.paths[0]), "last_frame": str(source.paths[-1]),
+			},
 		},
 	)
 	totals = np.zeros(keep); row_moments = np.zeros(keep); column_moments = np.zeros(keep)

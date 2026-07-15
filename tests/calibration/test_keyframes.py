@@ -8,10 +8,10 @@ from lftomo.calibration import (
 	CalibrationBuildSession, CalibrationBundle, CompatibilityMetadata, DetectorRegion,
 	ProducerInfo, TIFFRandomFrameSource, TimeAxis, build_flat_series_digest,
 )
-from lftomo.config import Recon, Scan
-from lftomo.pipeline import NumpyBackend, PipelineState
+from lftomo.config import Recon, Scan, StageConfig
+from lftomo.pipeline import NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.domains import DataDomain
-from lftomo.pipeline.stages import BeamKeyframesNormalizeStage
+from lftomo.pipeline.stages import BeamKeyframesNormalizeStage, create_stage
 from lftomo.util.shapes import ProjOrder
 
 
@@ -64,6 +64,29 @@ def test_event_keyframes_beat_endpoint_model_and_keep_detector_defect_fixed(tmp_
 	assert state.artifacts["beam_keyframe_qc"]["maximum_gap_seen"] == 5
 
 
+def test_heldout_midpoints_beat_a_scan_endpoint_model(tmp_path):
+	y, x = np.indices((20, 28))
+	detector = np.ones((20, 28)); detector[6:8, 9:11] = 0.65
+	keyframes = np.stack([
+		detector * 1000 * (1 + 0.08 * np.sin((y - shift) / 4) + 0.02 * np.cos(x / 9))
+		for shift in (0, 5, 0)
+	]).astype(np.float32)
+	ref = _build_bundle(tmp_path, keyframes, [0, 5, 10])
+	heldout = np.stack([
+		np.sqrt(keyframes[0] * keyframes[1]),
+		np.sqrt(keyframes[1] * keyframes[2]),
+	])
+	endpoint = np.sqrt(keyframes[0] * keyframes[-1])
+	endpoint_error = np.std(heldout / endpoint - 1)
+	state = PipelineState(
+		heldout.copy(), _scan(20, 28, 2), Recon.model_validate({"pipeline": []}),
+		artifacts={"calibration_bundle": ref, "projection_times": np.array([2.5, 7.5])},
+		backend=NumpyBackend(), layout=ProjOrder, domain=DataDomain.RAW,
+	)
+	BeamKeyframesNormalizeStage(transport_sigma=2).run(state)
+	assert np.std(np.asarray(state.working_array) - 1) < endpoint_error / 20
+
+
 def test_digest_samples_short_centered_medians_and_writes_trajectory(tmp_path):
 	source_dir = tmp_path / "frames"; source_dir.mkdir()
 	y, x = np.indices((12, 16))
@@ -89,6 +112,12 @@ def test_digest_samples_short_centered_medians_and_writes_trajectory(tmp_path):
 	assert digest.times == (1.5, 5.0, 8.5)
 	assert len(digest.trajectory) == 3
 	bundle = CalibrationBundle.open(ref.manifest_path, verify_hashes=True)
+	source_metadata = bundle.component("beam_keyframes").metadata["source"]
+	assert source_metadata == {
+		"path": str(source_dir.resolve()), "pattern": "*.tif*", "frame_count": 21,
+		"first_frame": str((source_dir / "frame_000.tif").resolve()),
+		"last_frame": str((source_dir / "frame_020.tif").resolve()),
+	}
 	values = bundle.read_component("beam_keyframes", time_value=5, y_start=0, y_stop=2)
 	assert values[0, 0] < 2000  # the short median rejected the centre-frame zinger
 
@@ -106,6 +135,21 @@ def test_keyframe_stage_rejects_missing_times_and_large_gaps(tmp_path):
 	state.artifacts["projection_times"] = [5]
 	with pytest.raises(ValueError, match="keyframe gap"):
 		BeamKeyframesNormalizeStage(maximum_gap=4).run(state)
+
+
+def test_beam_keyframes_is_the_sole_normalization_in_a_complete_pipeline():
+	configs = [
+		StageConfig(kind="read", algorithm="tiff_stack", params={"order": "projection"}),
+		StageConfig(kind="normalize", algorithm="beam_keyframes"),
+		StageConfig(kind="phase", algorithm="paganin"),
+		StageConfig(kind="recon", algorithm="gridrec", params={"center": 14}),
+	]
+	plan = validate_pipeline(
+		[create_stage(config) for config in configs], _scan(20, 28, 3), mode="complete",
+	)
+	normalize = next(step for step in plan.steps if step.stage_name == "normalize.beam_keyframes")
+	assert normalize.input_domain is DataDomain.RAW
+	assert normalize.output_domain is DataDomain.TRANSMISSION
 
 
 @pytest.mark.integration
