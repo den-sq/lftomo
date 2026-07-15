@@ -2,12 +2,26 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
 import tifffile as tf
 import yaml
 from click.testing import CliRunner
 
+from lftomo.calibration import (
+	ArrayPayload,
+	CalibrationBundleRef,
+	CalibrationComponent,
+	CalibrationCompatibilityError,
+	CalibrationManifest,
+	CompatibilityMetadata,
+	DetectorRegion,
+	ProducerInfo,
+	load_manifest,
+	stream_sha256,
+)
+from lftomo.config import Recon, Scan
 from lftomo.pipeline.stages import create_stage
-from lftomo.runner import load_recon, main, run_reconstruction
+from lftomo.runner import load_recon, main, resolve_calibration, run_reconstruction
 
 
 def write_yaml(path, value):
@@ -21,7 +35,7 @@ def scan_document(data_path):
 		"ssd_cm": 10,
 		"n_projections": 3,
 		"degrees_per_fov": 180,
-		"detector": {"pixel_size_um": 1, "rows": 2, "columns": 4},
+		"detector": {"name": "camera-a", "pixel_size_um": 1, "rows": 2, "columns": 4},
 		"acquisition": {"n_projections": 3, "rotation_end_deg": 180},
 		"projections": {
 			"format": "hdf5_dxchange",
@@ -31,6 +45,62 @@ def scan_document(data_path):
 			"dark_path": "exchange/data_dark",
 		},
 	}
+
+
+def calibration_manifest(tmp_path, *, detector_id="camera-a", corrupt_hash=False):
+	components = {}
+	for index, name in enumerate(("pre_gain", "post_gain", "pre_dark", "post_dark")):
+		path = tmp_path / f"{name}.npy"
+		np.save(path, np.full((4, 4), index + 10, dtype=np.float32))
+		payload_hash = "0" * 64 if corrupt_hash and name == "pre_gain" else stream_sha256(path)
+		components[name] = CalibrationComponent(
+			kind="dark" if "dark" in name else "detector_static",
+			coordinate_frame="detector",
+			payload=ArrayPayload(
+				path=path.name, format="npy", sha256=payload_hash,
+				shape=(4, 4), dtype="float32", axes=("Y", "X"),
+			),
+		)
+	manifest = CalibrationManifest(
+		calibration_id="test-calibration",
+		producer=ProducerInfo(package="lftomo", version="test"),
+		compatibility=CompatibilityMetadata(
+			detector_id=detector_id,
+			region=DetectorRegion(y_start=0, x_start=0, height=4, width=4),
+			static_artifact_epoch="epoch-a",
+		),
+		components=components,
+	)
+	path = tmp_path / "calibration.yaml"
+	path.write_text(manifest.to_yaml(), encoding="utf-8")
+	return path
+
+
+def normalization_recon(**params):
+	return Recon.model_validate({
+		"pipeline": [
+			{"kind": "read", "algorithm": "hdf5_dxchange", "params": {
+				"order": "projection", "y_start": 1, "y_stop": 3,
+				"calibration_policy": "required",
+			}},
+			{"kind": "normalize", "algorithm": "weighted", "params": params},
+		],
+	})
+
+
+def hdf5_scan(tmp_path, *, detector_id="camera-a"):
+	data_path = tmp_path / "scan.h5"
+	with h5py.File(data_path, "w") as handle:
+		handle.create_dataset("exchange/data", data=np.ones((3, 4, 4), dtype=np.float32))
+		handle.create_dataset("exchange/data_white", data=np.full((5, 4, 4), 100, dtype=np.float32))
+		handle.create_dataset("exchange/data_dark", data=np.full((5, 4, 4), 2, dtype=np.float32))
+	document = scan_document(data_path)
+	document["detector"]["rows"] = 4
+	document["metadata"] = {
+		"detector_id": detector_id,
+		"static_artifact_epoch": "epoch-a",
+	}
+	return Scan.model_validate(document)
 
 
 def test_all_bundled_canonical_templates_instantiate():
@@ -71,6 +141,175 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(tmp_path, 
 	assert results[0].output_path == output
 	assert [path.name for path in results[0].artifacts["output_files"]] == ["slice_000.tif", "slice_001.tif"]
 	assert tf.imread(output / "slice_000.tif").shape == (4, 4)
+	assert results[0].artifacts["calibration_resolution"]["source"] == "embedded_hdf5"
+	assert "white_fields" not in results[0].artifacts
+	assert "dark_fields" not in results[0].artifacts
+
+
+def test_external_bundle_overrides_hdf5_and_reads_only_y_window(tmp_path):
+	manifest_path = calibration_manifest(tmp_path)
+	scan = hdf5_scan(tmp_path)
+	recon = normalization_recon(calibration_manifest=manifest_path.name)
+
+	resolution = resolve_calibration(
+		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path,
+	)
+
+	assert resolution.source == "external_bundle"
+	assert resolution.bundle_ref.calibration_id == "test-calibration"
+	assert resolution.compatibility.compatible
+	assert scan.metadata["flat_fields"].shape == (4, 2, 4)
+	np.testing.assert_array_equal(scan.metadata["flat_fields"][:, 0, 0], [10, 11, 12, 13])
+	read = next(stage for stage in recon.pipeline if stage.kind == "read")
+	assert read.params["calibration_policy"] == "ignore"
+	normalize = next(stage for stage in recon.pipeline if stage.kind == "normalize")
+	assert "calibration_manifest" not in normalize.params
+
+
+def test_direct_bundle_ref_and_yaml_must_identify_same_calibration(tmp_path):
+	manifest_path = calibration_manifest(tmp_path)
+	_, ref = load_manifest(manifest_path)
+	scan = hdf5_scan(tmp_path)
+	recon = normalization_recon(calibration_manifest=manifest_path)
+	resolution = resolve_calibration(
+		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path, seeded_bundle=ref,
+	)
+	assert resolution.bundle_ref == ref
+
+	other = CalibrationBundleRef(
+		manifest_path=tmp_path / "other.yaml", calibration_id=ref.calibration_id,
+	)
+	with pytest.raises(ValueError, match="conflicts"):
+		resolve_calibration(
+			hdf5_scan(tmp_path), normalization_recon(calibration_manifest=manifest_path),
+			pipeline_root=tmp_path, scan_root=tmp_path, seeded_bundle=other,
+		)
+
+
+def test_compatibility_mismatch_defaults_to_error_and_override_is_provenance(tmp_path):
+	manifest_path = calibration_manifest(tmp_path)
+	with pytest.raises(CalibrationCompatibilityError, match="detector_id"):
+		resolve_calibration(
+			hdf5_scan(tmp_path, detector_id="camera-b"),
+			normalization_recon(calibration_manifest=manifest_path),
+			pipeline_root=tmp_path, scan_root=tmp_path,
+		)
+
+	resolution = resolve_calibration(
+		hdf5_scan(tmp_path, detector_id="camera-b"),
+		normalization_recon(
+			calibration_manifest=manifest_path,
+			compatibility_policy="override",
+			compatibility_override_reason="validated camera replacement",
+		),
+		pipeline_root=tmp_path, scan_root=tmp_path,
+	)
+	provenance = resolution.provenance()
+	assert provenance["compatibility"]["override"]["reason"] == "validated camera replacement"
+	assert provenance["compatibility"]["diagnostics"][0]["field"] == "detector_id"
+
+
+def test_runner_reports_region_and_artifact_epoch_mismatches(tmp_path):
+	manifest_path = calibration_manifest(tmp_path)
+	scan = hdf5_scan(tmp_path)
+	scan.detector.columns = 5
+	scan.metadata["static_artifact_epoch"] = "epoch-b"
+
+	with pytest.raises(CalibrationCompatibilityError) as caught:
+		resolve_calibration(
+			scan, normalization_recon(calibration_manifest=manifest_path),
+			pipeline_root=tmp_path, scan_root=tmp_path,
+		)
+
+	assert {item.field for item in caught.value.report.diagnostics} == {
+		"region", "static_artifact_epoch",
+	}
+
+
+def test_dynamic_normalizer_keeps_explicit_bundle_for_direct_stage_consumption(tmp_path):
+	manifest_path = calibration_manifest(tmp_path)
+	recon = Recon.model_validate({
+		"pipeline": [{"kind": "normalize", "algorithm": "beam_tracking", "params": {
+			"calibration_manifest": str(manifest_path),
+		}}],
+	})
+	scan = hdf5_scan(tmp_path)
+
+	resolution = resolve_calibration(
+		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path,
+	)
+
+	assert resolution.source == "external_bundle"
+	assert resolution.bundle_ref is not None
+	assert "flat_fields" not in scan.metadata
+	assert "calibration_manifest" not in recon.pipeline[0].params
+
+
+def test_explicit_legacy_maps_precede_embedded_hdf5(tmp_path):
+	scan = hdf5_scan(tmp_path)
+	scan.metadata["flat_fields"] = np.full((4, 2, 4), 7, dtype=np.float32)
+	recon = normalization_recon()
+	resolution = resolve_calibration(
+		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path,
+	)
+	assert resolution.source == "legacy_flat_fields"
+	assert np.all(scan.metadata["flat_fields"] == 7)
+	assert recon.pipeline[0].params["calibration_policy"] == "ignore"
+
+
+def test_selected_bundle_is_integrity_checked_before_stages(tmp_path):
+	manifest_path = calibration_manifest(tmp_path, corrupt_hash=True)
+	with pytest.raises(ValueError, match="validation failed"):
+		resolve_calibration(
+			hdf5_scan(tmp_path), normalization_recon(calibration_manifest=manifest_path),
+			pipeline_root=tmp_path, scan_root=tmp_path,
+		)
+
+
+def test_runner_seeds_typed_bundle_and_serializable_resolution(tmp_path, monkeypatch):
+	manifest_path = calibration_manifest(tmp_path)
+	_, bundle_ref = load_manifest(manifest_path)
+	scan_path = tmp_path / "scan.yaml"
+	scan_path.write_text(hdf5_scan(tmp_path).to_yaml(), encoding="utf-8")
+	pipeline_path = tmp_path / "pipeline.yaml"
+	write_yaml(pipeline_path, {
+		"pipeline": [
+			{"kind": "read", "algorithm": "hdf5_dxchange", "params": {
+				"order": "projection", "y_start": 1, "y_stop": 3,
+				"calibration_policy": "required",
+			}},
+			{"kind": "normalize", "algorithm": "weighted"},
+		],
+	})
+	monkeypatch.setattr("lftomo.runner.Pipeline.run", lambda self, state: state)
+
+	result = run_reconstruction(
+		pipeline_path, scan_path, calibration_bundle=bundle_ref,
+	)[0]
+
+	assert result.artifacts["calibration_bundle"] == bundle_ref
+	assert result.artifacts["calibration_compatibility"].compatible
+	assert result.artifacts["calibration_resolution"]["source"] == "external_bundle"
+
+
+def test_normalization_without_any_calibration_source_fails(tmp_path):
+	projection = tmp_path / "projection.tif"
+	tf.imwrite(projection, np.ones((4, 4), dtype=np.float32))
+	scan = Scan.model_validate({
+		**scan_document(projection),
+		"projections": {
+			"format": "tiff_stack", "path": projection, "pattern": "*.tif",
+		},
+	})
+	with pytest.raises(ValueError, match="normalization requires"):
+		resolve_calibration(
+			scan,
+			Recon.model_validate({
+				"pipeline": [{"kind": "normalize", "algorithm": "weighted"}],
+			}),
+			pipeline_root=tmp_path,
+			scan_root=tmp_path,
+		)
 
 
 def test_cli_emits_json_summary(tmp_path, monkeypatch):
