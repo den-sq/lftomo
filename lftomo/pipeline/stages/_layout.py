@@ -14,6 +14,38 @@ def _tomography_layout(layout: type[Any]) -> None:
 		raise TypeError(f"expected ProjOrder or SinoOrder, got {layout.__name__}")
 
 
+def configured_layout(order: str | None) -> type[Any] | None:
+	"""Translate a legacy textual order flag into a layout type."""
+
+	if order is None:
+		return None
+	if order == "projection":
+		return ProjOrder
+	if order == "sinogram":
+		return SinoOrder
+	raise ValueError("array order must be 'projection' or 'sinogram'")
+
+
+def resolve_layout(
+	state: Any,
+	configured: str | None,
+	stage_name: str,
+	*,
+	legacy_default: type[Any] = SinoOrder,
+) -> type[Any]:
+	"""Use state as truth and check, rather than apply, a compatibility flag."""
+
+	compatibility = configured_layout(configured)
+	if state.layout is None:
+		return compatibility or legacy_default
+	_tomography_layout(state.layout)
+	if compatibility is not None and compatibility is not state.layout:
+		raise ValueError(
+			f"{stage_name} order compatibility flag disagrees with PipelineState.layout"
+		)
+	return state.layout
+
+
 def projection_view(data: np.ndarray, layout: type[Any], index: int) -> np.ndarray:
 	"""Return projection ``index`` as a potentially strided ``(Y, X)`` view."""
 

@@ -13,9 +13,10 @@ import numpy as np
 import tifffile as tf
 import yaml
 
-from lftomo.pipeline import NumpyBackend, PipelineState, validate_pipeline
+from lftomo.pipeline import DataDomain, NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.stages import create_stage
-from lftomo.runner import _make_executable, _resolve_flat_fields, load_recon, load_scan
+from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
+from lftomo.util.shapes import ProjOrder
 
 
 class ReferenceNotReproducible(RuntimeError):
@@ -201,25 +202,17 @@ def aligned_producer_window(selected: list[int] | tuple[int, ...], row_count: in
 
 
 def _phase_contrast_configs(recon, window: tuple[int, int]):
-	"""Configure the AAA523 lineage to retain its recorded projection layout."""
+	"""Apply only the bounded AAA523 row-window configuration."""
 	result = recon.model_copy(deep=True)
 	window_start, window_stop = window
 	for stage in result.pipeline:
 		if stage.kind == "read":
 			stage.params.update({
-				"order": "projection", "y_start": window_start, "y_stop": window_stop,
+				"y_start": window_start, "y_stop": window_stop,
 			})
-		elif stage.kind in {"normalize", "phase", "filter", "stripe", "center"}:
-			stage.params["order"] = "projection"
 		elif stage.kind == "geometry":
-			if stage.algorithm == "movement":
-				stage.params["array_order"] = "projection"
-			else:
-				stage.params["order"] = "projection"
 			if stage.algorithm == "affine_skew":
 				stage.params["center_y_px"] = -window_start
-		elif stage.kind == "recon":
-			stage.params["sinogram_order"] = False
 	return result
 
 
@@ -272,6 +265,7 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 			raise ValueError("phase-contrast input contains no projections")
 		state = PipelineState(
 			working_array=volume, scan=scan, recon=recon, backend=NumpyBackend(),
+			layout=ProjOrder, domain=DataDomain.ATTENUATION,
 		)
 		state = create_stage(stripe_config).run(state)
 		volume.flush()
@@ -346,7 +340,6 @@ def run_reference_archive(root: str | Path, producer: str,
 		)
 		layout = "projection"
 	else:
-		recon = _make_executable(recon)
 		halo = _processing_halo(recon)
 		window_start = max(0, min(selected) - halo)
 		window_stop = min(scan.detector.rows or max(selected) + halo + 1, max(selected) + halo + 1)

@@ -6,7 +6,9 @@ import cv2
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.stages._layout import configured_layout, n_projections, projection_view, resolve_layout
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -30,16 +32,18 @@ class BilateralFilterStage(Stage):
 
 	def __init__(self, diameter: int = 3, sigma_color: float = 1,
 				sigma_space: float = 1, enabled: bool = True,
-				border_type: int = cv2.BORDER_DEFAULT, order: str = "sinogram"):
+				border_type: int = cv2.BORDER_DEFAULT, order: str | None = None):
 		if diameter < 1:
 			raise ValueError("bilateral diameter must be positive")
 		if sigma_color <= 0 or sigma_space <= 0:
 			raise ValueError("bilateral sigma values must be positive")
-		if order not in ("projection", "sinogram"):
-			raise ValueError("bilateral order must be 'projection' or 'sinogram'")
-		shape = ProjOrder if order == "projection" else SinoOrder
+		compatibility = configured_layout(order)
+		shape = compatibility or SinoOrder
 		self.contract = StageContract(
-			expected_input=shape, produced_output=shape, mutates_input=True,
+			expected_input=shape, produced_output=shape, mutates_input=enabled,
+			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
+			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+			produces_domain=PRESERVE, locality=Locality.PROJECTION,
 			window_axes=("Y", "Theta"), resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.diameter = diameter
@@ -57,13 +61,14 @@ class BilateralFilterStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BilateralFilterStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
+		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("filter.bilateral expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
-		count = data.shape[0] if self.order == "projection" else data.shape[1]
+		count = n_projections(data, layout)
 		for projection in range(count):
-			image = data[projection, :, :] if self.order == "projection" else data[:, projection, :]
+			image = projection_view(data, layout, projection)
 			# This conversion is intentional and is part of the Stage's public
 			# numerical behavior; cv2.bilateralFilter rejects float64 inputs.
 			image[:] = cv2.bilateralFilter(

@@ -7,7 +7,7 @@ import yaml
 from click.testing import CliRunner
 
 from lftomo.pipeline.stages import create_stage
-from lftomo.runner import _make_executable, load_recon, main, run_reconstruction
+from lftomo.runner import load_recon, main, run_reconstruction
 
 
 def write_yaml(path, value):
@@ -37,7 +37,7 @@ def test_all_bundled_canonical_templates_instantiate():
 	root = Path(__file__).parents[1] / "lftomo" / "pipelines"
 	for path in root.glob("*.yaml"):
 		recon, _ = load_recon(path)
-		stages = [create_stage(config) for config in _make_executable(recon).pipeline]
+		stages = [create_stage(config) for config in recon.pipeline]
 		assert stages, path.name
 
 

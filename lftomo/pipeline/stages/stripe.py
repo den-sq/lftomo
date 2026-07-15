@@ -5,7 +5,15 @@ from __future__ import annotations
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.stages._layout import (
+	configured_layout,
+	n_projections,
+	n_rows,
+	resolve_layout,
+	sinogram_view,
+)
 from lftomo.prep.stripe import (
 	_remove_dead_array,
 	_remove_large_array,
@@ -156,16 +164,18 @@ class FourierWaveletStripeStage(Stage):
 	def __init__(self, level: int | None = None, wname: str = "db5",
 				sigma: float = 2.0, zero_pad: bool = False,
 				wavelet: str | None = None, ncore: int | None = None,
-				order: str = "sinogram"):
+				order: str | None = None):
 		if level is not None and level < 1:
 			raise ValueError("Fourier-wavelet level must be positive")
 		if sigma <= 0:
 			raise ValueError("Fourier-wavelet sigma must be positive")
-		if order not in ("projection", "sinogram"):
-			raise ValueError("Fourier-wavelet order must be 'projection' or 'sinogram'")
-		shape = ProjOrder if order == "projection" else SinoOrder
+		compatibility = configured_layout(order)
+		shape = compatibility or SinoOrder
 		self.contract = StageContract(
 			expected_input=shape, produced_output=shape, mutates_input=True,
+			accepts=(ProjOrder, SinoOrder), prefers=SinoOrder, produces=PRESERVE,
+			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
 			window_axes=("Y",), resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.level = level
@@ -183,13 +193,14 @@ class FourierWaveletStripeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("FourierWaveletStripeStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
+		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("stripe.fw expects a (Y, Theta, X) sinogram array")
-		theta_size = data.shape[0] if self.order == "projection" else data.shape[1]
-		y_size = data.shape[1] if self.order == "projection" else data.shape[0]
+		theta_size = n_projections(data, layout)
+		y_size = n_rows(data, layout)
 		level = self.level or int(np.ceil(np.log2(max(theta_size, data.shape[2]))))
 		for y_index in range(y_size):
-			sinogram = data[:, y_index, :] if self.order == "projection" else data[y_index]
+			sinogram = sinogram_view(data, layout, y_index)
 			_remove_stripe_fw_array(
 				sinogram, level=level, wname=self.wname,
 				sigma=self.sigma, zero_pad=self.zero_pad,
@@ -217,6 +228,14 @@ class AllOfTheStripeStage(Stage):
 		self.dim = dim
 		self.ncore = ncore
 		self.nchunk = nchunk
+		self.contract = StageContract(
+			expected_input=SinoOrder, produced_output=SinoOrder,
+			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
+			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
+			mutates_input=True, window_axes=("Y",),
+			resources=ResourceHints(memory_multiplier=3.0),
+		)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "AllOfTheStripeStage":
@@ -226,13 +245,15 @@ class AllOfTheStripeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("AllOfTheStripeStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
+		layout = resolve_layout(state, None, self.name)
 		if data.ndim != 3:
 			raise ValueError("stripe.all_of_the_stripe expects a (Y, Theta, X) sinogram array")
 
 		import tomopy
 
+		tomopy_input = data if layout is ProjOrder else np.transpose(data, (1, 0, 2))
 		corrected = tomopy.remove_all_stripe(
-			np.transpose(data, (1, 0, 2)),
+			tomopy_input,
 			snr=self.snr,
 			la_size=self.la_size,
 			sm_size=self.sm_size,
@@ -240,5 +261,5 @@ class AllOfTheStripeStage(Stage):
 			ncore=self.ncore,
 			nchunk=self.nchunk,
 		)
-		data[:] = np.transpose(corrected, (1, 0, 2))
+		data[:] = corrected if layout is ProjOrder else np.transpose(corrected, (1, 0, 2))
 		return state

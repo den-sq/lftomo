@@ -8,6 +8,13 @@ from multiprocessing.pool import ThreadPool
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.stages._layout import (
+	configured_layout,
+	n_projections,
+	n_rows,
+	projection_view,
+	resolve_layout,
+)
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -36,6 +43,8 @@ class PaganinStage(Stage):
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
 		locality=Locality.PROJECTION,
+		accepts=(ProjOrder, SinoOrder),
+		prefers=ProjOrder,
 		mutates_input=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
@@ -43,17 +52,22 @@ class PaganinStage(Stage):
 	)
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
-				enabled: bool = True, pad_y: bool = False):
+				enabled: bool = True, pad_y: bool = False,
+				order: str | None = None):
 		if alpha <= 0:
 			raise ValueError("Paganin alpha must be positive")
 		self.alpha = alpha
 		self.epsilon = epsilon
 		self.enabled = enabled
 		self.pad_y = pad_y
+		self.order = order
+		compatibility = configured_layout(order)
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=SinoOrder,
+			expected_input=compatibility or SinoOrder,
+			produced_output=compatibility or SinoOrder,
 			produces=PRESERVE,
+			accepts=(ProjOrder, SinoOrder),
+			prefers=ProjOrder,
 			mutates_input=enabled,
 			window_axes=("Y", "Theta"),
 			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm") if enabled else (),
@@ -73,17 +87,19 @@ class PaganinStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
+		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
 		pixel_size_cm = state.scan.pixel_size_um / 10_000
 		wavelength = _wavelength_cm(state.scan.energy_keV)
-		w2 = _angular_frequency_squared((data.shape[0], data.shape[2]), pixel_size_cm)
+		w2 = _angular_frequency_squared((n_rows(data, layout), data.shape[2]), pixel_size_cm)
 		transfer = 1 / (1 + state.scan.ssd_cm * self.alpha * wavelength * w2 / (4 * np.pi))
-		for projection in range(data.shape[1]):
-			filtered = np.real(np.fft.ifft2(np.fft.fft2(data[:, projection, :]) * transfer))
-			data[:, projection, :] = -np.log(np.clip(filtered, self.epsilon, None))
+		for projection in range(n_projections(data, layout)):
+			image = projection_view(data, layout, projection)
+			filtered = np.real(np.fft.ifft2(np.fft.fft2(image) * transfer))
+			image[:] = -np.log(np.clip(filtered, self.epsilon, None))
 		return state
 
 
@@ -98,17 +114,36 @@ class PaganinPhaseAbsorptionStage(Stage):
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
 		locality=Locality.PROJECTION,
+		accepts=(ProjOrder, SinoOrder),
+		prefers=ProjOrder,
 		mutates_input=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
 		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
-	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8):
+	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
+				order: str | None = None):
 		if alpha <= 0:
 			raise ValueError("phase/absorption alpha must be positive")
 		self.alpha = alpha
 		self.epsilon = epsilon
+		self.order = order
+		compatibility = configured_layout(order)
+		self.contract = StageContract(
+			expected_input=compatibility or SinoOrder,
+			produced_output=compatibility or SinoOrder,
+			produces=PRESERVE,
+			accepts=(ProjOrder, SinoOrder),
+			prefers=ProjOrder,
+			mutates_input=True,
+			window_axes=("Y", "Theta"),
+			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
+			resources=ResourceHints(memory_multiplier=2.0),
+			accepts_domain=(DataDomain.TRANSMISSION,),
+			produces_domain=DataDomain.ATTENUATION,
+			locality=Locality.PROJECTION,
+		)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "PaganinPhaseAbsorptionStage":
@@ -118,20 +153,22 @@ class PaganinPhaseAbsorptionStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinPhaseAbsorptionStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
+		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin_phase_absorption expects a (Y, Theta, X) sinogram array")
 		pixel_size_cm = state.scan.pixel_size_um / 10_000
 		wavelength = _wavelength_cm(state.scan.energy_keV)
-		w2 = _angular_frequency_squared((data.shape[0], data.shape[2]), pixel_size_cm)
+		w2 = _angular_frequency_squared((n_rows(data, layout), data.shape[2]), pixel_size_cm)
 		# Corrected-paper branch from dan_scripts/prep/phase.py:22-144.
 		filter_factor = 1 / (1 + state.scan.ssd_cm * self.alpha * wavelength * w2 / (4 * np.pi))
 		beta_scale = 4 * np.pi / wavelength
-		for projection in range(data.shape[1]):
-			complex_image = np.fft.fft2(data[:, projection, :])
+		for projection in range(n_projections(data, layout)):
+			image = projection_view(data, layout, projection)
+			complex_image = np.fft.fft2(image)
 			complex_image *= filter_factor
 			transmission = np.real(np.fft.ifft2(complex_image))
 			absorption = -np.log(np.clip(transmission, self.epsilon, 0.99999999))
-			data[:, projection, :] = absorption / beta_scale
+			image[:] = absorption / beta_scale
 		return state
 
 
@@ -149,20 +186,21 @@ class BronnikovAidedCorrectionStage(Stage):
 
 	def __init__(self, alpha: float, gamma: float = 1.0, enabled: bool = True,
 				invert: bool = False, processes: int = 1, device: str | None = None,
-				order: str = "sinogram", clip_input: bool = False,
+				order: str | None = None, clip_input: bool = False,
 				clip_minimum: float = 1e-9, clip_threshold: float = 2.0,
 				clip_high_value: float = 1.0):
 		if alpha <= 0 or gamma <= 0:
 			raise ValueError("BAC alpha and gamma must be positive")
 		if processes < 1:
 			raise ValueError("BAC processes must be positive")
-		if order not in ("projection", "sinogram"):
-			raise ValueError("BAC order must be 'projection' or 'sinogram'")
-		shape = ProjOrder if order == "projection" else SinoOrder
+		compatibility = configured_layout(order)
+		shape = compatibility or SinoOrder
 		self.contract = StageContract(
 			expected_input=shape,
 			produced_output=shape,
 			produces=PRESERVE,
+			accepts=(ProjOrder, SinoOrder),
+			prefers=ProjOrder,
 			mutates_input=enabled,
 			accepts_domain=(DataDomain.TRANSMISSION,) if enabled else (
 				DataDomain.TRANSMISSION, DataDomain.ATTENUATION,
@@ -214,28 +252,22 @@ class BronnikovAidedCorrectionStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BronnikovAidedCorrectionStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
+		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.bac expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		count = data.shape[0] if self.order == "projection" else data.shape[1]
+		count = n_projections(data, layout)
 		def image(index: int) -> np.ndarray:
-			values = data[index, :, :] if self.order == "projection" else data[:, index, :]
-			return values.copy()
+			return projection_view(data, layout, index).copy()
 		if self.processes == 1:
 			corrected = (self._correct(image(index)) for index in range(count))
 		else:
 			with ThreadPool(self.processes) as pool:
 				corrected = pool.imap(self._correct, (image(index) for index in range(count)))
 				for projection, result in enumerate(corrected):
-					if self.order == "projection":
-						data[projection, :, :] = result
-					else:
-						data[:, projection, :] = result
+					projection_view(data, layout, projection)[:] = result
 			return state
 		for projection, result in enumerate(corrected):
-			if self.order == "projection":
-				data[projection, :, :] = result
-			else:
-				data[:, projection, :] = result
+			projection_view(data, layout, projection)[:] = result
 		return state

@@ -123,26 +123,11 @@ def _resolve_flat_fields(scan: Scan, recon: Recon) -> None:
 	])
 
 
-def _make_executable(recon: Recon) -> Recon:
-	"""Legacy compatibility rewrite removed by the Phase-B Stage migration."""
-	result = recon.model_copy(deep=True)
-	uses_sinograms = any(stage.kind in {"normalize", "phase", "stripe", "center", "geometry", "filter"}
-		for stage in result.pipeline)
-	if uses_sinograms:
-		for stage in result.pipeline:
-			if stage.kind == "read":
-				stage.params["order"] = "sinogram"
-			elif stage.kind == "recon":
-				stage.params["sinogram_order"] = True
-	return result
-
-
 def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			output_path: str | Path | None = None, backend: Backend | None = None) -> list[RunResult]:
 	"""Load, expand, and execute every concrete run described by YAML files."""
 	recon, _ = load_recon(pipeline_path)
 	scan, _ = load_scan(scan_path)
-	recon = _make_executable(recon)
 	if output_path is not None:
 		recon.output_path = Path(output_path).resolve()
 	elif recon.output_path is not None and not recon.output_path.is_absolute():
