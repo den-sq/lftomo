@@ -5,6 +5,7 @@ import pytest
 
 CURRENT_IMPORTS = [
 	"lftomo",
+	"lftomo.calibration",
 	"lftomo.util.io",
 	"lftomo.util.log",
 	"lftomo.util.mem",
