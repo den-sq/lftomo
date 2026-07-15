@@ -316,6 +316,66 @@ run reproduced it within tolerance. The benchmark should measure against that
 recorded configuration rather than only a synthetic arm-3, so its baseline is
 grounded in a real producer.
 
+The Phase-C implementation provides `benchmarks/order_layout.py`. It runs one
+arm per process, reports wall time and peak RSS, and requires `--scratch` for
+arrays larger than 1 GiB so the large cases use memmap storage rather than
+risk another WSL OOM. All arms apply the requested row concurrency. The
+transition arm includes the ProjOrder-to-SinoOrder materialization in its timer
+and releases the obsolete source mapping before processing. Run all three arms
+for each required shape:
+
+```text
+python -m benchmarks.order_layout --arm bounded    --shape 1969,140,5008 --workers 4 --scratch /fast/ac7
+python -m benchmarks.order_layout --arm transition --shape 1969,140,5008 --workers 4 --scratch /fast/ac7
+python -m benchmarks.order_layout --arm strided    --shape 1969,140,5008 --workers 4 --scratch /fast/ac7
+
+python -m benchmarks.order_layout --arm bounded    --shape 1969,1100,5008 --workers 4 --scratch /fast/ac7
+python -m benchmarks.order_layout --arm transition --shape 1969,1100,5008 --workers 4 --scratch /fast/ac7
+python -m benchmarks.order_layout --arm strided    --shape 1969,1100,5008 --workers 4 --scratch /fast/ac7
+```
+
+### AC-7 result
+
+The six isolated WSL2 runs used four row workers, NumPy `float32` memmaps on
+the WSL ext4 filesystem, a 72 GiB WSL limit, and one thread each for OpenMP,
+OpenBLAS, and MKL. The timer begins after synthetic projection initialization;
+the absolute RSS includes the resident projection mapping, while RSS delta
+shows additional memory used during the measured strategy. All three arms
+produced identical fixed-coordinate fingerprints at each shape.
+
+The `bounded` arm drives the real chain-grouped segment executor via
+`Pipeline.run`, while the `strided` and `transition` arms use the direct
+per-row baseline loop. The `strided` arm is therefore a simplified
+direct-strided loop over the Vo stages, not `stripe.fw`'s production
+Fourier-wavelet kernel; its timing isolates the layout/execution path rather
+than that specific kernel's cost. The asymmetry is deliberately conservative —
+the bounded arm runs the "real" executor yet still does not win decisively.
+
+| Shape `(Theta,Y,X)` | Arm | Time | vs fastest | Peak RSS | RSS delta |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `1969,140,5008` | bounded | 376.21 s | fastest | 6.34 GiB | 1.03 GiB |
+| `1969,140,5008` | transition | 400.84 s | +6.55% | 11.34 GiB | 6.02 GiB |
+| `1969,140,5008` | strided | 394.68 s | +4.91% | 6.20 GiB | 0.88 GiB |
+| `1969,1100,5008` | bounded | 3042.07 s | +4.38% | 41.61 GiB | 1.03 GiB |
+| `1969,1100,5008` | transition | 3194.29 s | +9.61% | 65.00 GiB | 24.42 GiB |
+| `1969,1100,5008` | strided | 2914.31 s | fastest | 41.46 GiB | 0.89 GiB |
+
+No arm wins decisively under the project's 10% threshold: bounded is fastest
+for the 140-row window, while direct strided is fastest for 1100 rows. The
+explicit transition never wins and costs 23.4 GiB more peak RSS than bounded
+at full scale. Therefore a sinogram-local segment alone does **not** justify a
+full-volume layout transition. Use the chain-grouped bounded executor as the
+general default because it supplies contiguous kernel input while remaining
+within 4.38% of the full-scale fastest arm. Direct strided execution remains a
+valid kernel-specific optimization when that kernel is numerically validated
+on strided input. Select a full transition only when a downstream consumer or
+an already-required fused resampling boundary can amortize it across more work.
+
+The large empirical result remains outside unit CI; CI covers equal-concurrency
+dispatch, cross-arm numerical fingerprints, and release of the obsolete source
+mapping after a transition. The safe default uses one bounded row worker unless
+the caller supplies a higher resource limit.
+
 ## 7. Stage migration list (verified on `c775826`)
 
 Effort: **A** = contract + helper swap (mechanical); **B** = A plus a

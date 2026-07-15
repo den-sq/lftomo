@@ -9,9 +9,9 @@ from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, 
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import (
 	configured_layout,
-	n_projections,
 	n_rows,
 	resolve_layout,
+	sinogram_scratch,
 	sinogram_view,
 )
 from lftomo.prep.stripe import (
@@ -27,10 +27,33 @@ def _contract(memory_multiplier: float) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
+		accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+		produces_domain=PRESERVE, locality=Locality.SINOGRAM,
+		bounded_views_from=(ProjOrder,),
 		mutates_input=True,
 		window_axes=("Y",),
 		resources=ResourceHints(memory_multiplier=memory_multiplier),
 	)
+
+
+def _run_sinogram_stage(
+	stage: Stage, state: PipelineState, configured: str | None = None,
+) -> PipelineState:
+	if state.backend.name != "numpy":
+		raise TypeError(f"{stage.name} currently requires the NumPy backend")
+	data = np.asarray(state.working_array)
+	layout = resolve_layout(state, configured, stage.name)
+	if data.ndim != 3:
+		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
+	for y_index in range(n_rows(data, layout)):
+		if layout is ProjOrder:
+			sinogram = sinogram_scratch(data, layout, y_index)
+			stage.run_sinogram(sinogram, state)
+			sinogram_view(data, layout, y_index)[:] = sinogram
+		else:
+			stage.run_sinogram(sinogram_view(data, layout, y_index), state)
+	return state
 
 
 class VoSortStripeStage(Stage):
@@ -47,14 +70,10 @@ class VoSortStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		if state.backend.name != "numpy":
-			raise TypeError("VoSortStripeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
-		if data.ndim != 3:
-			raise ValueError("stripe.vo_sort expects a (Y, Theta, X) sinogram array")
-		for y_index in range(data.shape[0]):
-			_remove_sort_array(data[y_index], size=self.size, dim=self.dim)
-		return state
+		return _run_sinogram_stage(self, state)
+
+	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+		_remove_sort_array(sinogram, size=self.size, dim=self.dim)
 
 
 class VoDeadStripeStage(Stage):
@@ -71,16 +90,12 @@ class VoDeadStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		if state.backend.name != "numpy":
-			raise TypeError("VoDeadStripeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
-		if data.ndim != 3:
-			raise ValueError("stripe.vo_dead expects a (Y, Theta, X) sinogram array")
-		for y_index in range(data.shape[0]):
-			_remove_dead_array(data[y_index], snr=self.snr, size=self.size)
-			if self.norm:
-				_remove_large_array(data[y_index], snr=self.snr, size=self.size, norm=True)
-		return state
+		return _run_sinogram_stage(self, state)
+
+	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+		_remove_dead_array(sinogram, snr=self.snr, size=self.size)
+		if self.norm:
+			_remove_large_array(sinogram, snr=self.snr, size=self.size, norm=True)
 
 
 class VoLargeStripeStage(Stage):
@@ -99,17 +114,13 @@ class VoLargeStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		if state.backend.name != "numpy":
-			raise TypeError("VoLargeStripeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
-		if data.ndim != 3:
-			raise ValueError("stripe.vo_large expects a (Y, Theta, X) sinogram array")
-		for y_index in range(data.shape[0]):
-			_remove_large_array(
-				data[y_index], snr=self.snr, size=self.size,
-				drop_ratio=self.drop_ratio, norm=self.norm,
-			)
-		return state
+		return _run_sinogram_stage(self, state)
+
+	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+		_remove_large_array(
+			sinogram, snr=self.snr, size=self.size,
+			drop_ratio=self.drop_ratio, norm=self.norm,
+		)
 
 
 class VoFamilyStripeStage(Stage):
@@ -138,23 +149,19 @@ class VoFamilyStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		if state.backend.name != "numpy":
-			raise TypeError("VoFamilyStripeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
-		if data.ndim != 3:
-			raise ValueError("stripe.vo_family expects a (Y, Theta, X) sinogram array")
-		for y_index in range(data.shape[0]):
-			for operation in self.order:
-				if operation == "remove_dead_vo":
-					_remove_dead_array(data[y_index], snr=self.snr, size=self.size)
-				elif operation == "remove_large_vo":
-					_remove_large_array(
-						data[y_index], snr=self.snr, size=self.size,
-						drop_ratio=self.drop_ratio, norm=self.norm,
-					)
-				else:
-					_remove_sort_array(data[y_index], size=self.size, dim=self.dim)
-		return state
+		return _run_sinogram_stage(self, state)
+
+	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+		for operation in self.order:
+			if operation == "remove_dead_vo":
+				_remove_dead_array(sinogram, snr=self.snr, size=self.size)
+			elif operation == "remove_large_vo":
+				_remove_large_array(
+					sinogram, snr=self.snr, size=self.size,
+					drop_ratio=self.drop_ratio, norm=self.norm,
+				)
+			else:
+				_remove_sort_array(sinogram, size=self.size, dim=self.dim)
 
 
 class FourierWaveletStripeStage(Stage):
@@ -173,9 +180,10 @@ class FourierWaveletStripeStage(Stage):
 		shape = compatibility or SinoOrder
 		self.contract = StageContract(
 			expected_input=shape, produced_output=shape, mutates_input=True,
-			accepts=(ProjOrder, SinoOrder), prefers=SinoOrder, produces=PRESERVE,
+			accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
+			bounded_views_from=(ProjOrder,),
 			window_axes=("Y",), resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.level = level
@@ -190,22 +198,14 @@ class FourierWaveletStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		if state.backend.name != "numpy":
-			raise TypeError("FourierWaveletStripeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
-		if data.ndim != 3:
-			raise ValueError("stripe.fw expects a (Y, Theta, X) sinogram array")
-		theta_size = n_projections(data, layout)
-		y_size = n_rows(data, layout)
-		level = self.level or int(np.ceil(np.log2(max(theta_size, data.shape[2]))))
-		for y_index in range(y_size):
-			sinogram = sinogram_view(data, layout, y_index)
-			_remove_stripe_fw_array(
-				sinogram, level=level, wname=self.wname,
-				sigma=self.sigma, zero_pad=self.zero_pad,
-			)
-		return state
+		return _run_sinogram_stage(self, state, self.order)
+
+	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+		level = self.level or int(np.ceil(np.log2(max(sinogram.shape))))
+		_remove_stripe_fw_array(
+			sinogram, level=level, wname=self.wname,
+			sigma=self.sigma, zero_pad=self.zero_pad,
+		)
 
 
 class AllOfTheStripeStage(Stage):

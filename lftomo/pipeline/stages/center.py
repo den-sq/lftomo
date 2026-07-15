@@ -7,9 +7,16 @@ import numpy as np
 from skimage.measure import shannon_entropy
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.stages._layout import configured_layout, n_rows, resolve_layout
+from lftomo.pipeline.stages._layout import (
+	configured_layout,
+	n_projections,
+	n_rows,
+	projection_view,
+	resolve_layout,
+	sinogram_scratch,
+)
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -21,6 +28,8 @@ def _contract(memory_multiplier: float = 1.0) -> StageContract:
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
 		produces=PRESERVE,
+		accepts=(SinoOrder,), prefers=SinoOrder,
+		bounded_views_from=(ProjOrder,), locality=Locality.SINOGRAM,
 		accepts_domain=(DataDomain.ATTENUATION,),
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
@@ -29,13 +38,13 @@ def _contract(memory_multiplier: float = 1.0) -> StageContract:
 	)
 
 
-def _sinograms(state: PipelineState) -> np.ndarray:
+def _sinograms(state: PipelineState) -> tuple[np.ndarray, type]:
 	if state.backend.name != "numpy":
 		raise TypeError("center Stages currently require the NumPy backend")
 	data = np.asarray(state.working_array)
 	if data.ndim != 3:
 		raise ValueError("center Stages expect a (Y, Theta, X) sinogram array")
-	return data
+	return data, resolve_layout(state, None, "center")
 
 
 def _angles(state: PipelineState, theta_count: int) -> np.ndarray:
@@ -159,9 +168,10 @@ class EntropyLocalCenterStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		data = _sinograms(state)
-		index = data.shape[0] // 2 if self.slice_index is None else self.slice_index
-		if not 0 <= index < data.shape[0]:
+		data, layout = _sinograms(state)
+		row_count = n_rows(data, layout)
+		index = row_count // 2 if self.slice_index is None else self.slice_index
+		if not 0 <= index < row_count:
 			raise ValueError("center.entropy_local slice_index is outside the sinogram window")
 		start = data.shape[2] / 2 if self.start is None else self.start
 		candidates = np.arange(
@@ -170,14 +180,15 @@ class EntropyLocalCenterStage(Stage):
 			self.step,
 			dtype=np.float32,
 		)
-		angles = _angles(state, data.shape[1])
+		angles = _angles(state, n_projections(data, layout))
+		sinogram = sinogram_scratch(data, layout, index)
 
 		import tomopy
 
 		entropies = []
 		for center in candidates:
 			reconstruction = tomopy.recon(
-				data[index:index + 1],
+				sinogram[np.newaxis, :, :],
 				angles,
 				center=float(center),
 				sinogram_order=True,
@@ -252,36 +263,38 @@ class VoCenterStage(Stage):
 	def from_config(cls, config: StageConfig) -> "VoCenterStage":
 		return cls(**config.params)
 
-	def _find(self, projection_order: np.ndarray, index: int) -> float:
+	def _find(self, sinogram: np.ndarray) -> float:
 		import tomopy
 
-		center = float(tomopy.find_center_vo(projection_order, ind=index, **self.kwargs))
+		center = float(tomopy.find_center_vo(sinogram, **self.kwargs))
 		if not np.isfinite(center):
 			raise ValueError("center.vo returned a non-finite center")
 		return center
 
 	def run(self, state: PipelineState) -> PipelineState:
-		data = _sinograms(state)
-		projection_order = np.transpose(data, (1, 0, 2))
+		data, layout = _sinograms(state)
+		row_count = n_rows(data, layout)
 		try:
 			if self.tilt_fit == "polynomial":
-				count = min(self.tilt_samples, data.shape[0])
-				indices = np.unique(np.linspace(0, data.shape[0] - 1, count).round().astype(int))
+				count = min(self.tilt_samples, row_count)
+				indices = np.unique(np.linspace(0, row_count - 1, count).round().astype(int))
 				if len(indices) <= self.fit_degree:
 					raise ValueError("center.vo needs more sampled rows than the polynomial degree")
-				centers = np.asarray([self._find(projection_order, int(index)) for index in indices])
+				centers = np.asarray([
+					self._find(sinogram_scratch(data, layout, int(index))) for index in indices
+				])
 				coefficients = np.polyfit(indices, centers, self.fit_degree)
-				center = np.polyval(coefficients, np.arange(data.shape[0])).astype(np.float32)
+				center = np.polyval(coefficients, np.arange(row_count)).astype(np.float32)
 				state.artifacts["center_fit"] = {
 					"indices": indices,
 					"centers": centers,
 					"coefficients": coefficients,
 				}
 			else:
-				index = data.shape[0] // 2 if self.ind is None else self.ind
-				if not 0 <= index < data.shape[0]:
+				index = row_count // 2 if self.ind is None else self.ind
+				if not 0 <= index < row_count:
 					raise ValueError("center.vo ind is outside the sinogram window")
-				center = self._find(projection_order, index)
+				center = self._find(sinogram_scratch(data, layout, index))
 		except (ValueError, RuntimeError, ArithmeticError) as error:
 			if self.fallback != "entropy_local":
 				raise
@@ -305,21 +318,28 @@ class PhaseCorrelationCenterStage(Stage):
 			raise ValueError("center.pc tol must be positive")
 		self.tol = tol
 		self.rotc_guess = rotc_guess
+		self.contract = StageContract(
+			expected_input=SinoOrder, produced_output=SinoOrder,
+			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
+			accepts_domain=(DataDomain.ATTENUATION,), produces_domain=PRESERVE,
+			locality=Locality.PROJECTION, produces_artifacts=("center",),
+		)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "PhaseCorrelationCenterStage":
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		data = _sinograms(state)
-		if data.shape[1] < 2:
+		data, layout = _sinograms(state)
+		projection_count = n_projections(data, layout)
+		if projection_count < 2:
 			raise ValueError("center.pc requires at least two projections")
 
 		import tomopy
 
 		center = tomopy.find_center_pc(
-			data[:, 0, :],
-			data[:, -1, :],
+			projection_view(data, layout, 0),
+			projection_view(data, layout, projection_count - 1),
 			tol=self.tol,
 			rotc_guess=self.rotc_guess,
 		)

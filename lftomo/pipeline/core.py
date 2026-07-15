@@ -212,13 +212,17 @@ class Pipeline:
 			scan: Scan | None = None, validate: bool = True,
 			validation_mode: str = "fragment",
 			initial_layout: type[Any] | None = None,
-			initial_domain: DataDomain | None = None):
+			initial_domain: DataDomain | None = None,
+			bounded_workers: int = 1):
+		if bounded_workers < 1:
+			raise ValueError("bounded_workers must be positive")
 		self.stages = tuple(stages)
 		self.backend = backend or NumpyBackend()
 		self.validate = validate
 		self.validation_mode = validation_mode
 		self.initial_layout = initial_layout
 		self.initial_domain = initial_domain
+		self.bounded_workers = bounded_workers
 		self.plan = None
 		self._validated = False
 		if validate and scan is not None:
@@ -248,14 +252,34 @@ class Pipeline:
 				initial_domain=self.initial_domain,
 			)
 			self._validated = True
-		for stage in self.stages:
-			input_layout = state.layout
-			input_domain = state.domain
-			state = stage.run(state)
-			output_layout = stage.contract.output_layout(input_layout)
-			output_domain = stage.contract.output_domain(input_domain)
-			if output_layout is not None:
-				state.layout = output_layout
-			if output_domain is not None:
-				state.domain = output_domain
+		segments = () if self.plan is None else self.plan.segments
+		if not segments:
+			from lftomo.pipeline.planning import ExecutionKind, PlanSegment
+
+			segments = tuple(PlanSegment(
+				index, index + 1, ExecutionKind.SEQUENTIAL, (stage.name,),
+			) for index, stage in enumerate(self.stages))
+		from lftomo.pipeline.planning import ExecutionKind
+		for segment in segments:
+			segment_stages = self.stages[segment.start:segment.stop]
+			if segment.kind is ExecutionKind.BOUNDED_SINOGRAM:
+				from lftomo.pipeline.execution import run_bounded_sinogram_segment
+
+				state = run_bounded_sinogram_segment(
+					state, segment_stages, max_workers=self.bounded_workers,
+				)
+				for stage in segment_stages:
+					state.layout = stage.contract.output_layout(state.layout)
+					state.domain = stage.contract.output_domain(state.domain)
+				continue
+			for stage in segment_stages:
+				input_layout = state.layout
+				input_domain = state.domain
+				state = stage.run(state)
+				output_layout = stage.contract.output_layout(input_layout)
+				output_domain = stage.contract.output_domain(input_domain)
+				if output_layout is not None:
+					state.layout = output_layout
+				if output_domain is not None:
+					state.domain = output_domain
 		return state

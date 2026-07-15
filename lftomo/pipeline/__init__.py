@@ -13,7 +13,14 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
-from lftomo.pipeline.planning import Materialization, MaterializationKind, PipelinePlan, PlanStep
+from lftomo.pipeline.planning import (
+	ExecutionKind,
+	Materialization,
+	MaterializationKind,
+	PipelinePlan,
+	PlanSegment,
+	PlanStep,
+)
 from lftomo.pipeline.validation import (
 	BackendCompatibilityError,
 	MissingArtifactError,
@@ -43,7 +50,9 @@ __all__ = [
 	"PRESERVE",
 	"Materialization",
 	"MaterializationKind",
+	"ExecutionKind",
 	"PipelinePlan",
+	"PlanSegment",
 	"PlanStep",
 	"BackendCompatibilityError",
 	"MissingArtifactError",
