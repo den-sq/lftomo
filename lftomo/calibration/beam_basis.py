@@ -212,11 +212,24 @@ def fit_projection_beam(
 	trim_sigma: float = 4.0,
 	erode: int = 1,
 	n_iter: int = 4,
+	exposure_quantile: float = 0.2,
+	edge_quantile: float = 0.85,
 ) -> ProjectionBeamFit:
-	"""Robustly fit one projection and report mask contamination/coverage QC."""
+	"""Robustly fit one projection and report mask contamination/coverage QC.
 
-	if not 0 < air_threshold <= 1 or not 0 < minimum_air_fraction <= 1:
-		raise ValueError("air_threshold and minimum_air_fraction must lie in (0, 1]")
+	Residual trimming assumes the candidate mask contains a majority of true air
+	pixels. Fit residual and coefficient-range QC remain required backstops when
+	gross contamination violates that assumption.
+	"""
+
+	if (
+		not 0 < air_threshold <= 1 or not 0 < minimum_air_fraction <= 1
+		or not 0 <= exposure_quantile <= 1 or not 0 <= edge_quantile <= 1
+	):
+		raise ValueError(
+			"air_threshold and minimum_air_fraction must lie in (0, 1], and mask "
+			"quantiles must lie in [0, 1]"
+		)
 	if minimum_air_pixels < 1 or trim_sigma <= 0 or erode < 0 or n_iter < 1:
 		raise ValueError("fit counts must be positive and erosion cannot be negative")
 	projection = _clean(projection)
@@ -227,7 +240,7 @@ def fit_projection_beam(
 	log_projection = np.log(working)
 	mean, components = basis[0], basis[1:]
 	auto = air_mask is None
-	exposed = mean > np.quantile(mean, 0.2)
+	exposed = mean > np.quantile(mean, exposure_quantile)
 	mask = (
 		(log_projection - mean > np.log(air_threshold)) & exposed
 		if auto else np.asarray(air_mask, bool).copy()
@@ -235,7 +248,7 @@ def fit_projection_beam(
 	if mask.shape != projection.shape:
 		raise ValueError("air mask must match the projection")
 	edges = gaussian_gradient_magnitude(log_projection - mean, 1)
-	edge_limit = np.quantile(edges, 0.85)
+	edge_limit = np.quantile(edges, edge_quantile)
 	edge_pixels = edges >= edge_limit
 	edge_overlap = float(np.count_nonzero(mask & edge_pixels) / max(np.count_nonzero(mask), 1))
 	mask &= ~edge_pixels

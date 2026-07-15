@@ -8,10 +8,14 @@ from lftomo.calibration import (
 	CalibrationBuildSession, CalibrationBundle, ConcatenatedFrameSource,
 	HDF5RandomFrameSource, build_beam_basis, fit_projection_beam,
 )
-from lftomo.config import Recon, Scan
-from lftomo.pipeline import NumpyBackend, PipelineState
+from lftomo.config import Recon, Scan, StageConfig
+from lftomo.pipeline import NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.domains import DataDomain
-from lftomo.pipeline.stages import BeamBasisFitNormalizeStage, STAGE_REGISTRY
+from lftomo.pipeline.stages import (
+	BeamBasisFitNormalizeStage,
+	STAGE_REGISTRY,
+	create_stage,
+)
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -149,6 +153,61 @@ def test_stage_preserves_both_layouts_and_reports_coefficients_and_qc(tmp_path):
 	assert BeamBasisFitNormalizeStage.contract.accepts_domain == (DataDomain.RAW,)
 	assert BeamBasisFitNormalizeStage.contract.produces_domain is DataDomain.TRANSMISSION
 	assert BeamBasisFitNormalizeStage.contract.prefers is ProjOrder
+
+
+def test_gross_mask_contamination_is_caught_by_stage_qc(tmp_path):
+	frames, mean, vertical, horizontal = _beam_frames()
+	_, _, ref = _build(tmp_path, frames)
+	beam = np.exp(mean + 0.17 * vertical - 0.23 * horizontal)
+	y, x = np.indices(beam.shape)
+	transmission = np.ones_like(beam)
+	transmission[(y - 20) ** 2 + (x - 26) ** 2 < 22 ** 2] = 0.45
+	projection = (beam * transmission).astype(np.float32)[None]
+	artifacts = {
+		"calibration_bundle": ref,
+		"air_mask": np.ones_like(beam, dtype=bool),
+	}
+	state = PipelineState(
+		projection.copy(), _scan(40, 52, 1), Recon.model_validate({"pipeline": []}),
+		artifacts=artifacts.copy(), backend=NumpyBackend(), layout=ProjOrder,
+		domain=DataDomain.RAW,
+	)
+	with pytest.raises(ValueError, match="failed QC"):
+		BeamBasisFitNormalizeStage().run(state)
+	diagnostic = PipelineState(
+		projection.copy(), _scan(40, 52, 1), Recon.model_validate({"pipeline": []}),
+		artifacts=artifacts.copy(), backend=NumpyBackend(), layout=ProjOrder,
+		domain=DataDomain.RAW,
+	)
+	BeamBasisFitNormalizeStage(fail_on_qc=False).run(diagnostic)
+	qc = diagnostic.artifacts["beam_basis_qc"]
+	assert qc["violating_projection_count"] == 1
+	assert qc["projections"][0]["violations"]
+	assert "candidate-mask air pixels are the majority" in qc["mask_assumption"]
+
+
+def test_beam_basis_is_the_sole_normalization_in_a_complete_pipeline():
+	configs = [
+		StageConfig(kind="read", algorithm="tiff_stack", params={"order": "projection"}),
+		StageConfig(kind="normalize", algorithm="beam_basis_fit"),
+		StageConfig(kind="phase", algorithm="paganin"),
+		StageConfig(kind="recon", algorithm="gridrec", params={"center": 26}),
+	]
+	plan = validate_pipeline(
+		[create_stage(config) for config in configs], _scan(40, 52, 3),
+		available_artifacts={"calibration_bundle": object()}, mode="complete",
+	)
+	normalize = next(step for step in plan.steps if step.stage_name == "normalize.beam_basis_fit")
+	assert normalize.input_domain is DataDomain.RAW
+	assert normalize.output_domain is DataDomain.TRANSMISSION
+
+
+def test_beam_basis_mask_quantiles_are_configurable_and_validated():
+	stage = BeamBasisFitNormalizeStage(exposure_quantile=0.1, edge_quantile=0.9)
+	assert stage.exposure_quantile == 0.1
+	assert stage.edge_quantile == 0.9
+	with pytest.raises(ValueError, match="quantiles"):
+		BeamBasisFitNormalizeStage(edge_quantile=1.1)
 
 
 @pytest.mark.integration

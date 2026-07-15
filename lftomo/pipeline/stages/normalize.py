@@ -332,6 +332,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		air_mask_artifact: str = "air_mask", air_threshold: float = 0.95,
 		minimum_air_pixels: int = 100, minimum_air_fraction: float = 0.005,
 		trim_sigma: float = 4.0, erode: int = 1, iterations: int = 4,
+		exposure_quantile: float = 0.2, edge_quantile: float = 0.85,
 		maximum_fit_residual: float = 0.08, maximum_out_of_basis: float = 0.75,
 		maximum_basis_condition: float = 1e6,
 		maximum_contamination_fraction: float = 0.5,
@@ -339,8 +340,14 @@ class BeamBasisFitNormalizeStage(Stage):
 		fail_on_qc: bool = True, order: str | None = None,
 	):
 		configured_layout(order)
-		if not 0 < air_threshold <= 1 or not 0 < minimum_air_fraction <= 1:
-			raise ValueError("air_threshold and minimum_air_fraction must lie in (0, 1]")
+		if (
+			not 0 < air_threshold <= 1 or not 0 < minimum_air_fraction <= 1
+			or not 0 <= exposure_quantile <= 1 or not 0 <= edge_quantile <= 1
+		):
+			raise ValueError(
+				"air_threshold and minimum_air_fraction must lie in (0, 1], and mask "
+				"quantiles must lie in [0, 1]"
+			)
 		if any(value <= 0 for value in (
 			minimum_air_pixels, trim_sigma,
 			maximum_fit_residual, maximum_out_of_basis, maximum_basis_condition,
@@ -356,6 +363,8 @@ class BeamBasisFitNormalizeStage(Stage):
 		self.trim_sigma = trim_sigma
 		self.erode = erode
 		self.iterations = iterations
+		self.exposure_quantile = exposure_quantile
+		self.edge_quantile = edge_quantile
 		self.maximum_fit_residual = maximum_fit_residual
 		self.maximum_out_of_basis = maximum_out_of_basis
 		self.maximum_basis_condition = maximum_basis_condition
@@ -425,6 +434,8 @@ class BeamBasisFitNormalizeStage(Stage):
 				minimum_air_pixels=self.minimum_air_pixels,
 				minimum_air_fraction=self.minimum_air_fraction,
 				trim_sigma=self.trim_sigma, erode=self.erode, n_iter=self.iterations,
+				exposure_quantile=self.exposure_quantile,
+				edge_quantile=self.edge_quantile,
 			)
 			coefficient_extrapolation = 0.0
 			if training_min.shape == fit.coefficients.shape == training_max.shape:
@@ -468,6 +479,10 @@ class BeamBasisFitNormalizeStage(Stage):
 			))) if len(coefficient_array) > 1 else 0.0,
 			"violating_projection_count": sum(bool(value) for value in violations),
 			"basis_scope": "only beam states represented by training_coverage are supported",
+			"mask_assumption": (
+				"robust trimming assumes candidate-mask air pixels are the majority; "
+				"fit and coefficient QC guard gross contamination"
+			),
 		}
 		return state if data is state.working_array else state.with_array(data)
 

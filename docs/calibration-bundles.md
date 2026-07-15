@@ -366,8 +366,13 @@ against the basis mean is near one.
 
 The automatic mask assumes that every projection contains a sufficiently large,
 well-exposed air region. It is not appropriate when the sample or holder covers
-the whole detector. Likely sample edges are removed, the mask is eroded, and a
-robust residual trim rejects false-positive sample pixels before the final fit.
+the whole detector. `exposure_quantile` and `edge_quantile` configure the
+bright-field and edge exclusions. Likely sample edges are removed, the mask is
+eroded, and a robust residual trim rejects false-positive sample pixels before
+the final fit. That trim assumes true air is the majority of the candidate
+mask: when gross contamination violates this assumption, the MAD centre may
+follow the sample rather than reject it. Fit-residual, coefficient-range, and
+out-of-basis QC are therefore required backstops, not optional decoration.
 QC reports air count/fraction, edge overlap, rejected-mask fraction, residual,
 basis rank/conditioning, coefficient stability, training-range extrapolation,
 and relative out-of-basis error. Insufficient air and rank-deficient coverage
