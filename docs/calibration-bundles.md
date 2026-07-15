@@ -176,3 +176,48 @@ segment, and static-artifact epoch. `hash_source=True` computes a streamed hash;
 it does not materialize the source file. Algorithm builders add component or
 bundle `ValidationResult` objects, including confidence metrics, before
 finalization.
+
+## Conventional per-session medians
+
+`lftomo.prep.flat_median.generate_four_map_medians()` is the deliberately
+smaller legacy-compatible workflow. It accepts explicit `HDF5FrameSeries` or
+`TIFFFrameSeries` readers for pre-gain, post-gain, pre-dark, and post-dark,
+median-combines one detector-row chunk at a time, and atomically publishes:
+
+```text
+pre_gain.tif
+post_gain.tif
+pre_dark.tif
+post_dark.tif
+flat_medians.yaml
+```
+
+The TIFFs are float32. `FourMapMedianResult.flat_fields` and
+`scan_metadata()` preserve the exact order expected by `normalize.weighted` and
+the runner. The YAML sidecar records source paths/datasets, frame ranges/counts,
+source shape/dtype, detector crop/binning/orientation, output shape/dtype, chunk
+size, caller build parameters, and per-role non-finite input counts. Recoverable
+NaN/inf samples are excluded from the per-pixel median; a pixel with no finite
+sample fails the atomic build. Source arrays are treated as immutable even when
+a TIFF reader returns a writable disk-backed view.
+
+```python
+from lftomo.prep.flat_median import (
+    generate_four_map_medians,
+    hdf5_four_map_sources,
+)
+
+result = generate_four_map_medians(
+    hdf5_four_map_sources("session.h5"),
+    "session-flat-medians",
+    y_chunk=32,
+)
+scan.metadata.update(result.scan_metadata())
+```
+
+The HDF5 convenience function uses `exchange/data_white` and
+`exchange/data_dark` for both pre and post by default. For sessions with
+distinct datasets or frame ranges, construct four explicit `HDF5FrameSeries`
+instances. TIFF input may be one multi-page stack or a sequence of consistently
+shaped single-frame files. The output directory must not already exist, so a
+failed run can never expose a mixture of old and partial maps.
