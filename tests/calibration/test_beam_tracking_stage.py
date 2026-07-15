@@ -107,7 +107,8 @@ def test_aaa392_timestamped_air_residual_improves_over_weighted(request):
 	def median(pattern):
 		directory = next(root.glob(pattern))
 		return np.median(np.stack([
-			tf.memmap(path)[:192, :1024] for path in natsorted(directory.glob("*.tif"))
+			tf.memmap(path, mode="r")[:192, :1024]
+			for path in natsorted(directory.glob("*.tif"))
 		]), axis=0)
 	pre, post = median("*rescan5_pregains_tiff"), median("*rescan5_postgains_tiff")
 	dark0, dark1 = median("*rescan5_predarks_tiff"), median("*rescan5_postdarks_tiff")
@@ -115,7 +116,7 @@ def test_aaa392_timestamped_air_residual_improves_over_weighted(request):
 	timestamps = np.array([162723463462000, 162832427675000, 162911873666000,
 		162915736571000, 163012286547000])
 	projections = np.stack([
-		tf.memmap(projection_dir / f"proj_{timestamp}.tif")[:192, :1024]
+		tf.memmap(projection_dir / f"proj_{timestamp}.tif", mode="r")[:192, :1024]
 		for timestamp in timestamps
 	])
 	fractions = (timestamps - timestamps[0]) / (timestamps[-1] - timestamps[0])
