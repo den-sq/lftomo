@@ -10,6 +10,13 @@ from .bundle import (
 	validate_bundle,
 )
 from .compatibility import CalibrationCompatibilityError, check_compatibility
+from .build import (
+	BuildInspection,
+	CalibrationBuildError,
+	CalibrationBuildSession,
+	IncrementalArrayWriter,
+	inspect_build,
+)
 from .models import (
 	ArrayPayload,
 	BundleValidationReport,
@@ -33,10 +40,13 @@ from .models import (
 __all__ = [
 	"ArrayPayload",
 	"BundleValidationReport",
+	"BuildInspection",
 	"CalibrationBundle",
 	"CalibrationBundleError",
 	"CalibrationBundleRef",
 	"CalibrationBundleValidationError",
+	"CalibrationBuildError",
+	"CalibrationBuildSession",
 	"CalibrationCompatibilityError",
 	"CalibrationComponent",
 	"CalibrationManifest",
@@ -47,6 +57,7 @@ __all__ = [
 	"CompatibilityReport",
 	"DetectorRegion",
 	"MotorAxisCalibration",
+	"IncrementalArrayWriter",
 	"ProducerInfo",
 	"SCHEMA_VERSION",
 	"SourceRecord",
@@ -55,7 +66,7 @@ __all__ = [
 	"ValidationResult",
 	"check_compatibility",
 	"load_manifest",
+	"inspect_build",
 	"stream_sha256",
 	"validate_bundle",
 ]
-
