@@ -129,3 +129,50 @@ results = run_reconstruction(
     calibration_bundle=bundle_ref,
 )
 ```
+
+## Bounded bundle construction
+
+`CalibrationBuildSession` writes into a hidden sibling staging directory and
+publishes the target directory with one atomic rename only after every payload,
+descriptor, hash, and validation result passes. A crash leaves a `BUILDING.json`
+marker; an explicit or context-manager failure leaves `BUILD_FAILED.json` and
+the partial payloads for diagnosis. `inspect_build()` distinguishes those states
+from complete and corrupt bundles.
+
+Array components are NPY memory maps filled sequentially along a caller-selected
+axis. `append()` retains only the current iterator chunk; `close()` flushes and
+hashes the payload in bounded blocks. `write_table_component()` applies the same
+contract to numeric row chunks and records explicit column names.
+
+```python
+from lftomo.calibration import CalibrationBuildSession
+
+with CalibrationBuildSession(
+    "/calibrations/trip-1",
+    calibration_id="trip-1",
+    producer={"package": "lftomo", "version": "0.1.0", "parameters": params},
+    compatibility={"detector_id": "pco-edge", "region": detector_region},
+) as build:
+    build.add_source(scan_path, uuid=scan_uuid, hash_source=True)
+    writer = build.create_array_component(
+        "beam_keyframes",
+        shape=(n_keyframes, rows, columns),
+        dtype="float32",
+        axes=("T", "Y", "X"),
+        kind="beam_keyframes",
+        coordinate_frame="beam",
+        time_axis=time_axis,
+    )
+    for keyframe_batch in bounded_keyframe_reader:
+        writer.append(keyframe_batch)
+    writer.add_validation_result(qc_result)
+    writer.close()
+    bundle_ref = build.finalize()
+```
+
+Source records accept paths, UUIDs, acquisition times, caller-supplied hashes,
+and algorithm metadata such as detector crop/binning/orientation, camera
+segment, and static-artifact epoch. `hash_source=True` computes a streamed hash;
+it does not materialize the source file. Algorithm builders add component or
+bundle `ValidationResult` objects, including confidence metrics, before
+finalization.
