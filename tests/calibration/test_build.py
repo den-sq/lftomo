@@ -1,6 +1,7 @@
 from pathlib import Path
 import tracemalloc
 
+import h5py
 import numpy as np
 import pytest
 
@@ -40,7 +41,12 @@ def test_incremental_multiscan_build_is_chunk_bounded_and_atomic(tmp_path):
 	assert inspect_build(session.staging_path).state == "building"
 	for index in range(3):
 		source = tmp_path / f"scan-{index}.h5"
-		source.write_bytes(f"source-{index}".encode())
+		with h5py.File(source, "w") as handle:
+			handle.create_dataset(
+				"exchange/data_white",
+				data=np.full((4, 32, 64), index, dtype=np.float32),
+				chunks=(1, 8, 64),
+			)
 		session.add_source(
 			source,
 			uuid=f"uuid-{index}",
@@ -87,6 +93,34 @@ def test_incremental_multiscan_build_is_chunk_bounded_and_atomic(tmp_path):
 		bundle.read_component("beam_keyframes", time_value=7, y_start=3, y_stop=5),
 		np.full((2, 64), 6, dtype=np.float32),
 	)
+
+
+def test_peak_memory_scales_with_append_chunk_not_total_component(tmp_path):
+	session = CalibrationBuildSession(
+		tmp_path / "large-bundle", calibration_id="large-test",
+		producer={"package": "lftomo", "version": "test"},
+		compatibility={
+			"detector_id": "camera-a", "region": {"height": 256, "width": 256},
+		},
+	)
+	frame_count = 128
+	writer = session.create_array_component(
+		"beam_keyframes", shape=(frame_count, 256, 256), dtype="float32",
+		axes=("T", "Y", "X"), kind="beam_keyframes", coordinate_frame="beam",
+		time_axis=TimeAxis(kind="projection_index", values=list(range(frame_count))),
+	)
+	tracemalloc.start()
+	for index in range(frame_count):
+		writer.append(np.full((1, 256, 256), index, dtype=np.float32))
+	_, peak = tracemalloc.get_traced_memory()
+	tracemalloc.stop()
+
+	chunk_bytes = 256 * 256 * np.dtype("float32").itemsize
+	full_bytes = frame_count * chunk_bytes
+	assert writer.max_buffer_bytes == chunk_bytes
+	assert full_bytes > 32_000_000
+	assert peak < 2_000_000
+	writer.close()
 
 
 def test_table_writer_records_columns_and_uses_row_chunks(tmp_path):
@@ -155,7 +189,10 @@ def test_descriptor_roi_mismatch_prevents_atomic_publication(tmp_path):
 	with pytest.raises(CalibrationBuildError, match="validation failed"):
 		session.finalize()
 	assert not session.target.exists()
-	assert inspect_build(session.staging_path).state == "corrupt"
+	inspection = inspect_build(session.staging_path)
+	assert inspection.state == "failed"
+	assert "validation failed" in inspection.message
+	assert (session.staging_path / "calibration.yaml").is_file()
 
 
 def test_source_hash_mismatch_is_reported_without_unbounded_read(tmp_path):

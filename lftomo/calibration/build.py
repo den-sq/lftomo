@@ -59,6 +59,16 @@ def inspect_build(path: str | Path, *, verify_hashes: bool = False) -> BuildInsp
 
 	path = Path(path).expanduser().resolve()
 	payloads = tuple(sorted((path / "components").glob("*"))) if path.is_dir() else ()
+	failed = path / "BUILD_FAILED.json"
+	if failed.is_file():
+		try:
+			metadata = json.loads(failed.read_text(encoding="utf-8"))
+		except (OSError, ValueError):
+			metadata = {}
+		return BuildInspection(
+			path, "failed", str(metadata.get("reason", "build failed")),
+			calibration_id=metadata.get("calibration_id"), payloads=payloads,
+		)
 	manifest_path = path / "calibration.yaml"
 	if manifest_path.is_file():
 		try:
@@ -71,16 +81,6 @@ def inspect_build(path: str | Path, *, verify_hashes: bool = False) -> BuildInsp
 			"bundle validation passed" if report.valid else "bundle validation failed",
 			calibration_id=report.calibration_id,
 			payloads=payloads,
-		)
-	failed = path / "BUILD_FAILED.json"
-	if failed.is_file():
-		try:
-			metadata = json.loads(failed.read_text(encoding="utf-8"))
-		except (OSError, ValueError):
-			metadata = {}
-		return BuildInspection(
-			path, "failed", str(metadata.get("reason", "build failed")),
-			calibration_id=metadata.get("calibration_id"), payloads=payloads,
 		)
 	building = path / "BUILDING.json"
 	if building.is_file():
