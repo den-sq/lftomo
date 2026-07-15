@@ -343,6 +343,14 @@ the absolute RSS includes the resident projection mapping, while RSS delta
 shows additional memory used during the measured strategy. All three arms
 produced identical fixed-coordinate fingerprints at each shape.
 
+The `bounded` arm drives the real chain-grouped segment executor via
+`Pipeline.run`, while the `strided` and `transition` arms use the direct
+per-row baseline loop. The `strided` arm is therefore a simplified
+direct-strided loop over the Vo stages, not `stripe.fw`'s production
+Fourier-wavelet kernel; its timing isolates the layout/execution path rather
+than that specific kernel's cost. The asymmetry is deliberately conservative —
+the bounded arm runs the "real" executor yet still does not win decisively.
+
 | Shape `(Theta,Y,X)` | Arm | Time | vs fastest | Peak RSS | RSS delta |
 | --- | --- | ---: | ---: | ---: | ---: |
 | `1969,140,5008` | bounded | 376.21 s | fastest | 6.34 GiB | 1.03 GiB |
