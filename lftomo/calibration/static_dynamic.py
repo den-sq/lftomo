@@ -243,7 +243,11 @@ def register_beam_offset(
 	min_confidence: float = 0.25,
 	max_ambiguity: float = 0.98,
 ) -> BeamOffsetRegistration:
-	"""Register old-to-new beam motion with ZNCC and peak-ambiguity diagnostics."""
+	"""Register old-to-new beam motion with ZNCC and peak-ambiguity diagnostics.
+
+	``env_sigma`` is retained for source-model API and provenance compatibility,
+	but does not currently alter the bounded ZNCC calculation.
+	"""
 
 	old = _clean(flat_old)
 	new = _clean(flat_new)
@@ -295,7 +299,10 @@ def calibrate_motor_axis(
 		flat_before, flat_after, D=D, **registration_kwargs,
 	)
 	axis_result = registration.dy if axis == "vertical" else registration.dx
-	scale = axis_result.measured_shift / motor_delta
+	# The resolved value incorporates the encoder prior when the image
+	# registration is low-confidence or ambiguous. A typed calibration must use
+	# the same policy decision exposed by its accompanying diagnostic.
+	scale = axis_result.resolved_shift / motor_delta
 	return MotorAxisCalibrationResult(
 		axis=axis,
 		calibration=MotorAxisCalibration(

@@ -254,9 +254,12 @@ the winning ZNCC, competing-peak ambiguity, peak margin, measured shift, and
 resolved shift. An encoder prior limits the refinement search and becomes the
 resolved value when confidence or ambiguity fails policy; this is especially
 important along stripes, where the aperture problem makes one axis weak even
-when its winning ZNCC looks high. `calibrate_motor_axis()` returns typed units,
-pixel scale magnitude, sign, and the full axis diagnostic for persistence as a
-`camera_registration` component or compatibility metadata.
+when its winning ZNCC looks high. `calibrate_motor_axis()` derives its typed
+pixel scale and sign from that resolved value and returns the full axis
+diagnostic for persistence as a `camera_registration` component or
+compatibility metadata. The `env_sigma` argument remains accepted for parity
+with the source model and provenance, but does not currently tune the bounded
+ZNCC calculation.
 
 ### RA-00808 validation finding
 

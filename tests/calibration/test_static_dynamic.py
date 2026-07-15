@@ -46,6 +46,11 @@ def test_decomposition_keeps_fixed_compact_defects_static_and_reconstructs_exact
 	assert detector[67, 93] > 1.15
 	# Horizontally elongated moving beam bands belong in B, not D.
 	assert np.std(detector.mean(axis=1)) < np.std(flats[0].mean(axis=1)) / 100
+	# The compact detector defects must not leave a meaningful imprint in B.
+	low_defect_neighbor = (beam[:, 23, 36] + beam[:, 23, 40]) / 2
+	high_defect_neighbor = (beam[:, 67, 90] + beam[:, 67, 96]) / 2
+	np.testing.assert_allclose(beam[:, 23, 38], low_defect_neighbor, rtol=0.01)
+	np.testing.assert_allclose(beam[:, 67, 93], high_defect_neighbor, rtol=0.01)
 
 
 def test_windowed_decomposition_writes_distinct_validity_scopes(tmp_path):
@@ -136,6 +141,22 @@ def test_motor_axis_calibration_returns_typed_signed_metadata(tmp_path):
 	assert CalibrationBundle.open(ref.manifest_path).component("camera_registration")
 
 
+def test_motor_axis_calibration_uses_resolved_encoder_fallback():
+	y, _ = np.indices((96, 128))
+	# The horizontal profile is constant, so image registration cannot resolve X.
+	old = 1000 * (1 + 0.2 * np.sin(y / 7))
+	result = calibrate_motor_axis(
+		old, old, motor_delta=2, unit="mm", axis="horizontal", max_shift=12,
+		expected=(0, -7), refine=2, max_ambiguity=0.2,
+	)
+	assert result.registration.used_expected_fallback
+	assert result.registration.measured_shift != pytest.approx(-7)
+	assert result.registration.resolved_shift == -7
+	assert result.calibration.pixels_per_unit == pytest.approx(3.5)
+	assert result.calibration.sign == -1
+	assert result.expected_shift(2) == -7
+
+
 def test_camera_segments_are_hard_interpolation_boundaries():
 	points = [
 		SegmentedTimePoint("before", 0), SegmentedTimePoint("before", 10),
@@ -158,8 +179,8 @@ def test_ra00808_camera_move_matches_encoder_and_is_segmented(request):
 	if not before.is_file() or not after.is_file():
 		pytest.skip("local RA-00808 median pair is unavailable")
 	# Bounded 2x view: the manifest records i0_y -25 -> -40, delta -15.
-	old = tf.memmap(before)[256:1904:2, ::2]
-	new = tf.memmap(after)[256:1904:2, ::2]
+	old = tf.memmap(before, mode="r")[256:1904:2, ::2]
+	new = tf.memmap(after, mode="r")[256:1904:2, ::2]
 	registration = register_beam_offset(old, new, max_shift=40)
 	full_resolution_dy = registration.dy.measured_shift * 2
 	assert full_resolution_dy == pytest.approx(-30, abs=2)
