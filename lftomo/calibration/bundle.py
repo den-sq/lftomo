@@ -156,6 +156,24 @@ def validate_bundle(
 				message=f"{name} declares dtype {payload.dtype} but payload has {dtype}",
 			))
 		compatibility = _effective_compatibility(manifest, component)
+		recommended_scopes = {
+			"detector_static": ("static_artifact_epoch",),
+			"dynamic_beam": ("camera_segment",),
+			"beam_keyframes": ("camera_segment",),
+		}
+		missing_scopes = [
+			field for field in recommended_scopes.get(component.kind, ())
+			if getattr(compatibility, field) is None
+		]
+		if missing_scopes:
+			results.append(ValidationResult(
+				name="compatibility_scope", status="warning", component=name,
+				message=(
+					f"{name} does not declare recommended compatibility scope(s): "
+					+ ", ".join(missing_scopes)
+				),
+				metrics={"missing": missing_scopes},
+			))
 		if compatibility.region is not None and "Y" in payload.axes and "X" in payload.axes:
 			y_size = payload.shape[payload.axes.index("Y")]
 			x_size = payload.shape[payload.axes.index("X")]

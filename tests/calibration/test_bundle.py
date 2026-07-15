@@ -78,6 +78,29 @@ def test_manifest_round_trip_and_payload_validation(tmp_path):
 	assert report.results[0].status == "pass"
 
 
+def test_validation_warns_when_moving_components_lack_validity_scopes(tmp_path):
+	values = np.ones((2, 4, 5), dtype=np.float32)
+	np.save(tmp_path / "beam.npy", values)
+	path, _ = _write_manifest(tmp_path, {
+		"beam": CalibrationComponent(
+			kind="dynamic_beam", coordinate_frame="beam",
+			payload=_payload(tmp_path / "beam.npy", ("T", "Y", "X")),
+			time_axis=TimeAxis(kind="projection_index"),
+			compatibility=CompatibilityMetadata(camera_segment=None),
+		),
+	})
+	manifest = CalibrationManifest.from_yaml(path.read_text(encoding="utf-8"))
+	manifest.compatibility.camera_segment = None
+	path.write_text(manifest.to_yaml(), encoding="utf-8")
+
+	report = validate_bundle(path)
+
+	assert report.valid
+	warning = next(result for result in report.results if result.name == "compatibility_scope")
+	assert warning.status == "warning"
+	assert warning.metrics == {"missing": ["camera_segment"]}
+
+
 def test_validation_reports_missing_corrupt_shape_and_hash(tmp_path):
 	values = np.ones((4, 5), dtype=np.float32)
 	np.save(tmp_path / "field.npy", values)

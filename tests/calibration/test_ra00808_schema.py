@@ -73,6 +73,15 @@ def test_ra00808_headers_express_camera_segment_and_artifact_epoch_boundary(tmp_
 					dtype="float32", axes=("Y", "X"),
 				),
 			),
+			"beam": CalibrationComponent(
+				kind="dynamic_beam", coordinate_frame="beam",
+				payload=ArrayPayload(
+					path="beam.npy", format="npy", sha256="0" * 64,
+					shape=(2, region.height, region.width),
+					dtype="float32", axes=("T", "Y", "X"),
+				),
+				time_axis={"kind": "projection_index"},
+			),
 		},
 	)
 	manifest_path = tmp_path / "calibration.yaml"
@@ -92,7 +101,12 @@ def test_ra00808_headers_express_camera_segment_and_artifact_epoch_boundary(tmp_
 			camera_segment="distance-150.079114",
 			static_artifact_epoch="from-20260611-143029",
 		),
-		components=["detector"], policy="report",
+		components=["detector", "beam"], policy="report",
 	)
 	assert not report.compatible
-	assert {item.field for item in report.diagnostics} == {"region", "static_artifact_epoch"}
+	assert {
+		(item.component, item.field) for item in report.diagnostics
+	} == {
+		("detector", "region"), ("detector", "static_artifact_epoch"),
+		("beam", "region"), ("beam", "camera_segment"),
+	}
