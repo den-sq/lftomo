@@ -60,12 +60,19 @@ from .beam_tracking import (
 	optimal_transport_interp,
 )
 from .keyframes import FlatSeriesDigest, TIFFRandomFrameSource, build_flat_series_digest
+from .beam_basis import (
+	BeamBasisBuild, BeamFitQC, ConcatenatedFrameSource, HDF5RandomFrameSource,
+	ProjectionBeamFit,
+	build_beam_basis, fit_projection_beam,
+)
 
 __all__ = [
 	"ArrayPayload",
 	"AxisRegistration",
 	"BeamOffsetRegistration",
 	"BeamSchedule",
+	"BeamBasisBuild",
+	"BeamFitQC",
 	"BundleValidationReport",
 	"BuildInspection",
 	"CalibrationBundle",
@@ -82,12 +89,15 @@ __all__ = [
 	"CompatibilityMetadata",
 	"CompatibilityOverride",
 	"CompatibilityReport",
+	"ConcatenatedFrameSource",
 	"FlatSeriesDigest",
+	"HDF5RandomFrameSource",
 	"DetectorRegion",
 	"MotorAxisCalibration",
 	"MotorAxisCalibrationResult",
 	"IncrementalArrayWriter",
 	"ProducerInfo",
+	"ProjectionBeamFit",
 	"SCHEMA_VERSION",
 	"SourceRecord",
 	"SegmentedTimePoint",
@@ -99,6 +109,7 @@ __all__ = [
 	"check_compatibility",
 	"build_static_dynamic_components",
 	"build_flat_series_digest",
+	"build_beam_basis",
 	"auto_air_mask",
 	"calibrate_motor_axis",
 	"calibrate_schedule",
@@ -106,6 +117,7 @@ __all__ = [
 	"diagnose_beam_change",
 	"estimate_noise_floor",
 	"fit_beam_time",
+	"fit_projection_beam",
 	"geometric_crossfade",
 	"load_manifest",
 	"inspect_build",
