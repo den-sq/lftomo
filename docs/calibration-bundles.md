@@ -277,3 +277,28 @@ does not justify changing the detector-static epoch for `D`; it does require a
 new beam state at its first appearance and a new camera segment at each move.
 No interpolation is permitted between those segment-specific dynamic
 components.
+
+## Two-flat beam tracking normalization
+
+`normalize.beam_tracking` is the order-aware replacement for weighted
+normalization when pre/post beam structure drifts during a scan. It accepts
+projection or sinogram layout, prefers projection order, preserves layout, and
+is the pipeline's sole RAW-to-TRANSMISSION transition. For each global
+projection index it evaluates only one Y-windowed gain; it never constructs a
+`(Theta, Y, X)` gain stack.
+
+The safe-default interpolator retains the log-space endpoint mean—including
+detector-static `D`—and transports only the smoothed log ratio, where `D`
+cancels. A serializable linear or piecewise `BeamSchedule` maps global scan
+fraction to beam time. `fit_schedule: true` estimates that mapping from sampled
+projection air pixels and records air count/fraction, fitted beam times, and
+residual standard deviation in `beam_tracking_qc`. Missing air or a degenerate
+endpoint direction fails explicitly. Legacy four-map input remains supported;
+bundle input names can be configured through `component_names`.
+
+On the five timestamped AAA392 rescan5 projections documented by the source
+package, a bounded 192×1024 air-region validation found a nonzero initial beam
+time and reduced mean held-out air residual from 0.01086 (naive weighted
+endpoints) to 0.01067. The improvement is modest for this subpixel-motion scan;
+the schedule is the material correction. More complex non-monotonic events
+require keyframes rather than forcing a two-endpoint schedule.
