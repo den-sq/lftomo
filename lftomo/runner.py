@@ -279,7 +279,10 @@ def resolve_calibration(
 					"for legacy normalization"
 				)
 			scan.metadata["flat_fields"] = fields
-		_disable_embedded_calibration(recon)
+			_disable_embedded_calibration(recon)
+		# Legacy normalizers consume four materialized Y-window maps. Dynamic
+		# normalizers consume the typed bundle reference from PipelineState directly;
+		# never fall through and let a lower-precedence legacy/HDF5 source replace it.
 		_strip_resolution_params(recon)
 		return CalibrationResolution(
 			source="external_bundle", bundle_ref=ref, compatibility=report,
@@ -386,9 +389,13 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		if len(runs) > 1 and concrete.output_path is not None:
 			concrete.output_path = concrete.output_path / f"sweep-{run.index:04d}"
 		stages = [create_stage(config) for config in concrete.pipeline]
+		run_scan = scan.model_copy(deep=False)
+		# Sweep runs may add metadata keys but must treat shared calibration arrays
+		# as immutable; copy the mapping without duplicating detector-sized fields.
+		run_scan.metadata = dict(scan.metadata)
 		state = PipelineState(
 			working_array=np.empty((0,), dtype=np.float32),
-			scan=scan.model_copy(deep=False),
+			scan=run_scan,
 			recon=concrete,
 			artifacts=dict(initial_artifacts),
 			backend=backend,

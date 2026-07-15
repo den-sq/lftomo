@@ -209,6 +209,42 @@ def test_compatibility_mismatch_defaults_to_error_and_override_is_provenance(tmp
 	assert provenance["compatibility"]["diagnostics"][0]["field"] == "detector_id"
 
 
+def test_runner_reports_region_and_artifact_epoch_mismatches(tmp_path):
+	manifest_path = calibration_manifest(tmp_path)
+	scan = hdf5_scan(tmp_path)
+	scan.detector.columns = 5
+	scan.metadata["static_artifact_epoch"] = "epoch-b"
+
+	with pytest.raises(CalibrationCompatibilityError) as caught:
+		resolve_calibration(
+			scan, normalization_recon(calibration_manifest=manifest_path),
+			pipeline_root=tmp_path, scan_root=tmp_path,
+		)
+
+	assert {item.field for item in caught.value.report.diagnostics} == {
+		"region", "static_artifact_epoch",
+	}
+
+
+def test_dynamic_normalizer_keeps_explicit_bundle_for_direct_stage_consumption(tmp_path):
+	manifest_path = calibration_manifest(tmp_path)
+	recon = Recon.model_validate({
+		"pipeline": [{"kind": "normalize", "algorithm": "beam_tracking", "params": {
+			"calibration_manifest": str(manifest_path),
+		}}],
+	})
+	scan = hdf5_scan(tmp_path)
+
+	resolution = resolve_calibration(
+		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path,
+	)
+
+	assert resolution.source == "external_bundle"
+	assert resolution.bundle_ref is not None
+	assert "flat_fields" not in scan.metadata
+	assert "calibration_manifest" not in recon.pipeline[0].params
+
+
 def test_explicit_legacy_maps_precede_embedded_hdf5(tmp_path):
 	scan = hdf5_scan(tmp_path)
 	scan.metadata["flat_fields"] = np.full((4, 2, 4), 7, dtype=np.float32)
