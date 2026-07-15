@@ -8,6 +8,7 @@ nav:
    - Buildout: Buildout.md
  - Operations:
    - Recon-data runner: recon-data-runner.md
+   - Calibration bundles: calibration-bundles.md
  - API reference:
    - Configuration models: api/config.md
    - Pipeline: api-pipeline.md
