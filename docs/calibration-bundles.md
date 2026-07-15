@@ -221,3 +221,56 @@ distinct datasets or frame ranges, construct four explicit `HDF5FrameSeries`
 instances. TIFF input may be one multi-page stack or a sequence of consistently
 shaped single-frame files. The output directory must not already exist, so a
 failed run can never expose a mixture of old and partial maps.
+
+## Static detector / dynamic beam decomposition
+
+`decompose_static_dynamic()` implements the source model in log space. A
+Gaussian separates fine detector-scale structure from the broad beam envelope;
+an optional long directional median assigns elongated horizontal or vertical
+bands to the beam; and the temporal median retains stable compact residuals in
+the detector field `D`. Dynamic snapshots are defined as `B[k] = F[k] / D`, so
+`D * B[k]` reconstructs each cleaned input flat exactly.
+
+This is an identifiability prior, not a proof of physical origin. A compact
+beam feature that never moves can be classified as detector-static. With the
+directional prior enabled, an elongated detector scratch parallel to the beam
+bands can be classified as beam texture. More flat motion and frames reduce
+the first ambiguity; disabling the directional prior avoids the second but
+requires adequate temporal beam motion.
+
+`build_static_dynamic_components()` applies the model in haloed Y windows and
+writes directly through `CalibrationBuildSession`. The detector component has
+kind `detector_static` and is valid by detector, optics, detector coordinates,
+and static-artifact epoch. The beam component has kind `dynamic_beam` and is
+valid by beam/optics/energy and one camera segment. Each camera move starts a
+new dynamic component; `segment_time_bracket()` refuses to bracket outside the
+named segment, so interpolation cannot cross a move. `D` may carry across a
+camera move only while detector pixels, optics/focus, and artifact epoch remain
+unchanged.
+
+`register_beam_offset()` performs bounded old-to-new ZNCC registration on row
+and column beam profiles after optionally dividing out `D`. Each axis reports
+the winning ZNCC, competing-peak ambiguity, peak margin, measured shift, and
+resolved shift. An encoder prior limits the refinement search and becomes the
+resolved value when confidence or ambiguity fails policy; this is especially
+important along stripes, where the aperture problem makes one axis weak even
+when its winning ZNCC looks high. `calibrate_motor_axis()` returns typed units,
+pixel scale magnitude, sign, and the full axis diagnostic for persistence as a
+`camera_registration` component or compatibility metadata.
+
+### RA-00808 validation finding
+
+The supplied B11 medians and `als832_refs/manifest.csv` confirm a hard camera
+move between `20260611_143029_cyrothin1` (`i0_y=-25`) and
+`20260611_145551_cyrothin2` (`i0_y=-40`). Bounded registration on a 2× view
+measures `dy=-15.11` view pixels, or `-30.22` detector pixels: approximately
+`2.01 px` per recorded i0-y unit. The stripe-parallel X profile has negligible
+ZNCC in this pair and must not be trusted without an encoder prior.
+
+The new artifact first visible in `20260611_143029_cyrothin1` moves in detector
+coordinates with the later camera move. It is therefore beam/optic-attached,
+not a detector-pixel defect, and must remain in the dynamic beam component. It
+does not justify changing the detector-static epoch for `D`; it does require a
+new beam state at its first appearance and a new camera segment at each move.
+No interpolation is permitted between those segment-specific dynamic
+components.
