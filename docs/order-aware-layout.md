@@ -220,7 +220,7 @@ necessity:
 
 | function | necessity |
 |---|---|
-| **skew/rotation** | **data-conditional.** Recon-minimal and the frozen B10 compatibility lineages record zero skew at their relevant boundary, but AAA523 phase contrast records and numerically reproduces a nonzero **0.149°** affine skew after BAC and before Fourier-wavelet stripe removal. When nonzero it is `cv2.warpAffine` cubic — an **irreversible resample**; never run for layout convenience. For lineages that permit it, the resample-free small-tilt path is `center.vo(tilt_fit=polynomial)` → per-row center array → gridrec per-slice center. It is not a substitute when reproducing AAA523's recorded producer order. |
+| **skew/rotation** | **data-conditional.** The recon-minimal Click-default canonical path and frozen B10 compatibility lineages use zero skew at this boundary, but the AAA592 recon-minimal reference manifest records `tilt_radians=-0.003134796238244514` (a corrective affine angle of about **+0.1796°**) before Paganin. AAA523 phase contrast separately records and numerically reproduces a nonzero **0.149°** affine skew after BAC and before Fourier-wavelet stripe removal. When nonzero these are cubic `cv2.warpAffine` resamples — **irreversible** and never run for layout convenience. For lineages that permit it, the resample-free small-tilt path is `center.vo(tilt_fit=polynomial)` → per-row center array → gridrec per-slice center. It is not a substitute when reproducing a recorded producer order. |
 | **padding** | required by gridrec window handling. |
 | **transpose** | pure performance, never correctness. |
 
@@ -266,13 +266,13 @@ discrete. Neither order is "correct" — the recorded lineage order is truth. ~1
 global is inside the Tier-2 NRMSE≤0.15 tolerance, but ~20% edge-local differences
 are a real reproducibility hazard at exactly the features people measure.
 
-**This hazard does not actually bite any pinned lineage** — but note *why*, so
-AAA523's nonzero skew is not mistaken for tripping it. AAA523 applies its 0.149°
-skew **after** BAC, i.e. retrieve-then-warp (the numerically-safe order); the
-warp-then-retrieve case only arises in recon_minimal, whose recorded skew is
-`0.0`. So the non-commutativity is realized in no pinned producer today; it
-becomes live only if a future lineage warps *before* phase retrieval with a
-nonzero skew.
+AAA523 does **not** trip this hazard: it applies its 0.149° skew **after** BAC,
+i.e. retrieve-then-warp. The AAA592 recon-minimal reference does: its recorded
+nonzero `projection_rotation` precedes Paganin, so reproducing that reference
+must preserve warp-then-retrieve exactly. The Click-default recon-minimal
+canonical template remains the zero-skew special case. Tests therefore pin both
+the default fused transpose-without-interpolation and the nonzero AAA592 lineage
+ordering instead of treating all recon-minimal provenance as zero skew.
 
 ## 6. Bounded-view semantics, segment execution, and the open benchmark
 
@@ -427,7 +427,8 @@ injection and prove ordinary YAML execution selects the same layout.
 - **D — fused boundary + lineage tests:** `geometry.affine_skew_movement` → fused
   direction-parametric Sino↔Proj rewrite when configured as a transition; add the
   missing fused Stage to the recon-minimal canonical YAML; lineage tests pin
-  recon-minimal's `Sino→Proj`, AAA523's nonzero 0.149° Proj-preserving skew and
+  recon-minimal's `Sino→Proj`, AAA592's nonzero warp-before-Paganin reference,
+  AAA523's nonzero 0.149° Proj-preserving skew and
   retained `Proj`, and the absence of an extra lftomo layout conversion before
   AAA523 recon (TomoPy's recorded boundary copy remains visible in the plan).
 

@@ -164,14 +164,40 @@ class MovementCorrectStage(Stage):
 
 
 class AffineSkewMovementStage(Stage):
-	"""Legacy R2.54 compatibility Stage: movement followed by skew."""
+	"""Legacy affine correction with an optional fused layout rewrite."""
 
 	name = "geometry.affine_skew_movement"
 	contract = _contract()
 
 	def __init__(self, skew_degrees: float = 0.0, movement_enabled: bool = False,
 				movement_y: float = 0.0, movement_x: float = 0.0,
-				center_px: float | None = None, interpolation: str = "cubic"):
+				center_px: float | None = None, interpolation: str = "cubic",
+				transition_to: str | None = None, pad_x: int = 0,
+				pad_mode: str = "edge", center_y_px: float | None = None,
+				tilt_radians: float | None = None):
+		if tilt_radians is not None:
+			if skew_degrees != 0:
+				raise ValueError("provide skew_degrees or tilt_radians, not both")
+			# recon_minimal's rotate_xy corrects the recorded detector tilt.
+			skew_degrees = float(np.degrees(-tilt_radians))
+		if pad_x < 0:
+			raise ValueError("fused affine pad_x cannot be negative")
+		if pad_mode not in {"edge", "constant", "reflect", "symmetric"}:
+			raise ValueError("unsupported fused affine pad_mode")
+		target = configured_layout(transition_to)
+		if transition_to is not None and target is None:
+			raise ValueError("transition_to must be 'projection' or 'sinogram'")
+		self.skew_degrees = skew_degrees
+		self.movement_enabled = movement_enabled
+		self.movement_y = movement_y
+		self.movement_x = movement_x
+		self.center_px = center_px
+		self.center_y_px = center_y_px
+		self.interpolation_name = interpolation
+		self.transition_to = transition_to
+		self.target_layout = target
+		self.pad_x = pad_x
+		self.pad_mode = pad_mode
 		self.movement = MovementCorrectStage(
 			enabled=movement_enabled,
 			movement_y=movement_y,
@@ -180,12 +206,85 @@ class AffineSkewMovementStage(Stage):
 		self.skew = SkewCorrectStage(
 			skew_degrees=skew_degrees,
 			center_px=center_px,
+			center_y_px=center_y_px,
 			interpolation=interpolation,
 		)
+		active_resample = (
+			skew_degrees != 0
+			or (movement_enabled and (movement_y != 0 or movement_x != 0))
+		)
+		if target is None:
+			self.contract = _contract(
+				resamples_detector=active_resample,
+				mutates_input=active_resample,
+			)
+		else:
+			source = SinoOrder if target is ProjOrder else ProjOrder
+			self.contract = StageContract(
+				expected_input=source, produced_output=target,
+				accepts=(source,), prefers=source, produces=target,
+				accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+				produces_domain=PRESERVE, locality=Locality.VOLUME,
+				fused_transition=True, resamples_detector=active_resample,
+				mutates_input=False,
+				resources=ResourceHints(memory_multiplier=2.0),
+			)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "AffineSkewMovementStage":
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		return self.skew.run(self.movement.run(state))
+		if self.target_layout is None:
+			return self.skew.run(self.movement.run(state))
+		if state.backend.name != "numpy":
+			raise TypeError("geometry.affine_skew_movement currently requires the NumPy backend")
+		data = np.asarray(state.working_array)
+		if data.ndim != 3:
+			raise ValueError("geometry.affine_skew_movement expects a three-dimensional array")
+		input_layout = state.layout
+		if input_layout not in (ProjOrder, SinoOrder):
+			raise ValueError("fused affine transition requires a known tomography layout")
+		if input_layout is self.target_layout:
+			raise ValueError("fused affine transition must change layout")
+		projection_count = n_projections(data, input_layout)
+		row_count = n_rows(data, input_layout)
+		width = data.shape[2] + 2 * self.pad_x
+		shape = (
+			(projection_count, row_count, width)
+			if self.target_layout is ProjOrder
+			else (row_count, projection_count, width)
+		)
+		output = np.empty(shape, dtype=data.dtype)
+		try:
+			interpolation = _INTERPOLATION[self.interpolation_name]
+		except KeyError as error:
+			raise ValueError(f"unknown skew interpolation {self.interpolation_name!r}") from error
+		for projection in range(projection_count):
+			image = projection_view(data, input_layout, projection)
+			if self.movement_enabled and (self.movement_y != 0 or self.movement_x != 0):
+				fraction = projection / projection_count
+				image = shift(
+					image,
+					(self.movement_y * fraction, self.movement_x * fraction),
+					order=3, mode="constant", cval=0.0,
+				)
+			padded = np.pad(
+				image, ((0, 0), (self.pad_x, self.pad_x)), mode=self.pad_mode,
+			)
+			if self.skew_degrees != 0:
+				center = (
+					(data.shape[2] / 2 if self.center_px is None else self.center_px) + self.pad_x,
+					row_count / 2 if self.center_y_px is None else self.center_y_px,
+				)
+				matrix = cv2.getRotationMatrix2D(center, self.skew_degrees, 1.0)
+				padded = cv2.warpAffine(
+					padded, matrix, (width, row_count), flags=interpolation,
+				)
+			projection_view(output, self.target_layout, projection)[:] = padded
+		result = state.with_array(output, layout=self.target_layout)
+		result.artifacts["fused_layout_transition"] = {
+			"from": input_layout.__name__, "to": self.target_layout.__name__,
+			"pad_x": self.pad_x, "skew_degrees": self.skew_degrees,
+		}
+		return result

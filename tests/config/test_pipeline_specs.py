@@ -11,7 +11,9 @@ EXPECTED_ORDERS = {
 	"r254-canonical.yaml": [
 		"read", "normalize", "phase", "geometry", "stripe", "stripe", "center", "recon", "write",
 	],
-	"recon-minimal-canonical.yaml": ["read", "normalize", "stripe", "phase", "center", "recon", "write"],
+	"recon-minimal-canonical.yaml": [
+		"read", "normalize", "stripe", "geometry", "phase", "center", "recon", "write",
+	],
 	"phase-contrast-canonical.yaml": [
 		"read", "normalize", "geometry", "phase", "filter", "geometry", "geometry", "stripe", "center", "recon", "write",
 	],
