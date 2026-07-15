@@ -196,7 +196,10 @@ The TIFFs are float32. `FourMapMedianResult.flat_fields` and
 `scan_metadata()` preserve the exact order expected by `normalize.weighted` and
 the runner. The YAML sidecar records source paths/datasets, frame ranges/counts,
 source shape/dtype, detector crop/binning/orientation, output shape/dtype, chunk
-size, and caller build parameters.
+size, caller build parameters, and per-role non-finite input counts. Recoverable
+NaN/inf samples are excluded from the per-pixel median; a pixel with no finite
+sample fails the atomic build. Source arrays are treated as immutable even when
+a TIFF reader returns a writable disk-backed view.
 
 ```python
 from lftomo.prep.flat_median import (

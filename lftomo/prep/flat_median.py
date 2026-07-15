@@ -51,6 +51,7 @@ class FlatMedianRecord(ConfigModel):
 	region: DetectorRegion
 	y_chunk: int
 	sources: dict[str, FrameSeriesRecord]
+	nonfinite_counts: dict[str, int] = Field(default_factory=dict)
 	build_parameters: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -288,16 +289,20 @@ def generate_four_map_medians(
 	target.parent.mkdir(parents=True, exist_ok=True)
 	staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.building-", dir=target.parent))
 	try:
-		completed_sources: dict[str, Path] = {}
+		completed_sources: dict[str, tuple[Path, int]] = {}
+		nonfinite_counts: dict[str, int] = {}
 		for name in FOUR_MAP_ORDER:
 			reader = getattr(sources, name)
 			source_key = reader.record().model_dump_json()
 			if source_key in completed_sources:
-				shutil.copyfile(completed_sources[source_key], staging / f"{name}.tif")
+				completed_path, nonfinite_count = completed_sources[source_key]
+				shutil.copyfile(completed_path, staging / f"{name}.tif")
+				nonfinite_counts[name] = nonfinite_count
 				continue
 			output = tf.memmap(
 				staging / f"{name}.tif", shape=output_shape, dtype=np.float32,
 			)
+			nonfinite_count = 0
 			for local_start in range(0, region.height, y_chunk):
 				local_stop = min(region.height, local_start + y_chunk)
 				frames = reader.read_oriented_window(
@@ -309,12 +314,29 @@ def generate_four_map_medians(
 					raise FlatMedianSourceError(
 						f"{name} returned invalid window shape {frames.shape}"
 					)
-				output[local_start:local_stop] = np.median(
-					frames, axis=0, overwrite_input=True,
-				).astype(np.float32, copy=False)
+				finite = np.isfinite(frames)
+				invalid = int(frames.size - np.count_nonzero(finite))
+				nonfinite_count += invalid
+				if invalid:
+					missing = np.all(~finite, axis=0)
+					if missing.any():
+						raise FlatMedianSourceError(
+							f"{name} has {np.count_nonzero(missing)} pixel(s) with no finite frame value"
+						)
+					working = np.array(
+						frames, dtype=np.result_type(frames.dtype, np.float32), copy=True,
+					)
+					working[~finite] = np.nan
+					median = np.nanmedian(working, axis=0, overwrite_input=True)
+				else:
+					# A reader may return a writable disk-backed view. Never let NumPy's
+					# in-place selection/sort mutate calibration source files.
+					median = np.median(frames, axis=0, overwrite_input=False)
+				output[local_start:local_stop] = median.astype(np.float32, copy=False)
 			output.flush()
 			del output
-			completed_sources[source_key] = staging / f"{name}.tif"
+			nonfinite_counts[name] = nonfinite_count
+			completed_sources[source_key] = staging / f"{name}.tif", nonfinite_count
 		record = FlatMedianRecord(
 			created_at=datetime.now(timezone.utc),
 			flat_fields=[Path(f"{name}.tif") for name in FOUR_MAP_ORDER],
@@ -322,6 +344,7 @@ def generate_four_map_medians(
 			region=region,
 			y_chunk=y_chunk,
 			sources={name: getattr(sources, name).record() for name in FOUR_MAP_ORDER},
+			nonfinite_counts=nonfinite_counts,
 			build_parameters=build_parameters or {},
 		)
 		metadata_path = staging / "flat_medians.yaml"

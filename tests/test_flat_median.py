@@ -16,7 +16,6 @@ from lftomo.prep.flat_median import (
 	generate_four_map_medians,
 	hdf5_four_map_sources,
 )
-from lftomo.runner import run_reconstruction
 
 
 def _tiff_stack(tmp_path: Path, name: str, values: np.ndarray) -> TIFFFrameSeries:
@@ -102,7 +101,66 @@ def test_hdf5_frame_ranges_support_explicit_pre_and_post_series(tmp_path):
 	np.testing.assert_array_equal(tf.imread(result.post_gain), np.median(values[3:], axis=0))
 
 
+@pytest.mark.parametrize("orientation,crop", [
+	("identity", None),
+	("flip_x", DetectorRegion(
+		y_start=0, x_start=1, height=3, width=3, orientation="flip_x",
+	)),
+])
+def test_multipage_tiff_source_is_never_modified(tmp_path, orientation, crop):
+	values = np.stack([
+		np.full((3, 5), value, dtype=np.float32) for value in (5, 1, 9)
+	])
+	path = tmp_path / "source.tif"
+	tf.imwrite(path, values, photometric="minisblack")
+	before = tf.imread(path).copy()
+	source = TIFFFrameSeries(path)
+
+	generate_four_map_medians(
+		FourMapSources.from_series(source, source, source, source),
+		tmp_path / f"maps-{orientation}", y_chunk=2,
+		orientation=orientation, region=crop,
+	)
+
+	np.testing.assert_array_equal(tf.imread(path), before)
+
+
+def test_nonfinite_values_are_counted_and_ignored_but_empty_pixels_fail(tmp_path):
+	path = tmp_path / "nonfinite.h5"
+	values = np.array([
+		[[1, np.nan], [1, 1]],
+		[[3, 5], [np.inf, 3]],
+		[[7, 9], [5, 5]],
+	], dtype=np.float32)
+	with h5py.File(path, "w") as handle:
+		handle.create_dataset("white", data=values)
+	source = HDF5FrameSeries(path, "white")
+	result = generate_four_map_medians(
+		FourMapSources.from_series(source, source, source, source),
+		tmp_path / "finite-maps", y_chunk=1,
+	)
+	record = yaml.safe_load(result.metadata_path.read_text())
+	assert record["nonfinite_counts"] == {name: 2 for name in FOUR_MAP_ORDER}
+	np.testing.assert_array_equal(
+		tf.imread(result.pre_gain), np.array([[3, 7], [3, 3]], dtype=np.float32),
+	)
+
+	values[:, 0, 0] = np.nan
+	with h5py.File(path, "w") as handle:
+		handle.create_dataset("white", data=values)
+	bad = HDF5FrameSeries(path, "white")
+	with pytest.raises(FlatMedianSourceError, match="no finite frame value"):
+		generate_four_map_medians(
+			FourMapSources.from_series(bad, bad, bad, bad),
+			tmp_path / "invalid-maps", y_chunk=1,
+		)
+	assert not (tmp_path / "invalid-maps").exists()
+
+
 def test_generated_maps_run_through_legacy_weighted_pipeline(tmp_path, monkeypatch):
+	pytest.importorskip("tomopy")
+	from lftomo.runner import run_reconstruction
+
 	sources = FourMapSources.from_series(*[
 		_tiff_stack(tmp_path, name, np.full((3, 2, 4), value, dtype=np.uint16))
 		for name, value in zip(FOUR_MAP_ORDER, (10, 12, 1, 2), strict=True)
@@ -156,8 +214,8 @@ def test_ra00808_toothpick_matches_b11_reference(tmp_path, request):
 	for actual_path, expected_path in (
 		(result.pre_gain, white_reference), (result.pre_dark, dark_reference),
 	):
-		actual = tf.memmap(actual_path)
-		expected = tf.memmap(expected_path)
+		actual = tf.memmap(actual_path, mode="r")
+		expected = tf.memmap(expected_path, mode="r")
 		for y_start in range(0, actual.shape[0], 32):
 			np.testing.assert_allclose(
 				actual[y_start:y_start + 32], expected[y_start:y_start + 32],
