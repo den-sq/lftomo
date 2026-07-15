@@ -8,6 +8,10 @@ is the version-controlled reference the implementing PRs (A–D) update as reali
 diverges from the sketch. Phase A implementation started from master `f08dba6`,
 after #103 was merged.
 
+**Status:** all four phases are merged — A (#104), B (#105), C (#106), D (#107).
+This document now reflects the landed implementation rather than a forward plan;
+§6 records the completed AC-7 benchmark result and the planner guidance it settled.
+
 ## 1. Problem
 
 The pipeline must not hardcode a universal `ProjOrder → SinoOrder` transition. The
@@ -274,7 +278,7 @@ canonical template remains the zero-skew special case. Tests therefore pin both
 the default fused transpose-without-interpolation and the nonzero AAA592 lineage
 ordering instead of treating all recon-minimal provenance as zero skew.
 
-## 6. Bounded-view semantics, segment execution, and the open benchmark
+## 6. Bounded-view semantics, segment execution, and the AC-7 benchmark
 
 `locality=SINOGRAM, bounded_views_from=(ProjOrder,)` declares a capability; it
 does not select an execution strategy and does not claim that a sinogram-local
@@ -293,21 +297,27 @@ insufficient: the current sequential `Pipeline.run` would otherwise gather and
 scatter once per Stage, defeating the chain-sharing requirement.
 
 In theory one shared scratch pass ≈ one transpose in total traffic, with peak
-memory of one sinogram (~MBs) vs a second volume (~GiBs). **Open empirical
-question:** the recon_minimal straight-to-sino rewrite was a *significant measured*
-speedup, so "gather/scatter is a small fraction of Vo runtime" is a **hypothesis,
-not a fact** (cache/TLB behavior at scale, mmap, tomopy sharedmem fan-out could all
-favor the rewrite). Therefore bounded-view support is a **capability declaration,
-not a planner default**, decided by the AC-7 benchmark with three arms:
+memory of one sinogram (~MBs) vs a second volume (~GiBs). The empirical question
+AC-7 was built to answer: the recon_minimal straight-to-sino rewrite was a
+*significant measured* speedup, so "gather/scatter is a small fraction of Vo
+runtime" was a **hypothesis, not a fact** (cache/TLB behavior at scale, mmap,
+tomopy sharedmem fan-out could all favor the rewrite). Bounded-view support is
+therefore a **capability declaration, not a planner default**, settled by the
+AC-7 benchmark with three arms:
 
 1. shared per-row scratch (chain-grouped, bounded concurrency),
 2. fused/explicit transition → contiguous SinoOrder processing (recon_minimal),
 3. direct strided in-place processing (baseline to avoid),
 
 measured at the ~5 GiB AAA523 window and a full 1100-row stack (wall-clock + peak
-RSS). If (2) wins decisively at scale, planner guidance flips to "prefer the fused
-transition whenever a sinogram-local segment exists," and bounded views remain
-the bounded-memory fallback.
+RSS). **AC-7 result (recorded below):** no arm won decisively under the 10%
+threshold and arm (2) never won — it added up to 23.4 GiB peak RSS at full scale.
+Planner guidance therefore did **not** flip to the fused transition: chain-grouped
+bounded execution is the general contiguous-input default, direct strided stays a
+validated kernel-specific optimization, and a full transition is reserved for
+cases where a downstream consumer or an already-required fused boundary amortizes
+it. Bounded views remain the capability-gated default, with the safe fallback of
+one row worker.
 
 Arm (3) already has a **live, numerically-validated anchor**: post-#91,
 `stripe.fw` in the AAA523 phase-contrast path iterates ProjOrder strided
