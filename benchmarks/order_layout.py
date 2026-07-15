@@ -6,6 +6,7 @@ Run one arm per process so peak RSS and large memmap storage remain isolated.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -99,12 +100,49 @@ def _state(array: np.ndarray, layout: type) -> PipelineState:
 	)
 
 
-def _fingerprint(array: np.ndarray) -> tuple[float, float, float]:
-	# Fixed small samples avoid a second full-volume pass solely for reporting.
-	values = np.asarray(array).reshape(-1)
-	indices = np.linspace(0, len(values) - 1, min(4096, len(values))).astype(np.int64)
-	sample = np.asarray(values[indices], dtype=np.float64)
+def _fingerprint(array: np.ndarray, layout: type) -> tuple[float, float, float]:
+	"""Sample identical projection-order coordinates without copying the volume."""
+
+	canonical_shape = array.shape if layout is ProjOrder else (
+		array.shape[1], array.shape[0], array.shape[2],
+	)
+	value_count = int(np.prod(canonical_shape, dtype=np.int64))
+	indices = np.linspace(0, value_count - 1, min(4096, value_count)).astype(np.int64)
+	theta, row, column = np.unravel_index(indices, canonical_shape)
+	values = array[theta, row, column] if layout is ProjOrder else array[row, theta, column]
+	sample = np.asarray(values, dtype=np.float64)
 	return float(sample.mean()), float(sample.std()), float(np.linalg.norm(sample))
+
+
+def _run_direct_rows(
+	array: np.ndarray,
+	layout: type,
+	stages: list,
+	state: PipelineState,
+	workers: int,
+) -> None:
+	"""Run a sinogram-local chain with equal row concurrency for direct arms."""
+
+	row_count = array.shape[1] if layout is ProjOrder else array.shape[0]
+
+	def process(row: int) -> None:
+		sinogram = array[:, row, :] if layout is ProjOrder else array[row]
+		for stage in stages:
+			stage.run_sinogram(sinogram, state)
+
+	if workers == 1:
+		for row in range(row_count):
+			process(row)
+	else:
+		with ThreadPoolExecutor(max_workers=min(workers, row_count)) as pool:
+			list(pool.map(process, range(row_count)))
+
+
+def _close_memmap(array: np.ndarray) -> None:
+	"""Release obsolete disk-backed source pages after a layout transition."""
+
+	if isinstance(array, np.memmap):
+		array._mmap.close()
 
 
 def run(arm: str, shape: tuple[int, int, int], workers: int = 1,
@@ -138,16 +176,17 @@ def run(arm: str, shape: tuple[int, int, int], workers: int = 1,
 				for theta in range(shape[0]):
 					sinogram[:, theta, :] = projection[theta]
 				sinogram.flush()
-			Pipeline(
-				stages, scan=_scan(shape[0]), initial_layout=SinoOrder,
-				initial_domain=DataDomain.ATTENUATION, bounded_workers=workers,
-			).run(_state(sinogram, SinoOrder))
+			# The source volume is obsolete after an explicit transition. Closing its
+			# mapping keeps the processing phase to one resident volume while the RSS
+			# sampler still records the materialization peak above.
+			_close_memmap(projection)
+			del projection
+			state = _state(sinogram, SinoOrder)
+			_run_direct_rows(sinogram, SinoOrder, stages, state, workers)
 			result = sinogram
 		else:
 			state = _state(projection, ProjOrder)
-			for stage in stages:
-				for row in range(shape[1]):
-					stage.run_sinogram(projection[:, row, :], state)
+			_run_direct_rows(projection, ProjOrder, stages, state, workers)
 			result = projection
 		seconds = time.perf_counter() - started
 	return BenchmarkResult(
@@ -155,7 +194,7 @@ def run(arm: str, shape: tuple[int, int, int], workers: int = 1,
 		storage="memmap" if scratch is not None else "memory",
 		seconds=seconds, peak_rss_bytes=memory.peak,
 		peak_rss_delta_bytes=memory.peak - memory.baseline,
-		fingerprint=_fingerprint(result),
+		fingerprint=_fingerprint(result, SinoOrder if arm == "transition" else ProjOrder),
 	)
 
 
