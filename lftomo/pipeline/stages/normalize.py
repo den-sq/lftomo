@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
 
 from lftomo.calibration import (
 	BeamSchedule,
@@ -228,6 +229,85 @@ class BeamTrackingNormalizeStage(Stage):
 				"air_fraction": fit.air_fraction, "beam_times": fit.beam_times,
 			},
 			"projection_start": projection_start, "projection_count": projection_count,
+		}
+		return state if data is state.working_array else state.with_array(data)
+
+
+class BeamKeyframesNormalizeStage(Stage):
+	"""Normalize from the two physical-time keyframes bracketing each projection."""
+
+	name = "normalize.beam_keyframes"
+	contract = StageContract(
+		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
+		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
+		locality=Locality.PROJECTION, mutates_input=True, window_axes=("Y", "Theta"),
+		produces_artifacts=("beam_keyframe_qc",), resources=ResourceHints(memory_multiplier=2.0),
+	)
+
+	def __init__(self, *, component: str = "beam_keyframes", dark_component: str | None = None,
+			transport_sigma: float = 12, maximum_gap: float | None = None,
+			order: str | None = None):
+		configured_layout(order)
+		self.component = component
+		self.dark_component = dark_component
+		self.transport_sigma = transport_sigma
+		self.maximum_gap = maximum_gap
+		self.order = order
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "BeamKeyframesNormalizeStage":
+		return cls(**config.params)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		data = np.asarray(state.working_array).astype(np.float32, copy=False)
+		layout = resolve_layout(state, self.order, self.name)
+		y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
+		start, stop = _calibration_y_window(state, y_size)
+		ref = state.artifacts.get("calibration_bundle")
+		if not isinstance(ref, CalibrationBundleRef):
+			raise ValueError("normalize.beam_keyframes requires a selected calibration bundle")
+		bundle = CalibrationBundle.open(ref.manifest_path)
+		component = bundle.component(self.component)
+		if component.time_axis is None:
+			raise ValueError("beam keyframes require an explicit time axis")
+		projection_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
+		projection_start = int(state.artifacts.get("projection_start", 0))
+		if component.time_axis.kind == "timestamp_seconds":
+			times = state.artifacts.get("projection_times")
+			if times is None:
+				raise ValueError("physical-time keyframes require projection_times artifacts")
+			times = np.asarray(times, dtype=float)
+			if len(times) != n_projections(data, layout):
+				raise ValueError("projection_times must match the current Theta window")
+		else:
+			times = projection_start + np.arange(n_projections(data, layout), dtype=float)
+		dark = 0.0 if self.dark_component is None else bundle.read_component(
+			self.dark_component, y_start=start, y_stop=stop,
+		)
+		maximum_seen_gap = 0.0
+		for local_index, time in enumerate(times):
+			bracket = bundle.read_time_bracket(
+				self.component, float(time), y_start=start, y_stop=stop,
+			)
+			gap = bracket.after_time - bracket.before_time
+			maximum_seen_gap = max(maximum_seen_gap, gap)
+			if self.maximum_gap is not None and gap > self.maximum_gap:
+				raise ValueError(
+					f"projection time {time} lies in keyframe gap {gap}, exceeding {self.maximum_gap}"
+				)
+			average = 0.5 * (np.log(np.clip(bracket.before, 1e-6, None))
+				+ np.log(np.clip(bracket.after, 1e-6, None)))
+			transport = gaussian_filter(
+				np.log(np.clip(bracket.after, 1e-6, None))
+				- np.log(np.clip(bracket.before, 1e-6, None)), self.transport_sigma,
+			)
+			gain = np.exp(average + (bracket.weight - 0.5) * transport)
+			image = projection_view(data, layout, local_index)
+			image[:] = _normalize_with_maps(image, gain, dark, False, floor_nonpositive=True)
+		state.artifacts["beam_keyframe_qc"] = {
+			"component": self.component, "maximum_gap_seen": maximum_seen_gap,
+			"projection_start": projection_start, "projection_count": projection_count,
+			"observability": "events wholly inside a keyframe gap cannot be recovered",
 		}
 		return state if data is state.working_array else state.with_array(data)
 

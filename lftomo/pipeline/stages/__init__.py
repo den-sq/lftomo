@@ -9,6 +9,7 @@ from .helical import HelicalIndexRemapStage
 from .layout import LayoutConvertStage
 from .normalize import (
 	BeamTrackingNormalizeStage,
+	BeamKeyframesNormalizeStage,
 	TaperBlendedNormalizeStage,
 	ThetaSwitchNormalizeStage,
 	WeightedNormalizeStage,
@@ -53,6 +54,7 @@ STAGE_REGISTRY = {
 	"movement_correct.linear_shift": MovementCorrectStage,
 	"normalize.phase_contrast": TaperBlendedNormalizeStage,
 	"normalize.beam_tracking": BeamTrackingNormalizeStage,
+	"normalize.beam_keyframes": BeamKeyframesNormalizeStage,
 	"normalize.taper_blended": TaperBlendedNormalizeStage,
 	"normalize.theta_switch": ThetaSwitchNormalizeStage,
 	"normalize.weighted": WeightedNormalizeStage,
@@ -103,6 +105,7 @@ __all__ = [
 	"AffineSkewMovementStage",
 	"BPCudaStage",
 	"BeamTrackingNormalizeStage",
+	"BeamKeyframesNormalizeStage",
 	"BilateralFilterStage",
 	"BronnikovAidedCorrectionStage",
 	"CGLSCudaStage",

@@ -308,3 +308,27 @@ time and reduced mean held-out air residual from 0.01086 (naive weighted
 endpoints) to 0.01067. The improvement is modest for this subpixel-motion scan;
 the schedule is the material correction. More complex non-monotonic events
 require keyframes rather than forcing a two-endpoint schedule.
+
+## Flat-series keyframes
+
+`build_flat_series_digest()` samples the midpoint of each equal-length source
+interval and takes a short centered median (normally 3–5 frames). It reads and
+writes by detector-row window through `CalibrationBuildSession`; it never block
+averages an interval or accumulates full-resolution snapshots. The
+`beam_keyframes` component records physical/frame time, source frame indices,
+crop/binning, camera segment, intensity and centroid trajectory, hashes, and
+maximum keyframe gap.
+
+`normalize.beam_keyframes` requires projection times on that same explicit time
+axis. It reads only the two bracketing Y windows and evaluates one gain per
+projection, while preserving the detector-static content common to both
+keyframes. Queries outside the component time range fail. `maximum_gap` can
+enforce an observability policy; even without a hard limit, QC states that an
+event occurring wholly between keyframes cannot be recovered. Camera segments
+remain hard boundaries through component compatibility.
+
+On the copied 1,200-frame 10-minute white-field series, the real-data test uses
+20 five-frame keyframes and holds out every inter-keyframe midpoint. The compact
+piecewise model lowers median held-out error relative to interpolation between
+only the series endpoints while touching only the sampled frames and a 32-row
+working window.
