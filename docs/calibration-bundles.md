@@ -296,6 +296,12 @@ residual standard deviation in `beam_tracking_qc`. Missing air or a degenerate
 endpoint direction fails explicitly. Legacy four-map input remains supported;
 bundle input names can be configured through `component_names`.
 
+A schedule may extrapolate beam structure beyond its endpoint beam times, but
+dark interpolation is clamped to the measured pre/post interval. A Theta-window
+executor must seed `projection_start` and total `projection_count` artifacts;
+the stage rejects a partial projection batch without those global coordinates
+instead of silently assigning incorrect schedule fractions.
+
 On the five timestamped AAA392 rescan5 projections documented by the source
 package, a bounded 192×1024 air-region validation found a nonzero initial beam
 time and reduced mean held-out air residual from 0.01086 (naive weighted

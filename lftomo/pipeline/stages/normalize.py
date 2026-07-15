@@ -187,6 +187,13 @@ class BeamTrackingNormalizeStage(Stage):
 		projection_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
 		projection_start = int(state.artifacts.get("projection_start", 0))
 		batch_count = n_projections(data, layout)
+		if batch_count != state.scan.n_projections and not {
+			"projection_start", "projection_count",
+		}.issubset(state.artifacts):
+			raise ValueError(
+				"Theta-windowed beam tracking requires projection_start and "
+				"projection_count artifacts"
+			)
 		schedule = self.schedule
 		fit = None
 		if self.fit_schedule:
@@ -205,7 +212,10 @@ class BeamTrackingNormalizeStage(Stage):
 			fraction = global_index / max(projection_count - 1, 1)
 			beam_time = float(schedule(fraction))
 			gain = gain_at(fraction)
-			dark = (1 - beam_time) * pre_dark + beam_time * post_dark
+			# Schedules may legitimately extrapolate beam structure. Dark fields do
+			# not carry that motion model, so keep them within measured endpoints.
+			dark_time = float(np.clip(beam_time, 0, 1))
+			dark = (1 - dark_time) * pre_dark + dark_time * post_dark
 			image = projection_view(data, layout, local_index)
 			image[:] = _normalize_with_maps(
 				image, gain, dark, self.pre_subtracted, floor_nonpositive=True,

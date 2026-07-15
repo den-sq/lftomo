@@ -4,11 +4,20 @@ from pathlib import Path
 from natsort import natsorted
 import tifffile as tf
 
-from lftomo.calibration import BeamSchedule, calibrate_schedule, optimal_transport_interp
-from lftomo.config import Recon, Scan
-from lftomo.pipeline import NumpyBackend, PipelineState
+from lftomo.calibration import (
+	BeamSchedule,
+	CalibrationBuildSession,
+	calibrate_schedule,
+	optimal_transport_interp,
+)
+from lftomo.config import Recon, Scan, StageConfig
+from lftomo.pipeline import NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.domains import DataDomain
-from lftomo.pipeline.stages import BeamTrackingNormalizeStage, create_stage
+from lftomo.pipeline.stages import (
+	BeamTrackingNormalizeStage,
+	WeightedNormalizeStage,
+	create_stage,
+)
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -38,6 +47,26 @@ def _fixture(count=9):
 	return projections, np.stack([pre, post, dark0, dark1]).astype(np.float32), schedule
 
 
+def _bundle(tmp_path, flats):
+	build = CalibrationBuildSession(
+		tmp_path / "bundle", calibration_id="tracking",
+		producer={"package": "lftomo", "version": "test"},
+		compatibility={
+			"detector_id": "test-detector",
+			"region": {"height": flats.shape[1], "width": flats.shape[2]},
+		},
+	)
+	for name, values in zip(
+		("pre_gain", "post_gain", "pre_dark", "post_dark"), flats, strict=True,
+	):
+		build.write_array_component(
+			name, [values], shape=values.shape, dtype="float32", axes=("Y", "X"),
+			kind="dark" if "dark" in name else "detector_static",
+			coordinate_frame="detector", append_axis=0,
+		)
+	return build.finalize()
+
+
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 def test_beam_tracking_preserves_layout_and_removes_nonlinear_drift(layout):
 	projections, flats, schedule = _fixture()
@@ -56,22 +85,68 @@ def test_beam_tracking_preserves_layout_and_removes_nonlinear_drift(layout):
 	assert result.artifacts["beam_tracking_qc"]["projection_count"] == 9
 
 
-def test_tracking_beats_naive_arithmetic_endpoint_interpolation():
+def test_tracking_beats_weighted_normalization():
 	projections, flats, schedule = _fixture()
-	pre, post, dark0, dark1 = flats
 	tracked = projections.copy()
-	state = PipelineState(
+	tracked_state = PipelineState(
 		tracked, _scan(flats), Recon.model_validate({"pipeline": []}),
 		backend=NumpyBackend(), layout=ProjOrder, domain=DataDomain.RAW,
 	)
+	BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__).run(tracked_state)
+	weighted = projections.copy()
+	weighted_state = PipelineState(
+		weighted, _scan(flats), Recon.model_validate({"pipeline": []}),
+		backend=NumpyBackend(), layout=ProjOrder, domain=DataDomain.RAW,
+	)
+	WeightedNormalizeStage().run(weighted_state)
+	assert np.std(tracked - 1) < np.std(weighted - 1) / 20
+
+
+def test_stage_reads_four_maps_from_bundle_at_runtime(tmp_path):
+	projections, flats, schedule = _fixture()
+	scan = _scan(flats)
+	scan.metadata.pop("flat_fields")
+	state = PipelineState(
+		projections.copy(), scan, Recon.model_validate({"pipeline": []}),
+		backend=NumpyBackend(), layout=ProjOrder, domain=DataDomain.RAW,
+		artifacts={"calibration_bundle": _bundle(tmp_path, flats)},
+	)
 	BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__).run(state)
-	naive = []
-	for index, projection in enumerate(projections):
-		t = index / (len(projections) - 1)
-		gain = (1 - t) * pre + t * post
-		dark = (1 - t) * dark0 + t * dark1
-		naive.append((projection - dark) / (gain - dark))
-	assert np.std(tracked - 1) < np.std(np.asarray(naive) - 1) / 20
+	assert np.std(np.asarray(state.working_array) - 1) < 2e-6
+
+
+def test_theta_window_requires_global_projection_coordinates():
+	projections, flats, schedule = _fixture()
+	state = PipelineState(
+		projections[3:6].copy(), _scan(flats), Recon.model_validate({"pipeline": []}),
+		backend=NumpyBackend(), layout=ProjOrder, domain=DataDomain.RAW,
+	)
+	stage = BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__)
+	with pytest.raises(ValueError, match="projection_start and projection_count"):
+		stage.run(state)
+	state.artifacts.update(projection_start=3, projection_count=9)
+	stage.run(state)
+	assert state.artifacts["beam_tracking_qc"]["projection_start"] == 3
+
+
+def test_extrapolated_schedule_clamps_dark_fields_to_measured_endpoints():
+	shape = (8, 8)
+	_, x = np.indices(shape)
+	pre_gain = post_gain = (120 + 0.1 * x).astype(np.float32)
+	pre_dark = np.full(shape, 10, dtype=np.float32)
+	post_dark = np.full(shape, 30, dtype=np.float32)
+	flats = np.stack([pre_gain, post_gain, pre_dark, post_dark])
+	data = np.stack([
+		(pre_gain - pre_dark) * 0.5 + pre_dark,
+		(post_gain - post_dark) * 0.5 + post_dark,
+	]).astype(np.float32)
+	schedule = BeamSchedule(alpha=-1, beta=3)
+	state = PipelineState(
+		data, _scan(flats, count=2), Recon.model_validate({"pipeline": []}),
+		backend=NumpyBackend(), layout=ProjOrder, domain=DataDomain.RAW,
+	)
+	BeamTrackingNormalizeStage(schedule=schedule.__dict__).run(state)
+	np.testing.assert_allclose(data, 0.5, atol=1e-6)
 
 
 def test_schedule_fit_recovers_nonzero_initial_beam_time():
@@ -95,6 +170,21 @@ def test_stage_registry_and_domain_contract():
 	assert stage.contract.prefers is ProjOrder
 	assert stage.contract.accepts_domain == (DataDomain.RAW,)
 	assert stage.contract.produces_domain is DataDomain.TRANSMISSION
+
+
+def test_beam_tracking_is_the_sole_normalization_in_a_complete_pipeline():
+	configs = [
+		StageConfig(kind="read", algorithm="tiff_stack", params={"order": "projection"}),
+		StageConfig(kind="normalize", algorithm="beam_tracking"),
+		StageConfig(kind="phase", algorithm="paganin"),
+		StageConfig(kind="recon", algorithm="gridrec", params={"center": 16}),
+	]
+	plan = validate_pipeline(
+		[create_stage(config) for config in configs], _scan(_fixture()[1]), mode="complete",
+	)
+	normalize = next(step for step in plan.steps if step.stage_name == "normalize.beam_tracking")
+	assert normalize.input_domain is DataDomain.RAW
+	assert normalize.output_domain is DataDomain.TRANSMISSION
 
 
 @pytest.mark.integration
