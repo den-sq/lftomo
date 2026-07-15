@@ -1,0 +1,219 @@
+import numpy as np
+import pytest
+
+from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
+from lftomo.pipeline import (
+	CompletePipelineError,
+	DataDomain,
+	DomainCompatibilityError,
+	Locality,
+	MaterializationKind,
+	PRESERVE,
+	Pipeline,
+	PipelineState,
+	RowIdentityError,
+	ShapeCompatibilityError,
+	Stage,
+	StageContract,
+	validate_pipeline,
+)
+from lftomo.pipeline.stages import LayoutConvertStage, create_stage
+from lftomo.pipeline.stages._layout import (
+	n_projections,
+	n_rows,
+	projection_view,
+	sinogram_scratch,
+	sinogram_view,
+)
+from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+
+
+def scan_config():
+	return Scan(
+		energy_keV=24,
+		pixel_size_um=1.3,
+		n_projections=3,
+		degrees_per_fov=180,
+		detector=Detector(pixel_size_um=1.3),
+		acquisition=Acquisition(n_projections=3, rotation_end_deg=180),
+		projections=TIFFStackProjections(format="tiff_stack", path="projections"),
+	)
+
+
+def recon_config():
+	return Recon(pipeline=[StageConfig(kind="echo")])
+
+
+class ContractStage(Stage):
+	def __init__(self, name, contract):
+		self.name = name
+		self.contract = contract
+
+	def run(self, state):
+		return state
+
+
+def complete_stages(*middle):
+	return [
+		ContractStage("read.test", StageContract(
+			produced_output=ProjOrder, produces_domain=DataDomain.RAW,
+		)),
+		ContractStage("normalize.test", StageContract(
+			accepts=(ProjOrder,), produces=PRESERVE,
+			accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
+		)),
+		*middle,
+		ContractStage("phase.test", StageContract(
+			accepts=(ProjOrder,), produces=PRESERVE,
+			accepts_domain=(DataDomain.TRANSMISSION,), produces_domain=DataDomain.ATTENUATION,
+		)),
+		ContractStage("recon.test", StageContract(
+			accepts=(ProjOrder, SinoOrder), prefers=SinoOrder, produces=ReconOrder,
+			accepts_domain=(DataDomain.ATTENUATION,), produces_domain=DataDomain.RECON,
+		)),
+	]
+
+
+def test_legacy_shape_fields_derive_layout_contract_defaults():
+	contract = StageContract(expected_input=ProjOrder, produced_output=SinoOrder)
+
+	assert contract.accepted_layouts == (ProjOrder,)
+	assert contract.preferred_layout is ProjOrder
+	assert contract.output_layout(ProjOrder) is SinoOrder
+
+
+def test_with_array_preserves_explicit_layout_and_domain():
+	state = PipelineState(
+		working_array=np.zeros((3, 2, 4)), scan=scan_config(), recon=recon_config(),
+		layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+	)
+
+	result = state.with_array(np.ones((3, 2, 4)))
+
+	assert result.layout is ProjOrder
+	assert result.domain is DataDomain.TRANSMISSION
+
+
+def test_axis_helpers_return_views_and_contiguous_scratch():
+	projection_order = np.arange(24).reshape(3, 2, 4)
+	sinogram_order = projection_order.transpose(1, 0, 2).copy()
+
+	assert np.array_equal(projection_view(projection_order, ProjOrder, 1), projection_order[1])
+	assert np.array_equal(projection_view(sinogram_order, SinoOrder, 1), projection_order[1])
+	assert np.array_equal(sinogram_view(projection_order, ProjOrder, 1), projection_order[:, 1])
+	assert np.array_equal(sinogram_view(sinogram_order, SinoOrder, 1), projection_order[:, 1])
+	assert sinogram_scratch(projection_order, ProjOrder, 1).flags.c_contiguous
+	assert n_projections(projection_order, ProjOrder) == 3
+	assert n_rows(sinogram_order, SinoOrder) == 2
+
+
+def test_layout_convert_is_explicit_contiguous_and_visible_in_plan():
+	stage = create_stage(StageConfig(
+		kind="layout", algorithm="convert",
+		params={"target": "sinogram", "reason": "make Vo-family input contiguous"},
+	))
+	plan = validate_pipeline(
+		[stage], scan_config(), initial_layout=ProjOrder,
+		initial_domain=DataDomain.TRANSMISSION,
+	)
+	state = PipelineState(
+		working_array=np.arange(24).reshape(3, 2, 4), scan=scan_config(),
+		recon=recon_config(), layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+	)
+
+	result = Pipeline([stage], validate=False).run(state)
+
+	assert isinstance(stage, LayoutConvertStage)
+	assert result.layout is SinoOrder
+	assert result.domain is DataDomain.TRANSMISSION
+	assert result.working_array.flags.c_contiguous
+	assert np.array_equal(result.working_array, np.arange(24).reshape(3, 2, 4).transpose(1, 0, 2))
+	assert plan.full_volume_materializations[0].kind is MaterializationKind.LAYOUT_CONVERSION
+
+
+def test_layout_convert_requires_reason_and_real_transition():
+	with pytest.raises(ValueError, match="non-empty reason"):
+		LayoutConvertStage(target="sinogram", reason=" ")
+	with pytest.raises(ShapeCompatibilityError, match="must change"):
+		validate_pipeline(
+			[LayoutConvertStage(target="sinogram", reason="test")], scan_config(),
+			initial_layout=SinoOrder,
+		)
+
+
+def test_layout_mismatch_never_auto_converts():
+	stage = ContractStage("sino-only", StageContract(
+		accepts=(SinoOrder,), produces=PRESERVE,
+	))
+
+	with pytest.raises(ShapeCompatibilityError, match="explicit layout.convert"):
+		validate_pipeline([stage], scan_config(), initial_layout=ProjOrder)
+
+
+def test_only_explicit_or_fused_stages_may_flip_tomography_layout():
+	stage = ContractStage("ordinary", StageContract(
+		accepts=(ProjOrder,), produces=SinoOrder,
+	))
+	with pytest.raises(ShapeCompatibilityError, match="fused_transition"):
+		validate_pipeline([stage], scan_config(), initial_layout=ProjOrder)
+
+	fused = ContractStage("geometry.fused", StageContract(
+		accepts=(ProjOrder,), produces=SinoOrder, fused_transition=True,
+	))
+	validate_pipeline([fused], scan_config(), initial_layout=ProjOrder)
+
+
+def test_complete_and_fragment_validation_have_distinct_skeleton_rules():
+	fragment = ContractStage("phase.fragment", StageContract(
+		accepts=(ProjOrder,), produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION,), produces_domain=DataDomain.ATTENUATION,
+	))
+	validate_pipeline(
+		[fragment], scan_config(), mode="fragment",
+		initial_layout=ProjOrder, initial_domain=DataDomain.TRANSMISSION,
+	)
+
+	with pytest.raises(CompletePipelineError, match="must begin"):
+		validate_pipeline([fragment], scan_config(), mode="complete")
+	validate_pipeline(complete_stages(), scan_config(), mode="complete")
+
+
+def test_complete_validation_counts_concrete_domain_transitions():
+	disabled_phase = ContractStage("phase.disabled", StageContract(
+		accepts=(ProjOrder,), produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION,), produces_domain=PRESERVE,
+	))
+	stages = complete_stages()
+	stages[2] = disabled_phase
+
+	with pytest.raises(DomainCompatibilityError, match="recon.test.*got transmission"):
+		validate_pipeline(stages, scan_config(), mode="complete")
+
+
+def test_domain_cannot_move_backward():
+	stage = ContractStage("bad", StageContract(produces_domain=DataDomain.RAW))
+	with pytest.raises(DomainCompatibilityError, match="cannot move backward"):
+		validate_pipeline(
+			[stage], scan_config(), initial_domain=DataDomain.ATTENUATION,
+		)
+
+
+def test_detector_resampling_invalidates_later_row_identity_requirement():
+	resample = ContractStage("geometry.skew", StageContract(
+		produces=PRESERVE, produces_domain=PRESERVE, resamples_detector=True,
+	))
+	remap = ContractStage("helical.index_remap", StageContract(
+		produces=PRESERVE, produces_domain=PRESERVE, requires_row_identity=True,
+	))
+
+	with pytest.raises(RowIdentityError, match="row identity"):
+		validate_pipeline([resample, remap], scan_config())
+
+
+def test_plan_records_preference_warning_and_hidden_tomopy_copy():
+	plan = validate_pipeline(complete_stages(), scan_config(), mode="complete")
+	recon_step = plan.steps[-1]
+
+	assert "prefers SinoOrder" in recon_step.warnings[0]
+	assert recon_step.materializations[0].kind is MaterializationKind.TOMOPY_BOUNDARY
+	assert recon_step.materializations[0].hidden is True

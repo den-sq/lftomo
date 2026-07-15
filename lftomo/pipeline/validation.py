@@ -1,11 +1,27 @@
-"""Pipeline contract validation."""
+"""Pipeline contract validation and concrete plan construction."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 from lftomo.pipeline.core import Backend, NumpyBackend, Stage
+from lftomo.pipeline.domains import DataDomain
+from lftomo.pipeline.planning import (
+	Materialization,
+	MaterializationKind,
+	PipelinePlan,
+	PlanStep,
+)
+from lftomo.util.shapes import ProjOrder, SinoOrder
+
+
+class ValidationMode(str, Enum):
+	"""Validation scope for a complete YAML pipeline or reusable fragment."""
+
+	COMPLETE = "complete"
+	FRAGMENT = "fragment"
 
 
 @dataclass
@@ -21,7 +37,19 @@ class PipelineValidationError(ValueError):
 
 
 class ShapeCompatibilityError(PipelineValidationError):
-	"""Raised when adjacent Stage shape contracts do not compose."""
+	"""Raised when adjacent Stage layout contracts do not compose."""
+
+
+class DomainCompatibilityError(PipelineValidationError):
+	"""Raised when Stage domains do not compose monotonically."""
+
+
+class CompletePipelineError(PipelineValidationError):
+	"""Raised when a complete runner/YAML pipeline violates its skeleton."""
+
+
+class RowIdentityError(PipelineValidationError):
+	"""Raised when a detector-row operation follows detector resampling."""
 
 
 class MissingMetadataError(PipelineValidationError):
@@ -56,63 +84,199 @@ def _has_path(obj: Any, dotted_path: str) -> bool:
 	return True
 
 
+def _layout_name(layout: type[Any] | None) -> str:
+	return "unknown" if layout is None else layout.__name__
+
+
+def _domain_name(domain: DataDomain | None) -> str:
+	return "unknown" if domain is None else domain.name.lower()
+
+
+def _complete_skeleton(stages: tuple[Stage, ...] | list[Stage]) -> None:
+	if not stages or not stages[0].name.startswith("read."):
+		raise CompletePipelineError(
+			stage="0:<pipeline>", field="read",
+			message="complete pipelines must begin with exactly one read Stage",
+		)
+	read_indices = [index for index, stage in enumerate(stages) if stage.name.startswith("read.")]
+	if read_indices != [0]:
+		raise CompletePipelineError(
+			stage=f"{read_indices[-1]}:{stages[read_indices[-1]].name}", field="read",
+			message="complete pipelines may only read at index 0",
+		)
+
+
 def validate_pipeline(
 	stages: tuple[Stage, ...] | list[Stage],
 	scan: Any,
 	backend: Backend | None = None,
 	available_artifacts: Any = (),
-) -> None:
-	"""Validate an ordered Stage sequence before execution."""
+	*,
+	mode: ValidationMode | str = ValidationMode.FRAGMENT,
+	initial_layout: type[Any] | None = None,
+	initial_domain: DataDomain | None = None,
+) -> PipelinePlan:
+	"""Validate a Stage sequence and return its resolved execution plan."""
+
+	try:
+		mode = ValidationMode(mode)
+	except ValueError as error:
+		raise ValueError("validation mode must be 'complete' or 'fragment'") from error
+	if mode is ValidationMode.COMPLETE:
+		_complete_skeleton(stages)
+		current_layout = None
+		current_domain = None
+	else:
+		current_layout = initial_layout
+		current_domain = initial_domain
 
 	backend = backend or NumpyBackend()
 	produced_artifacts = set(available_artifacts)
-	previous_stage: Stage | None = None
 	upstream_mutated = False
+	row_identity_available = True
+	normalize_transitions = 0
+	attenuation_transitions = 0
+	steps: list[PlanStep] = []
+	warnings: list[str] = []
 
 	for index, stage in enumerate(stages):
 		stage_name = f"{index}:{stage.name}"
 		contract = stage.contract
+		input_layout = current_layout
+		input_domain = current_domain
 
-		if previous_stage is not None:
-			previous_shape = previous_stage.contract.produced_output
-			expected_shape = contract.expected_input
-			if previous_shape is not None and expected_shape is not None and previous_shape is not expected_shape:
-				raise ShapeCompatibilityError(
-					stage=stage_name,
-					field="expected_input",
-					message=f"expected {expected_shape.__name__}, got {previous_shape.__name__} from {previous_stage.name}",
+		accepted = contract.accepted_layouts
+		if current_layout is not None and accepted is not None and current_layout not in accepted:
+			expected = ", ".join(item.__name__ for item in accepted)
+			field = "accepts" if contract.accepts is not None else "expected_input"
+			raise ShapeCompatibilityError(
+				stage=stage_name, field=field,
+				message=f"accepts ({expected}), got {_layout_name(current_layout)}; add an explicit layout.convert",
+			)
+
+		accepted_domains = contract.accepts_domain
+		if current_domain is not None and accepted_domains is not None and current_domain not in accepted_domains:
+			expected = ", ".join(item.name.lower() for item in accepted_domains)
+			raise DomainCompatibilityError(
+				stage=stage_name, field="accepts_domain",
+				message=f"accepts ({expected}), got {_domain_name(current_domain)}",
+			)
+
+		output_layout = contract.output_layout(current_layout)
+		output_domain = contract.output_domain(current_domain)
+		if (
+			current_layout in (ProjOrder, SinoOrder)
+			and output_layout in (ProjOrder, SinoOrder)
+			and output_layout is not current_layout
+			and stage.name != "layout.convert"
+			and not contract.fused_transition
+		):
+			raise ShapeCompatibilityError(
+				stage=stage_name, field="produces",
+				message="tomography layout changes require layout.convert or fused_transition=True",
+			)
+		if current_domain is not None and output_domain is not None and output_domain.value < current_domain.value:
+			raise DomainCompatibilityError(
+				stage=stage_name, field="produces_domain",
+				message=f"domain cannot move backward from {_domain_name(current_domain)} to {_domain_name(output_domain)}",
+			)
+
+		if current_domain is DataDomain.RAW and output_domain is DataDomain.TRANSMISSION:
+			if not stage.name.startswith("normalize.") and stage.name != "weighted-normalize":
+				raise DomainCompatibilityError(
+					stage=stage_name, field="produces_domain",
+					message="only normalize Stages may convert raw counts to transmission",
 				)
+			normalize_transitions += 1
+		if current_domain is DataDomain.TRANSMISSION and output_domain is DataDomain.ATTENUATION:
+			attenuation_transitions += 1
 
 		for metadata_path in contract.required_metadata:
 			if not _has_path(scan, metadata_path):
 				raise MissingMetadataError(
-					stage=stage_name,
-					field=f"required_metadata.{metadata_path}",
+					stage=stage_name, field=f"required_metadata.{metadata_path}",
 					message="missing from Scan config",
 				)
 
 		for artifact_name in contract.consumes_artifacts:
 			if artifact_name not in produced_artifacts:
 				raise MissingArtifactError(
-					stage=stage_name,
-					field=f"consumes_artifacts.{artifact_name}",
+					stage=stage_name, field=f"consumes_artifacts.{artifact_name}",
 					message="not produced by an upstream Stage",
 				)
 
 		if contract.resources.requires_gpu and not backend.supports_gpu:
 			raise BackendCompatibilityError(
-				stage=stage_name,
-				field="resources.requires_gpu",
+				stage=stage_name, field="resources.requires_gpu",
 				message=f"Stage requires GPU but backend {backend.name!r} does not support GPU execution",
 			)
 
 		if contract.forks_pipeline and upstream_mutated:
 			raise MutationForkError(
-				stage=stage_name,
-				field="forks_pipeline",
+				stage=stage_name, field="forks_pipeline",
 				message="cannot share a prefix after an upstream Stage mutated input state",
 			)
 
+		if contract.requires_row_identity and not row_identity_available:
+			raise RowIdentityError(
+				stage=stage_name, field="requires_row_identity",
+				message="detector row identity was destroyed by an upstream resampling Stage",
+			)
+
+		step_warnings: list[str] = []
+		preferred = contract.preferred_layout
+		if input_layout is not None and preferred is not None and input_layout is not preferred:
+			message = (
+				f"{stage_name} accepts {_layout_name(input_layout)} but prefers {preferred.__name__}"
+			)
+			step_warnings.append(message)
+			warnings.append(message)
+
+		materializations: list[Materialization] = []
+		if stage.name == "layout.convert":
+			reason = str(getattr(stage, "reason", "")).strip()
+			if not reason:
+				raise ShapeCompatibilityError(
+					stage=stage_name, field="reason",
+					message="YAML-authored layout conversions require a non-empty reason",
+				)
+			if input_layout is not None and output_layout is input_layout:
+				raise ShapeCompatibilityError(
+					stage=stage_name, field="produces",
+					message="layout.convert must change the current layout",
+				)
+			materializations.append(Materialization(
+				MaterializationKind.LAYOUT_CONVERSION, reason=reason,
+			))
+		elif stage.name.startswith("recon.") and input_layout is ProjOrder:
+			materializations.append(Materialization(
+				MaterializationKind.TOMOPY_BOUNDARY,
+				reason="TomoPy materializes its contiguous SinoOrder working array",
+				hidden=True,
+			))
+
+		steps.append(PlanStep(
+			index=index, stage_name=stage.name,
+			input_layout=input_layout, output_layout=output_layout,
+			input_domain=input_domain, output_domain=output_domain,
+			materializations=tuple(materializations), warnings=tuple(step_warnings),
+		))
 		upstream_mutated = upstream_mutated or contract.mutates_input
+		row_identity_available = row_identity_available and not contract.resamples_detector
 		produced_artifacts.update(contract.produces_artifacts)
-		previous_stage = stage
+		current_layout = output_layout
+		current_domain = output_domain
+
+	if mode is ValidationMode.COMPLETE:
+		if normalize_transitions != 1:
+			raise CompletePipelineError(
+				stage="<pipeline>", field="normalize",
+				message=f"expected exactly one raw-to-transmission transition, found {normalize_transitions}",
+			)
+		if any(stage.name.startswith("recon.") for stage in stages) and attenuation_transitions != 1:
+			raise CompletePipelineError(
+				stage="<pipeline>", field="attenuation",
+				message=f"expected exactly one transmission-to-attenuation transition, found {attenuation_transitions}",
+			)
+
+	return PipelinePlan(steps=tuple(steps), warnings=tuple(warnings))

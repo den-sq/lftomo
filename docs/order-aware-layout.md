@@ -5,8 +5,8 @@ Design spec for the pipeline layout/ordering contract tracked in **#97**.
 This is the consolidated, implementable specification. The rationale, measurements,
 and back-and-forth that produced it live in the #97 comment thread; this document
 is the version-controlled reference the implementing PRs (A–D) update as reality
-diverges from the sketch. Verified against master `c775826`, after #91, #92, and
-#98 were merged.
+diverges from the sketch. Phase A implementation started from master `f08dba6`,
+after #103 was merged.
 
 ## 1. Problem
 
@@ -109,13 +109,16 @@ structure — implement them together (PR A).
 @dataclass
 class PipelineState:
     ...
-    layout: type = SinoOrder                  # set by read or supplied by a fragment caller
-    domain: DataDomain = DataDomain.RAW       # advanced by domain-producing stages
+    layout: type | None = None                # set by read or supplied by a fragment caller
+    domain: DataDomain | None = None           # advanced by domain-producing stages
 ```
 
 Stages consult `state.layout`/`state.domain` for axis mapping instead of hardcoding
 `(Y, Theta, X)`. `PipelineState.with_array()` must preserve both fields unless a
-stage explicitly changes them. A small `lftomo/pipeline/stages/_layout.py` provides the helpers
+stage explicitly changes them. `None` is retained only as a legacy-fragment
+compatibility state; complete pipelines establish both axes at their read Stage,
+and a fragment requesting axis validation supplies them explicitly. A small
+`lftomo/pipeline/stages/_layout.py` provides the helpers
 (`projection_view`, `sinogram_view`, `sinogram_scratch`, `n_projections`,
 `n_rows`) so per-stage migrations are mechanical.
 

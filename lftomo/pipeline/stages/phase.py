@@ -6,7 +6,8 @@ import numpy as np
 from multiprocessing.pool import ThreadPool
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -31,6 +32,10 @@ class PaganinStage(Stage):
 	contract = StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
+		produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION,),
+		produces_domain=DataDomain.ATTENUATION,
+		locality=Locality.PROJECTION,
 		mutates_input=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
@@ -45,6 +50,20 @@ class PaganinStage(Stage):
 		self.epsilon = epsilon
 		self.enabled = enabled
 		self.pad_y = pad_y
+		self.contract = StageContract(
+			expected_input=SinoOrder,
+			produced_output=SinoOrder,
+			produces=PRESERVE,
+			mutates_input=enabled,
+			window_axes=("Y", "Theta"),
+			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm") if enabled else (),
+			resources=ResourceHints(memory_multiplier=2.0),
+			accepts_domain=(DataDomain.TRANSMISSION,) if enabled else (
+				DataDomain.TRANSMISSION, DataDomain.ATTENUATION,
+			),
+			produces_domain=DataDomain.ATTENUATION if enabled else PRESERVE,
+			locality=Locality.PROJECTION,
+		)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "PaganinStage":
@@ -75,6 +94,10 @@ class PaganinPhaseAbsorptionStage(Stage):
 	contract = StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
+		produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION,),
+		produces_domain=DataDomain.ATTENUATION,
+		locality=Locality.PROJECTION,
 		mutates_input=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
@@ -139,7 +162,13 @@ class BronnikovAidedCorrectionStage(Stage):
 		self.contract = StageContract(
 			expected_input=shape,
 			produced_output=shape,
-			mutates_input=True,
+			produces=PRESERVE,
+			mutates_input=enabled,
+			accepts_domain=(DataDomain.TRANSMISSION,) if enabled else (
+				DataDomain.TRANSMISSION, DataDomain.ATTENUATION,
+			),
+			produces_domain=DataDomain.ATTENUATION if enabled else PRESERVE,
+			locality=Locality.PROJECTION,
 			window_axes=("Y", "Theta"),
 			resources=ResourceHints(memory_multiplier=2.0),
 		)

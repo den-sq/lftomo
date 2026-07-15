@@ -7,17 +7,23 @@ import numpy as np
 from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
-def _contract(order: str = "sinogram") -> StageContract:
+def _contract(order: str = "sinogram", *, resamples_detector: bool = False) -> StageContract:
 	if order not in ("projection", "sinogram"):
 		raise ValueError("geometry order must be 'projection' or 'sinogram'")
 	shape = ProjOrder if order == "projection" else SinoOrder
 	return StageContract(
 		expected_input=shape,
 		produced_output=shape,
+		produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+		produces_domain=PRESERVE,
+		locality=Locality.PROJECTION,
+		resamples_detector=resamples_detector,
 		mutates_input=True,
 		window_axes=("Y", "Theta"),
 		resources=ResourceHints(memory_multiplier=2.0),
@@ -64,7 +70,7 @@ class SkewCorrectStage(Stage):
 		self.center_y_px = center_y_px
 		self.enabled = enabled
 		self.order = order
-		self.contract = _contract(order)
+		self.contract = _contract(order, resamples_detector=enabled and degrees != 0)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "SkewCorrectStage":
@@ -116,7 +122,9 @@ class MovementCorrectStage(Stage):
 		self.mode = mode
 		self.cval = cval
 		self.array_order = array_order
-		self.contract = _contract(array_order)
+		self.contract = _contract(
+			array_order, resamples_detector=enabled and (y != 0 or x != 0),
+		)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "MovementCorrectStage":
