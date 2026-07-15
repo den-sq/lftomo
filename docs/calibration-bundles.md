@@ -92,3 +92,40 @@ Use `validate_bundle(..., verify_hashes=True)` when accepting a newly created or
 transferred bundle. Hashing is streamed in 8 MiB blocks. Routine window reads do
 not repeatedly hash complete payloads.
 
+## Runner resolution
+
+`lftomo.runner.resolve_calibration()` resolves calibration before Stage
+construction and complete-pipeline validation. The resolution order is:
+
+1. `calibration_manifest` on a normalization Stage in `recon.yaml`;
+2. a caller-supplied `CalibrationBundleRef`;
+3. explicit legacy `Scan.metadata["flat_fields"]` four-map input;
+4. explicit legacy `pre_gain`, `post_gain`, `pre_dark`, and `post_dark` Stage
+   paths;
+5. whites and darks embedded in a dxchange HDF5 source.
+
+If YAML and a direct caller both select a bundle, their resolved manifest path
+and calibration ID must agree. The runner never searches for a nearby bundle.
+It validates the selected bundle and its component compatibility before
+constructing Stages. A mismatch raises by default; `compatibility_policy:
+override` also requires `compatibility_override_reason` and persists the full
+diagnostic decision.
+
+For legacy normalization algorithms, a bundle can provide components named
+`pre_gain`, `post_gain`, `pre_dark`, and `post_dark`. Only the active detector Y
+window is read. Embedded HDF5 fallback similarly reads only the first and last
+white/dark Y windows and suppresses a second, full calibration-stack read.
+
+Every run records a serializable `calibration_resolution` artifact. External
+bundle runs additionally seed the typed `calibration_bundle` reference and
+`calibration_compatibility` report. Direct callers use:
+
+```python
+from lftomo.runner import run_reconstruction
+
+results = run_reconstruction(
+    "recon.yaml",
+    "scan.yaml",
+    calibration_bundle=bundle_ref,
+)
+```
