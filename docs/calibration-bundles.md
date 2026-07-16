@@ -308,3 +308,36 @@ time and reduced mean held-out air residual from 0.01086 (naive weighted
 endpoints) to 0.01067. The improvement is modest for this subpixel-motion scan;
 the schedule is the material correction. More complex non-monotonic events
 require keyframes rather than forcing a two-endpoint schedule.
+
+## Flat-series keyframes
+
+`build_flat_series_digest()` samples the midpoint of each equal-length source
+interval and takes a short centered median (normally 3–5 frames). It reads and
+writes by detector-row window through `CalibrationBuildSession`; it never block
+averages an interval or accumulates full-resolution snapshots. The
+`beam_keyframes` component records physical/frame time, source frame indices,
+source path/pattern and first/last frame, crop/binning, camera segment,
+intensity and centroid trajectory, hashes, and maximum keyframe gap.
+
+`normalize.beam_keyframes` requires projection times on that same explicit time
+axis. It reads only the two bracketing Y windows and evaluates one gain per
+projection, while preserving the detector-static content common to both
+keyframes. Queries outside the component time range fail. `maximum_gap` can
+enforce an observability policy; even without a hard limit, QC states that an
+event occurring wholly between keyframes cannot be recovered. Camera segments
+remain hard boundaries through component compatibility.
+
+Choose spacing from the shortest beam event that must be recovered, not merely
+from total scan length: use at least two samples across that event and prefer
+three or more when its shape is nonlinear. Treat interpolation uncertainty as
+increasing with the bracketing gap. A gap at or below the validated median
+training gap is the baseline regime; a 1–2× gap is elevated uncertainty, and a
+gap above 2× should be rejected with `maximum_gap` unless held-out validation
+supports it. This is an observability policy rather than a statistical error
+bar—events wholly inside any gap remain unknowable from the digest.
+
+On the copied 1,200-frame 10-minute white-field series, the real-data test uses
+20 five-frame keyframes and holds out every inter-keyframe midpoint. The compact
+piecewise model lowers median held-out error relative to interpolation between
+only the series endpoints while touching only the sampled frames and a 32-row
+working window.

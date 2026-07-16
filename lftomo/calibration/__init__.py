@@ -59,6 +59,7 @@ from .beam_tracking import (
 	geometric_crossfade,
 	optimal_transport_interp,
 )
+from .keyframes import FlatSeriesDigest, TIFFRandomFrameSource, build_flat_series_digest
 
 __all__ = [
 	"ArrayPayload",
@@ -81,6 +82,7 @@ __all__ = [
 	"CompatibilityMetadata",
 	"CompatibilityOverride",
 	"CompatibilityReport",
+	"FlatSeriesDigest",
 	"DetectorRegion",
 	"MotorAxisCalibration",
 	"MotorAxisCalibrationResult",
@@ -92,9 +94,11 @@ __all__ = [
 	"ScheduleFit",
 	"TimeAxis",
 	"TimeBracket",
+	"TIFFRandomFrameSource",
 	"ValidationResult",
 	"check_compatibility",
 	"build_static_dynamic_components",
+	"build_flat_series_digest",
 	"auto_air_mask",
 	"calibrate_motor_axis",
 	"calibrate_schedule",
