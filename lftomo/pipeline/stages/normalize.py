@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
@@ -11,6 +13,7 @@ from lftomo.calibration import (
 	CalibrationBundleRef,
 	calibrate_schedule,
 	diagnose_beam_change,
+	fit_projection_beam,
 	optimal_transport_interp,
 )
 from lftomo.config import StageConfig
@@ -308,6 +311,178 @@ class BeamKeyframesNormalizeStage(Stage):
 			"component": self.component, "maximum_gap_seen": maximum_seen_gap,
 			"projection_start": projection_start, "projection_count": projection_count,
 			"observability": "events wholly inside a keyframe gap cannot be recovered",
+		}
+		return state if data is state.working_array else state.with_array(data)
+
+
+class BeamBasisFitNormalizeStage(Stage):
+	"""Fit a low-dimensional external beam library from air in each projection."""
+
+	name = "normalize.beam_basis_fit"
+	contract = StageContract(
+		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
+		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
+		locality=Locality.PROJECTION, mutates_input=True, window_axes=("Y", "Theta"),
+		consumes_artifacts=("calibration_bundle",), produces_artifacts=("beam_basis_qc",),
+		resources=ResourceHints(memory_multiplier=2.0),
+	)
+
+	def __init__(
+		self, *, component: str = "beam_basis", detector_component: str | None = None,
+		air_mask_artifact: str = "air_mask", air_threshold: float = 0.95,
+		minimum_air_pixels: int = 100, minimum_air_fraction: float = 0.005,
+		trim_sigma: float = 4.0, erode: int = 1, iterations: int = 4,
+		exposure_quantile: float = 0.2, edge_quantile: float = 0.85,
+		maximum_fit_residual: float = 0.08, maximum_out_of_basis: float = 0.75,
+		maximum_basis_condition: float = 1e6,
+		maximum_contamination_fraction: float = 0.5,
+		maximum_coefficient_extrapolation: float = 1.0,
+		fail_on_qc: bool = True, order: str | None = None,
+	):
+		configured_layout(order)
+		if (
+			not 0 < air_threshold <= 1 or not 0 < minimum_air_fraction <= 1
+			or not 0 <= exposure_quantile <= 1 or not 0 <= edge_quantile <= 1
+		):
+			raise ValueError(
+				"air_threshold and minimum_air_fraction must lie in (0, 1], and mask "
+				"quantiles must lie in [0, 1]"
+			)
+		if any(value <= 0 for value in (
+			minimum_air_pixels, trim_sigma,
+			maximum_fit_residual, maximum_out_of_basis, maximum_basis_condition,
+			maximum_contamination_fraction, maximum_coefficient_extrapolation,
+		)) or erode < 0 or iterations < 1:
+			raise ValueError("beam-basis fit counts and QC thresholds must be positive")
+		self.component = component
+		self.detector_component = detector_component
+		self.air_mask_artifact = air_mask_artifact
+		self.air_threshold = air_threshold
+		self.minimum_air_pixels = minimum_air_pixels
+		self.minimum_air_fraction = minimum_air_fraction
+		self.trim_sigma = trim_sigma
+		self.erode = erode
+		self.iterations = iterations
+		self.exposure_quantile = exposure_quantile
+		self.edge_quantile = edge_quantile
+		self.maximum_fit_residual = maximum_fit_residual
+		self.maximum_out_of_basis = maximum_out_of_basis
+		self.maximum_basis_condition = maximum_basis_condition
+		self.maximum_contamination_fraction = maximum_contamination_fraction
+		self.maximum_coefficient_extrapolation = maximum_coefficient_extrapolation
+		self.fail_on_qc = fail_on_qc
+		self.order = order
+
+	@classmethod
+	def from_config(cls, config: StageConfig) -> "BeamBasisFitNormalizeStage":
+		return cls(**config.params)
+
+	def _mask(self, state: PipelineState, layout: type, index: int, shape: tuple[int, int]):
+		value = state.artifacts.get(self.air_mask_artifact)
+		if value is None:
+			return None
+		value = np.asarray(value, dtype=bool)
+		if value.ndim == 2:
+			mask = value
+		elif value.ndim == 3:
+			mask = projection_view(value, layout, index)
+		else:
+			raise ValueError(f"{self.air_mask_artifact} must be a 2-D or 3-D mask")
+		if mask.shape != shape:
+			raise ValueError(f"{self.air_mask_artifact} does not match the active detector window")
+		return mask
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if state.backend.name != "numpy":
+			raise TypeError("BeamBasisFitNormalizeStage currently requires the NumPy backend")
+		data = np.asarray(state.working_array).astype(np.float32, copy=False)
+		layout = resolve_layout(state, self.order, self.name)
+		if data.ndim != 3:
+			raise ValueError("normalize.beam_basis_fit expects a three-dimensional array")
+		ref = state.artifacts.get("calibration_bundle")
+		if not isinstance(ref, CalibrationBundleRef):
+			raise ValueError("normalize.beam_basis_fit requires a selected calibration bundle")
+		bundle = CalibrationBundle.open(ref.manifest_path)
+		descriptor = bundle.component(self.component)
+		if descriptor.kind != "beam_basis" or descriptor.coordinate_frame != "beam":
+			raise ValueError("beam-basis component must have kind='beam_basis' in beam coordinates")
+		y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
+		start, stop = _calibration_y_window(state, y_size)
+		basis = bundle.read_component(self.component, y_start=start, y_stop=stop)
+		if basis.shape[2] != data.shape[2]:
+			raise ValueError("beam-basis X extent is incompatible with the active detector window")
+		detector = None if self.detector_component is None else bundle.read_component(
+			self.detector_component, y_start=start, y_stop=stop,
+		)
+		if self.detector_component is not None:
+			detector_descriptor = bundle.component(self.detector_component)
+			if (detector_descriptor.kind != "detector_static"
+					or detector_descriptor.coordinate_frame != "detector"):
+				raise ValueError(
+					"detector component must have kind='detector_static' in detector coordinates"
+				)
+		metadata = descriptor.metadata
+		training_min = np.asarray(metadata.get("training_coefficient_min", []), dtype=float)
+		training_max = np.asarray(metadata.get("training_coefficient_max", []), dtype=float)
+		qcs, coefficients, violations = [], [], []
+		for index in range(n_projections(data, layout)):
+			image = projection_view(data, layout, index)
+			fit = fit_projection_beam(
+				image, basis, detector=detector,
+				air_mask=self._mask(state, layout, index, image.shape),
+				air_threshold=self.air_threshold,
+				minimum_air_pixels=self.minimum_air_pixels,
+				minimum_air_fraction=self.minimum_air_fraction,
+				trim_sigma=self.trim_sigma, erode=self.erode, n_iter=self.iterations,
+				exposure_quantile=self.exposure_quantile,
+				edge_quantile=self.edge_quantile,
+			)
+			coefficient_extrapolation = 0.0
+			if training_min.shape == fit.coefficients.shape == training_max.shape:
+				span = np.maximum(training_max - training_min, 1e-12)
+				outside = np.maximum(training_min - fit.coefficients, fit.coefficients - training_max)
+				coefficient_extrapolation = float(np.max(np.maximum(outside, 0) / span))
+			contamination = max(fit.qc.rejected_fraction, fit.qc.edge_overlap_fraction)
+			projection_violations = []
+			for failed, label in (
+				(fit.qc.fit_residual > self.maximum_fit_residual, "fit_residual"),
+				(fit.qc.out_of_basis > self.maximum_out_of_basis, "out_of_basis"),
+				(fit.qc.basis_condition > self.maximum_basis_condition, "basis_condition"),
+				(contamination > self.maximum_contamination_fraction, "mask_contamination"),
+				(coefficient_extrapolation > self.maximum_coefficient_extrapolation,
+					"coefficient_extrapolation"),
+			):
+				if failed:
+					projection_violations.append(label)
+			if projection_violations and self.fail_on_qc:
+				raise ValueError(
+					f"beam-basis fit failed QC for projection {index}: "
+					+ ", ".join(projection_violations)
+				)
+			image[:] = fit.transmission
+			coefficients.append(fit.coefficients)
+			violations.append(projection_violations)
+			qcs.append({
+				**asdict(fit.qc), "coefficient_extrapolation": coefficient_extrapolation,
+				"mask_source": "auto" if self.air_mask_artifact not in state.artifacts else "supplied",
+				"violations": projection_violations,
+			})
+		coefficient_array = np.asarray(coefficients)
+		state.artifacts["beam_basis_qc"] = {
+			"component": self.component,
+			"training_coverage": descriptor.compatibility.training_coverage,
+			"training_relative_residual": metadata.get("training_relative_residual"),
+			"projections": qcs,
+			"coefficient_std": coefficient_array.std(axis=0).tolist(),
+			"maximum_coefficient_step": float(np.max(np.linalg.norm(
+				np.diff(coefficient_array, axis=0), axis=1,
+			))) if len(coefficient_array) > 1 else 0.0,
+			"violating_projection_count": sum(bool(value) for value in violations),
+			"basis_scope": "only beam states represented by training_coverage are supported",
+			"mask_assumption": (
+				"robust trimming assumes candidate-mask air pixels are the majority; "
+				"fit and coefficient QC guard gross contamination"
+			),
 		}
 		return state if data is state.working_array else state.with_array(data)
 

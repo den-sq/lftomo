@@ -341,3 +341,51 @@ On the copied 1,200-frame 10-minute white-field series, the real-data test uses
 piecewise model lowers median held-out error relative to interpolation between
 only the series endpoints while touching only the sampled frames and a 32-row
 working window.
+
+## External beam-basis normalization
+
+`build_beam_basis()` is the opt-in path for scans with no trustworthy in-scan
+flat. It accepts one bounded random-access source or a
+`ConcatenatedFrameSource` made from compatible external scans. The builder makes
+two detector-row-windowed passes: the first accumulates only an N-by-N Gram
+matrix in log space; the second writes the mean and retained PCA fields directly
+through `CalibrationBuildSession`. `HDF5RandomFrameSource` supports explicit
+dataset/frame ranges, and `crop` limits both source reads and the persisted
+detector region. The component records its source scan identifiers, explained
+fractions, training residual, coefficient ranges, detector crop, and camera
+segment.
+
+`normalize.beam_basis_fit` consumes that selected `beam_basis` component and an
+optional detector-static component. It accepts both projection and sinogram
+layout, prefers projection order, preserves layout, and is the pipeline's sole
+RAW-to-TRANSMISSION transition. It fits a handful of coefficients independently
+for each projection and therefore never constructs a full gain stack. A 2-D
+shared air mask or a layout-matching 3-D mask may be supplied as the `air_mask`
+artifact. Without one, the fallback selects bright pixels whose transmission
+against the basis mean is near one.
+
+The automatic mask assumes that every projection contains a sufficiently large,
+well-exposed air region. It is not appropriate when the sample or holder covers
+the whole detector. `exposure_quantile` and `edge_quantile` configure the
+bright-field and edge exclusions. Likely sample edges are removed, the mask is
+eroded, and a robust residual trim rejects false-positive sample pixels before
+the final fit. That trim assumes true air is the majority of the candidate
+mask: when gross contamination violates this assumption, the MAD centre may
+follow the sample rather than reject it. Fit-residual, coefficient-range, and
+out-of-basis QC are therefore required backstops, not optional decoration.
+QC reports air count/fraction, edge overlap, rejected-mask fraction, residual,
+basis rank/conditioning, coefficient stability, training-range extrapolation,
+and relative out-of-basis error. Insufficient air and rank-deficient coverage
+always fail; configurable limits either fail the Stage or, with
+`fail_on_qc: false`, leave explicit per-projection violations for diagnostic
+runs.
+
+The basis can represent only beam states present in its compatible training
+library. A low PCA training residual does not authorize use across a camera
+move, energy/optics change, or unrepresented beam event. Populate
+`training_coverage` with the source scans and keep normal compatibility checks
+enabled. The RA-00808 integration test trains across three independent scans at
+the same recorded camera/SSD configuration, improves reconstruction of a clean
+flat held out from a fourth scan over the static mean, and reduces the fitted
+residual on real projection air pixels. It reads a 128-row crop in 32-row
+windows rather than materializing any full scan.

@@ -8,6 +8,7 @@ from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrect
 from .helical import HelicalIndexRemapStage
 from .layout import LayoutConvertStage
 from .normalize import (
+	BeamBasisFitNormalizeStage,
 	BeamTrackingNormalizeStage,
 	BeamKeyframesNormalizeStage,
 	TaperBlendedNormalizeStage,
@@ -53,6 +54,7 @@ STAGE_REGISTRY = {
 	"layout.convert": LayoutConvertStage,
 	"movement_correct.linear_shift": MovementCorrectStage,
 	"normalize.phase_contrast": TaperBlendedNormalizeStage,
+	"normalize.beam_basis_fit": BeamBasisFitNormalizeStage,
 	"normalize.beam_tracking": BeamTrackingNormalizeStage,
 	"normalize.beam_keyframes": BeamKeyframesNormalizeStage,
 	"normalize.taper_blended": TaperBlendedNormalizeStage,
@@ -104,6 +106,7 @@ __all__ = [
 	"AllOfTheStripeStage",
 	"AffineSkewMovementStage",
 	"BPCudaStage",
+	"BeamBasisFitNormalizeStage",
 	"BeamTrackingNormalizeStage",
 	"BeamKeyframesNormalizeStage",
 	"BilateralFilterStage",
