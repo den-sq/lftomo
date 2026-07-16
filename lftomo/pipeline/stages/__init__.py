@@ -7,7 +7,12 @@ from .filter import BilateralFilterStage
 from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrectStage
 from .helical import HelicalIndexRemapStage
 from .layout import LayoutConvertStage
-from .normalize import TaperBlendedNormalizeStage, ThetaSwitchNormalizeStage, WeightedNormalizeStage
+from .normalize import (
+	BeamTrackingNormalizeStage,
+	TaperBlendedNormalizeStage,
+	ThetaSwitchNormalizeStage,
+	WeightedNormalizeStage,
+)
 from .phase import BronnikovAidedCorrectionStage, PaganinPhaseAbsorptionStage, PaganinStage
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
 from .recon import (
@@ -47,6 +52,7 @@ STAGE_REGISTRY = {
 	"layout.convert": LayoutConvertStage,
 	"movement_correct.linear_shift": MovementCorrectStage,
 	"normalize.phase_contrast": TaperBlendedNormalizeStage,
+	"normalize.beam_tracking": BeamTrackingNormalizeStage,
 	"normalize.taper_blended": TaperBlendedNormalizeStage,
 	"normalize.theta_switch": ThetaSwitchNormalizeStage,
 	"normalize.weighted": WeightedNormalizeStage,
@@ -96,6 +102,7 @@ __all__ = [
 	"AllOfTheStripeStage",
 	"AffineSkewMovementStage",
 	"BPCudaStage",
+	"BeamTrackingNormalizeStage",
 	"BilateralFilterStage",
 	"BronnikovAidedCorrectionStage",
 	"CGLSCudaStage",
