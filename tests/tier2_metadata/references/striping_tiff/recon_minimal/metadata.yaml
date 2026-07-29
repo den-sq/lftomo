@@ -18,13 +18,14 @@ input:
   recovered_path: projections
   historical_projections: 3937
   historical_dropped_frames: 0
-  recovered_variant: thresholded
-  recovered_projections: 3935
+  recovered_variant: thresholded_with_restored_raw_endpoints
+  recovered_projections: 3937
   recovered_input_note: >-
-    The restored physical-drive copy is not byte-identical to the original
-    input directory: it is a later thresholded variant with two fewer TIFFs.
-    The historical output remains authoritative; an exact producer rerun
-    requires restoration of the original 3,937 projection files.
+    The restored physical-drive copy contains the later thresholded 3,935-frame
+    interior plus the first and last frames copied byte-for-byte from the
+    surviving raw acquisition. Thresholding required two-sided temporal
+    neighbors and therefore produced no endpoint outputs. The historical
+    output remains authoritative and must not be refreshed.
   shape: [3000, 11648]
   dtype: uint16
   flats:

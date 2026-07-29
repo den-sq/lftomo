@@ -1,0 +1,71 @@
+schema_version: 1
+producer: r254
+dataset: striping_tiff
+status: frozen_producer_rerun
+immutable: true
+source:
+  repository: unversioned B10Scripts working tree
+  path: B10/PCRBox_Octo0/20kev/voi2.1/R2.54_Berkeley8_hpc_v1.81_alt.py
+  git_sha: unavailable
+  source_sha256: 7ef0c00b8020ce327bb850cb8a49d4338c6e8159521e046c3bb44e5943abf1ab
+  executed_copy: reference/r254/R2.54_Berkeley8_hpc_v1.81_alt_AAA592.py
+  executed_sha256: d74a93ba1191b0fb3942f069521d2d2273cfc63bd5eba63eec24af170727b1ab
+  lftomo_schema_commit: 77c8f8507a873327c519b9bc26ae2c5ee8ee8c68
+  adaptation:
+    - selected TIFF input instead of HDF5
+    - selected slices 1800 through 1809 and manual center 6235.0
+    - exposed slice start and chunk size as environment parameters; froze one slice per process to stay within host memory
+    - initialized the TIFF projection-directory variable omitted by the HDF5-default script
+    - repaired the stale parallel_sectional_write_listdist call to its defined parallel_sectional_write_ name
+    - left the canonical BAC, zero-skew, movement-disabled, stripe, and gridrec parameters unchanged
+input:
+  path: projections
+  shape: [3937, 3000, 11648]
+  dtype: uint16
+  angular_range_degrees: 180.0
+  recovered_variant: thresholded_with_restored_raw_endpoints
+  restored_projection_count: 3937
+  restored_endpoints:
+    - proj_478330110614000.tif
+    - proj_479987348370000.tif
+  restoration_note: >-
+    The recovered thresholded stack originally held 3,935 interior frames.
+    The first and last frames were restored byte-for-byte from the surviving
+    raw 3,937-frame acquisition. Thresholding required two-sided temporal
+    neighbors, so neither endpoint had a corresponding thresholded output.
+calibration:
+  method: median of 25 pre/post gains; median of dark frames 2 through 25
+  gain_sha256: acd003edc63fc7d6b65c62ad101e5cd8adb2b3bef0df1bf86795b131d182b51e
+  gain_post_sha256: faf8606f527f1c7e1f8106053966b15cd3bc2371408e4608b6d6eaadc8a66552
+  dark_sha256: 553cced943b9ee27fecf55d3196eeb417f0f11d2c9d8237e6a927a95d80c28e6
+  dark_post_sha256: f489a40ab6d7177ce848175dcf8166eb3788cfdecb47bcb42584c76fe9c39d75
+run:
+  host: PSH1VS12J3
+  operator: dnorthover
+  date: "2026-07-28T16:16:25-04:00"
+  runtime: "00:13:19 wall time across ten serial one-slice producer processes"
+  slurm_nodelist: null
+  slurm_ntasks: null
+  environment:
+    conda_env: /home/dnorthover/miniconda3/envs/recon
+    python: 3.10.13
+    numpy: 1.26.3
+    scipy: 1.11.4
+    tifffile: 2023.12.9
+    tomopy: 1.12.1
+    opencv: 4.7.0
+    h5py: 3.7.0
+    dxchange: 0.1.7
+    hotopy: version attribute unavailable
+reference_selection:
+  slices: [1800, 1801, 1802, 1803, 1804, 1805, 1806, 1807, 1808, 1809]
+  rationale: contiguous feature-rich region matching the recon-minimal comparison chunk
+  shape: [11648, 11648]
+  dtype: float32
+freeze:
+  path: reference/r254
+  host: PSH1VS12J3
+  operator: dnorthover
+  date: "2026-07-28"
+  method: exact R2.54 producer rerun against the restored 3,937-frame stack
+  rule: do not rerun or refresh this reference
