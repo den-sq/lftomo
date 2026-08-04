@@ -210,6 +210,15 @@ transition, and does not satisfy an exactly-once boundary. The same applies to
 zero-effect configuration branches generally; validation describes what the
 concrete Stage instance will execute, not what its class could execute.
 
+Same-domain operations intentionally have no implied adjacency rule. A Stage
+that accepts transmission and preserves transmission can follow another such
+Stage; non-commutativity alone is not invalid. The phase audit found that the
+scientifically invalid phase orders all cross the terminal domain boundary, so
+the existing domain contract is sufficient and no generic semantic-effect
+fields are added. A future effect mechanism requires an audited precondition
+that cannot be represented by input/output domain, not an algorithm-name
+allowlist.
+
 **Preferences (planner *warnings*, never rules — the frozen lineages disagree):**
 
 - Stripe / dead-pixel cleanup prefers original detector alignment (before warp):

@@ -190,6 +190,57 @@ def test_complete_validation_counts_concrete_domain_transitions():
 		validate_pipeline(stages, scan_config(), mode="complete")
 
 
+def test_transmission_preserving_operations_chain_before_one_terminal_conversion():
+	def correction(name):
+		return ContractStage(name, StageContract(
+			accepts=(ProjOrder,), produces=PRESERVE,
+			accepts_domain=(DataDomain.TRANSMISSION,), produces_domain=PRESERVE,
+		))
+
+	stages = complete_stages(correction("correction.one"), correction("correction.two"))
+
+	plan = validate_pipeline(stages, scan_config(), mode="complete")
+
+	assert plan.steps[2].input_domain is DataDomain.TRANSMISSION
+	assert plan.steps[2].output_domain is DataDomain.TRANSMISSION
+	assert plan.steps[3].input_domain is DataDomain.TRANSMISSION
+	assert plan.steps[3].output_domain is DataDomain.TRANSMISSION
+	assert plan.steps[4].output_domain is DataDomain.ATTENUATION
+
+
+def test_terminal_conversion_is_the_ordering_boundary_for_same_domain_operations():
+	correction = ContractStage("correction", StageContract(
+		accepts=(ProjOrder,), produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION,), produces_domain=PRESERVE,
+	))
+	terminal = ContractStage("phase.negative_log", StageContract(
+		accepts=(ProjOrder,), produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION,),
+		produces_domain=DataDomain.ATTENUATION,
+	))
+	correction.occurrence_id = "post-log-correction"
+	terminal.occurrence_id = "terminal-log"
+
+	validate_pipeline(
+		[correction, terminal], scan_config(), initial_layout=ProjOrder,
+		initial_domain=DataDomain.TRANSMISSION,
+	)
+	with pytest.raises(
+		DomainCompatibilityError, match="post-log-correction:correction.*got attenuation",
+	):
+		validate_pipeline(
+			[terminal, correction], scan_config(), initial_layout=ProjOrder,
+			initial_domain=DataDomain.TRANSMISSION,
+		)
+	with pytest.raises(
+		DomainCompatibilityError, match="terminal-log:phase.negative_log.*got attenuation",
+	):
+		validate_pipeline(
+			[terminal, terminal], scan_config(), initial_layout=ProjOrder,
+			initial_domain=DataDomain.TRANSMISSION,
+		)
+
+
 def test_domain_cannot_move_backward():
 	stage = ContractStage("bad", StageContract(produces_domain=DataDomain.RAW))
 	with pytest.raises(DomainCompatibilityError, match="cannot move backward"):
