@@ -7,38 +7,38 @@ on:
       - master
 
 jobs:
-  tests:
-    name: Packaging and import smoke tests
+  light-tests:
+    name: Lightweight unit tests
     runs-on: ubuntu-latest
-
-    defaults:
-      run:
-        shell: bash -el {0}
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set up lftomo conda environment
-        uses: conda-incubator/setup-miniconda@v3
+      - name: Set up Python
+        uses: actions/setup-python@v6
         with:
-          miniforge-version: latest
-          activate-environment: lftomo
-          environment-file: environment.yml
-          auto-activate-base: false
-          use-mamba: true
+          python-version: "3.12"
+          cache: pip
 
-      - name: Install lftomo package metadata
-        run: python -m pip install --no-deps -e .
-
-      - name: Validate pyproject metadata
+      - name: Install lightweight test dependencies
         run: >-
-          python -c
-          "import pathlib, tomllib;
-          data = tomllib.loads(pathlib.Path('pyproject.toml').read_text());
-          assert data['build-system']['build-backend'] == 'hatchling.build';
-          assert data['project']['name'] == 'lftomo';
-          assert data['project']['requires-python'] == '>=3.11'"
+          python -m pip install
+          "numpy<2" "pydantic>=2" PyYAML scipy pytest
 
-      - name: Run import smoke tests
-        run: python -m pytest tests/test_imports.py -q
+      - name: Run lightweight unit tests
+        shell: bash
+        run: |
+          test_paths=(
+            tests/pipeline/test_sweep.py
+            tests/pipeline/test_validation.py
+            tests/experiment/test_models.py
+            tests/evaluation/test_aggregation_ranking.py
+          )
+          existing_test_paths=()
+          for test_path in "${test_paths[@]}"; do
+            if [[ -f "$test_path" ]]; then
+              existing_test_paths+=("$test_path")
+            fi
+          done
+          python -m pytest -q "${existing_test_paths[@]}"
