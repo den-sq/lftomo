@@ -253,6 +253,28 @@ def count_recon_candidates(recon: Recon) -> int:
 	return total
 
 
+def has_continuous_domains(recon: Recon) -> bool:
+	"""Return whether any parameter or algorithm case has a continuous domain."""
+
+	for stage in recon.pipeline:
+		if stage.sweep is None:
+			continue
+		if stage.sweep.kind == "domain":
+			if any(
+				isinstance(domain, (LinearDomain, LogDomain)) and domain.count is None
+				for domain in parameter_domains(stage.sweep).values()
+			):
+				return True
+		if stage.sweep.kind == "cases":
+			for case in stage.sweep.cases:
+				if any(
+					isinstance(domain, (LinearDomain, LogDomain)) and domain.count is None
+					for domain in case.domains.values()
+				):
+					return True
+	return False
+
+
 def candidate_key(recon: Recon) -> str:
 	"""Hash canonical resolved candidate content independently of enumeration."""
 

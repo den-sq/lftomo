@@ -44,6 +44,7 @@ from lftomo.pipeline.sweep import (
 	domain_values,
 	expand_recon_sweeps,
 	expand_sweep,
+	has_continuous_domains,
 	parameter_domains,
 )
 
@@ -86,6 +87,7 @@ __all__ = [
 	"domain_values",
 	"expand_recon_sweeps",
 	"expand_sweep",
+	"has_continuous_domains",
 	"parameter_domains",
 	"validate_pipeline",
 ]
