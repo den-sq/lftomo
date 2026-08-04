@@ -12,6 +12,7 @@ nav:
    - Candidate spaces: candidate-spaces.md
    - Stripe-chain invariant: stripe-chain-regression.md
    - Experiment models: experiment-models.md
+   - Reconstruction evaluation: evaluation.md
  - API reference:
    - Configuration models: api/config.md
    - Pipeline: api-pipeline.md

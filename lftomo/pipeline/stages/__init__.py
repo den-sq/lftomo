@@ -1,6 +1,7 @@
 """Built-in reconstruction Pipeline stages."""
 
 from lftomo.config import StageConfig
+from lftomo.evaluation.stage import EvaluationStage
 
 from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
 from .filter import BilateralFilterStage
@@ -45,6 +46,7 @@ STAGE_REGISTRY = {
 	"center.manual": ManualCenterStage,
 	"center.pc": PhaseCorrelationCenterStage,
 	"center.vo": VoCenterStage,
+	"evaluate.metrics": EvaluationStage,
 	"filter.bilateral": BilateralFilterStage,
 	"geometry.affine_skew": SkewCorrectStage,
 	"geometry.affine_skew_movement": AffineSkewMovementStage,
@@ -118,6 +120,7 @@ __all__ = [
 	"DRHTStage",
 	"EMCudaStage",
 	"EntropyLocalCenterStage",
+	"EvaluationStage",
 	"HDF5DxchangeReadStage",
 	"FourierWaveletStripeStage",
 	"FBPCudaStage",
