@@ -190,10 +190,12 @@ tests and legitimate pipeline fragments.
 1. In complete mode, `read` first — sets initial domain + layout.
 2. In complete mode, `normalize.*` is the only raw-consumer → first after read, **exactly once**
    (the `beam_*` variants #93–#96 belong here too, authored order-aware).
-3. In complete reconstruction mode, **Transmission → attenuation exactly once.** `phase.paganin` embeds its own
-   `-log`, so Paganin / BAC / a future standalone `minus_log` are *alternatives at
-   the same boundary*, not composable steps. The exactly-once rule catches both
-   "forgot to normalize" and "double log".
+3. In complete reconstruction mode, **Transmission → attenuation exactly once.**
+   Legacy `phase.paganin` and `phase.bac` embed `-log` and remain terminal
+   compatibility alternatives. Composable `phase.paganin_filter` and
+   `phase.bac_correction` preserve transmission and may be repeated before one
+   explicit `phase.negative_log`. The exactly-once rule catches both a missing
+   terminal conversion and a double log.
 4. `center.*` before recon — already enforced by the `center` artifact dependency;
    no new rule.
 5. `recon` → recon domain; `super_resolve.*`, recon-space filters, and `write.*`
@@ -407,6 +409,7 @@ to adopt `state.layout`, capability contracts, and domain declarations.
 | `normalize.weighted/theta_switch/taper_blended` | projection-local | theta/taper order branch present; weighted Sino-only | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
 | `phase.paganin` / `paganin_phase_absorption` | projection-local | Sino-only | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
 | **`phase.bac`** | projection-local | order branch present and AAA523-validated | accepts (Proj, Sino), prefers **Proj**; one `(Y,X)` projection at a time, bounded concurrency, in-place writeback | A |
+| `phase.paganin_filter` / `bac_correction` / `negative_log` / `beta_scale` | projection-local | split phase-chain operations | accepts (Proj, Sino), prefers **Proj**, PRESERVE layout; corrections preserve transmission, negative-log produces attenuation, beta scale preserves attenuation | A |
 | `filter.bilateral` | projection-local | order branch present | accepts (Proj, Sino), prefers **Proj**, PRESERVE | A |
 | `geometry.skew` / `movement` | projection-local | order branches present | accepts (Proj, Sino), prefers **Proj**, PRESERVE; skew sets `resamples_detector` when enabled/nonzero | A |
 | **`geometry.affine_skew_movement`** | optional boundary rewrite | Sino-only compatibility wrapper | accepts either; when transition configured, **produces the other, `fused_transition=True`** | C |

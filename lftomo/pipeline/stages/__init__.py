@@ -16,7 +16,15 @@ from .normalize import (
 	ThetaSwitchNormalizeStage,
 	WeightedNormalizeStage,
 )
-from .phase import BronnikovAidedCorrectionStage, PaganinPhaseAbsorptionStage, PaganinStage
+from .phase import (
+	BetaScaleStage,
+	BronnikovAidedCorrectionFilterStage,
+	BronnikovAidedCorrectionStage,
+	NegativeLogStage,
+	PaganinFilterStage,
+	PaganinPhaseAbsorptionStage,
+	PaganinStage,
+)
 from .read import HDF5DxchangeReadStage, TIFFStackReadStage
 from .recon import (
 	AstraCudaStage,
@@ -63,8 +71,12 @@ STAGE_REGISTRY = {
 	"normalize.theta_switch": ThetaSwitchNormalizeStage,
 	"normalize.weighted": WeightedNormalizeStage,
 	"phase.bac": BronnikovAidedCorrectionStage,
+	"phase.bac_correction": BronnikovAidedCorrectionFilterStage,
+	"phase.beta_scale": BetaScaleStage,
 	"phase.bronnikov_aided": BronnikovAidedCorrectionStage,
+	"phase.negative_log": NegativeLogStage,
 	"phase.paganin": PaganinStage,
+	"phase.paganin_filter": PaganinFilterStage,
 	"phase.paganin_phase_absorption": PaganinPhaseAbsorptionStage,
 	"read.hdf5_dxchange": HDF5DxchangeReadStage,
 	"read.tiff_stack": TIFFStackReadStage,
@@ -115,6 +127,8 @@ __all__ = [
 	"BeamTrackingNormalizeStage",
 	"BeamKeyframesNormalizeStage",
 	"BilateralFilterStage",
+	"BetaScaleStage",
+	"BronnikovAidedCorrectionFilterStage",
 	"BronnikovAidedCorrectionStage",
 	"CGLSCudaStage",
 	"DRHTStage",
@@ -133,6 +147,8 @@ __all__ = [
 	"ManualCenterStage",
 	"MovementCorrectStage",
 	"NeuroglancerWriteStage",
+	"NegativeLogStage",
+	"PaganinFilterStage",
 	"PaganinPhaseAbsorptionStage",
 	"PaganinStage",
 	"PhaseCorrelationCenterStage",
