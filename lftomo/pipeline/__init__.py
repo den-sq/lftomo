@@ -34,7 +34,18 @@ from lftomo.pipeline.validation import (
 	ValidationMode,
 	validate_pipeline,
 )
-from lftomo.pipeline.sweep import SweepRun, expand_recon_sweeps, expand_sweep
+from lftomo.pipeline.sweep import (
+	CandidateLimitError,
+	CandidateSpaceError,
+	ContinuousDomainError,
+	SweepRun,
+	candidate_key,
+	count_recon_candidates,
+	domain_values,
+	expand_recon_sweeps,
+	expand_sweep,
+	parameter_domains,
+)
 
 __all__ = [
 	"Backend",
@@ -66,8 +77,15 @@ __all__ = [
 	"ValidationMode",
 	"Stage",
 	"StageContract",
+	"CandidateLimitError",
+	"CandidateSpaceError",
+	"ContinuousDomainError",
 	"SweepRun",
+	"candidate_key",
+	"count_recon_candidates",
+	"domain_values",
 	"expand_recon_sweeps",
 	"expand_sweep",
+	"parameter_domains",
 	"validate_pipeline",
 ]

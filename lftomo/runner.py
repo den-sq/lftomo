@@ -24,7 +24,15 @@ from lftomo.calibration import (
 	validate_bundle,
 )
 from lftomo.config import HDF5DxchangeProjections, Recon, Scan
-from lftomo.pipeline import Backend, NumpyBackend, Pipeline, PipelineState, expand_recon_sweeps
+from lftomo.pipeline import (
+	Backend,
+	CandidateLimitError,
+	NumpyBackend,
+	Pipeline,
+	PipelineState,
+	expand_recon_sweeps,
+	validate_pipeline,
+)
 from lftomo.pipeline.stages import create_stage
 
 
@@ -36,6 +44,8 @@ class RunResult:
 	parameters: dict[str, Any]
 	output_path: Path | None
 	artifacts: dict[str, Any]
+	candidate_key: str = ""
+	resolved_recon: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -355,6 +365,22 @@ def _resolve_flat_fields(scan: Scan, recon: Recon) -> None:
 	resolve_calibration(scan, recon, pipeline_root=root, scan_root=root)
 
 
+def _estimated_output_bytes(scan: Scan, recon: Recon) -> int | None:
+	"""Estimate float32 reconstructed-volume output without reading projection data."""
+
+	if recon.output_path is None:
+		return 0
+	rows = scan.detector.rows
+	columns = scan.detector.columns
+	if rows is None or columns is None:
+		return None
+	read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
+	y_start = int(read.params.get("y_start", 0)) if read is not None else 0
+	y_stop = int(read.params.get("y_stop", rows)) if read is not None else rows
+	selected_rows = max(0, min(rows, y_stop) - max(0, y_start))
+	return selected_rows * columns * columns * np.dtype(np.float32).itemsize
+
+
 def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			output_path: str | Path | None = None, backend: Backend | None = None, *,
 			calibration_bundle: CalibrationBundleRef | None = None,
@@ -366,33 +392,68 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		recon.output_path = Path(output_path).resolve()
 	elif recon.output_path is not None and not recon.output_path.is_absolute():
 		recon.output_path = (Path.cwd() / recon.output_path).resolve()
-	resolution = resolve_calibration(
-		scan,
-		recon,
-		pipeline_root=resolved_pipeline_path.parent,
-		scan_root=resolved_scan_path.parent,
-		seeded_bundle=calibration_bundle,
-		verify_hashes=verify_calibration_hashes,
-	)
-	initial_artifacts: dict[str, Any] = {
-		"calibration_resolution": resolution.provenance(),
-	}
-	if resolution.bundle_ref is not None:
-		initial_artifacts["calibration_bundle"] = resolution.bundle_ref
-	if resolution.compatibility is not None:
-		initial_artifacts["calibration_compatibility"] = resolution.compatibility
 	backend = backend or NumpyBackend()
 	runs = expand_recon_sweeps(recon)
-	results = []
+	# Construct every resolved Stage before touching calibration or projection
+	# payloads. This rejects invalid structures and algorithm-specific parameters
+	# for the entire candidate set as one preflight operation.
+	for run in runs:
+		preflight = run.recon.model_copy(deep=True)
+		_strip_resolution_params(preflight)
+		[create_stage(config) for config in preflight.pipeline]
+	estimates = [_estimated_output_bytes(scan, run.recon) for run in runs]
+	if all(value is not None for value in estimates):
+		total_output = sum(value for value in estimates if value is not None)
+		limit = recon.candidate_limits.max_estimated_output_bytes
+		if total_output > limit:
+			raise CandidateLimitError(
+				f"candidate outputs are estimated at {total_output} bytes, exceeding "
+				f"max_estimated_output_bytes={limit}; narrow the space/output window "
+				"or raise the configured limit explicitly"
+			)
+	prepared = []
 	for run in runs:
 		concrete = run.recon.model_copy(deep=True)
 		if len(runs) > 1 and concrete.output_path is not None:
-			concrete.output_path = concrete.output_path / f"sweep-{run.index:04d}"
-		stages = [create_stage(config) for config in concrete.pipeline]
+			concrete.output_path = concrete.output_path / run.output_key
+		# Capture the rerunnable candidate before calibration resolution removes
+		# source-selection directives from the executable copy.
+		resolved_document = concrete.model_dump(mode="json")
 		run_scan = scan.model_copy(deep=False)
-		# Sweep runs may add metadata keys but must treat shared calibration arrays
-		# as immutable; copy the mapping without duplicating detector-sized fields.
+		# Candidates may add metadata keys but must treat shared detector-sized
+		# arrays as immutable. Copy only the mapping.
 		run_scan.metadata = dict(scan.metadata)
+		resolution = resolve_calibration(
+			run_scan,
+			concrete,
+			pipeline_root=resolved_pipeline_path.parent,
+			scan_root=resolved_scan_path.parent,
+			seeded_bundle=calibration_bundle,
+			verify_hashes=verify_calibration_hashes,
+		)
+		initial_artifacts: dict[str, Any] = {
+			"calibration_resolution": resolution.provenance(),
+		}
+		if resolution.bundle_ref is not None:
+			initial_artifacts["calibration_bundle"] = resolution.bundle_ref
+		if resolution.compatibility is not None:
+			initial_artifacts["calibration_compatibility"] = resolution.compatibility
+		stages = [create_stage(config) for config in concrete.pipeline]
+		# Validate every selected complete structure before the first projection
+		# Stage runs. Candidate N cannot fail contract validation after candidate
+		# N-1 has already produced output.
+		validate_pipeline(
+			stages,
+			run_scan,
+			backend,
+			available_artifacts=initial_artifacts,
+			mode="complete",
+		)
+		prepared.append((
+			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
+		))
+	results = []
+	for run, concrete, resolved_document, run_scan, initial_artifacts, stages in prepared:
 		state = PipelineState(
 			working_array=np.empty((0,), dtype=np.float32),
 			scan=run_scan,
@@ -401,7 +462,14 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			backend=backend,
 		)
 		state = Pipeline(stages, backend=backend, validation_mode="complete").run(state)
-		results.append(RunResult(run.index, run.parameters, concrete.output_path, dict(state.artifacts)))
+		results.append(RunResult(
+			run.index,
+			run.parameters,
+			concrete.output_path,
+			dict(state.artifacts),
+			candidate_key=run.candidate_key,
+			resolved_recon=resolved_document,
+		))
 	return results
 
 
@@ -422,8 +490,10 @@ def _json_value(value: Any) -> Any:
 def _json_result(result: RunResult) -> dict[str, Any]:
 	return {
 		"index": result.index,
+		"candidate_key": result.candidate_key,
 		"parameters": result.parameters,
 		"output_path": None if result.output_path is None else str(result.output_path),
+		"resolved_recon": result.resolved_recon,
 		"artifacts": _json_value(result.artifacts),
 	}
 
@@ -443,7 +513,10 @@ def main(pipeline_path: Path, scan_path: Path, output_path: Path | None,
 		click.echo(json.dumps([_json_result(result) for result in results], indent=2))
 	else:
 		for result in results:
-			click.echo(f"run {result.index}: {result.output_path or '(no output path)'}")
+			click.echo(
+				f"run {result.index} [{result.candidate_key[:16]}]: "
+				f"{result.output_path or '(no output path)'}"
+			)
 
 
 if __name__ == "__main__":

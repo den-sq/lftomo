@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 
 class ConfigModel(BaseModel):
@@ -116,20 +116,145 @@ class Scan(ConfigModel):
 		return acquisition
 
 
-class SweepConfig(ConfigModel):
-	"""Parameter sweep description for a pipeline stage."""
+class DiscreteDomain(ConfigModel):
+	"""Finite ordered values for a numeric or otherwise discrete parameter."""
 
-	kind: Literal["list", "grid", "linspace", "zip"] = Field(description="Sweep expansion strategy.")
-	params: dict[str, Any] = Field(default_factory=dict, description="Sweep parameter values.")
+	kind: Literal["discrete"] = "discrete"
+	values: list[Any] = Field(min_length=1)
+
+
+class CategoricalDomain(ConfigModel):
+	"""Finite ordered categorical choices."""
+
+	kind: Literal["categorical"] = "categorical"
+	values: list[str | int | float | bool] = Field(min_length=1)
+
+
+class LinearDomain(ConfigModel):
+	"""Linear numeric domain; ``count=None`` denotes a continuous domain."""
+
+	kind: Literal["linear"] = "linear"
+	start: float
+	stop: float
+	count: int | None = Field(default=None, ge=2)
+	endpoint: bool = True
+
+
+class LogDomain(ConfigModel):
+	"""Log-spaced positive domain; ``count=None`` denotes continuity."""
+
+	kind: Literal["log"] = "log"
+	start: float = Field(gt=0)
+	stop: float = Field(gt=0)
+	count: int | None = Field(default=None, ge=2)
+	base: float = Field(default=10.0, gt=0)
+
+	@field_validator("base")
+	@classmethod
+	def _base_is_not_one(cls, value: float) -> float:
+		if value == 1:
+			raise ValueError("log-domain base must not be 1")
+		return value
+
+
+ParameterDomain = Annotated[
+	DiscreteDomain | CategoricalDomain | LinearDomain | LogDomain,
+	Field(discriminator="kind"),
+]
+_PARAMETER_DOMAIN_ADAPTER = TypeAdapter(ParameterDomain)
+
+
+class StageCase(ConfigModel):
+	"""One named algorithm choice and only the parameters valid for it."""
+
+	name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
+	algorithm: str = Field(min_length=1)
+	params: dict[str, Any] = Field(default_factory=dict)
+	domains: dict[str, ParameterDomain] = Field(default_factory=dict)
+
+	@model_validator(mode="after")
+	def _parameters_are_unambiguous(self):
+		overlap = set(self.params) & set(self.domains)
+		if overlap:
+			raise ValueError(f"case params and domains overlap: {sorted(overlap)}")
+		return self
+
+
+class SweepConfig(ConfigModel):
+	"""The canonical parameter/algorithm candidate-space description.
+
+	The original list/grid/linspace/zip forms remain supported. ``domain``
+	adds typed finite or continuous domains, while ``cases`` keeps
+	algorithm-specific parameters together.
+	"""
+
+	kind: Literal["list", "grid", "linspace", "zip", "domain", "cases"] = Field(
+		description="Candidate expansion strategy.",
+	)
+	params: dict[str, Any] = Field(
+		default_factory=dict, description="Parameter values or typed domains.",
+	)
+	cases: list[StageCase] = Field(
+		default_factory=list, description="Named conditional algorithm cases.",
+	)
+
+	@model_validator(mode="after")
+	def _shape_matches_kind(self):
+		if self.kind == "cases":
+			if not self.cases:
+				raise ValueError("cases sweep requires at least one case")
+			if self.params:
+				raise ValueError("cases sweep uses 'cases', not 'params'")
+			names = [case.name for case in self.cases]
+			if len(names) != len(set(names)):
+				raise ValueError("case names must be unique within a Stage")
+		else:
+			if self.cases:
+				raise ValueError(f"{self.kind} sweep does not accept algorithm cases")
+			if self.kind == "domain":
+				if not self.params:
+					raise ValueError("domain sweep requires at least one parameter")
+				for name, spec in self.params.items():
+					try:
+						_PARAMETER_DOMAIN_ADAPTER.validate_python(spec)
+					except ValueError as error:
+						raise ValueError(f"invalid domain for parameter {name!r}: {error}") from error
+		return self
 
 
 class StageConfig(ConfigModel):
 	"""Single pipeline stage configuration entry."""
 
+	id: str | None = Field(
+		default=None,
+		pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$",
+		description="Stable identity for this ordered Stage occurrence.",
+	)
 	kind: str = Field(description="Stage kind, such as read, normalize, phase, recon, or write.")
 	algorithm: str | None = Field(default=None, description="Optional algorithm choice within the stage kind.")
 	params: dict[str, Any] = Field(default_factory=dict, description="Stage-specific parameters.")
 	sweep: SweepConfig | None = Field(default=None, description="Optional sweep applied at this stage.")
+
+
+class PipelineVariant(ConfigModel):
+	"""One explicitly permitted named ordering/subset of Stage IDs."""
+
+	name: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")
+	stages: list[str] = Field(min_length=1, description="Ordered stable Stage IDs to include.")
+
+	@field_validator("stages")
+	@classmethod
+	def _stage_ids_are_unique(cls, values: list[str]) -> list[str]:
+		if len(values) != len(set(values)):
+			raise ValueError("a structural variant cannot repeat a Stage ID")
+		return values
+
+
+class CandidateLimits(ConfigModel):
+	"""Preflight limits protecting ordinary exhaustive candidate runs."""
+
+	max_candidates: int = Field(default=10_000, gt=0)
+	max_estimated_output_bytes: int = Field(default=500 * 1024**3, gt=0)
 
 
 class Recon(ConfigModel):
@@ -139,3 +264,33 @@ class Recon(ConfigModel):
 	pipeline_template: str | None = Field(default=None, description="Optional named pipeline template.")
 	output_path: Path | None = Field(default=None, description="Optional output directory for the run.")
 	metadata: dict[str, Any] = Field(default_factory=dict, description="Additional run metadata.")
+	variants: list[PipelineVariant] = Field(
+		default_factory=list,
+		description="Explicitly permitted named Stage-ID structures.",
+	)
+	candidate_limits: CandidateLimits = Field(default_factory=CandidateLimits)
+
+	@model_validator(mode="after")
+	def _validate_stage_occurrence_ids(self):
+		ids = [stage.id for stage in self.pipeline if stage.id is not None]
+		duplicates = sorted({stage_id for stage_id in ids if ids.count(stage_id) > 1})
+		if duplicates:
+			raise ValueError(f"duplicate pipeline Stage IDs: {duplicates}")
+		variant_names = [variant.name for variant in self.variants]
+		if len(variant_names) != len(set(variant_names)):
+			raise ValueError("pipeline variant names must be unique")
+		if self.variants:
+			missing = [index for index, stage in enumerate(self.pipeline) if stage.id is None]
+			if missing:
+				raise ValueError(
+					"structural variants require stable IDs on every pipeline Stage; "
+					+ f"missing at indexes {missing}"
+				)
+			known = set(ids)
+			for variant in self.variants:
+				unknown = sorted(set(variant.stages) - known)
+				if unknown:
+					raise ValueError(
+						f"pipeline variant {variant.name!r} references unknown Stage IDs: {unknown}"
+					)
+		return self

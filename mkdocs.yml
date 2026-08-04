@@ -9,6 +9,7 @@ nav:
  - Operations:
    - Recon-data runner: recon-data-runner.md
    - Calibration bundles: calibration-bundles.md
+   - Candidate spaces: candidate-spaces.md
  - API reference:
    - Configuration models: api/config.md
    - Pipeline: api-pipeline.md

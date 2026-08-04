@@ -142,7 +142,8 @@ def validate_pipeline(
 	warnings: list[str] = []
 
 	for index, stage in enumerate(stages):
-		stage_name = f"{index}:{stage.name}"
+		occurrence = getattr(stage, "occurrence_id", None)
+		stage_name = f"{occurrence if occurrence is not None else index}:{stage.name}"
 		contract = stage.contract
 		input_layout = current_layout
 		input_domain = current_domain

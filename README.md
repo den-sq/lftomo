@@ -42,9 +42,14 @@ lftomo-run recon-minimal scan.yaml --output recon/
 lftomo-run phase-contrast-canonical scan.yaml --output recon/ --json-output
 ```
 
-Stage sweeps expand automatically. Multiple concrete runs are written beneath
-`sweep-0000`, `sweep-0001`, and so on. Use `--gpu` only when the runtime has the
-CUDA dependencies required by a selected GPU Stage.
+Finite parameter, algorithm, and named structural candidates expand
+automatically. Multiple concrete runs are written beneath stable
+`candidate-<key-prefix>` directories, and JSON summaries contain a directly
+rerunnable resolved `Recon`. See
+[`docs/candidate-spaces.md`](docs/candidate-spaces.md) for Stage IDs, typed
+domains, conditional algorithm cases, structural variants, and preflight
+guards. Use `--gpu` only when the runtime has the CUDA dependencies required
+by a selected GPU Stage.
 
 Angle sampling, gridrec defaults, and the optional TomoPy/NumPy compatibility
 contract are documented in
