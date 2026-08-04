@@ -10,6 +10,7 @@ nav:
    - Recon-data runner: recon-data-runner.md
    - Calibration bundles: calibration-bundles.md
    - Candidate spaces: candidate-spaces.md
+   - Stripe-chain invariant: stripe-chain-regression.md
  - API reference:
    - Configuration models: api/config.md
    - Pipeline: api-pipeline.md

@@ -91,6 +91,12 @@ sweep-free `Recon` and is validated by the normal Stage constructors and
 pipeline contracts before reconstruction. Phase structures remain subject to
 the phase semantic contracts.
 
+Repeated stripe occurrences also remain subject to the
+[ordered stripe-chain regression invariant](stripe-chain-regression.md):
+candidate materialization may select a listed order but execution may never
+reorder it or replace bounded row scratch with an implicit full-volume
+transition.
+
 ## Identity, output, and guards
 
 Each resolved candidate has a SHA-256 candidate key derived from its canonical
