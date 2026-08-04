@@ -79,6 +79,17 @@ def test_shape_mismatch_identifies_stage_and_field():
 		validate_pipeline(stages, scan_config())
 
 
+def test_shape_mismatch_uses_stable_stage_occurrence_id_when_available():
+	stages = [
+		ContractStage("read", StageContract(expected_input=ProjOrder, produced_output=SinoOrder)),
+		ContractStage("recon", StageContract(expected_input=ReconOrder, produced_output=ReconOrder)),
+	]
+	stages[1].occurrence_id = "final-recon"
+
+	with pytest.raises(ShapeCompatibilityError, match="final-recon:recon: expected_input"):
+		validate_pipeline(stages, scan_config())
+
+
 def test_missing_required_metadata_identifies_stage_and_field():
 	stages = [
 		ContractStage("normalize", StageContract(required_metadata=("metadata.flat_fields",))),

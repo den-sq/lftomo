@@ -323,3 +323,53 @@ def test_cli_emits_json_summary(tmp_path, monkeypatch):
 
 	assert result.exit_code == 0
 	assert result.output.strip() == "[]"
+
+
+def test_plain_runner_executes_algorithm_candidates_with_stable_outputs(tmp_path, monkeypatch):
+	data_path = tmp_path / "scan.h5"
+	with h5py.File(data_path, "w") as handle:
+		handle.create_dataset("exchange/data", data=np.ones((3, 2, 4), dtype=np.float32))
+		handle.create_dataset("exchange/data_white", data=np.full((2, 2, 4), 2, dtype=np.float32))
+		handle.create_dataset("exchange/data_dark", data=np.zeros((2, 2, 4), dtype=np.float32))
+	scan_path = tmp_path / "scan.yaml"
+	write_yaml(scan_path, scan_document(str(data_path)))
+	pipeline_path = tmp_path / "pipeline.yaml"
+	write_yaml(pipeline_path, {
+		"output_path": str(tmp_path / "output"),
+		"pipeline": [
+			{
+				"id": "read",
+				"kind": "read",
+				"algorithm": "hdf5_dxchange",
+				"params": {"order": "projection", "calibration_policy": "required"},
+			},
+			{"id": "normalize", "kind": "normalize", "algorithm": "weighted"},
+			{
+				"id": "stripe",
+				"kind": "stripe",
+				"sweep": {
+					"kind": "cases",
+					"cases": [
+						{"name": "sort", "algorithm": "vo_sort", "params": {"size": 3}},
+						{"name": "dead", "algorithm": "vo_dead", "params": {"size": 5, "snr": 2}},
+					],
+				},
+			},
+		],
+	})
+	monkeypatch.setattr("lftomo.runner.Pipeline.run", lambda self, state: state)
+
+	results = run_reconstruction(pipeline_path, scan_path)
+
+	assert len(results) == 2
+	assert results[0].parameters["stage[stripe].algorithm"] == "vo_sort"
+	assert results[1].parameters["stage[stripe].algorithm"] == "vo_dead"
+	assert results[0].candidate_key != results[1].candidate_key
+	assert results[0].output_path.name == f"candidate-{results[0].candidate_key[:16]}"
+	assert results[1].output_path.name == f"candidate-{results[1].candidate_key[:16]}"
+	assert all(
+			stage.get("sweep") is None
+			for result in results
+			for stage in result.resolved_recon["pipeline"]
+		)
+	assert Recon.model_validate(results[0].resolved_recon)

@@ -1,6 +1,7 @@
 """Built-in reconstruction Pipeline stages."""
 
 from lftomo.config import StageConfig
+from lftomo.evaluation.stage import EvaluationStage
 
 from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
 from .filter import BilateralFilterStage
@@ -45,6 +46,7 @@ STAGE_REGISTRY = {
 	"center.manual": ManualCenterStage,
 	"center.pc": PhaseCorrelationCenterStage,
 	"center.vo": VoCenterStage,
+	"evaluate.metrics": EvaluationStage,
 	"filter.bilateral": BilateralFilterStage,
 	"geometry.affine_skew": SkewCorrectStage,
 	"geometry.affine_skew_movement": AffineSkewMovementStage,
@@ -95,9 +97,12 @@ def create_stage(config: StageConfig):
 	try:
 		stage_type = STAGE_REGISTRY[key]
 	except KeyError as error:
-		raise ValueError(f"unknown pipeline Stage {key!r}") from error
+		location = f" {config.id!r}" if config.id is not None else ""
+		raise ValueError(f"unknown pipeline Stage{location} {key!r}") from error
 	from_config = getattr(stage_type, "from_config", None)
-	return from_config(config) if from_config is not None else stage_type(**config.params)
+	stage = from_config(config) if from_config is not None else stage_type(**config.params)
+	stage.occurrence_id = config.id
+	return stage
 
 
 __all__ = [
@@ -115,6 +120,7 @@ __all__ = [
 	"DRHTStage",
 	"EMCudaStage",
 	"EntropyLocalCenterStage",
+	"EvaluationStage",
 	"HDF5DxchangeReadStage",
 	"FourierWaveletStripeStage",
 	"FBPCudaStage",
