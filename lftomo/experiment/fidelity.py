@@ -201,6 +201,14 @@ def successive_halving(
 		unknown = sorted(manual_promote - keys)
 		if unknown:
 			raise ValueError(f"manual promotion references unknown candidates: {unknown}")
+		terminal = sorted(
+			item.candidate_key for item in candidates
+			if item.candidate_key in manual_promote and item.status != "succeeded"
+		)
+		if terminal:
+			raise ValueError(
+				f"manual promotion requires succeeded candidates: {terminal}"
+			)
 	directions = {item.id: item.direction for item in config.metrics}
 	objectives = [item for item in config.objectives if item.role == "objective"]
 	constraints = [item for item in config.objectives if item.role == "constraint"]
@@ -217,6 +225,10 @@ def successive_halving(
 				excluded[candidate.candidate_key] = f"terminal status {candidate.status}"
 			else:
 				worst.append(candidate)
+				excluded[candidate.candidate_key] = (
+					f"terminal status {candidate.status}; ranked as worst but ineligible "
+					"for promotion"
+				)
 			continue
 		required = [item.metric_id for item in (*objectives, *constraints)]
 		missing = [
@@ -272,7 +284,9 @@ def successive_halving(
 		item.candidate_key,
 	))
 	worst.sort(key=lambda item: item.candidate_key)
-	eligible = valid + worst
+	eligible = valid + [
+		item for item in worst if item.candidate_key not in excluded
+	]
 	target = min(
 		len(eligible),
 		max(policy.min_survivors, math.ceil(len(eligible) / policy.reduction_factor)),
@@ -442,6 +456,8 @@ def export_blinded_previews(
 	if not blinding_key:
 		raise ValueError("blinding_key must not be empty")
 	root = Path(root)
+	private_root = root / "private" / "preview-mapping"
+	private_root.mkdir(parents=True, exist_ok=True, mode=0o700)
 	entries = []
 	total = 0
 	for candidate_key in sorted(images):
@@ -492,7 +508,7 @@ def export_blinded_previews(
 		entries.append(PreviewMappingEntry(
 			blind_id=blind_id, candidate_key=candidate_key, files=tuple(files),
 		))
-	mapping_path = root / "previews" / "mapping.json"
+	mapping_path = private_root / "mapping.json"
 	bundle = PreviewBundle(
 		contract=contract,
 		mapping_path=mapping_path,

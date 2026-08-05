@@ -61,6 +61,9 @@ rules for ties, invalid metrics, and failed attempts; candidate keys provide the
 stable ordering for `stable_cut`. `include_all` can promote more than the nominal cutoff
 when candidates have an identical boundary signature. Manual decisions are supported by
 the library API and are marked `manual_override` with the complete ranking retained.
+Terminally failed or interrupted candidates are never eligible for promotion, including
+under the `worst` policy or a manual decision: they have no successful output to run at
+the next fidelity. `worst` retains them at the bottom of the audit ranking.
 
 Each boundary writes
 `promotions/<from>--<to>/active.json`. The record contains its input fingerprint, ranks,
@@ -77,6 +80,10 @@ writes deterministic opaque labels, and produces a separate private mapping back
 candidate keys. PNG and TIFF output are supported, and the byte guard is checked before
 each file is published. Do not vary scale, crop, or selected slice by candidate: that
 would make a visual comparison biased even if filenames remain blinded.
+
+Reviewer-facing images live under `previews/<blind-id>/`. The reverse mapping lives
+outside that tree at `private/preview-mapping/mapping.json`; keep the entire `private/`
+tree access-controlled and share only `previews/` during blinded review.
 
 Writer stages are stripped throughout screening unless screening writers were explicitly
 requested. With `write_full_finalists: true`, they are restored only when a promoted trial

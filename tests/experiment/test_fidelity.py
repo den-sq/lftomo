@@ -142,7 +142,20 @@ def test_invalid_failures_and_manual_promotions_follow_explicit_policy():
 	], config, "screen", "final")
 	by_key = {item.candidate_key: item for item in decision.rankings}
 	assert not by_key[HASHES[2]].eligible
-	assert by_key[HASHES[3]].reason == "ranked as worst by policy"
+	assert not by_key[HASHES[3]].eligible
+	assert not by_key[HASHES[3]].promoted
+	assert by_key[HASHES[3]].reason == (
+		"terminal status failed; ranked as worst but ineligible for promotion"
+	)
+	failed_only = successive_halving(
+		[candidate(3, 0, status="failed")], config, "screen", "final",
+	)
+	assert failed_only.promoted_candidate_keys == ()
+	with pytest.raises(ValueError, match="manual promotion requires succeeded"):
+		successive_halving(
+			[candidate(3, 0, status="failed")], config, "screen", "final",
+			manual_promote={HASHES[3]},
+		)
 
 	manual = successive_halving(
 		[candidate(1, 1), candidate(2, 2)],
@@ -185,6 +198,8 @@ def test_blinded_previews_share_scale_crop_and_have_reversible_private_mapping(t
 	}, tmp_path, contract, blinding_key="private-review-key")
 
 	assert bundle.mapping_path.is_file()
+	assert bundle.mapping_path == tmp_path / "private" / "preview-mapping" / "mapping.json"
+	assert not any((tmp_path / "previews").rglob("*.json"))
 	assert len({item.blind_id for item in bundle.entries}) == 2
 	assert all(item.candidate_key not in str(item.files[0]) for item in bundle.entries)
 	image = cv2.imread(str(bundle.entries[1].files[0]), cv2.IMREAD_UNCHANGED)
