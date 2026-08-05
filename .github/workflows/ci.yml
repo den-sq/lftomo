@@ -36,6 +36,7 @@ jobs:
             tests/experiment/test_prefix_cache.py::test_prefix_planning_is_deterministic_visible_and_fail_closed
             tests/experiment/test_prefix_cache.py::test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe
             tests/experiment/test_prefix_cache.py::test_nonmutating_suffix_uses_read_only_map_and_unknown_identity_bypasses
+            tests/experiment/test_prefix_cache.py::test_initial_working_array_content_is_part_of_cache_identity
             tests/experiment/test_prefix_cache.py::test_invalidation_corruption_recovery_eviction_and_sampled_verification
             tests/experiment/test_prefix_cache.py::test_bounds_bypass_before_cache_creation
             tests/evaluation/test_aggregation_ranking.py

@@ -477,7 +477,7 @@ def _shared_options(function):
 	function = click.option(
 		"--prefix-cache-verify-fraction",
 		type=click.FloatRange(min=0, max=1),
-		default=0.0,
+		default=0.05,
 		show_default=True,
 	)(function)
 	function = click.option(

@@ -124,7 +124,7 @@ class PrefixCachePolicy(ConfigModel):
 	max_memory_bytes: int | None = Field(default=None, gt=0)
 	max_entries: int = Field(default=64, gt=0)
 	on_error: Literal["rebuild", "bypass", "fail"] = "rebuild"
-	verify_fraction: float = Field(default=0.0, ge=0, le=1)
+	verify_fraction: float = Field(default=0.05, ge=0, le=1)
 	verify_rtol: float = Field(default=1e-6, ge=0)
 	verify_atol: float = Field(default=1e-7, ge=0)
 
@@ -731,6 +731,7 @@ class PrefixCacheStore:
 				"schema_version": 1,
 				"runtime": runtime_identity,
 				"backend": state.backend,
+				"initial_working_array": state.working_array,
 				"initial_layout": state.layout,
 				"initial_domain": state.domain,
 				"scan": state.scan,

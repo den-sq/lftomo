@@ -44,6 +44,7 @@ Runtime cache identity additionally includes:
 - dataset content and acquisition identity;
 - scan/calibration configuration, code, environment, and backend;
 - fidelity and row/projection window;
+- the initial working-array dtype, shape, and content hash;
 - initial layout and data domain;
 - canonical prefix configs and contracts;
 - deep content fingerprints for scan metadata and input artifacts.
@@ -96,7 +97,10 @@ snapshot is safe to share.
 `--prefix-cache-verify-fraction` selects a deterministic subset of hits by trial/window
 ID. For each selected hit, the prefix is executed independently and arrays plus nested
 artifacts are compared with the declared numerical tolerances. A mismatch quarantines
-the entry and bypasses it (or fails under `on_error=fail`).
+the entry and bypasses it (or fails under `on_error=fail`). The default is `0.05` whenever
+the cache is enabled. Keep verification nonzero during rollout, and consider `1.0` for an
+initial representative qualification run before reducing the fraction based on measured
+cost and confidence.
 
 Every cached window records `build_seconds`, `load_seconds`, `snapshot_bytes`,
 `read_bytes`, `written_bytes`, `cache_bytes_after`, fork strategy, invalidation fields,
@@ -120,4 +124,7 @@ or whose scratch traffic offsets the saved computation.
 
 The implementation supports trusted, local, NumPy-backed scratch storage. It deliberately
 does not provide cross-cluster coordination, GPU snapshots, live mutable state sharing,
-algorithm reordering, or automatic enablement.
+algorithm reordering, or automatic enablement. Prefix build, load, publication, and
+eviction currently share a global cache lock; benchmark concurrent first-build workloads
+before relying on the cache for throughput. Per-prefix locking can be added later if
+contention proves material without changing cache identity or snapshot semantics.

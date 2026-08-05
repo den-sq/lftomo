@@ -112,6 +112,22 @@ class ReadOnlyTailStage(Stage):
 		return state
 
 
+class InputScaleStage(Stage):
+	name = "test.input_scale"
+	contract = StageContract(
+		produced_output=ProjOrder,
+		mutates_input=True,
+		cacheable_prefix=True,
+	)
+
+	def __init__(self, factor):
+		self.factor = factor
+
+	def run(self, state):
+		np.asarray(state.working_array)[:] *= self.factor
+		return state
+
+
 def scan():
 	return Scan(
 		energy_keV=24,
@@ -208,6 +224,7 @@ def test_prefix_planning_is_deterministic_visible_and_fail_closed(tmp_path):
 	disabled = plan_common_prefixes(
 		candidates, PrefixCachePolicy(),
 	)
+	assert PrefixCachePolicy().verify_fraction == pytest.approx(0.05)
 	assert all(item.action == "independent" for item in disabled.decisions)
 	assert "disabled" in disabled.decisions[0].reason
 
@@ -292,6 +309,40 @@ def test_nonmutating_suffix_uses_read_only_map_and_unknown_identity_bypasses(tmp
 	assert event.status == "bypass"
 	assert "lacks a cache identity contract" in event.reason
 	np.testing.assert_array_equal(result.working_array, values * 2)
+
+
+def test_initial_working_array_content_is_part_of_cache_identity(tmp_path):
+	policy = enabled_policy(tmp_path)
+	shared = config("scale", "input", factor=2)
+	candidates = tuple(PrefixPlanningCandidate(
+		candidate_id=f"input-{suffix}",
+		configs=(shared, config("tail", suffix)),
+		stages=(InputScaleStage(2), UnsafeStage()),
+		share_identity={"dataset": "same"},
+	) for suffix in ("left", "right"))
+	decision = plan_common_prefixes(candidates, policy).decisions[0]
+	executor = PrefixCachingPipelineExecutor(policy)
+
+	def execute(values):
+		initial = state(candidates[0].configs)
+		initial.working_array = np.asarray(values, dtype=np.float32)
+		return executor.execute(
+			decision,
+			initial,
+			candidates[0].stages,
+			candidates[0].configs,
+			runtime_identity={"dataset": "same"},
+		)
+
+	first, event = execute([1, 2, 3])
+	assert event.status == "miss"
+	np.testing.assert_array_equal(first.working_array, [2, 4, 6])
+	_same, event = execute([1, 2, 3])
+	assert event.status == "hit"
+	changed, event = execute([4, 5, 6])
+	assert event.status == "miss"
+	assert "initial_working_array.sha256" in event.invalidation_fields
+	np.testing.assert_array_equal(changed.working_array, [8, 10, 12])
 
 
 def test_invalidation_corruption_recovery_eviction_and_sampled_verification(tmp_path):
