@@ -3,7 +3,7 @@ import builtins
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import DataDomain, PRESERVE, Pipeline, PipelineState
 from lftomo.pipeline.stages import BronnikovAidedCorrectionStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder
 
@@ -65,10 +65,16 @@ def test_disabled_bac_is_noop(monkeypatch):
 		lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not construct")),
 	)
 
-	result = Pipeline([create_stage(config)]).run(_state(working, config))
+	stage = create_stage(config)
+	result = Pipeline([stage]).run(_state(working, config))
 
 	assert result.working_array is working
 	np.testing.assert_array_equal(working, 1)
+	assert stage.contract.accepts_domain == (
+		DataDomain.TRANSMISSION, DataDomain.ATTENUATION,
+	)
+	assert stage.contract.produces_domain is PRESERVE
+	assert stage.contract.mutates_input is False
 
 
 def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch):
