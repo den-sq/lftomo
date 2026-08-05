@@ -487,7 +487,9 @@ class FinalResult(ConfigModel):
 	complete: Literal[True] = True
 
 
-AttemptStatus = Literal["pending", "running", "succeeded", "failed", "interrupted"]
+AttemptStatus = Literal[
+	"pending", "running", "succeeded", "failed", "interrupted", "skipped", "incompatible",
+]
 
 
 class TrialAttemptRecord(ConfigModel):
@@ -537,6 +539,13 @@ class TrialAttemptRecord(ConfigModel):
 				raise ValueError(f"{self.status} attempts require start and finish timestamps")
 			if self.failure is None or self.result is not None:
 				raise ValueError(f"{self.status} attempts require failure and forbid final result")
+		elif self.status in ("skipped", "incompatible"):
+			if self.started_at is not None or self.finished_at is None or self.result is not None:
+				raise ValueError(
+					f"{self.status} attempts require finished_at, no start, and no final result"
+				)
+			if self.failure is None:
+				raise ValueError(f"{self.status} attempts require a structured reason")
 		if (
 			self.started_at is not None
 			and self.finished_at is not None

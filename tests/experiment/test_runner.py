@@ -255,7 +255,9 @@ def test_experiment_cli_exposes_validate_dry_run_and_run(tmp_path):
 	cli = CliRunner()
 	help_result = cli.invoke(main, ["--help"])
 	assert help_result.exit_code == 0
-	assert all(command in help_result.output for command in ("validate", "dry-run", "run"))
+	assert all(command in help_result.output for command in (
+		"validate", "dry-run", "run", "inspect", "resume", "rerun",
+	))
 	validate_result = cli.invoke(main, ["validate", str(config_path), "--json-output"])
 	assert validate_result.exit_code == 0
 	payload = json.loads(validate_result.output)

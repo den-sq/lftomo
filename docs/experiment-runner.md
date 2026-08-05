@@ -77,3 +77,38 @@ state or partial pipeline prefixes between candidates.
 in `TrialExecution`. Otherwise the runner records the process-wide `RUSAGE_SELF`
 high-water mark. Concurrent thread-based trials therefore share the fallback value; use
 an executor-supplied measurement when isolated per-trial memory accounting matters.
+
+## Resume and rerun
+
+`run` initializes a versioned filesystem store. The store retains an immutable identity
+document and append-safe attempt sequence for every trial. A per-trial atomic claim file
+prevents two processes from executing the same trial concurrently. Inspect the store or
+resume it with:
+
+```console
+lftomo-experiment inspect results
+lftomo-experiment resume experiment.yaml scan.yaml --root results
+```
+
+A clean resume reuses a compatible successful result. Failed and interrupted attempts
+are retained but require `--retry-failed` or `--retry-interrupted`; the store never turns
+one into a success implicitly. `rerun` always creates a new attempt and can be restricted
+to resolved trial identities:
+
+```console
+lftomo-experiment rerun experiment.yaml scan.yaml --root results \
+  --trial-id 6e2f...full-trial-id
+```
+
+Compatibility is checked against the complete trial identity, including dataset and
+calibration hashes, resolved candidate, code and environment, sampler coordinate,
+fidelity windows, and metric protocols. The default mismatch policy is `fail`; select
+`--mismatch skip` to persist an auditable incompatible record or `--mismatch rerun` to
+run under the new identity. Diagnostics name concrete fields such as
+`dataset.content_hash`.
+
+An abandoned running claim is never guessed from ordinary elapsed time. After checking
+that its owner is gone, recovery must be explicitly requested with `--recover-stale` and
+an appropriate `--stale-after` threshold; use `--retry-interrupted` to then start a new
+attempt. Invalid records and partial output directories are moved under `quarantine/`
+rather than being accepted as cache hits.

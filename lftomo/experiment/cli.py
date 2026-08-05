@@ -36,6 +36,11 @@ from .runner import (
 	TrialExecution,
 	json_value,
 )
+from .store import (
+	PersistedExperimentRunner,
+	PersistedExperimentStore,
+	ResumePolicy,
+)
 
 
 def _sha256(value: bytes) -> str:
@@ -251,7 +256,117 @@ def run_command(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
 	)
-	summary = runner.run()
+	summary = PersistedExperimentRunner(runner).run()
+	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
+
+
+def _resume_options(function):
+	function = click.option(
+		"--stale-after", type=click.FloatRange(min=0, min_open=True),
+		default=3600.0, show_default=True,
+	)(function)
+	function = click.option("--recover-stale", is_flag=True)(function)
+	function = click.option("--retry-interrupted", is_flag=True)(function)
+	function = click.option("--retry-failed", is_flag=True)(function)
+	function = click.option(
+		"--mismatch", type=click.Choice(["rerun", "skip", "fail"]),
+		default="fail", show_default=True,
+	)(function)
+	return function
+
+
+def _resume_policy(
+	*, mismatch: str, retry_failed: bool, retry_interrupted: bool,
+	recover_stale: bool, stale_after: float, force: bool = False,
+) -> ResumePolicy:
+	return ResumePolicy(
+		mismatch=mismatch,
+		retry_failed=retry_failed,
+		retry_interrupted=retry_interrupted,
+		recover_stale=recover_stale,
+		stale_after_seconds=stale_after,
+		force=force,
+	)
+
+
+@main.command("inspect")
+@click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def inspect_command(root: Path) -> None:
+	"""Inspect ROOT and quarantine malformed partial attempt records."""
+
+	inspection = PersistedExperimentStore(root).inspect()
+	click.echo(json.dumps(inspection.model_dump(mode="json"), sort_keys=True, indent=2))
+
+
+@main.command("resume")
+@_resume_options
+@_shared_options
+def resume_command(
+	experiment_path: Path,
+	scan_path: Path,
+	root: Path,
+	override_limits: bool,
+	failure: str,
+	mismatch: str,
+	retry_failed: bool,
+	retry_interrupted: bool,
+	recover_stale: bool,
+	stale_after: float,
+) -> None:
+	"""Reuse compatible successes and explicitly retry selected terminal states."""
+
+	runner = _runner(
+		experiment_path, scan_path, root,
+		override_limits=override_limits, failure=failure,
+	)
+	summary = PersistedExperimentRunner(
+		runner,
+		policy=_resume_policy(
+			mismatch=mismatch,
+			retry_failed=retry_failed,
+			retry_interrupted=retry_interrupted,
+			recover_stale=recover_stale,
+			stale_after=stale_after,
+		),
+	).run()
+	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
+
+
+@main.command("rerun")
+@click.option("--trial-id", "trial_ids", multiple=True)
+@_resume_options
+@_shared_options
+def rerun_command(
+	experiment_path: Path,
+	scan_path: Path,
+	root: Path,
+	override_limits: bool,
+	failure: str,
+	mismatch: str,
+	retry_failed: bool,
+	retry_interrupted: bool,
+	recover_stale: bool,
+	stale_after: float,
+	trial_ids: tuple[str, ...],
+) -> None:
+	"""Force a new attempt, optionally limited to one or more resolved trial IDs."""
+
+	runner = _runner(
+		experiment_path, scan_path, root,
+		override_limits=override_limits, failure=failure,
+	)
+	summary = PersistedExperimentRunner(
+		runner,
+		policy=_resume_policy(
+			mismatch=mismatch,
+			retry_failed=retry_failed,
+			retry_interrupted=retry_interrupted,
+			recover_stale=recover_stale,
+			stale_after=stale_after,
+			force=True,
+		),
+		trial_ids=set(trial_ids) if trial_ids else None,
+	).run()
 	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
 
 

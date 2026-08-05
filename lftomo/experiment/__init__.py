@@ -44,6 +44,14 @@ from .runner import (
 	TrialExecution,
 )
 from .selection import SelectedCandidate, select_candidates
+from .store import (
+	PersistedExperimentRunner,
+	PersistedExperimentStore,
+	ResumeDecision,
+	ResumePolicy,
+	StoreInspection,
+	TrialHistory,
+)
 
 __all__ = [
 	"AggregationPolicy",
@@ -72,15 +80,21 @@ __all__ = [
 	"OutputPolicy",
 	"OutputRecord",
 	"ParetoRecord",
+	"PersistedExperimentRunner",
+	"PersistedExperimentStore",
 	"PromotionLineage",
 	"ResourcePolicy",
+	"ResumeDecision",
+	"ResumePolicy",
 	"SamplerIdentity",
 	"SamplerSpec",
 	"SelectedCandidate",
+	"StoreInspection",
 	"TrialAttemptRecord",
 	"TrialDescription",
 	"TrialId",
 	"TrialIdentity",
+	"TrialHistory",
 	"TrialExecution",
 	"WindowIdentity",
 	"WindowReference",

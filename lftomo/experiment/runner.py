@@ -179,6 +179,8 @@ class PreparedTrial:
 	identity: TrialIdentity
 	output_root: Path
 	attempt_id: str
+	sequence: int = 0
+	previous_attempt_id: str | None = None
 
 
 TrialExecutor = Callable[[TrialIdentity, Path], TrialExecution]
@@ -344,7 +346,8 @@ class IndependentExperimentRunner:
 		created = _utcnow()
 		base = {
 			"attempt_id": trial.attempt_id,
-			"sequence": 0,
+			"sequence": trial.sequence,
+			"previous_attempt_id": trial.previous_attempt_id,
 			"trial_id": trial.identity.trial_id,
 			"identity": trial.identity,
 			"description": self.inputs.description,
@@ -450,7 +453,10 @@ class IndependentExperimentRunner:
 			updated_attempt = TrialAttemptRecord.model_validate(document)
 			updated.append(updated_attempt)
 			trial = next(item for item in trials if item.identity.trial_id == attempt.trial_id)
-			atomic_write_model(self._attempt_path(trial), updated_attempt)
+			atomic_write_model(
+				trial.output_root / "attempts" / f"{attempt.attempt_id}.json",
+				updated_attempt,
+			)
 
 		parameters = {item.identity.trial_id.value: item.selected.parameters for item in trials}
 		roots = {item.identity.trial_id.value: item.output_root for item in trials}
