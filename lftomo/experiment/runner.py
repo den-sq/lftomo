@@ -142,7 +142,14 @@ class TrialExecution(ConfigModel):
 	metrics: dict[str, JsonValue] = Field(default_factory=dict)
 	artifacts: dict[str, JsonValue] = Field(default_factory=dict)
 	outputs: tuple[OutputRecord, ...] = ()
-	peak_memory_bytes: int | None = Field(default=None, ge=0)
+	peak_memory_bytes: int | None = Field(
+		default=None,
+		ge=0,
+		description=(
+			"Executor-measured per-trial peak memory. When omitted, the runner records "
+			"the process-wide RUSAGE_SELF high-water mark instead."
+		),
+	)
 
 
 class LeaderboardEntry(ConfigModel):

@@ -72,3 +72,8 @@ parameter sweep from unexpectedly producing full-volume output. Raising an outpu
 requires an explicit `--override-limits`. GPU experiments also require declared GPU slots
 through the library policy; this first runner deliberately does not share mutable stage
 state or partial pipeline prefixes between candidates.
+
+`peak_memory_bytes` is a true per-trial measurement only when the executor supplies it
+in `TrialExecution`. Otherwise the runner records the process-wide `RUSAGE_SELF`
+high-water mark. Concurrent thread-based trials therefore share the fallback value; use
+an executor-supplied measurement when isolated per-trial memory accounting matters.
