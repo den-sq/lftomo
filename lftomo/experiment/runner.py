@@ -25,7 +25,6 @@ from lftomo.evaluation import (
 	ParetoObjective,
 	pareto_rank,
 )
-from lftomo.pipeline.stages import create_stage
 
 from .models import (
 	CandidateKey,
@@ -266,6 +265,8 @@ class IndependentExperimentRunner:
 
 	def prepare(self) -> tuple[ExperimentPreflight, tuple[PreparedTrial, ...]]:
 		"""Select, validate, identify, and guard trials without reading dataset payloads."""
+
+		from lftomo.pipeline.stages import create_stage
 
 		selected = select_candidates(self.config)
 		prepared = []
