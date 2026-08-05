@@ -1,4 +1,13 @@
-# Active B10 reconstruction driver
+# Examples
+
+`experiment-tier2-template.yaml` is the complete experiment/promotion template used by
+the experiment operations runbook. It demonstrates ordered repeated stripe occurrences,
+a split phase-filter/negative-log chain, typed Sobol search, tuning and held-out windows,
+blinded previews, successive halving, and finalist-only full output. Replace its dataset,
+calibration, center, window, scale, and resource values with frozen facts from the target
+acquisition before use.
+
+## Active B10 reconstruction driver
 
 `b10_recon_current.py` is the active-use copy ported to the current lftomo
 utility API. It reads TIFF stacks or dxchange HDF5, normalizes with B10 flat

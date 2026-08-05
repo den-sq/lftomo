@@ -101,3 +101,21 @@ def test_tiff_stack_stage_reads_bounded_theta_and_y_window(tmp_path):
 	result = create_stage(config).run(_state(projection_dir, count, size, config))
 
 	np.testing.assert_array_equal(result.working_array, stack[1:4, 2:5, :])
+
+
+def test_tiff_stack_stage_reads_strided_theta_window_with_matching_angles(tmp_path):
+	count, size = 6, 4
+	projection_dir = tmp_path / "projections"
+	projection_dir.mkdir()
+	stack = np.arange(count * size * size, dtype=np.uint16).reshape(count, size, size)
+	for index, image in enumerate(stack):
+		tf.imwrite(projection_dir / f"projection_{index}.tif", image)
+	config = StageConfig(
+		kind="read", algorithm="tiff_stack",
+		params={"theta_start": 1, "theta_stop": 6, "theta_stride": 2},
+	)
+
+	result = create_stage(config).run(_state(projection_dir, count, size, config))
+
+	np.testing.assert_array_equal(result.working_array, stack[1:6:2])
+	np.testing.assert_allclose(result.artifacts["angles"], np.deg2rad([30, 90, 150]))

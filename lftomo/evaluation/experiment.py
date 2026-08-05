@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from lftomo.evaluation.metrics import METRIC_REGISTRY
 from lftomo.evaluation.registry import MetricRegistry
-from lftomo.experiment import ExperimentConfig
+
+if TYPE_CHECKING:
+	from lftomo.experiment.models import ExperimentConfig
 
 
 def validate_experiment_metric_references(

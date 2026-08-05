@@ -39,12 +39,16 @@ class HDF5DxchangeReadStage(Stage):
 				theta_stop: int | None = None, y_start: int = 0,
 				y_stop: int | None = None, calibration_policy: str = "optional",
 				theta_count: int | None = None, theta_start_degrees: float | None = None,
-				theta_stop_degrees: float | None = None, window_size: int | None = None):
+				theta_stop_degrees: float | None = None, window_size: int | None = None,
+				theta_stride: int = 1):
 		if calibration_policy not in ("ignore", "optional", "required"):
 			raise ValueError("calibration_policy must be 'ignore', 'optional', or 'required'")
 		self.order = order
 		self.theta_start = theta_start
 		self.theta_stop = theta_count if theta_stop is None else theta_stop
+		if theta_stride < 1:
+			raise ValueError("theta_stride must be positive")
+		self.theta_stride = theta_stride
 		self.y_start = y_start
 		self.y_stop = y_stop
 		self.calibration_policy = calibration_policy
@@ -87,7 +91,9 @@ class HDF5DxchangeReadStage(Stage):
 				raise ValueError("invalid HDF5 Theta window")
 			if not 0 <= self.y_start < y_stop <= rows:
 				raise ValueError("invalid HDF5 Y window")
-			working = data[self.theta_start:theta_stop, self.y_start:y_stop, :]
+			working = data[
+				self.theta_start:theta_stop:self.theta_stride, self.y_start:y_stop, :,
+			]
 
 			artifacts = dict(state.artifacts)
 			if self.calibration_policy != "ignore":
@@ -101,6 +107,17 @@ class HDF5DxchangeReadStage(Stage):
 				if not missing:
 					artifacts["white_fields"] = handle[source.white_path][:, self.y_start:y_stop, :]
 					artifacts["dark_fields"] = handle[source.dark_path][:, self.y_start:y_stop, :]
+			if self.theta_start != 0 or theta_stop != theta_count or self.theta_stride != 1:
+				all_angles = np.linspace(
+					np.deg2rad(state.scan.acquisition.rotation_start_deg),
+					np.deg2rad(state.scan.acquisition.rotation_end_deg),
+					theta_count,
+					endpoint=False,
+					dtype=np.float32,
+				)
+				artifacts["angles"] = all_angles[
+					self.theta_start:theta_stop:self.theta_stride
+				]
 
 		working = np.asarray(working)
 		if self.order == "sinogram":
@@ -120,7 +137,8 @@ class TIFFStackReadStage(Stage):
 				y_start: int = 0, y_stop: int | None = None,
 				theta_start: int = 0, theta_stop: int | None = None,
 				pattern: str | None = None, projection_count: int | None = None,
-				sinogram_chunk_size: int | None = None, chunk_overlap: int = 0):
+				sinogram_chunk_size: int | None = None, chunk_overlap: int = 0,
+				theta_stride: int = 1):
 		if order not in ("projection", "sinogram"):
 			raise ValueError("TIFF read order must be 'projection' or 'sinogram'")
 		self.order = order
@@ -129,6 +147,9 @@ class TIFFStackReadStage(Stage):
 		self.y_stop = y_stop
 		self.theta_start = theta_start
 		self.theta_stop = theta_stop
+		if theta_stride < 1:
+			raise ValueError("theta_stride must be positive")
+		self.theta_stride = theta_stride
 		self.pattern = pattern
 		self.projection_count = projection_count
 		self.sinogram_chunk_size = sinogram_chunk_size
@@ -180,10 +201,15 @@ class TIFFStackReadStage(Stage):
 			raise ValueError(
 				f"invalid TIFF Theta window [{self.theta_start}, {theta_stop}) for {count} projections"
 			)
-		selected_files = files[self.theta_start:theta_stop]
-		if len(files) == 1 and (self.theta_start != 0 or theta_stop != count):
-			raise ValueError("Theta-windowed TIFF reads currently require one file per projection")
-		shape = ProjOrder(Theta=theta_stop - self.theta_start, Y=stop - self.y_start, X=columns)
+		selected_files = files[self.theta_start:theta_stop:self.theta_stride]
+		if len(files) == 1 and (
+			self.theta_start != 0 or theta_stop != count or self.theta_stride != 1
+		):
+			raise ValueError(
+				"Theta-windowed or strided TIFF reads currently require one file per projection"
+			)
+		selected_count = count if len(files) == 1 else len(selected_files)
+		shape = ProjOrder(Theta=selected_count, Y=stop - self.y_start, X=columns)
 		memory = SharedNPArray(f"tiff-read-{uuid4().hex}", shape, dtype, allocate=True)
 		try:
 			kwargs = {} if self.threads is None else {"thread_max": self.threads}
@@ -198,4 +224,17 @@ class TIFFStackReadStage(Stage):
 		if self.order == "sinogram":
 			working = np.transpose(working, (1, 0, 2)).copy()
 		layout = ProjOrder if self.order == "projection" else SinoOrder
-		return state.with_array(working, layout=layout, domain=DataDomain.RAW)
+		result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
+		if self.theta_start != 0 or theta_stop != count or self.theta_stride != 1:
+			all_angles = np.linspace(
+				np.deg2rad(state.scan.acquisition.rotation_start_deg),
+				np.deg2rad(state.scan.acquisition.rotation_end_deg),
+				count,
+				endpoint=False,
+				dtype=np.float32,
+			)
+			result.artifacts = dict(result.artifacts)
+			result.artifacts["angles"] = all_angles[
+				self.theta_start:theta_stop:self.theta_stride
+			]
+		return result

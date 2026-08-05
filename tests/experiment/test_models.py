@@ -181,6 +181,14 @@ def test_candidate_key_and_trial_id_have_distinct_stable_identity_domains():
 	assert with_other_path.candidate == identity.candidate
 	assert with_other_path.trial_id == identity.trial_id
 
+	resampled = replace(identity, sampler={
+		"name": "random", "seed": 99, "coordinate": {"alpha": 0.75},
+	})
+	assert resampled.sampler != identity.sampler
+	assert resampled.trial_id == identity.trial_id
+	assert compare_trial_identities(identity, resampled).compatible
+	assert "sampler" not in identity.identity_payload()
+
 	changed = trial_identity(recon=resolved_recon(alpha=0.02))
 	assert changed.candidate != identity.candidate
 	assert changed.trial_id != identity.trial_id
