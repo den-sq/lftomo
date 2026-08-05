@@ -1,3 +1,6 @@
+import sys
+from types import ModuleType
+
 import numpy as np
 import pytest
 
@@ -135,7 +138,12 @@ def test_bac_correction_then_negative_log_matches_legacy_fused_stage(monkeypatch
 		def __call__(self, image):
 			return -np.log(_independent_bac(image, self.alpha, self.gamma))
 
-	monkeypatch.setattr("hotopy.holo.BronnikovAidedCorrection", IndependentBAC)
+	fake_hotopy = ModuleType("hotopy")
+	fake_holo = ModuleType("hotopy.holo")
+	fake_holo.BronnikovAidedCorrection = IndependentBAC
+	fake_hotopy.holo = fake_holo
+	monkeypatch.setitem(sys.modules, "hotopy", fake_hotopy)
+	monkeypatch.setitem(sys.modules, "hotopy.holo", fake_holo)
 	_run([BronnikovAidedCorrectionStage(alpha=alpha, gamma=gamma)], legacy, layout)
 	_run([
 		BronnikovAidedCorrectionFilterStage(alpha=alpha, gamma=gamma),
