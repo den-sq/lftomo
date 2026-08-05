@@ -7,15 +7,14 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import traceback
 from typing import Any
 
 import click
 import numpy as np
-import yaml
 
 from lftomo.config import Recon
-from lftomo.evaluation import validate_experiment_metric_references
-from lftomo.pipeline import NumpyBackend, validate_pipeline
+from lftomo.pipeline import NumpyBackend, Pipeline, validate_pipeline
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import load_scan, run_reconstruction
 
@@ -29,7 +28,6 @@ from .models import (
 	canonical_json,
 )
 from .fidelity import (
-	FidelityExperimentRunner,
 	FidelityRunSummary,
 	PreviewBundle,
 	aggregate_window_metrics,
@@ -65,11 +63,9 @@ from .runtime import (
 	require_runtime_compatibility,
 )
 from .resources import PathContextRoots, PathResourceRequest
-from .store import (
-	PersistedExperimentRunner,
-	PersistedExperimentStore,
-	ResumePolicy,
-)
+from .events import current_execution_context
+from .lifecycle import ExperimentLifecycle, load_experiment, validate_experiment
+from .store import ResumePolicy
 
 
 def _sha256(value: bytes) -> str:
@@ -79,11 +75,7 @@ def _sha256(value: bytes) -> str:
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
 	"""Load and validate one versioned experiment YAML document."""
 
-	path = Path(path)
-	with path.open("r", encoding="utf-8") as stream:
-		config = ExperimentConfig.model_validate(yaml.safe_load(stream))
-	validate_experiment_metric_references(config)
-	return config
+	return load_experiment(path)
 
 
 def _git(arguments: list[str], root: Path) -> str | None:
@@ -147,6 +139,28 @@ class PipelineTrialExecutor:
 		self.prefix_cache_policy = prefix_cache_policy or PrefixCachePolicy()
 		self.prefix_executor = PrefixCachingPipelineExecutor(self.prefix_cache_policy)
 		self._prefix_decisions: dict[str, PrefixCacheDecision] = {}
+
+	def replay_document(self) -> dict[str, Any]:
+		"""Return the normalized non-secret adapter inputs needed for replay."""
+
+		scan, _ = load_scan(self.scan_path)
+		return {
+			"kind": "pipeline",
+			"scan": scan.model_dump(mode="json"),
+			"prefix_cache_policy": self.prefix_cache_policy.model_dump(mode="json"),
+		}
+
+	@classmethod
+	def from_replay(
+		cls,
+		config: ExperimentConfig,
+		scan_path: str | Path,
+		document: dict[str, Any],
+	) -> "PipelineTrialExecutor":
+		policy = PrefixCachePolicy.model_validate(
+			document.get("prefix_cache_policy", {}),
+		)
+		return cls(config, scan_path, policy)
 
 	def validate(self, recon: Recon) -> None:
 		scan, _ = load_scan(self.scan_path)
@@ -282,6 +296,35 @@ class PipelineTrialExecutor:
 		self._prefix_decisions = {item.candidate_id: item for item in plan.decisions}
 		return plan
 
+	@staticmethod
+	def _stage_observer(configs):
+		by_stage = {}
+		context = current_execution_context()
+
+		def bind(stages):
+			by_stage.update({id(stage): config for stage, config in zip(stages, configs)})
+
+		def observe(phase, index, stage, error):
+			if context is None:
+				return
+			config = by_stage.get(id(stage))
+			occurrence_id = (
+				getattr(config, "id", None)
+				or f"{getattr(config, 'kind', stage.name)}[{index}]"
+			)
+			algorithm = getattr(config, "algorithm", None) or stage.name
+			if phase == "started":
+				context.stage_started(occurrence_id, algorithm)
+			elif phase == "completed":
+				context.stage_completed(occurrence_id, algorithm)
+			else:
+				assert error is not None
+				context.stage_failed(
+					occurrence_id, algorithm, error, traceback.format_exc(),
+				)
+
+		return bind, observe
+
 	def __call__(self, identity, output_root: Path) -> TrialExecution:
 		output_root.mkdir(parents=True, exist_ok=True)
 		window_metrics: dict[str, dict[str, Any]] = {}
@@ -291,6 +334,9 @@ class PipelineTrialExecutor:
 		preview_images = {}
 		preview_contract = None
 		for window in identity.fidelity.windows:
+			context = current_execution_context()
+			if context is not None:
+				context.window_started(window.id)
 			window_root = output_root / "windows" / window.id
 			recon = self._window_recon(identity, window, window_root)
 			window_root.mkdir(parents=True, exist_ok=True)
@@ -301,24 +347,45 @@ class PipelineTrialExecutor:
 				decision = self._prefix_decisions.get(
 					self._prefix_candidate_id(identity, window)
 				)
-			state_executor = None
-			if decision is not None and decision.action == "cache":
-				def execute_state(state, stages, configs, *, _decision=decision, _window=window):
+			def execute_state(state, stages, configs, *, _decision=decision, _window=window):
+				bind_stages, observer = self._stage_observer(configs)
+				bind_stages(stages)
+				if _decision is not None and _decision.action == "cache":
 					result, event = self.prefix_executor.execute(
 						_decision,
 						state,
 						stages,
 						configs,
 						runtime_identity=self._prefix_runtime_identity(identity, _window),
+						observer=observer,
+						checkpoint=None if context is None else context.checkpoint,
 					)
 					result.artifacts["prefix_cache"] = event.model_dump(mode="json")
+					active = current_execution_context()
+					if active is not None:
+						counters = event.model_dump(mode="json")
+						active.cache_event(
+							"rebuild" if event.status == "rebuilt" else event.status,
+							cache_bytes=event.cache_bytes_after,
+							**counters,
+						)
+						if event.verified:
+							active.cache_event("verify", cache_key=event.cache_key)
+						if event.evicted_keys:
+							active.cache_event("evict", evicted_keys=event.evicted_keys)
 					return result
-				state_executor = execute_state
-			if state_executor is None:
+				return Pipeline(
+					list(stages),
+					backend=state.backend,
+					validation_mode="complete",
+					observer=observer,
+					checkpoint=None if context is None else context.checkpoint,
+				).run(state)
+			if context is None and (decision is None or decision.action != "cache"):
 				result = run_reconstruction(pipeline_path, self.scan_path)[0]
 			else:
 				result = run_reconstruction(
-					pipeline_path, self.scan_path, state_executor=state_executor,
+					pipeline_path, self.scan_path, state_executor=execute_state,
 				)[0]
 			window_artifacts = dict(result.artifacts)
 			raw_previews = window_artifacts.pop("preview_images", {})
@@ -362,6 +429,8 @@ class PipelineTrialExecutor:
 						path=path,
 						bytes=path.stat().st_size,
 					))
+			if context is not None:
+				context.window_completed(window.id)
 		is_screening = identity.fidelity.id != self.config.output.final_fidelity_id
 		if self.config.output.screening == "metrics_and_previews" and is_screening:
 			if preview_contract is None or not preview_images:
@@ -477,12 +546,8 @@ def main() -> None:
 def validate_command(experiment_path: Path, json_output: bool) -> None:
 	"""Validate EXPERIMENT_PATH without loading reconstruction data."""
 
-	config = load_experiment_config(experiment_path)
-	payload = {
-		"valid": True,
-		"experiment_id": config.experiment_id,
-		"sampler": config.sampler.model_dump(mode="json"),
-	}
+	result = validate_experiment(experiment_path)
+	payload = result.model_dump(mode="json")
 	click.echo(json.dumps(payload, sort_keys=True) if json_output else (
 		f"valid experiment {config.experiment_id}"
 	))
@@ -560,26 +625,7 @@ def dry_run_command(
 		prefix_cache_on_error=prefix_cache_on_error,
 		prefix_cache_verify_fraction=prefix_cache_verify_fraction,
 	)
-	if runner.config.promotion is None:
-		preflight, _ = runner.prepare()
-		payload = preflight.model_dump(mode="json")
-	else:
-		payload = {"levels": {}}
-		for fidelity in runner.config.fidelities:
-			level_runner = IndependentExperimentRunner(
-				runner.config,
-				runner.inputs,
-				runner.root,
-				runner.executor,
-				validator=runner.validator,
-				identity_validator=runner.identity_validator,
-				policy=runner.policy,
-				fidelity_id=fidelity.id,
-				path_resources=runner.path_resources,
-				runtime_report=runner.runtime_report,
-			)
-			preflight, _ = level_runner.prepare()
-			payload["levels"][fidelity.id] = preflight.model_dump(mode="json")
+	payload = ExperimentLifecycle(runner).preflight().model_dump(mode="json")
 	click.echo(json.dumps(payload, sort_keys=True, indent=2))
 
 
@@ -614,20 +660,7 @@ def run_command(
 		prefix_cache_on_error=prefix_cache_on_error,
 		prefix_cache_verify_fraction=prefix_cache_verify_fraction,
 	)
-	if runner.config.promotion is not None:
-		summary = FidelityExperimentRunner(
-			runner.config,
-			runner.inputs,
-			runner.root,
-			runner.executor,
-			validator=runner.validator,
-			identity_validator=runner.identity_validator,
-			run_policy=runner.policy,
-			path_resources=runner.path_resources,
-			runtime_report=runner.runtime_report,
-		).run()
-	else:
-		summary = PersistedExperimentRunner(runner).run()
+	summary = ExperimentLifecycle(runner).run()
 	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
 
 
@@ -665,8 +698,17 @@ def _resume_policy(
 def inspect_command(root: Path) -> None:
 	"""Inspect ROOT and quarantine malformed partial attempt records."""
 
-	inspection = PersistedExperimentStore(root).inspect()
+	inspection = ExperimentLifecycle.inspect_root(root)
 	click.echo(json.dumps(inspection.model_dump(mode="json"), sort_keys=True, indent=2))
+
+
+@main.command("status")
+@click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def status_command(root: Path) -> None:
+	"""Report authoritative current state reconstructed from ROOT alone."""
+
+	status = ExperimentLifecycle.status_root(root)
+	click.echo(json.dumps(status.model_dump(mode="json"), sort_keys=True, indent=2))
 
 
 @main.command("tier2-plan")
@@ -799,22 +841,10 @@ def resume_command(
 			recover_stale=recover_stale,
 			stale_after=stale_after,
 		)
-	if runner.config.promotion is not None:
-		summary = FidelityExperimentRunner(
-			runner.config,
-			runner.inputs,
-			runner.root,
-			runner.executor,
-			validator=runner.validator,
-			identity_validator=runner.identity_validator,
-			run_policy=runner.policy,
-			resume_policy=resume_policy,
-			invalidate_stale_promotions=invalidate_stale_promotions,
-			path_resources=runner.path_resources,
-			runtime_report=runner.runtime_report,
-		).run()
-	else:
-		summary = PersistedExperimentRunner(runner, policy=resume_policy).run()
+	summary = ExperimentLifecycle(runner).resume(
+		resume_policy,
+		invalidate_stale_promotions=invalidate_stale_promotions,
+	)
 	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
 
 
@@ -867,31 +897,15 @@ def rerun_command(
 			stale_after=stale_after,
 			force=True,
 		)
-	if runner.config.promotion is not None:
-		if trial_ids:
-			raise click.UsageError(
-				"--trial-id filtering is not supported for a multi-fidelity rerun; "
-				"use the library boundary API"
-			)
-		summary = FidelityExperimentRunner(
-			runner.config,
-			runner.inputs,
-			runner.root,
-			runner.executor,
-			validator=runner.validator,
-			identity_validator=runner.identity_validator,
-			run_policy=runner.policy,
-			resume_policy=resume_policy,
-			invalidate_stale_promotions=invalidate_stale_promotions,
-			path_resources=runner.path_resources,
-			runtime_report=runner.runtime_report,
-		).run()
-	else:
-		summary = PersistedExperimentRunner(
-			runner,
-			policy=resume_policy,
-			trial_ids=set(trial_ids) if trial_ids else None,
-		).run()
+	if runner.config.promotion is not None and trial_ids:
+		raise click.UsageError(
+			"--trial-id filtering is not supported for a multi-fidelity rerun"
+		)
+	summary = ExperimentLifecycle(runner).rerun(
+		resume_policy,
+		trial_ids=set(trial_ids) if trial_ids else None,
+		invalidate_stale_promotions=invalidate_stale_promotions,
+	)
 	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
 
 

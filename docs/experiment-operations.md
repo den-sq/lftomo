@@ -81,8 +81,13 @@ The root layout is versioned and inspectable:
 ```text
 store.json
 manifest.json
+progress.jsonl
 trials/<trial-id>/identity.json
 trials/<trial-id>/attempts/<attempt-id>.json
+trials/<trial-id>/progress/<attempt-id>.json
+invocation/replay-bundle.json
+invocation/normalized-experiment.yaml
+invocation/normalized-scan.yaml
 promotions/<from>--<to>/active.json
 previews/<blind-id>/*.png
 private/preview-mapping/entries/<blind-id>.json
@@ -91,6 +96,9 @@ experiment-results.json
 fidelity-results.json
 leaderboard.md
 ```
+
+See [Public experiment lifecycle](experiment-lifecycle.md) for the library API,
+cooperative cancellation contract, authoritative progress ordering, and replay semantics.
 
 Attempt files move atomically through pending/running/terminal state. A successful result
 contains raw metrics and Pareto rank; failures cannot contain a final result. Blinded

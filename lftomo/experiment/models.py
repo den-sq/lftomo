@@ -472,6 +472,9 @@ class FailureRecord(ConfigModel):
 	type: str = Field(min_length=1)
 	message: str = Field(min_length=1)
 	stage_id: str | None = None
+	stage_algorithm: str | None = None
+	window_id: str | None = None
+	traceback: str | None = None
 	details: dict[str, JsonValue] = Field(default_factory=dict)
 
 
@@ -564,8 +567,10 @@ class TrialAttemptRecord(ConfigModel):
 			if CandidateKey.from_recon(self.result.resolved_recon) != self.identity.candidate:
 				raise ValueError("final result resolved_recon must match the trial candidate")
 		elif self.status in ("failed", "interrupted"):
-			if self.started_at is None or self.finished_at is None:
-				raise ValueError(f"{self.status} attempts require start and finish timestamps")
+			if self.finished_at is None:
+				raise ValueError(f"{self.status} attempts require a finish timestamp")
+			if self.status == "failed" and self.started_at is None:
+				raise ValueError("failed attempts require a start timestamp")
 			if self.failure is None or self.result is not None:
 				raise ValueError(f"{self.status} attempts require failure and forbid final result")
 		elif self.status in ("skipped", "incompatible"):
