@@ -64,6 +64,7 @@ from .runtime import (
 	collect_environment_identity,
 	require_runtime_compatibility,
 )
+from .resources import PathContextRoots, PathResourceRequest
 from .store import (
 	PersistedExperimentRunner,
 	PersistedExperimentStore,
@@ -405,6 +406,7 @@ def _runner(
 	*,
 	override_limits: bool,
 	failure: str,
+	scratch_root: Path | None,
 	prefix_cache: bool,
 	prefix_cache_root: Path | None,
 	prefix_cache_max_disk_bytes: int | None,
@@ -436,6 +438,17 @@ def _runner(
 		on_error=prefix_cache_on_error,
 		verify_fraction=prefix_cache_verify_fraction,
 	)
+	path_resources = PathResourceRequest(
+		result_root=root,
+		scratch_root=scratch_root,
+		cache_root=prefix_cache_root if prefix_cache else None,
+		cache_guard_bytes=prefix_cache_max_disk_bytes if prefix_cache else None,
+		contexts=PathContextRoots(
+			cwd=Path.cwd(),
+			repository=Path(__file__).resolve().parents[2],
+			config_directory=experiment_path.resolve().parent,
+		),
+	)
 	executor = PipelineTrialExecutor(config, scan_path, cache_policy)
 	return IndependentExperimentRunner(
 		config,
@@ -449,6 +462,7 @@ def _runner(
 			failure=failure,
 		),
 		runtime_report=runtime_report,
+		path_resources=path_resources,
 	)
 
 
@@ -506,6 +520,9 @@ def _shared_options(function):
 	function = click.option("--failure", type=click.Choice(["continue", "fail_fast"]),
 		default="continue", show_default=True)(function)
 	function = click.option("--override-limits", is_flag=True)(function)
+	function = click.option(
+		"--scratch-root", type=click.Path(file_okay=False, path_type=Path),
+	)(function)
 	function = click.option("--root", type=click.Path(path_type=Path), required=True)(function)
 	function = click.argument("scan_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))(function)
 	function = click.argument("experiment_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))(function)
@@ -520,6 +537,7 @@ def dry_run_command(
 	root: Path,
 	override_limits: bool,
 	failure: str,
+	scratch_root: Path | None,
 	prefix_cache: bool,
 	prefix_cache_root: Path | None,
 	prefix_cache_max_disk_bytes: int | None,
@@ -533,6 +551,7 @@ def dry_run_command(
 	runner = _runner(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
+		scratch_root=scratch_root,
 		prefix_cache=prefix_cache,
 		prefix_cache_root=prefix_cache_root,
 		prefix_cache_max_disk_bytes=prefix_cache_max_disk_bytes,
@@ -556,6 +575,8 @@ def dry_run_command(
 				identity_validator=runner.identity_validator,
 				policy=runner.policy,
 				fidelity_id=fidelity.id,
+				path_resources=runner.path_resources,
+				runtime_report=runner.runtime_report,
 			)
 			preflight, _ = level_runner.prepare()
 			payload["levels"][fidelity.id] = preflight.model_dump(mode="json")
@@ -570,6 +591,7 @@ def run_command(
 	root: Path,
 	override_limits: bool,
 	failure: str,
+	scratch_root: Path | None,
 	prefix_cache: bool,
 	prefix_cache_root: Path | None,
 	prefix_cache_max_disk_bytes: int | None,
@@ -583,6 +605,7 @@ def run_command(
 	runner = _runner(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
+		scratch_root=scratch_root,
 		prefix_cache=prefix_cache,
 		prefix_cache_root=prefix_cache_root,
 		prefix_cache_max_disk_bytes=prefix_cache_max_disk_bytes,
@@ -600,6 +623,8 @@ def run_command(
 			validator=runner.validator,
 			identity_validator=runner.identity_validator,
 			run_policy=runner.policy,
+			path_resources=runner.path_resources,
+			runtime_report=runner.runtime_report,
 		).run()
 	else:
 		summary = PersistedExperimentRunner(runner).run()
@@ -738,6 +763,7 @@ def resume_command(
 	root: Path,
 	override_limits: bool,
 	failure: str,
+	scratch_root: Path | None,
 	mismatch: str,
 	retry_failed: bool,
 	retry_interrupted: bool,
@@ -757,6 +783,7 @@ def resume_command(
 	runner = _runner(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
+		scratch_root=scratch_root,
 		prefix_cache=prefix_cache,
 		prefix_cache_root=prefix_cache_root,
 		prefix_cache_max_disk_bytes=prefix_cache_max_disk_bytes,
@@ -783,6 +810,8 @@ def resume_command(
 			run_policy=runner.policy,
 			resume_policy=resume_policy,
 			invalidate_stale_promotions=invalidate_stale_promotions,
+			path_resources=runner.path_resources,
+			runtime_report=runner.runtime_report,
 		).run()
 	else:
 		summary = PersistedExperimentRunner(runner, policy=resume_policy).run()
@@ -800,6 +829,7 @@ def rerun_command(
 	root: Path,
 	override_limits: bool,
 	failure: str,
+	scratch_root: Path | None,
 	mismatch: str,
 	retry_failed: bool,
 	retry_interrupted: bool,
@@ -820,6 +850,7 @@ def rerun_command(
 	runner = _runner(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
+		scratch_root=scratch_root,
 		prefix_cache=prefix_cache,
 		prefix_cache_root=prefix_cache_root,
 		prefix_cache_max_disk_bytes=prefix_cache_max_disk_bytes,
@@ -852,6 +883,8 @@ def rerun_command(
 			run_policy=runner.policy,
 			resume_policy=resume_policy,
 			invalidate_stale_promotions=invalidate_stale_promotions,
+			path_resources=runner.path_resources,
+			runtime_report=runner.runtime_report,
 		).run()
 	else:
 		summary = PersistedExperimentRunner(

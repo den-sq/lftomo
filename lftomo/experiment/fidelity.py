@@ -41,6 +41,8 @@ from .runner import (
 	TrialExecutor,
 	atomic_write_model,
 )
+from .resources import PathResourceRequest
+from .runtime import RuntimeCompatibilityReport
 from .store import PersistedExperimentRunner, ResumePolicy
 
 
@@ -589,6 +591,8 @@ class FidelityExperimentRunner:
 		resume_policy: ResumePolicy | None = None,
 		manual_promotions: Mapping[str, set[str]] | None = None,
 		invalidate_stale_promotions: bool = False,
+		path_resources: PathResourceRequest | None = None,
+		runtime_report: RuntimeCompatibilityReport | None = None,
 	):
 		if config.promotion is None:
 			raise ValueError("fidelity execution requires an explicit promotion policy")
@@ -602,6 +606,8 @@ class FidelityExperimentRunner:
 		self.resume_policy = resume_policy or ResumePolicy()
 		self.manual_promotions = manual_promotions or {}
 		self.invalidate_stale_promotions = invalidate_stale_promotions
+		self.path_resources = path_resources
+		self.runtime_report = runtime_report
 
 	def run(self) -> FidelityRunSummary:
 		levels = []
@@ -620,6 +626,8 @@ class FidelityExperimentRunner:
 				policy=self.run_policy,
 				fidelity_id=fidelity.id,
 				promotion_lineage=lineage,
+				path_resources=self.path_resources,
+				runtime_report=self.runtime_report,
 			)
 			trial_ids = None
 			if selected_keys is not None:

@@ -25,6 +25,11 @@ from .models import (
 	TrialIdentity,
 	compare_trial_identities,
 )
+from .resources import (
+	PathRelocationCompatibility,
+	PathResourceReport,
+	compare_path_resource_reports,
+)
 from .runner import (
 	ExperimentRunSummary,
 	IndependentExperimentRunner,
@@ -144,6 +149,30 @@ class PersistedExperimentStore:
 				f"expected {STORE_SCHEMA_VERSION}"
 			)
 		return StoreMetadata.model_validate(document)
+
+	def validate_path_relocation(
+		self,
+		current: PathResourceReport,
+	) -> PathRelocationCompatibility:
+		"""Compare operational roots with an existing manifest before claims."""
+
+		manifest_path = self.root / "manifest.json"
+		if not manifest_path.exists():
+			return PathRelocationCompatibility(compatible=True, cache_reusable=True)
+		manifest = ExperimentManifest.model_validate_json(
+			manifest_path.read_text(encoding="utf-8")
+		)
+		prior_document = manifest.metadata.get("path_resource_preflight")
+		if prior_document is None:
+			return PathRelocationCompatibility(compatible=True, cache_reusable=False)
+		prior = PathResourceReport.model_validate(prior_document)
+		comparison = compare_path_resource_reports(prior, current)
+		if not comparison.compatible:
+			reasons = "; ".join(
+				item.message for item in comparison.diagnostics if item.severity == "error"
+			)
+			raise ValueError(f"incompatible experiment resource relocation: {reasons}")
+		return comparison
 
 	def _trial_root(self, identity: TrialIdentity) -> Path:
 		return self.root / "trials" / identity.trial_id.value
@@ -471,7 +500,12 @@ class PersistedExperimentRunner:
 
 	def run(self) -> ExperimentRunSummary:
 		preflight, trials = self.runner.prepare()
-		manifest_metadata = {"runtime_compatibility": preflight.runtime}
+		relocation = self.store.validate_path_relocation(preflight.path_resources)
+		manifest_metadata = {
+			"runtime_compatibility": preflight.runtime,
+			"path_resource_preflight": preflight.path_resources,
+			"path_resource_relocation": relocation,
+		}
 		self.store.initialize(
 			self.runner.config, manifest_metadata=manifest_metadata,
 		)

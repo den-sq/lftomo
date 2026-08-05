@@ -14,6 +14,7 @@ from lftomo.experiment import (
 	EnvironmentIdentity,
 	ExperimentConfig,
 	FidelityExperimentRunner,
+	PathResourceError,
 	PromotionCandidate,
 	PromotionDecisionStore,
 	ResumePolicy,
@@ -266,7 +267,7 @@ def test_level_specific_memory_and_output_guards_apply_during_preflight(tmp_path
 			estimated_output_bytes_per_trial=30000,
 		),
 	)
-	with pytest.raises(ValueError, match="screening output estimate"):
+	with pytest.raises(PathResourceError, match="override the configured guard"):
 		runner.prepare()
 	overridden = IndependentExperimentRunner(
 		config,

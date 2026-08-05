@@ -52,6 +52,11 @@ from .runtime import (
 	RuntimeCompatibilityReport,
 	check_runtime_compatibility,
 )
+from .resources import (
+	PathResourceRequest,
+	PathResourceReport,
+	require_path_resources,
+)
 
 
 FailurePolicy = Literal["continue", "fail_fast"]
@@ -141,6 +146,7 @@ class ExperimentPreflight(ConfigModel):
 	validation_failures: tuple[ValidationFailure, ...] = ()
 	prefix_cache: dict[str, JsonValue] | None = None
 	runtime: RuntimeCompatibilityReport
+	path_resources: PathResourceReport
 
 
 class TrialExecution(ConfigModel):
@@ -218,6 +224,7 @@ class IndependentExperimentRunner:
 		fidelity_id: str | None = None,
 		promotion_lineage: dict[str, Any] | None = None,
 		runtime_report: RuntimeCompatibilityReport | None = None,
+		path_resources: PathResourceRequest | None = None,
 	):
 		self.config = config
 		self.inputs = inputs
@@ -229,6 +236,7 @@ class IndependentExperimentRunner:
 		self.fidelity_id = fidelity_id or config.fidelities[0].id
 		self.promotion_lineage = promotion_lineage or {}
 		self.runtime_report = runtime_report
+		self.path_resources = path_resources
 
 	def _fidelity(self) -> FidelityIdentity:
 		try:
@@ -352,17 +360,36 @@ class IndependentExperimentRunner:
 			self.config.output.max_bytes,
 			self._fidelity().max_output_bytes,
 		) if value is not None]
-		if limits and total_output is not None and total_output > min(limits):
-			if not self.policy.override_limits:
-				raise ValueError(
-					f"screening output estimate {total_output} bytes exceeds limit {min(limits)}; "
-					"reduce trials/output or rerun with override_limits=True"
-				)
 		workers = self._effective_workers()
 		prefix_planner = getattr(self.executor, "plan_prefix_cache", None)
 		prefix_cache = None
 		if callable(prefix_planner):
 			prefix_cache = json_value(prefix_planner(tuple(prepared)))
+		path_request = self.path_resources or PathResourceRequest(result_root=self.root)
+		if (
+			path_request.result_root.expanduser().resolve(strict=False)
+			!= self.root.expanduser().resolve(strict=False)
+		):
+			raise ValueError("path resource result_root must match the experiment runner root")
+		path_updates: dict[str, Any] = {}
+		if path_request.estimated_result_bytes is None:
+			path_updates["estimated_result_bytes"] = total_output
+		if (
+			path_request.result_guard_bytes is None
+			and limits
+			and not self.policy.override_limits
+		):
+			path_updates["result_guard_bytes"] = min(limits)
+		if prefix_cache is not None:
+			if path_request.cache_root is None and prefix_cache.get("scratch") is not None:
+				path_updates["cache_root"] = Path(prefix_cache["scratch"])
+			if path_request.estimated_cache_bytes is None:
+				path_updates["estimated_cache_bytes"] = prefix_cache.get(
+					"estimated_unique_snapshot_bytes"
+				)
+		path_request = path_request.model_copy(update=path_updates)
+		self.path_resources = path_request
+		path_report = require_path_resources(path_request)
 		preflight = ExperimentPreflight(
 			experiment_id=self.config.experiment_id,
 			sampler=self.config.sampler.name,
@@ -384,6 +411,7 @@ class IndependentExperimentRunner:
 			validation_failures=tuple(failures),
 			prefix_cache=prefix_cache,
 			runtime=runtime,
+			path_resources=path_report,
 		)
 		return preflight, tuple(prepared)
 
@@ -555,7 +583,10 @@ class IndependentExperimentRunner:
 			config=self.config,
 			created_at=_utcnow(),
 			attempt_ids=tuple(item.attempt_id for item in attempts),
-			metadata={"runtime_compatibility": json_value(preflight.runtime)},
+			metadata={
+				"runtime_compatibility": json_value(preflight.runtime),
+				"path_resource_preflight": json_value(preflight.path_resources),
+			},
 		)
 		atomic_write_model(self.root / "manifest.json", manifest)
 		summary = ExperimentRunSummary(
