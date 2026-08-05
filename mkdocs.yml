@@ -13,6 +13,7 @@ nav:
    - Stripe-chain invariant: stripe-chain-regression.md
    - Phase-operation audit: phase-chain-audit.md
    - Experiment models: experiment-models.md
+   - Experiment runner: experiment-runner.md
    - Reconstruction evaluation: evaluation.md
  - API reference:
    - Configuration models: api/config.md

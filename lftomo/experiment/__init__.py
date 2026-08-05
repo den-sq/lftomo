@@ -34,6 +34,16 @@ from .models import (
 	canonical_json,
 	compare_trial_identities,
 )
+from .runner import (
+	ExperimentInputs,
+	ExperimentPreflight,
+	ExperimentRunPolicy,
+	ExperimentRunSummary,
+	IndependentExperimentRunner,
+	LeaderboardEntry,
+	TrialExecution,
+)
+from .selection import SelectedCandidate, select_candidates
 
 __all__ = [
 	"AggregationPolicy",
@@ -43,6 +53,10 @@ __all__ = [
 	"ConfigurationIdentity",
 	"DatasetIdentity",
 	"EnvironmentIdentity",
+	"ExperimentInputs",
+	"ExperimentPreflight",
+	"ExperimentRunPolicy",
+	"ExperimentRunSummary",
 	"ExperimentConfig",
 	"ExperimentManifest",
 	"FailureRecord",
@@ -50,6 +64,8 @@ __all__ = [
 	"FidelityReference",
 	"FinalResult",
 	"IdentityCompatibility",
+	"IndependentExperimentRunner",
+	"LeaderboardEntry",
 	"MetricProtocolIdentity",
 	"MetricReference",
 	"ObjectiveReference",
@@ -60,12 +76,15 @@ __all__ = [
 	"ResourcePolicy",
 	"SamplerIdentity",
 	"SamplerSpec",
+	"SelectedCandidate",
 	"TrialAttemptRecord",
 	"TrialDescription",
 	"TrialId",
 	"TrialIdentity",
+	"TrialExecution",
 	"WindowIdentity",
 	"WindowReference",
 	"canonical_json",
 	"compare_trial_identities",
+	"select_candidates",
 ]

@@ -26,6 +26,7 @@ dependencies = [
 
 [project.scripts]
 lftomo-run = "lftomo.runner:main"
+lftomo-experiment = "lftomo.experiment.cli:main"
 
 [project.optional-dependencies]
 bac = [
