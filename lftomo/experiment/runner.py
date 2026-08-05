@@ -140,6 +140,7 @@ class TrialExecution(ConfigModel):
 	"""Executor result before #129 attempt/final-result wrapping."""
 
 	metrics: dict[str, JsonValue] = Field(default_factory=dict)
+	window_metrics: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
 	artifacts: dict[str, JsonValue] = Field(default_factory=dict)
 	outputs: tuple[OutputRecord, ...] = ()
 	peak_memory_bytes: int | None = Field(
@@ -185,6 +186,7 @@ class PreparedTrial:
 
 TrialExecutor = Callable[[TrialIdentity, Path], TrialExecution]
 CandidateValidator = Callable[[Recon], None]
+IdentityValidator = Callable[[TrialIdentity], None]
 
 
 def _peak_memory_bytes() -> int:
@@ -204,16 +206,20 @@ class IndependentExperimentRunner:
 		executor: TrialExecutor,
 		*,
 		validator: CandidateValidator | None = None,
+		identity_validator: IdentityValidator | None = None,
 		policy: ExperimentRunPolicy | None = None,
 		fidelity_id: str | None = None,
+		promotion_lineage: dict[str, Any] | None = None,
 	):
 		self.config = config
 		self.inputs = inputs
 		self.root = Path(root)
 		self.executor = executor
 		self.validator = validator
+		self.identity_validator = identity_validator
 		self.policy = policy or ExperimentRunPolicy()
 		self.fidelity_id = fidelity_id or config.fidelities[0].id
+		self.promotion_lineage = promotion_lineage or {}
 
 	def _fidelity(self) -> FidelityIdentity:
 		try:
@@ -225,6 +231,7 @@ class IndependentExperimentRunner:
 			id=reference.id,
 			windows=tuple(WindowIdentity(
 				id=windows[name].id,
+				role=windows[name].role,
 				y_start=windows[name].y_start,
 				y_stop=windows[name].y_stop,
 				theta_start=windows[name].theta_start,
@@ -232,6 +239,11 @@ class IndependentExperimentRunner:
 				halo=windows[name].halo,
 			) for name in reference.windows),
 			projection_stride=reference.projection_stride,
+			projection_limit=reference.projection_limit,
+			resource_fraction=reference.resource_fraction,
+			memory_gb=reference.memory_gb,
+			max_output_bytes=reference.max_output_bytes,
+			timeout_seconds=reference.timeout_seconds,
 		)
 
 	def _identity(self, selected: SelectedCandidate) -> TrialIdentity:
@@ -263,8 +275,13 @@ class IndependentExperimentRunner:
 				)
 			workers = min(workers, self.policy.gpu_slots)
 		memory = self.policy.estimated_memory_bytes_per_trial
-		if memory is not None and self.config.resources.memory_gb is not None:
-			budget = int(self.config.resources.memory_gb * 1024**3)
+		fidelity_memory = self._fidelity().memory_gb
+		memory_limits = [
+			value for value in (self.config.resources.memory_gb, fidelity_memory)
+			if value is not None
+		]
+		if memory is not None and memory_limits:
+			budget = int(min(memory_limits) * 1024**3)
 			if memory > budget:
 				raise ValueError(
 					f"one trial requires an estimated {memory} bytes, exceeding memory budget {budget}"
@@ -294,6 +311,15 @@ class IndependentExperimentRunner:
 				))
 				continue
 			identity = self._identity(item)
+			if self.identity_validator is not None:
+				try:
+					self.identity_validator(identity.model_copy(deep=True))
+				except Exception as error:
+					failures.append(ValidationFailure(
+						candidate_key=item.candidate_key,
+						message=f"{type(error).__name__}: {error}",
+					))
+					continue
 			trial_root = self.root / "trials" / identity.trial_id.value
 			prepared.append(PreparedTrial(
 				selected=item,
@@ -309,6 +335,7 @@ class IndependentExperimentRunner:
 		limits = [value for value in (
 			self.config.resources.max_output_bytes,
 			self.config.output.max_bytes,
+			self._fidelity().max_output_bytes,
 		) if value is not None]
 		if limits and total_output is not None and total_output > min(limits):
 			if not self.policy.override_limits:
@@ -375,6 +402,7 @@ class IndependentExperimentRunner:
 				resolved_recon=trial.identity.resolved_recon,
 				metrics=json_value(execution.metrics),
 				outputs=execution.outputs,
+				promotion=self.promotion_lineage.get(trial.identity.candidate.value),
 			)
 			attempt = TrialAttemptRecord(
 				**base,
@@ -386,6 +414,7 @@ class IndependentExperimentRunner:
 				observations={
 					"metrics": json_value(execution.metrics),
 					"artifacts": json_value(execution.artifacts),
+					"window_metrics": json_value(execution.window_metrics),
 				},
 				result=result,
 			)

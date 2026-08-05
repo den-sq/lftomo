@@ -84,3 +84,19 @@ def test_hdf5_stage_can_require_calibration(tmp_path):
 
 	with pytest.raises(ValueError, match="data_white.*data_dark"):
 		Pipeline([create_stage(config)]).run(_state(path, 2, 3, config))
+
+
+def test_hdf5_stage_reads_strided_theta_window_with_matching_angles(tmp_path):
+	count, size = 6, 4
+	data = np.arange(count * size * size, dtype=np.uint16).reshape(count, size, size)
+	path = tmp_path / "scan.h5"
+	_write(path, data)
+	config = StageConfig(
+		kind="read", algorithm="hdf5_dxchange",
+		params={"theta_start": 1, "theta_stop": 6, "theta_stride": 2},
+	)
+
+	result = create_stage(config).run(_state(path, count, size, config))
+
+	np.testing.assert_array_equal(result.working_array, data[1:6:2])
+	np.testing.assert_allclose(result.artifacts["angles"], np.deg2rad([30, 90, 150]))

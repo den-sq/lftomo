@@ -29,6 +29,7 @@ from .models import (
 	OutputRecord,
 	canonical_json,
 )
+from .fidelity import FidelityExperimentRunner, aggregate_window_metrics
 from .runner import (
 	ExperimentInputs,
 	ExperimentRunPolicy,
@@ -131,38 +132,114 @@ class PipelineTrialExecutor:
 		stages = [create_stage(config) for config in resolved.pipeline]
 		validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
 
-	def __call__(self, identity, output_root: Path) -> TrialExecution:
+	def _window_recon(self, identity, window, output_root: Path) -> Recon:
+		scan, _ = load_scan(self.scan_path)
 		recon = identity.resolved_recon.model_copy(deep=True)
-		if self.config.output.screening != "configured_writers":
+		read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
+		if read is None:
+			raise ValueError("fidelity window execution requires a read stage")
+		rows = scan.detector.rows
+		if rows is not None and (
+			window.y_start - window.halo < 0 or window.y_stop + window.halo > rows
+		):
+			raise ValueError(
+				f"window {window.id!r} halo exceeds detector rows [0, {rows})"
+			)
+		read.params["y_start"] = window.y_start - window.halo
+		read.params["y_stop"] = window.y_stop + window.halo
+		theta_start = 0 if window.theta_start is None else window.theta_start
+		theta_stop = scan.n_projections if window.theta_stop is None else window.theta_stop
+		if identity.fidelity.projection_limit is not None:
+			theta_stop = min(
+				theta_stop,
+				theta_start
+				+ identity.fidelity.projection_limit * identity.fidelity.projection_stride,
+			)
+		read.params["theta_start"] = theta_start
+		read.params["theta_stop"] = theta_stop
+		read.params["theta_stride"] = identity.fidelity.projection_stride
+		for stage in recon.pipeline:
+			if stage.kind == "evaluate":
+				stage.params["windows"] = [{
+					"id": window.id,
+					"slice_start": window.halo,
+					"slice_stop": window.halo + window.y_stop - window.y_start,
+				}]
+		is_full_finalist = (
+			self.config.output.write_full_finalists
+			and identity.fidelity.id == self.config.output.final_fidelity_id
+		)
+		if self.config.output.screening != "configured_writers" and not is_full_finalist:
 			recon.pipeline = [stage for stage in recon.pipeline if stage.kind != "write"]
 			recon.output_path = None
 		else:
 			recon.output_path = output_root / "output"
+		return recon
+
+	def validate_identity(self, identity) -> None:
+		scan, _ = load_scan(self.scan_path)
+		for window in identity.fidelity.windows:
+			recon = self._window_recon(identity, window, Path("validation") / window.id)
+			for stage in recon.pipeline:
+				for name in (
+					"calibration_manifest", "calibration_components",
+					"compatibility_policy", "compatibility_override_reason",
+				):
+					stage.params.pop(name, None)
+			stages = [create_stage(config) for config in recon.pipeline]
+			validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
+
+	def __call__(self, identity, output_root: Path) -> TrialExecution:
 		output_root.mkdir(parents=True, exist_ok=True)
-		pipeline_path = output_root / "resolved-recon.yaml"
-		pipeline_path.write_text(recon.to_yaml(), encoding="utf-8")
-		result = run_reconstruction(pipeline_path, self.scan_path)[0]
-		artifact = result.artifacts.get("metrics", {})
-		aggregates = artifact.get("aggregates", {}) if isinstance(artifact, dict) else {}
-		metrics: dict[str, Any] = {}
-		for reference in self.config.metrics:
-			aggregate = aggregates.get(reference.metric)
-			if aggregate is None:
-				aggregate = aggregates.get(reference.id)
-			if isinstance(aggregate, dict):
-				metrics[reference.id] = aggregate.get("value")
-			elif aggregate is not None:
-				metrics[reference.id] = aggregate
+		window_metrics: dict[str, dict[str, Any]] = {}
+		metric_ids = {reference.metric: reference.id for reference in self.config.metrics}
+		artifacts = {}
 		outputs = []
-		for path in result.artifacts.get("output_files", ()):
-			path = Path(path)
-			if path.is_file():
-				outputs.append(OutputRecord(
-					role="screening_output", path=path, bytes=path.stat().st_size,
-				))
+		for window in identity.fidelity.windows:
+			window_root = output_root / "windows" / window.id
+			recon = self._window_recon(identity, window, window_root)
+			window_root.mkdir(parents=True, exist_ok=True)
+			pipeline_path = window_root / "resolved-recon.yaml"
+			pipeline_path.write_text(recon.to_yaml(), encoding="utf-8")
+			result = run_reconstruction(pipeline_path, self.scan_path)[0]
+			artifact = result.artifacts.get("metrics", {})
+			aggregates = artifact.get("aggregates", {}) if isinstance(artifact, dict) else {}
+			observations = artifact.get("observations", ()) if isinstance(artifact, dict) else ()
+			for observation in observations:
+				if not isinstance(observation, dict):
+					continue
+				metric = metric_ids.get(observation.get("metric"), observation.get("metric"))
+				if isinstance(metric, str):
+					window_metrics.setdefault(window.id, {}).setdefault(metric, []).append(
+						observation.get("value") if observation.get("valid") else None
+					)
+			if not observations:
+				for reference in self.config.metrics:
+					aggregate = aggregates.get(reference.metric, aggregates.get(reference.id))
+					if isinstance(aggregate, dict):
+						aggregate = aggregate.get("value")
+					window_metrics.setdefault(window.id, {})[reference.id] = [aggregate]
+			artifacts[window.id] = json_value(result.artifacts)
+			for path in result.artifacts.get("output_files", ()):
+				path = Path(path)
+				if path.is_file():
+					outputs.append(OutputRecord(
+						role="finalist_output" if (
+							self.config.output.write_full_finalists
+							and identity.fidelity.id == self.config.output.final_fidelity_id
+						) else "screening_output",
+						path=path,
+						bytes=path.stat().st_size,
+					))
+		aggregates = aggregate_window_metrics(window_metrics, self.config)
 		return TrialExecution(
-			metrics=metrics,
-			artifacts=json_value(result.artifacts),
+			metrics=json_value(aggregates.tuning),
+			window_metrics=json_value(window_metrics),
+			artifacts={
+				"windows": json_value(artifacts),
+				"per_window_metrics": json_value(aggregates.per_window),
+				"held_out_metrics": json_value(aggregates.held_out),
+			},
 			outputs=tuple(outputs),
 		)
 
@@ -183,6 +260,7 @@ def _runner(
 		root,
 		executor,
 		validator=executor.validate,
+		identity_validator=executor.validate_identity,
 		policy=ExperimentRunPolicy(
 			override_limits=override_limits,
 			failure=failure,
@@ -237,8 +315,25 @@ def dry_run_command(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
 	)
-	preflight, _ = runner.prepare()
-	click.echo(json.dumps(preflight.model_dump(mode="json"), sort_keys=True, indent=2))
+	if runner.config.promotion is None:
+		preflight, _ = runner.prepare()
+		payload = preflight.model_dump(mode="json")
+	else:
+		payload = {"levels": {}}
+		for fidelity in runner.config.fidelities:
+			level_runner = IndependentExperimentRunner(
+				runner.config,
+				runner.inputs,
+				runner.root,
+				runner.executor,
+				validator=runner.validator,
+				identity_validator=runner.identity_validator,
+				policy=runner.policy,
+				fidelity_id=fidelity.id,
+			)
+			preflight, _ = level_runner.prepare()
+			payload["levels"][fidelity.id] = preflight.model_dump(mode="json")
+	click.echo(json.dumps(payload, sort_keys=True, indent=2))
 
 
 @main.command("run")
@@ -256,7 +351,18 @@ def run_command(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
 	)
-	summary = PersistedExperimentRunner(runner).run()
+	if runner.config.promotion is not None:
+		summary = FidelityExperimentRunner(
+			runner.config,
+			runner.inputs,
+			runner.root,
+			runner.executor,
+			validator=runner.validator,
+			identity_validator=runner.identity_validator,
+			run_policy=runner.policy,
+		).run()
+	else:
+		summary = PersistedExperimentRunner(runner).run()
 	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
 
 
@@ -299,6 +405,7 @@ def inspect_command(root: Path) -> None:
 
 
 @main.command("resume")
+@click.option("--invalidate-stale-promotions", is_flag=True)
 @_resume_options
 @_shared_options
 def resume_command(
@@ -312,6 +419,7 @@ def resume_command(
 	retry_interrupted: bool,
 	recover_stale: bool,
 	stale_after: float,
+	invalidate_stale_promotions: bool,
 ) -> None:
 	"""Reuse compatible successes and explicitly retry selected terminal states."""
 
@@ -319,21 +427,33 @@ def resume_command(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
 	)
-	summary = PersistedExperimentRunner(
-		runner,
-		policy=_resume_policy(
+	resume_policy = _resume_policy(
 			mismatch=mismatch,
 			retry_failed=retry_failed,
 			retry_interrupted=retry_interrupted,
 			recover_stale=recover_stale,
 			stale_after=stale_after,
-		),
-	).run()
+		)
+	if runner.config.promotion is not None:
+		summary = FidelityExperimentRunner(
+			runner.config,
+			runner.inputs,
+			runner.root,
+			runner.executor,
+			validator=runner.validator,
+			identity_validator=runner.identity_validator,
+			run_policy=runner.policy,
+			resume_policy=resume_policy,
+			invalidate_stale_promotions=invalidate_stale_promotions,
+		).run()
+	else:
+		summary = PersistedExperimentRunner(runner, policy=resume_policy).run()
 	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
 
 
 @main.command("rerun")
 @click.option("--trial-id", "trial_ids", multiple=True)
+@click.option("--invalidate-stale-promotions", is_flag=True)
 @_resume_options
 @_shared_options
 def rerun_command(
@@ -348,6 +468,7 @@ def rerun_command(
 	recover_stale: bool,
 	stale_after: float,
 	trial_ids: tuple[str, ...],
+	invalidate_stale_promotions: bool,
 ) -> None:
 	"""Force a new attempt, optionally limited to one or more resolved trial IDs."""
 
@@ -355,18 +476,37 @@ def rerun_command(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
 	)
-	summary = PersistedExperimentRunner(
-		runner,
-		policy=_resume_policy(
+	resume_policy = _resume_policy(
 			mismatch=mismatch,
 			retry_failed=retry_failed,
 			retry_interrupted=retry_interrupted,
 			recover_stale=recover_stale,
 			stale_after=stale_after,
 			force=True,
-		),
-		trial_ids=set(trial_ids) if trial_ids else None,
-	).run()
+		)
+	if runner.config.promotion is not None:
+		if trial_ids:
+			raise click.UsageError(
+				"--trial-id filtering is not supported for a multi-fidelity rerun; "
+				"use the library boundary API"
+			)
+		summary = FidelityExperimentRunner(
+			runner.config,
+			runner.inputs,
+			runner.root,
+			runner.executor,
+			validator=runner.validator,
+			identity_validator=runner.identity_validator,
+			run_policy=runner.policy,
+			resume_policy=resume_policy,
+			invalidate_stale_promotions=invalidate_stale_promotions,
+		).run()
+	else:
+		summary = PersistedExperimentRunner(
+			runner,
+			policy=resume_policy,
+			trial_ids=set(trial_ids) if trial_ids else None,
+		).run()
 	click.echo(json.dumps(summary.model_dump(mode="json"), sort_keys=True, indent=2))
 
 

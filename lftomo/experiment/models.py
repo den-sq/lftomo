@@ -86,6 +86,7 @@ class WindowReference(ConfigModel):
 	"""An explicit detector/projection window referenced by a fidelity level."""
 
 	id: StableName
+	role: Literal["tuning", "held_out"] = "tuning"
 	y_start: int = Field(ge=0)
 	y_stop: int = Field(gt=0)
 	theta_start: int | None = Field(default=None, ge=0)
@@ -111,7 +112,11 @@ class FidelityReference(ConfigModel):
 	id: StableName
 	windows: list[StableName] = Field(min_length=1)
 	projection_stride: int = Field(default=1, gt=0)
+	projection_limit: int | None = Field(default=None, gt=0)
 	resource_fraction: float = Field(default=1.0, gt=0, le=1)
+	memory_gb: float | None = Field(default=None, gt=0)
+	max_output_bytes: int | None = Field(default=None, gt=0)
+	timeout_seconds: float | None = Field(default=None, gt=0)
 
 	@model_validator(mode="after")
 	def _windows_are_unique(self):
@@ -144,6 +149,18 @@ class OutputPolicy(ConfigModel):
 		return self
 
 
+class PromotionPolicy(ConfigModel):
+	"""Deterministic successive-halving and exceptional-outcome rules."""
+
+	name: Literal["successive_halving"] = "successive_halving"
+	protocol_version: str = Field(default="1", min_length=1)
+	reduction_factor: float = Field(default=2.0, gt=1)
+	min_survivors: int = Field(default=1, gt=0)
+	ties: Literal["stable_cut", "include_all"] = "stable_cut"
+	invalid: Literal["exclude", "worst", "fail"] = "exclude"
+	failures: Literal["exclude", "worst", "fail"] = "exclude"
+
+
 class ExperimentConfig(ConfigModel):
 	"""Versioned envelope around the canonical Recon candidate space."""
 
@@ -158,6 +175,7 @@ class ExperimentConfig(ConfigModel):
 	fidelities: list[FidelityReference] = Field(min_length=1)
 	aggregation: AggregationPolicy
 	output: OutputPolicy = Field(default_factory=OutputPolicy)
+	promotion: PromotionPolicy | None = None
 	metadata: dict[str, JsonValue] = Field(default_factory=dict)
 
 	@model_validator(mode="after")
@@ -208,6 +226,8 @@ class ExperimentConfig(ConfigModel):
 			)
 		if self.sampler.name == "exhaustive" and has_continuous_domains(self.candidate_space):
 			raise ValueError("exhaustive sampling cannot consume continuous candidate domains")
+		if self.promotion is not None and len(self.fidelities) < 2:
+			raise ValueError("successive-halving promotion requires at least two fidelities")
 		return self
 
 	@property
@@ -282,6 +302,7 @@ class WindowIdentity(ConfigModel):
 	"""Exact global coordinates and halo for one evaluated window."""
 
 	id: StableName
+	role: Literal["tuning", "held_out"] = "tuning"
 	y_start: int = Field(ge=0)
 	y_stop: int = Field(gt=0)
 	theta_start: int | None = Field(default=None, ge=0)
@@ -307,6 +328,11 @@ class FidelityIdentity(ConfigModel):
 	id: StableName
 	windows: tuple[WindowIdentity, ...] = Field(min_length=1)
 	projection_stride: int = Field(default=1, gt=0)
+	projection_limit: int | None = Field(default=None, gt=0)
+	resource_fraction: float = Field(default=1.0, gt=0, le=1)
+	memory_gb: float | None = Field(default=None, gt=0)
+	max_output_bytes: int | None = Field(default=None, gt=0)
+	timeout_seconds: float | None = Field(default=None, gt=0)
 
 
 class MetricProtocolIdentity(ConfigModel):
