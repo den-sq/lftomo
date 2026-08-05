@@ -1,0 +1,134 @@
+schema_version: 1
+name: phase-stripe-tier2-search
+
+candidate_space:
+  pipeline:
+    - id: input
+      kind: read
+      algorithm: hdf5_dxchange
+      params: {order: projection, calibration_policy: ignore}
+    - id: normalize
+      kind: normalize
+      algorithm: taper_blended
+      params:
+        calibration_manifest: calibration/manifest.yaml
+        gain_averaging: true
+    # Stripe occurrences are intentionally repeated and ordered.
+    - id: stripe-primary
+      kind: stripe
+      algorithm: fw
+      sweep:
+        kind: cases
+        cases:
+          - name: fourier-wavelet
+            algorithm: fw
+            params: {level: 5, wname: db5, sigma: 2.0}
+          - name: vo-dead
+            algorithm: vo_dead
+            params: {snr: 3, size: 31, norm: true}
+    - id: stripe-sort
+      kind: stripe
+      algorithm: vo_sort
+      params: {size: 21, dim: 1}
+    # The phase filter and terminal conversion are separate occurrences.
+    - id: phase-filter
+      kind: phase
+      algorithm: paganin_filter
+      sweep:
+        kind: domain
+        params:
+          alpha: {kind: log, start: 0.005, stop: 0.2}
+    - id: negative-log
+      kind: phase
+      algorithm: negative_log
+      params: {epsilon: 1.0e-8}
+    - id: reconstruct
+      kind: recon
+      algorithm: gridrec
+      params: {center: 1280.0, ncore: 2, circle_mask: true}
+    - id: evaluate
+      kind: evaluate
+      algorithm: metrics
+      params:
+        metrics:
+          - {kind: ring, inner_radius: 8, smoothing_sigma: 2}
+          - {kind: validity, clip_min: -0.05, clip_max: 0.5}
+        aggregation: {method: mean, invalid: exclude}
+        preview:
+          scale_min: -0.02
+          scale_max: 0.25
+          crop: {y_start: 256, y_stop: 2048, x_start: 256, x_stop: 2048}
+          blinded: true
+          format: png
+    - id: final-writer
+      kind: write
+      algorithm: tiff_slices
+      params: {dtype: float32, naming_template: "slice_{slice:05d}", processes: 2}
+  candidate_limits:
+    max_candidates: 64
+    max_estimated_output_bytes: 536870912000
+
+sampler: {name: sobol, seed: 20260804, budget: 32}
+resources:
+  max_concurrency: 2
+  memory_gb: 64
+  max_output_bytes: 536870912000
+
+metrics:
+  - id: rings
+    metric: artifact.ring_score
+    protocol_version: "1"
+    direction: minimize
+    units: ratio
+  - id: clipped
+    metric: validity.clipped_fraction
+    protocol_version: "1"
+    direction: minimize
+    units: fraction
+  - id: nonfinite
+    metric: validity.nonfinite_count
+    protocol_version: "1"
+    direction: constraint
+    units: pixels
+objectives:
+  - {metric_id: rings}
+  - {metric_id: clipped}
+  - {metric_id: nonfinite, role: constraint, threshold: 0}
+
+windows:
+  - {id: top, role: tuning, y_start: 256, y_stop: 272, halo: 8}
+  - {id: middle, role: tuning, y_start: 1072, y_stop: 1088, halo: 8}
+  - {id: blind-bottom, role: held_out, y_start: 1888, y_stop: 1904, halo: 8}
+  - {id: full-volume, role: tuning, y_start: 0, y_stop: 2160, halo: 0}
+fidelities:
+  - id: screen
+    windows: [top, middle, blind-bottom]
+    projection_stride: 8
+    projection_limit: 256
+    resource_fraction: 0.25
+    memory_gb: 16
+    max_output_bytes: 1073741824
+  - id: finalist
+    windows: [full-volume]
+    projection_stride: 1
+    resource_fraction: 1.0
+    memory_gb: 64
+    max_output_bytes: 536870912000
+
+aggregation: {name: mean, metric_ids: [rings, clipped, nonfinite], invalid: exclude}
+output:
+  screening: metrics_and_previews
+  final_fidelity_id: finalist
+  write_full_finalists: true
+  max_bytes: 536870912000
+promotion:
+  name: successive_halving
+  protocol_version: "1"
+  reduction_factor: 4
+  min_survivors: 2
+  ties: include_all
+  invalid: exclude
+  failures: exclude
+
+metadata:
+  purpose: Immutable Tier-2 operator template; pin dataset and protocol before execution.

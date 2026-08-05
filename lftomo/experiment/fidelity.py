@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import math
 import os
@@ -448,6 +449,33 @@ def export_blinded_previews(
 	blinding_key: str,
 	max_bytes: int | None = None,
 ) -> PreviewBundle:
+	"""Serialize bundle updates so mappings and global byte guards remain atomic."""
+
+	root = Path(root)
+	private_root = root / "private" / "preview-mapping"
+	private_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+	with (private_root / ".lock").open("a+", encoding="utf-8") as lock:
+		fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+		try:
+			return _export_blinded_previews_unlocked(
+				images,
+				root,
+				contract,
+				blinding_key=blinding_key,
+				max_bytes=max_bytes,
+			)
+		finally:
+			fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _export_blinded_previews_unlocked(
+	images: Mapping[str, np.ndarray | Mapping[str, np.ndarray]],
+	root: str | Path,
+	contract: PreviewContract,
+	*,
+	blinding_key: str,
+	max_bytes: int | None = None,
+) -> PreviewBundle:
 	"""Write consistently scaled/cropped previews and a reversible private mapping."""
 
 	import cv2
@@ -458,8 +486,16 @@ def export_blinded_previews(
 	root = Path(root)
 	private_root = root / "private" / "preview-mapping"
 	private_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-	entries = []
-	total = 0
+	mapping_path = private_root / "mapping.json"
+	entry_root = private_root / "entries"
+	if mapping_path.exists():
+		existing = PreviewBundle.model_validate_json(mapping_path.read_text(encoding="utf-8"))
+		if existing.contract != contract:
+			raise ValueError("preview contract differs from the existing blinded bundle")
+	total = sum(
+		path.stat().st_size for path in (root / "previews").glob("*/*")
+		if path.is_file() and path.suffix in (".png", ".tif", ".tiff")
+	)
 	for candidate_key in sorted(images):
 		blind_id = hashlib.sha256(
 			f"{blinding_key}:{candidate_key}".encode("utf-8")
@@ -497,22 +533,33 @@ def export_blinded_previews(
 			else:
 				tf.imwrite(temporary, encoded)
 			encoded_bytes = temporary.stat().st_size
-			if max_bytes is not None and total + encoded_bytes > max_bytes:
+			replaced_bytes = path.stat().st_size if path.exists() else 0
+			if max_bytes is not None and total - replaced_bytes + encoded_bytes > max_bytes:
 				temporary.unlink()
 				raise ValueError(
 					f"preview output would exceed configured guard {max_bytes} bytes"
 				)
 			os.replace(temporary, path)
-			total += encoded_bytes
+			total = total - replaced_bytes + encoded_bytes
 			files.append(path)
-		entries.append(PreviewMappingEntry(
+		entry = PreviewMappingEntry(
 			blind_id=blind_id, candidate_key=candidate_key, files=tuple(files),
-		))
-	mapping_path = private_root / "mapping.json"
+		)
+		fragment = entry_root / f"{blind_id}.json"
+		if fragment.exists():
+			prior = PreviewMappingEntry.model_validate_json(fragment.read_text(encoding="utf-8"))
+			entry = entry.model_copy(update={
+				"files": tuple(sorted(set(prior.files) | set(entry.files))),
+			})
+		atomic_write_model(fragment, entry)
+	entries = tuple(sorted((
+		PreviewMappingEntry.model_validate_json(path.read_text(encoding="utf-8"))
+		for path in entry_root.glob("*.json")
+	), key=lambda item: item.blind_id))
 	bundle = PreviewBundle(
 		contract=contract,
 		mapping_path=mapping_path,
-		entries=tuple(entries),
+		entries=entries,
 		total_bytes=total,
 	)
 	atomic_write_model(mapping_path, bundle)

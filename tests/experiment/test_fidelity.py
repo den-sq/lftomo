@@ -202,9 +202,19 @@ def test_blinded_previews_share_scale_crop_and_have_reversible_private_mapping(t
 	assert not any((tmp_path / "previews").rglob("*.json"))
 	assert len({item.blind_id for item in bundle.entries}) == 2
 	assert all(item.candidate_key not in str(item.files[0]) for item in bundle.entries)
-	image = cv2.imread(str(bundle.entries[1].files[0]), cv2.IMREAD_UNCHANGED)
+	constant_entry = next(item for item in bundle.entries if item.candidate_key == HASHES[2])
+	image = cv2.imread(str(constant_entry.files[0]), cv2.IMREAD_UNCHANGED)
 	assert image.shape == (2, 3)
 	assert np.all(image == np.uint16(round(0.5 * 65535)))
+	updated = export_blinded_previews(
+		{HASHES[3]: np.full((4, 4), 7, dtype=np.float32)},
+		tmp_path,
+		contract,
+		blinding_key="private-review-key",
+	)
+	assert {item.candidate_key for item in updated.entries} == {
+		HASHES[1], HASHES[2], HASHES[3],
+	}
 	with pytest.raises(ValueError, match="preview output would exceed"):
 		export_blinded_previews(
 			{HASHES[3]: np.ones((4, 4))}, tmp_path / "guarded", contract,
@@ -316,3 +326,55 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 	)
 	final = executor._window_recon(SimpleNamespace(**base), window, Path("final-window"))
 	assert any(stage.kind == "write" for stage in final.pipeline)
+
+
+def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp_path):
+	document = experiment(values=(0.01,)).model_dump(mode="json")
+	document["output"]["screening"] = "metrics_and_previews"
+	config = ExperimentConfig.model_validate(document)
+	executor = PipelineTrialExecutor(config, "scan.yaml")
+	scan = SimpleNamespace(detector=SimpleNamespace(rows=20), n_projections=100)
+	monkeypatch.setattr("lftomo.experiment.cli.load_scan", lambda _path: (scan, _path))
+	monkeypatch.setenv("LFTOMO_PREVIEW_BLINDING_KEY", "test-private-key")
+	recon = Recon.model_validate({
+		"pipeline": [
+			{"id": "read", "kind": "read", "algorithm": "tiff_stack"},
+			{"id": "metrics", "kind": "evaluate", "algorithm": "metrics"},
+		],
+	})
+	identity = SimpleNamespace(
+		candidate=SimpleNamespace(value="a" * 64),
+		resolved_recon=recon,
+		fidelity=SimpleNamespace(
+			id="screen", projection_limit=10, projection_stride=2,
+			windows=(SimpleNamespace(
+				id="tune-a", y_start=2, y_stop=4, halo=0,
+				theta_start=None, theta_stop=None,
+			),),
+		),
+	)
+	artifact = {
+		"aggregates": {"quality": {"value": 0.25}},
+		"observations": [{
+			"metric": "quality", "window_id": "tune-a", "valid": True,
+			"value": 0.25,
+		}],
+		"preview": {
+			"scale_min": 0, "scale_max": 1, "blinded": True, "format": "png",
+		},
+	}
+	monkeypatch.setattr(
+		"lftomo.experiment.cli.run_reconstruction",
+		lambda *_args: [SimpleNamespace(artifacts={
+			"metrics": artifact,
+			"preview_images": {"tune-a-0": np.full((3, 3), 0.5)},
+		})],
+	)
+
+	result = executor(identity, tmp_path / "trials" / ("b" * 64))
+
+	assert result.metrics == {"quality": 0.25}
+	assert result.outputs[0].role == "blinded_preview"
+	assert result.outputs[0].path.is_file()
+	assert (tmp_path / "previews" / "mapping.json").is_file()
+	assert "preview_images" not in str(result.artifacts)

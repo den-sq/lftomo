@@ -12,6 +12,7 @@ import subprocess
 from typing import Any
 
 import click
+import numpy as np
 import yaml
 
 from lftomo.config import Recon
@@ -29,7 +30,21 @@ from .models import (
 	OutputRecord,
 	canonical_json,
 )
-from .fidelity import FidelityExperimentRunner, aggregate_window_metrics
+from .fidelity import (
+	FidelityExperimentRunner,
+	FidelityRunSummary,
+	PreviewBundle,
+	aggregate_window_metrics,
+	export_blinded_previews,
+)
+from lftomo.evaluation import PreviewContract
+from .protocol import (
+	Tier2Bounds,
+	Tier2ExperimentPlan,
+	audit_tier2_results,
+	build_tier2_plan,
+	write_tier2_plan,
+)
 from .runner import (
 	ExperimentInputs,
 	ExperimentRunPolicy,
@@ -195,6 +210,8 @@ class PipelineTrialExecutor:
 		metric_ids = {reference.metric: reference.id for reference in self.config.metrics}
 		artifacts = {}
 		outputs = []
+		preview_images = {}
+		preview_contract = None
 		for window in identity.fidelity.windows:
 			window_root = output_root / "windows" / window.id
 			recon = self._window_recon(identity, window, window_root)
@@ -202,7 +219,9 @@ class PipelineTrialExecutor:
 			pipeline_path = window_root / "resolved-recon.yaml"
 			pipeline_path.write_text(recon.to_yaml(), encoding="utf-8")
 			result = run_reconstruction(pipeline_path, self.scan_path)[0]
-			artifact = result.artifacts.get("metrics", {})
+			window_artifacts = dict(result.artifacts)
+			raw_previews = window_artifacts.pop("preview_images", {})
+			artifact = window_artifacts.get("metrics", {})
 			aggregates = artifact.get("aggregates", {}) if isinstance(artifact, dict) else {}
 			observations = artifact.get("observations", ()) if isinstance(artifact, dict) else ()
 			for observation in observations:
@@ -219,7 +238,18 @@ class PipelineTrialExecutor:
 					if isinstance(aggregate, dict):
 						aggregate = aggregate.get("value")
 					window_metrics.setdefault(window.id, {})[reference.id] = [aggregate]
-			artifacts[window.id] = json_value(result.artifacts)
+			if isinstance(raw_previews, dict):
+				preview_images.update({
+					f"{window.id}-{label}": np.asarray(image)
+					for label, image in raw_previews.items()
+				})
+			contract_document = artifact.get("preview") if isinstance(artifact, dict) else None
+			if contract_document is not None:
+				contract = PreviewContract.model_validate(contract_document)
+				if preview_contract is not None and preview_contract != contract:
+					raise ValueError("evaluation windows use inconsistent preview contracts")
+				preview_contract = contract
+			artifacts[window.id] = json_value(window_artifacts)
 			for path in result.artifacts.get("output_files", ()):
 				path = Path(path)
 				if path.is_file():
@@ -231,6 +261,30 @@ class PipelineTrialExecutor:
 						path=path,
 						bytes=path.stat().st_size,
 					))
+		is_screening = identity.fidelity.id != self.config.output.final_fidelity_id
+		if self.config.output.screening == "metrics_and_previews" and is_screening:
+			if preview_contract is None or not preview_images:
+				raise ValueError(
+					"metrics_and_previews screening requires evaluate.metrics preview configuration"
+				)
+			blinding_key = os.environ.get("LFTOMO_PREVIEW_BLINDING_KEY")
+			if not blinding_key:
+				raise ValueError(
+					"metrics_and_previews screening requires LFTOMO_PREVIEW_BLINDING_KEY"
+				)
+			bundle = export_blinded_previews(
+				{identity.candidate.value: preview_images},
+				output_root.parents[1],
+				preview_contract,
+				blinding_key=blinding_key,
+				max_bytes=self.config.output.max_bytes,
+			)
+			entry = next(
+				item for item in bundle.entries if item.candidate_key == identity.candidate.value
+			)
+			outputs.extend(OutputRecord(
+				role="blinded_preview", path=path, bytes=path.stat().st_size,
+			) for path in entry.files)
 		aggregates = aggregate_window_metrics(window_metrics, self.config)
 		return TrialExecution(
 			metrics=json_value(aggregates.tuning),
@@ -402,6 +456,88 @@ def inspect_command(root: Path) -> None:
 
 	inspection = PersistedExperimentStore(root).inspect()
 	click.echo(json.dumps(inspection.model_dump(mode="json"), sort_keys=True, indent=2))
+
+
+@main.command("tier2-plan")
+@click.argument("experiment_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("scan_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+	"--environment-lock", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+	required=True,
+)
+@click.option(
+	"--projection-manifest", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+	required=True,
+)
+@click.option("--blinding-key-id", required=True)
+@click.option("--max-candidates", type=click.IntRange(min=1), required=True)
+@click.option("--max-screen-window-rows", type=click.IntRange(min=1), required=True)
+@click.option("--max-screen-projections", type=click.IntRange(min=1), required=True)
+@click.option("--max-output-bytes", type=click.IntRange(min=1), required=True)
+@click.option("--max-memory-gb", type=click.FloatRange(min=0, min_open=True), required=True)
+@click.option("--output", type=click.Path(dir_okay=False, path_type=Path), required=True)
+def tier2_plan_command(
+	experiment_path: Path,
+	scan_path: Path,
+	environment_lock: Path,
+	projection_manifest: Path,
+	blinding_key_id: str,
+	max_candidates: int,
+	max_screen_window_rows: int,
+	max_screen_projections: int,
+	max_output_bytes: int,
+	max_memory_gb: float,
+	output: Path,
+) -> None:
+	"""Freeze an immutable bounded Tier-2 protocol before loading projections."""
+
+	config = load_experiment_config(experiment_path)
+	preview_documents = {
+		canonical_json(stage.params["preview"])
+		for stage in config.candidate_space.pipeline
+		if stage.kind == "evaluate" and stage.params.get("preview") is not None
+	}
+	if len(preview_documents) != 1:
+		raise click.UsageError(
+			"Tier-2 planning requires one consistent evaluate.metrics preview contract"
+		)
+	preview = PreviewContract.model_validate(json.loads(next(iter(preview_documents))))
+	plan = build_tier2_plan(
+		config,
+		build_experiment_inputs(scan_path),
+		environment_lock_hash=_sha256(environment_lock.read_bytes()),
+		projection_manifest_hash=_sha256(projection_manifest.read_bytes()),
+		preview=preview,
+		blinding_key_id=blinding_key_id,
+		bounds=Tier2Bounds(
+			max_candidates=max_candidates,
+			max_screen_window_rows=max_screen_window_rows,
+			max_screen_projections=max_screen_projections,
+			max_output_bytes=max_output_bytes,
+			max_memory_gb=max_memory_gb,
+		),
+	)
+	write_tier2_plan(output, plan)
+	click.echo(json.dumps(plan.model_dump(mode="json"), sort_keys=True, indent=2))
+
+
+@main.command("tier2-audit")
+@click.argument("plan_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def tier2_audit_command(plan_path: Path, root: Path) -> None:
+	"""Audit a completed real-data bundle against its frozen Tier-2 protocol."""
+
+	plan = Tier2ExperimentPlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
+	summary = FidelityRunSummary.model_validate_json(
+		(root / "fidelity-results.json").read_text(encoding="utf-8")
+	)
+	previews = PreviewBundle.model_validate_json(
+		(root / "previews" / "mapping.json").read_text(encoding="utf-8")
+	)
+	audit = audit_tier2_results(plan, summary, previews)
+	click.echo(json.dumps(audit.model_dump(mode="json"), sort_keys=True, indent=2))
+	if not audit.passed:
+		raise click.ClickException("Tier-2 audit failed")
 
 
 @main.command("resume")

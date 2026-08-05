@@ -177,4 +177,10 @@ class EvaluationStage(Stage):
 			},
 		)
 		state.artifacts["metrics"] = artifact.model_dump(mode="json")
+		if self.preview is not None:
+			state.artifacts["preview_images"] = {
+				f"{window.id}-{(window.slice_start + window.slice_stop - 1) // 2}":
+				working[(window.slice_start + window.slice_stop - 1) // 2].copy()
+				for window in windows
+			}
 		return state

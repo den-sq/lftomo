@@ -67,6 +67,14 @@ from .fidelity import (
 	promotion_lineage,
 	successive_halving,
 )
+from .protocol import (
+	Tier2Audit,
+	Tier2Bounds,
+	Tier2ExperimentPlan,
+	audit_tier2_results,
+	build_tier2_plan,
+	write_tier2_plan,
+)
 
 __all__ = [
 	"AggregationPolicy",
@@ -113,6 +121,9 @@ __all__ = [
 	"SamplerSpec",
 	"SelectedCandidate",
 	"StoreInspection",
+	"Tier2Audit",
+	"Tier2Bounds",
+	"Tier2ExperimentPlan",
 	"TrialAttemptRecord",
 	"TrialDescription",
 	"TrialId",
@@ -125,8 +136,11 @@ __all__ = [
 	"canonical_json",
 	"compare_trial_identities",
 	"aggregate_window_metrics",
+	"audit_tier2_results",
+	"build_tier2_plan",
 	"export_blinded_previews",
 	"promotion_lineage",
 	"select_candidates",
 	"successive_halving",
+	"write_tier2_plan",
 ]

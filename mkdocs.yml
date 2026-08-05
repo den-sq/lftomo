@@ -15,6 +15,7 @@ nav:
    - Experiment models: experiment-models.md
    - Experiment runner: experiment-runner.md
    - Fidelity experiments: fidelity-experiments.md
+   - Experiment operations: experiment-operations.md
    - Reconstruction evaluation: evaluation.md
  - API reference:
    - Configuration models: api/config.md
