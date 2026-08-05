@@ -351,6 +351,9 @@ class TrialIdentity(ConfigModel):
 		"""Return only identity-bearing fields in canonical collection order."""
 
 		payload = self.model_dump(mode="json")
+		# Sampler provenance explains how the candidate was discovered, but it
+		# does not change the candidate's numerical inputs or result reuse.
+		payload.pop("sampler")
 		# The complete Recon remains rerunnable in the record, while its output
 		# path and execution guards are descriptive. CandidateKey owns the
 		# canonical pipeline-content projection.

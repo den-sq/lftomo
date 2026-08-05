@@ -101,8 +101,10 @@ lftomo-experiment rerun experiment.yaml scan.yaml --root results \
 ```
 
 Compatibility is checked against the complete trial identity, including dataset and
-calibration hashes, resolved candidate, code and environment, sampler coordinate,
-fidelity windows, and metric protocols. The default mismatch policy is `fail`; select
+calibration hashes, resolved candidate, code and environment, fidelity windows, and
+metric protocols. Sampler coordinates remain recorded provenance but are deliberately
+non-identity, so the same resolved candidate can reuse a result across samplers. The
+default mismatch policy is `fail`; select
 `--mismatch skip` to persist an auditable incompatible record or `--mismatch rerun` to
 run under the new identity. Diagnostics name concrete fields such as
 `dataset.content_hash`.

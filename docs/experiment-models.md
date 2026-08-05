@@ -49,13 +49,14 @@ is scientifically and numerically reusable:
 - resolved scan configuration and calibration hashes;
 - package version, commit, dirty state, runtime/backend, dependencies, and
   relevant hardware facts;
-- sampler seed plus coordinate or explicit case;
 - exact fidelity windows, halos, and projection stride;
 - metric protocol names, versions, and configuration hashes.
 
 The complete sweep-free `Recon` remains embedded for direct rerun. Labels,
-notes, and dataset/output paths belong to `TrialDescription`; changing them
-does not change compatibility. Compatibility compares normalized
+notes, dataset/output paths, and sampler provenance do not change
+compatibility. The sampler seed and coordinate remain recorded in every trial
+to explain candidate discovery, but identical resolved candidates are reusable
+across samplers. Compatibility compares normalized
 identity-bearing fields and reports paths such as
 `dataset.content_hash` or `metric_protocols[...].protocol_version`, not only
 a bare hash mismatch.
