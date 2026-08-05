@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import click
 import h5py
@@ -23,17 +23,24 @@ from lftomo.calibration import (
 	load_manifest,
 	validate_bundle,
 )
-from lftomo.config import HDF5DxchangeProjections, Recon, Scan
+from lftomo.config import HDF5DxchangeProjections, Recon, Scan, StageConfig
 from lftomo.pipeline import (
 	Backend,
 	CandidateLimitError,
 	NumpyBackend,
 	Pipeline,
 	PipelineState,
+	Stage,
 	expand_recon_sweeps,
 	validate_pipeline,
 )
 from lftomo.pipeline.stages import create_stage
+
+
+PipelineStateExecutor = Callable[
+	[PipelineState, tuple[Stage, ...], tuple[StageConfig, ...]],
+	PipelineState,
+]
 
 
 @dataclass(frozen=True)
@@ -384,7 +391,8 @@ def _estimated_output_bytes(scan: Scan, recon: Recon) -> int | None:
 def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			output_path: str | Path | None = None, backend: Backend | None = None, *,
 			calibration_bundle: CalibrationBundleRef | None = None,
-			verify_calibration_hashes: bool = True) -> list[RunResult]:
+			verify_calibration_hashes: bool = True,
+			state_executor: PipelineStateExecutor | None = None) -> list[RunResult]:
 	"""Load, expand, and execute every concrete run described by YAML files."""
 	recon, resolved_pipeline_path = load_recon(pipeline_path)
 	scan, resolved_scan_path = load_scan(scan_path)
@@ -461,7 +469,10 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			artifacts=dict(initial_artifacts),
 			backend=backend,
 		)
-		state = Pipeline(stages, backend=backend, validation_mode="complete").run(state)
+		if state_executor is None:
+			state = Pipeline(stages, backend=backend, validation_mode="complete").run(state)
+		else:
+			state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
 		results.append(RunResult(
 			run.index,
 			run.parameters,

@@ -1,0 +1,893 @@
+"""Opt-in, content-addressed common-prefix snapshots for experiment trials."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+import copy
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timezone
+from enum import Enum
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import pickle
+import shutil
+import threading
+import time
+from typing import Any, Callable, Literal, Sequence
+from uuid import uuid4
+
+import numpy as np
+from pydantic import Field, model_validator
+
+from lftomo.config import ConfigModel, StageConfig
+from lftomo.pipeline import Pipeline, PipelineState, Stage
+
+from .models import canonical_json
+
+
+class PrefixCacheError(RuntimeError):
+	"""Base error for safe prefix-cache fallback decisions."""
+
+
+class PrefixCacheIntegrityError(PrefixCacheError):
+	"""A published snapshot failed integrity or equivalence checks."""
+
+
+class PrefixCacheCapacityError(PrefixCacheError):
+	"""A snapshot cannot fit inside the declared cache bounds."""
+
+
+def _utcnow() -> datetime:
+	return datetime.now(timezone.utc)
+
+
+def _sha256_bytes(value: bytes) -> str:
+	return hashlib.sha256(value).hexdigest()
+
+
+def _fingerprint(value: Any) -> Any:
+	"""Return a deterministic identity document or reject an unsafe value."""
+
+	if hasattr(value, "model_dump"):
+		return _fingerprint(value.model_dump(mode="python"))
+	if is_dataclass(value) and not isinstance(value, type):
+		return _fingerprint(asdict(value))
+	if isinstance(value, np.ndarray):
+		if value.dtype.hasobject:
+			raise TypeError("object arrays do not have a safe cache identity")
+		array = np.ascontiguousarray(value)
+		return {
+			"kind": "ndarray",
+			"dtype": array.dtype.str,
+			"shape": list(array.shape),
+			"sha256": _sha256_bytes(memoryview(array).cast("B")),
+		}
+	if isinstance(value, np.generic):
+		return value.item()
+	if isinstance(value, Path):
+		return {"kind": "path", "value": str(value)}
+	if isinstance(value, type):
+		return {"kind": "type", "value": f"{value.__module__}.{value.__qualname__}"}
+	if isinstance(value, Enum):
+		return {
+			"kind": "enum",
+			"type": f"{type(value).__module__}.{type(value).__qualname__}",
+			"value": value.name,
+		}
+	if isinstance(value, dict):
+		return {str(key): _fingerprint(item) for key, item in value.items()}
+	if isinstance(value, (list, tuple)):
+		return [_fingerprint(item) for item in value]
+	if isinstance(value, (set, frozenset)):
+		items = [_fingerprint(item) for item in value]
+		return sorted(items, key=canonical_json)
+	if value is None or isinstance(value, (str, int, float, bool)):
+		return value
+	raise TypeError(
+		f"{type(value).__module__}.{type(value).__qualname__} lacks a cache identity contract"
+	)
+
+
+def _hash_document(value: Any) -> str:
+	return _sha256_bytes(canonical_json(_fingerprint(value)).encode("utf-8"))
+
+
+def _identity_differences(expected: Any, actual: Any, prefix: str = "") -> list[str]:
+	if isinstance(expected, dict) and isinstance(actual, dict):
+		fields = []
+		for key in sorted(set(expected) | set(actual)):
+			field = f"{prefix}.{key}" if prefix else str(key)
+			if key not in expected or key not in actual:
+				fields.append(field)
+			else:
+				fields.extend(_identity_differences(expected[key], actual[key], field))
+		return fields
+	if isinstance(expected, list) and isinstance(actual, list):
+		fields = []
+		if len(expected) != len(actual):
+			fields.append(f"{prefix}.length")
+		for index, (left, right) in enumerate(zip(expected, actual)):
+			fields.extend(_identity_differences(left, right, f"{prefix}[{index}]"))
+		return fields
+	return [] if expected == actual else [prefix]
+
+
+class PrefixCachePolicy(ConfigModel):
+	"""Explicit opt-in controls and hard resource bounds for prefix snapshots."""
+
+	enabled: bool = False
+	scratch: Path | None = None
+	max_disk_bytes: int | None = Field(default=None, gt=0)
+	max_memory_bytes: int | None = Field(default=None, gt=0)
+	max_entries: int = Field(default=64, gt=0)
+	on_error: Literal["rebuild", "bypass", "fail"] = "rebuild"
+	verify_fraction: float = Field(default=0.0, ge=0, le=1)
+	verify_rtol: float = Field(default=1e-6, ge=0)
+	verify_atol: float = Field(default=1e-7, ge=0)
+
+	@model_validator(mode="after")
+	def _enabled_cache_is_explicitly_bounded(self):
+		if self.enabled and (
+			self.scratch is None
+			or self.max_disk_bytes is None
+			or self.max_memory_bytes is None
+		):
+			raise ValueError(
+				"enabled prefix caching requires explicit scratch, max_disk_bytes, "
+				"and max_memory_bytes"
+			)
+		return self
+
+
+class PrefixCacheDecision(ConfigModel):
+	"""Dry-run-visible decision for one trial/window pipeline."""
+
+	candidate_id: str
+	action: Literal["cache", "independent", "bypass"]
+	prefix_id: str | None = None
+	stage_count: int = Field(default=0, ge=0)
+	stage_ids: tuple[str, ...] = ()
+	estimated_snapshot_bytes: int | None = Field(default=None, ge=0)
+	requires_array_copy: bool = False
+	reason: str
+
+
+class PrefixCachePlan(ConfigModel):
+	"""Deterministic prefix plan embedded in experiment preflight output."""
+
+	schema_version: Literal[1] = 1
+	enabled: bool
+	scratch: Path | None
+	estimated_unique_snapshot_bytes: int | None = Field(default=None, ge=0)
+	decisions: tuple[PrefixCacheDecision, ...]
+
+
+class PrefixCacheEvent(ConfigModel):
+	"""Per-window cache provenance and lightweight benchmark measurements."""
+
+	status: Literal["hit", "miss", "rebuilt", "bypass", "independent"]
+	prefix_id: str | None = None
+	cache_key: str | None = None
+	stage_count: int = Field(default=0, ge=0)
+	snapshot_bytes: int | None = Field(default=None, ge=0)
+	fork_strategy: Literal["explicit_copy", "read_only", "independent"]
+	invalidation_fields: tuple[str, ...] = ()
+	evicted_keys: tuple[str, ...] = ()
+	recovered_partials: int = Field(default=0, ge=0)
+	build_seconds: float = Field(default=0.0, ge=0)
+	load_seconds: float = Field(default=0.0, ge=0)
+	read_bytes: int = Field(default=0, ge=0)
+	written_bytes: int = Field(default=0, ge=0)
+	cache_bytes_after: int | None = Field(default=None, ge=0)
+	verified: bool = False
+	reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PrefixPlanningCandidate:
+	"""Runtime Stage/config facts used by deterministic prefix planning."""
+
+	candidate_id: str
+	configs: tuple[StageConfig, ...]
+	stages: tuple[Stage, ...]
+	share_identity: Any
+	estimated_snapshot_bytes: int | None = None
+
+
+def _stage_identity(config: StageConfig, stage: Stage) -> dict[str, Any]:
+	return {
+		"config": _fingerprint(config),
+		"contract": _fingerprint(stage.contract),
+	}
+
+
+def _stage_id(config: StageConfig, index: int) -> str:
+	return config.id or f"{config.kind}.{config.algorithm or 'default'}[{index}]"
+
+
+def _cacheable(stage: Stage) -> bool:
+	contract = stage.contract
+	return (
+		contract.cacheable_prefix
+		and not contract.forks_pipeline
+		and not contract.resources.requires_gpu
+	)
+
+
+def plan_common_prefixes(
+	candidates: Sequence[PrefixPlanningCandidate],
+	policy: PrefixCachePolicy,
+) -> PrefixCachePlan:
+	"""Find each candidate's longest safe prefix shared with another candidate."""
+
+	ordered = sorted(candidates, key=lambda item: item.candidate_id)
+	signatures = [
+		[_stage_identity(config, stage) for config, stage in zip(item.configs, item.stages)]
+		for item in ordered
+	]
+	share_identities = [_fingerprint(item.share_identity) for item in ordered]
+	decisions = []
+	unique_estimates: dict[str, int | None] = {}
+	for index, candidate in enumerate(ordered):
+		safe_limit = 0
+		for stage in candidate.stages:
+			if not _cacheable(stage):
+				break
+			safe_limit += 1
+		best = 0
+		for other_index, other in enumerate(ordered):
+			if index == other_index or share_identities[index] != share_identities[other_index]:
+				continue
+			other_safe = 0
+			for stage in other.stages:
+				if not _cacheable(stage):
+					break
+				other_safe += 1
+			common = 0
+			for left, right in zip(signatures[index], signatures[other_index]):
+				if common >= min(safe_limit, other_safe) or left != right:
+					break
+				common += 1
+			best = max(best, common)
+		stage_ids = tuple(
+			_stage_id(config, offset) for offset, config in enumerate(candidate.configs[:best])
+		)
+		prefix_id = None if best == 0 else _hash_document({"stages": signatures[index][:best]})
+		requires_copy = any(stage.contract.mutates_input for stage in candidate.stages[best:])
+		action: Literal["cache", "independent", "bypass"] = "independent"
+		if best == 0:
+			if candidate.stages and not _cacheable(candidate.stages[0]):
+				reason = (
+					f"stage {_stage_id(candidate.configs[0], 0)} is not explicitly "
+					"prefix-cacheable"
+				)
+			else:
+				reason = "no semantically identical safe prefix is shared"
+		elif not policy.enabled:
+			reason = "prefix caching is disabled; independent execution remains the default"
+		elif (
+			candidate.estimated_snapshot_bytes is not None
+			and policy.max_disk_bytes is not None
+			and candidate.estimated_snapshot_bytes > policy.max_disk_bytes
+		):
+			action = "bypass"
+			reason = "estimated snapshot exceeds the explicit disk bound"
+		elif (
+			requires_copy
+			and candidate.estimated_snapshot_bytes is not None
+			and policy.max_memory_bytes is not None
+			and candidate.estimated_snapshot_bytes > policy.max_memory_bytes
+		):
+			action = "bypass"
+			reason = "required mutation-isolation copy exceeds the explicit memory bound"
+		else:
+			action = "cache"
+			if best < len(candidate.stages) and not _cacheable(candidate.stages[best]):
+				reason = (
+					f"stopped before insufficiently contracted stage "
+					f"{_stage_id(candidate.configs[best], best)}"
+				)
+			elif best < len(candidate.stages):
+				reason = f"stopped before differing stage {_stage_id(candidate.configs[best], best)}"
+			else:
+				reason = "complete pipeline is a shared, explicitly cacheable prefix"
+		if prefix_id is not None:
+			unique_estimates.setdefault(prefix_id, candidate.estimated_snapshot_bytes)
+		decisions.append(PrefixCacheDecision(
+			candidate_id=candidate.candidate_id,
+			action=action,
+			prefix_id=prefix_id,
+			stage_count=best,
+			stage_ids=stage_ids,
+			estimated_snapshot_bytes=candidate.estimated_snapshot_bytes,
+			requires_array_copy=requires_copy,
+			reason=reason,
+		))
+	total = None if any(value is None for value in unique_estimates.values()) else sum(
+		value or 0 for value in unique_estimates.values()
+	)
+	return PrefixCachePlan(
+		enabled=policy.enabled,
+		scratch=policy.scratch,
+		estimated_unique_snapshot_bytes=total,
+		decisions=tuple(decisions),
+	)
+
+
+class PrefixSnapshotManifest(ConfigModel):
+	"""Immutable integrity manifest published last inside one snapshot directory."""
+
+	schema_version: Literal[1] = 1
+	prefix_id: str
+	cache_key: str
+	stage_count: int = Field(gt=0)
+	identity: dict[str, Any]
+	array_sha256: str
+	state_sha256: str
+	array_bytes: int = Field(ge=0)
+	state_bytes: int = Field(ge=0)
+	snapshot_bytes: int = Field(ge=0)
+	created_at: datetime
+
+
+def _write_bytes(path: Path, payload: bytes) -> None:
+	path.parent.mkdir(parents=True, exist_ok=True)
+	with path.open("xb") as stream:
+		stream.write(payload)
+		stream.flush()
+		os.fsync(stream.fileno())
+
+
+def _write_json(path: Path, payload: Any) -> None:
+	_write_bytes(
+		path,
+		(json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n").encode("utf-8"),
+	)
+
+
+def _directory_bytes(path: Path) -> int:
+	return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _run_stages(state: PipelineState, stages: Sequence[Stage]) -> PipelineState:
+	if not stages:
+		return state
+	return Pipeline(
+		list(stages),
+		backend=state.backend,
+		validation_mode="fragment",
+		initial_layout=state.layout,
+		initial_domain=state.domain,
+	).run(state)
+
+
+def _clone_initial_state(state: PipelineState) -> PipelineState:
+	working = np.asarray(state.working_array)
+	return PipelineState(
+		working_array=working.copy(),
+		scan=state.scan.model_copy(deep=True),
+		recon=state.recon.model_copy(deep=True),
+		artifacts=copy.deepcopy(state.artifacts),
+		backend=state.backend,
+		layout=state.layout,
+		domain=state.domain,
+	)
+
+
+def _equivalent(left: Any, right: Any, *, rtol: float, atol: float) -> bool:
+	if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+		try:
+			np.testing.assert_allclose(np.asarray(left), np.asarray(right), rtol=rtol, atol=atol)
+		except (AssertionError, TypeError, ValueError):
+			return False
+		return True
+	if hasattr(left, "model_dump") and hasattr(right, "model_dump"):
+		return _equivalent(
+			left.model_dump(mode="python"), right.model_dump(mode="python"),
+			rtol=rtol, atol=atol,
+		)
+	if isinstance(left, dict) and isinstance(right, dict):
+		return set(left) == set(right) and all(
+			_equivalent(left[key], right[key], rtol=rtol, atol=atol) for key in left
+		)
+	if isinstance(left, (list, tuple)) and isinstance(right, (list, tuple)):
+		return len(left) == len(right) and all(
+			_equivalent(a, b, rtol=rtol, atol=atol) for a, b in zip(left, right)
+		)
+	return left == right
+
+
+class PrefixCacheStore:
+	"""Atomic, bounded filesystem store for immutable NumPy prefix snapshots."""
+
+	def __init__(self, policy: PrefixCachePolicy):
+		if not policy.enabled or policy.scratch is None:
+			raise ValueError("PrefixCacheStore requires an enabled policy with scratch")
+		self.policy = policy
+		self.root = policy.scratch
+		self._thread_lock = threading.RLock()
+
+	@contextmanager
+	def _locked(self):
+		self.root.mkdir(parents=True, exist_ok=True)
+		lock_path = self.root / ".cache.lock"
+		with self._thread_lock, lock_path.open("a+", encoding="utf-8") as stream:
+			fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+			stream.seek(0)
+			prior = stream.read().strip()
+			if prior:
+				quarantine = self.root / "quarantine" / "locks"
+				quarantine.mkdir(parents=True, exist_ok=True)
+				(quarantine / f"stale-{time.time_ns()}.json").write_text(
+					prior + "\n", encoding="utf-8",
+				)
+			stream.seek(0)
+			stream.truncate()
+			json.dump({"pid": os.getpid(), "claimed_at": _utcnow().isoformat()}, stream)
+			stream.flush()
+			os.fsync(stream.fileno())
+			try:
+				yield bool(prior)
+			finally:
+				stream.seek(0)
+				stream.truncate()
+				stream.flush()
+				fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+	def _entry(self, prefix_id: str, cache_key: str) -> Path:
+		return self.root / "entries" / prefix_id / cache_key
+
+	def _quarantine(self, path: Path, category: str) -> None:
+		if not path.exists():
+			return
+		destination = self.root / "quarantine" / category / f"{path.name}-{time.time_ns()}"
+		destination.parent.mkdir(parents=True, exist_ok=True)
+		os.replace(path, destination)
+		self._trim_quarantine()
+
+	def _trim_quarantine(self, reserve: int = 0) -> None:
+		root = self.root / "quarantine"
+		if not root.exists() or self.policy.max_disk_bytes is None:
+			return
+		items = [item for category in root.iterdir() for item in category.iterdir()]
+		active = _directory_bytes(self.root / "entries")
+		quarantine = _directory_bytes(root)
+		for item in sorted(items, key=lambda value: value.stat().st_mtime):
+			if active + quarantine + reserve <= self.policy.max_disk_bytes:
+				break
+			size = _directory_bytes(item) if item.is_dir() else item.stat().st_size
+			if item.is_dir():
+				shutil.rmtree(item)
+			else:
+				item.unlink()
+			quarantine -= size
+
+	def _recover_partials(self) -> int:
+		builds = self.root / "builds"
+		partials = list(builds.iterdir()) if builds.exists() else []
+		for path in partials:
+			self._quarantine(path, "partial")
+		return len(partials)
+
+	def _read_manifest(self, entry: Path) -> PrefixSnapshotManifest:
+		manifest_path = entry / "manifest.json"
+		try:
+			manifest = PrefixSnapshotManifest.model_validate_json(
+				manifest_path.read_text(encoding="utf-8")
+			)
+		except Exception as error:
+			raise PrefixCacheIntegrityError(f"invalid snapshot manifest: {error}") from error
+		array_path = entry / "working.npy"
+		state_path = entry / "state.pkl"
+		try:
+			array_payload = array_path.read_bytes()
+			state_payload = state_path.read_bytes()
+		except OSError as error:
+			raise PrefixCacheIntegrityError(f"snapshot payload is missing: {error}") from error
+		if _sha256_bytes(array_payload) != manifest.array_sha256:
+			raise PrefixCacheIntegrityError("working-array integrity hash mismatch")
+		if _sha256_bytes(state_payload) != manifest.state_sha256:
+			raise PrefixCacheIntegrityError("snapshot-state integrity hash mismatch")
+		if len(array_payload) != manifest.array_bytes or len(state_payload) != manifest.state_bytes:
+			raise PrefixCacheIntegrityError("snapshot byte count mismatch")
+		if _directory_bytes(entry) != manifest.snapshot_bytes:
+			raise PrefixCacheIntegrityError("snapshot directory byte count mismatch")
+		return manifest
+
+	def _load(
+		self,
+		entry: Path,
+		current: PipelineState,
+		*,
+		requires_copy: bool,
+	) -> tuple[PipelineState, PrefixSnapshotManifest, float]:
+		started = time.perf_counter()
+		manifest = self._read_manifest(entry)
+		if requires_copy and manifest.snapshot_bytes > (self.policy.max_memory_bytes or 0):
+			raise PrefixCacheCapacityError(
+				f"snapshot fork requires up to {manifest.snapshot_bytes} bytes, exceeding "
+				f"cache memory bound {self.policy.max_memory_bytes}"
+			)
+		try:
+			working = np.load(entry / "working.npy", mmap_mode="r", allow_pickle=False)
+			with (entry / "state.pkl").open("rb") as stream:
+				payload = pickle.load(stream)
+		except Exception as error:
+			raise PrefixCacheIntegrityError(f"snapshot cannot be loaded: {error}") from error
+		if not isinstance(payload, dict) or not {
+			"artifacts", "scan", "recon_metadata", "layout", "domain",
+		}.issubset(payload):
+			raise PrefixCacheIntegrityError("snapshot state payload is incomplete")
+		if requires_copy:
+			working = np.array(working, copy=True)
+		else:
+			working.flags.writeable = False
+		recon = current.recon.model_copy(deep=True)
+		recon.metadata = copy.deepcopy(payload["recon_metadata"])
+		state = PipelineState(
+			working_array=working,
+			scan=copy.deepcopy(payload["scan"]),
+			recon=recon,
+			artifacts=copy.deepcopy(payload["artifacts"]),
+			backend=current.backend,
+			layout=payload["layout"],
+			domain=payload["domain"],
+		)
+		return state, manifest, time.perf_counter() - started
+
+	def _publish(
+		self,
+		prefix_id: str,
+		cache_key: str,
+		identity: dict[str, Any],
+		stage_count: int,
+		state: PipelineState,
+	) -> tuple[PrefixSnapshotManifest, tuple[str, ...]]:
+		build = self.root / "builds" / f"{cache_key}-{uuid4().hex}"
+		build.mkdir(parents=True)
+		try:
+			array_path = build / "working.npy"
+			with array_path.open("xb") as stream:
+				np.save(stream, np.asarray(state.working_array), allow_pickle=False)
+				stream.flush()
+				os.fsync(stream.fileno())
+			state_path = build / "state.pkl"
+			_write_bytes(state_path, pickle.dumps({
+				"artifacts": copy.deepcopy(state.artifacts),
+				"scan": state.scan.model_copy(deep=True),
+				"recon_metadata": copy.deepcopy(state.recon.metadata),
+				"layout": state.layout,
+				"domain": state.domain,
+			}, protocol=pickle.HIGHEST_PROTOCOL))
+			array_payload = array_path.read_bytes()
+			state_payload = state_path.read_bytes()
+			manifest = PrefixSnapshotManifest(
+				prefix_id=prefix_id,
+				cache_key=cache_key,
+				stage_count=stage_count,
+				identity=identity,
+				array_sha256=_sha256_bytes(array_payload),
+				state_sha256=_sha256_bytes(state_payload),
+				array_bytes=len(array_payload),
+				state_bytes=len(state_payload),
+				snapshot_bytes=len(array_payload) + len(state_payload),
+				created_at=_utcnow(),
+			)
+			manifest_payload = b""
+			for _attempt in range(10):
+				manifest_payload = (
+					json.dumps(
+						manifest.model_dump(mode="json"), sort_keys=True, indent=2,
+					) + "\n"
+				).encode("utf-8")
+				snapshot_bytes = len(array_payload) + len(state_payload) + len(manifest_payload)
+				if snapshot_bytes == manifest.snapshot_bytes:
+					break
+				manifest = manifest.model_copy(update={"snapshot_bytes": snapshot_bytes})
+			else:
+				raise PrefixCacheError("snapshot manifest byte count did not stabilize")
+			_write_bytes(build / "manifest.json", manifest_payload)
+			if manifest.snapshot_bytes > (self.policy.max_disk_bytes or 0):
+				raise PrefixCacheCapacityError(
+					f"snapshot is {manifest.snapshot_bytes} bytes, exceeding cache disk bound "
+					f"{self.policy.max_disk_bytes}"
+				)
+			evicted = self._evict_for(manifest.snapshot_bytes, exclude=cache_key)
+			entry = self._entry(prefix_id, cache_key)
+			entry.parent.mkdir(parents=True, exist_ok=True)
+			if entry.exists():
+				self._quarantine(entry, "superseded")
+			os.replace(build, entry)
+			return manifest, evicted
+		except PrefixCacheError:
+			if build.exists():
+				self._quarantine(build, "partial")
+			raise
+		except Exception as error:
+			if build.exists():
+				self._quarantine(build, "partial")
+			raise PrefixCacheError(f"snapshot publication failed: {error}") from error
+		except BaseException:
+			if build.exists():
+				self._quarantine(build, "partial")
+			raise
+
+	def _entry_records(self) -> list[tuple[float, str, Path, int]]:
+		records = []
+		entries = self.root / "entries"
+		if not entries.exists():
+			return records
+		for manifest_path in entries.glob("*/*/manifest.json"):
+			entry = manifest_path.parent
+			key = entry.name
+			access = self.root / "access" / f"{key}.json"
+			stamp = access.stat().st_mtime if access.exists() else manifest_path.stat().st_mtime
+			records.append((stamp, key, entry, _directory_bytes(entry)))
+		return records
+
+	def _cache_bytes(self) -> int:
+		return _directory_bytes(self.root / "entries") + _directory_bytes(
+			self.root / "quarantine"
+		)
+
+	def _evict_for(self, incoming: int, *, exclude: str) -> tuple[str, ...]:
+		self._trim_quarantine(reserve=incoming)
+		records = self._entry_records()
+		total = sum(item[3] for item in records) + _directory_bytes(
+			self.root / "quarantine"
+		)
+		count = len(records)
+		evicted = []
+		for _stamp, key, entry, size in sorted(records):
+			if (
+				total + incoming <= (self.policy.max_disk_bytes or 0)
+				and count + 1 <= self.policy.max_entries
+			):
+				break
+			if key == exclude:
+				continue
+			shutil.rmtree(entry)
+			total -= size
+			count -= 1
+			evicted.append(key)
+		if (
+			total + incoming > (self.policy.max_disk_bytes or 0)
+			or count + 1 > self.policy.max_entries
+		):
+			raise PrefixCacheCapacityError("cache bounds cannot admit the new snapshot")
+		return tuple(evicted)
+
+	def _touch(self, cache_key: str) -> None:
+		path = self.root / "access" / f"{cache_key}.json"
+		path.parent.mkdir(parents=True, exist_ok=True)
+		temporary = path.with_name(f".{path.name}-{uuid4().hex}")
+		_write_json(temporary, {"accessed_at": _utcnow().isoformat()})
+		os.replace(temporary, path)
+
+	def _invalidation_fields(self, prefix_id: str, identity: dict[str, Any]) -> tuple[str, ...]:
+		root = self.root / "entries" / prefix_id
+		if not root.exists():
+			return ()
+		fields = set()
+		for path in root.glob("*/manifest.json"):
+			try:
+				prior = PrefixSnapshotManifest.model_validate_json(path.read_text(encoding="utf-8"))
+			except Exception:
+				continue
+			fields.update(_identity_differences(prior.identity, identity))
+		return tuple(sorted(fields))
+
+	def execute(
+		self,
+		decision: PrefixCacheDecision,
+		state: PipelineState,
+		stages: Sequence[Stage],
+		configs: Sequence[StageConfig],
+		*,
+		runtime_identity: Any,
+	) -> tuple[PipelineState, PrefixCacheEvent]:
+		"""Load/build one prefix, isolate a fork, then execute the suffix."""
+
+		if decision.action != "cache" or decision.stage_count == 0:
+			result = _run_stages(state, stages)
+			return result, PrefixCacheEvent(
+				status="independent" if decision.action == "independent" else "bypass",
+				stage_count=decision.stage_count,
+				fork_strategy="independent",
+				reason=decision.reason,
+			)
+		if state.backend.name != "numpy":
+			result = _run_stages(state, stages)
+			return result, PrefixCacheEvent(
+				status="bypass",
+				stage_count=decision.stage_count,
+				fork_strategy="independent",
+				reason=f"backend {state.backend.name!r} lacks a prefix snapshot contract",
+			)
+		prefix_stages = tuple(stages[:decision.stage_count])
+		suffix_stages = tuple(stages[decision.stage_count:])
+		prefix_configs = tuple(configs[:decision.stage_count])
+		if len(prefix_stages) != decision.stage_count or any(
+			not _cacheable(stage) for stage in prefix_stages
+		):
+			result = _run_stages(state, stages)
+			return result, PrefixCacheEvent(
+				status="bypass",
+				stage_count=decision.stage_count,
+				fork_strategy="independent",
+				reason="runtime pipeline no longer matches a safe planned prefix",
+			)
+		requires_copy = any(stage.contract.mutates_input for stage in suffix_stages)
+		try:
+			stage_identity = [
+				_stage_identity(config, stage)
+				for config, stage in zip(prefix_configs, prefix_stages)
+			]
+			prefix_id = _hash_document({"stages": stage_identity})
+			identity = _fingerprint({
+				"schema_version": 1,
+				"runtime": runtime_identity,
+				"backend": state.backend,
+				"initial_layout": state.layout,
+				"initial_domain": state.domain,
+				"scan": state.scan,
+				"recon_metadata": state.recon.metadata,
+				"artifacts": state.artifacts,
+				"stages": stage_identity,
+			})
+			cache_key = _hash_document(identity)
+		except Exception as error:
+			if self.policy.on_error == "fail":
+				raise PrefixCacheError(f"cache identity is insufficient: {error}") from error
+			result = _run_stages(state, stages)
+			return result, PrefixCacheEvent(
+				status="bypass",
+				stage_count=decision.stage_count,
+				fork_strategy="independent",
+				reason=f"cache identity is insufficient: {error}",
+			)
+		entry = self._entry(prefix_id, cache_key)
+		build_seconds = 0.0
+		load_seconds = 0.0
+		invalidation = ()
+		evicted: tuple[str, ...] = ()
+		recovered = 0
+		status: Literal["hit", "miss", "rebuilt"] = "hit"
+		verified = False
+		cache_hit = False
+		cache_bytes_after = None
+		try:
+			with self._locked() as recovered_lock:
+				recovered = self._recover_partials() + int(recovered_lock)
+				if entry.exists():
+					try:
+						fork, manifest, load_seconds = self._load(
+							entry, state, requires_copy=requires_copy,
+						)
+					except PrefixCacheIntegrityError:
+						if self.policy.on_error == "fail":
+							raise
+						self._quarantine(entry, "corrupt")
+						if self.policy.on_error == "bypass":
+							raise PrefixCacheIntegrityError(
+								"corrupt snapshot was quarantined and cache bypass was requested"
+							)
+						status = "rebuilt"
+					else:
+						self._touch(cache_key)
+						cache_hit = True
+				else:
+					status = "miss"
+				if not cache_hit:
+					invalidation = self._invalidation_fields(prefix_id, identity)
+					started = time.perf_counter()
+					built = _run_stages(_clone_initial_state(state), prefix_stages)
+					build_seconds = time.perf_counter() - started
+					manifest, evicted = self._publish(
+						prefix_id, cache_key, identity, decision.stage_count, built,
+					)
+					fork, manifest, load_seconds = self._load(
+						self._entry(prefix_id, cache_key), state, requires_copy=requires_copy,
+					)
+					self._touch(cache_key)
+				cache_bytes_after = self._cache_bytes()
+		except PrefixCacheError as error:
+			if self.policy.on_error == "fail":
+				raise
+			result = _run_stages(state, stages)
+			return result, PrefixCacheEvent(
+				status="bypass",
+				prefix_id=prefix_id,
+				cache_key=cache_key,
+				stage_count=decision.stage_count,
+				fork_strategy="independent",
+				invalidation_fields=invalidation,
+				recovered_partials=recovered,
+				reason=str(error),
+			)
+		if cache_hit and self._sampled(decision.candidate_id):
+			check = _run_stages(_clone_initial_state(state), prefix_stages)
+			if not (
+				_equivalent(
+					np.asarray(check.working_array), np.asarray(fork.working_array),
+					rtol=self.policy.verify_rtol, atol=self.policy.verify_atol,
+				)
+				and _equivalent(
+					check.artifacts, fork.artifacts,
+					rtol=self.policy.verify_rtol, atol=self.policy.verify_atol,
+				)
+			):
+				with self._locked():
+					if entry.exists():
+						self._quarantine(entry, "mismatch")
+				if self.policy.on_error == "fail":
+					raise PrefixCacheIntegrityError(
+						"sampled independent prefix differs from cached snapshot"
+					)
+				return _run_stages(check, suffix_stages), PrefixCacheEvent(
+					status="bypass",
+					prefix_id=prefix_id,
+					cache_key=cache_key,
+					stage_count=decision.stage_count,
+					fork_strategy="independent",
+					load_seconds=load_seconds,
+					read_bytes=manifest.snapshot_bytes,
+					cache_bytes_after=cache_bytes_after,
+					reason="sampled independent prefix differs from cached snapshot",
+				)
+			verified = True
+		return _run_stages(fork, suffix_stages), PrefixCacheEvent(
+			status=status,
+			prefix_id=prefix_id,
+			cache_key=cache_key,
+			stage_count=decision.stage_count,
+			snapshot_bytes=manifest.snapshot_bytes,
+			fork_strategy="explicit_copy" if requires_copy else "read_only",
+			invalidation_fields=invalidation,
+			evicted_keys=evicted,
+			recovered_partials=recovered,
+			build_seconds=build_seconds,
+			load_seconds=load_seconds,
+			read_bytes=manifest.snapshot_bytes,
+			written_bytes=0 if cache_hit else manifest.snapshot_bytes,
+			cache_bytes_after=cache_bytes_after,
+			verified=verified,
+		)
+
+	def _sampled(self, candidate_id: str) -> bool:
+		if self.policy.verify_fraction <= 0:
+			return False
+		value = int(hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:16], 16)
+		return value / float(0xFFFFFFFFFFFFFFFF) < self.policy.verify_fraction
+
+
+class PrefixCachingPipelineExecutor:
+	"""Execute one planned pipeline through an optional shared prefix store."""
+
+	def __init__(self, policy: PrefixCachePolicy):
+		self.policy = policy
+		self.store = PrefixCacheStore(policy) if policy.enabled else None
+
+	def execute(
+		self,
+		decision: PrefixCacheDecision,
+		state: PipelineState,
+		stages: Sequence[Stage],
+		configs: Sequence[StageConfig],
+		*,
+		runtime_identity: Any,
+	) -> tuple[PipelineState, PrefixCacheEvent]:
+		if self.store is None:
+			result = _run_stages(state, stages)
+			return result, PrefixCacheEvent(
+				status="independent",
+				stage_count=decision.stage_count,
+				fork_strategy="independent",
+				reason=decision.reason,
+			)
+		return self.store.execute(
+			decision, state, stages, configs, runtime_identity=runtime_identity,
+		)

@@ -45,6 +45,14 @@ from .protocol import (
 	build_tier2_plan,
 	write_tier2_plan,
 )
+from .prefix_cache import (
+	PrefixCacheDecision,
+	PrefixCachePlan,
+	PrefixCachePolicy,
+	PrefixCachingPipelineExecutor,
+	PrefixPlanningCandidate,
+	plan_common_prefixes,
+)
 from .runner import (
 	ExperimentInputs,
 	ExperimentRunPolicy,
@@ -131,9 +139,17 @@ def build_experiment_inputs(scan_path: str | Path) -> ExperimentInputs:
 class PipelineTrialExecutor:
 	"""Run one resolved candidate through the existing complete-pipeline runner."""
 
-	def __init__(self, config: ExperimentConfig, scan_path: str | Path):
+	def __init__(
+		self,
+		config: ExperimentConfig,
+		scan_path: str | Path,
+		prefix_cache_policy: PrefixCachePolicy | None = None,
+	):
 		self.config = config
 		self.scan_path = Path(scan_path).resolve()
+		self.prefix_cache_policy = prefix_cache_policy or PrefixCachePolicy()
+		self.prefix_executor = PrefixCachingPipelineExecutor(self.prefix_cache_policy)
+		self._prefix_decisions: dict[str, PrefixCacheDecision] = {}
 
 	def validate(self, recon: Recon) -> None:
 		scan, _ = load_scan(self.scan_path)
@@ -204,6 +220,71 @@ class PipelineTrialExecutor:
 			stages = [create_stage(config) for config in recon.pipeline]
 			validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
 
+	@staticmethod
+	def _prefix_candidate_id(identity, window) -> str:
+		return f"{identity.trial_id.value}:{window.id}"
+
+	@staticmethod
+	def _prefix_runtime_identity(identity, window) -> dict[str, Any]:
+		return {
+			"dataset": identity.dataset,
+			"configuration": identity.configuration,
+			"code": identity.code,
+			"environment": identity.environment,
+			"fidelity": identity.fidelity,
+			"window": window,
+		}
+
+	@staticmethod
+	def _estimated_snapshot_bytes(scan, identity, window) -> int | None:
+		columns = scan.detector.columns
+		if columns is None:
+			return None
+		rows = window.y_stop - window.y_start + 2 * window.halo
+		theta_start = 0 if window.theta_start is None else window.theta_start
+		theta_stop = scan.n_projections if window.theta_stop is None else window.theta_stop
+		if identity.fidelity.projection_limit is not None:
+			theta_stop = min(
+				theta_stop,
+				theta_start
+				+ identity.fidelity.projection_limit * identity.fidelity.projection_stride,
+			)
+		selected = max(0, theta_stop - theta_start)
+		selected = (
+			selected + identity.fidelity.projection_stride - 1
+		) // identity.fidelity.projection_stride
+		return selected * rows * columns * np.dtype(np.float32).itemsize
+
+	def plan_prefix_cache(self, trials) -> PrefixCachePlan:
+		"""Plan trial/window prefixes without opening projection payloads."""
+
+		scan, _ = load_scan(self.scan_path)
+		candidates = []
+		for trial in trials:
+			for window in trial.identity.fidelity.windows:
+				recon = self._window_recon(
+					trial.identity, window, Path("prefix-plan") / window.id,
+				)
+				for config in recon.pipeline:
+					for name in (
+						"calibration_manifest", "calibration_components",
+						"compatibility_policy", "compatibility_override_reason",
+					):
+						config.params.pop(name, None)
+				stages = tuple(create_stage(config) for config in recon.pipeline)
+				candidates.append(PrefixPlanningCandidate(
+					candidate_id=self._prefix_candidate_id(trial.identity, window),
+					configs=tuple(recon.pipeline),
+					stages=stages,
+					share_identity=self._prefix_runtime_identity(trial.identity, window),
+					estimated_snapshot_bytes=self._estimated_snapshot_bytes(
+						scan, trial.identity, window,
+					),
+				))
+		plan = plan_common_prefixes(candidates, self.prefix_cache_policy)
+		self._prefix_decisions = {item.candidate_id: item for item in plan.decisions}
+		return plan
+
 	def __call__(self, identity, output_root: Path) -> TrialExecution:
 		output_root.mkdir(parents=True, exist_ok=True)
 		window_metrics: dict[str, dict[str, Any]] = {}
@@ -218,7 +299,30 @@ class PipelineTrialExecutor:
 			window_root.mkdir(parents=True, exist_ok=True)
 			pipeline_path = window_root / "resolved-recon.yaml"
 			pipeline_path.write_text(recon.to_yaml(), encoding="utf-8")
-			result = run_reconstruction(pipeline_path, self.scan_path)[0]
+			decision = None
+			if self._prefix_decisions:
+				decision = self._prefix_decisions.get(
+					self._prefix_candidate_id(identity, window)
+				)
+			state_executor = None
+			if decision is not None and decision.action == "cache":
+				def execute_state(state, stages, configs, *, _decision=decision, _window=window):
+					result, event = self.prefix_executor.execute(
+						_decision,
+						state,
+						stages,
+						configs,
+						runtime_identity=self._prefix_runtime_identity(identity, _window),
+					)
+					result.artifacts["prefix_cache"] = event.model_dump(mode="json")
+					return result
+				state_executor = execute_state
+			if state_executor is None:
+				result = run_reconstruction(pipeline_path, self.scan_path)[0]
+			else:
+				result = run_reconstruction(
+					pipeline_path, self.scan_path, state_executor=state_executor,
+				)[0]
 			window_artifacts = dict(result.artifacts)
 			raw_previews = window_artifacts.pop("preview_images", {})
 			artifact = window_artifacts.get("metrics", {})
@@ -305,9 +409,34 @@ def _runner(
 	*,
 	override_limits: bool,
 	failure: str,
+	prefix_cache: bool,
+	prefix_cache_root: Path | None,
+	prefix_cache_max_disk_bytes: int | None,
+	prefix_cache_max_memory_bytes: int | None,
+	prefix_cache_max_entries: int,
+	prefix_cache_on_error: str,
+	prefix_cache_verify_fraction: float,
 ) -> IndependentExperimentRunner:
 	config = load_experiment_config(experiment_path)
-	executor = PipelineTrialExecutor(config, scan_path)
+	if prefix_cache and (
+		prefix_cache_root is None
+		or prefix_cache_max_disk_bytes is None
+		or prefix_cache_max_memory_bytes is None
+	):
+		raise click.UsageError(
+			"--prefix-cache requires --prefix-cache-root, --prefix-cache-max-disk-bytes, "
+			"and --prefix-cache-max-memory-bytes"
+		)
+	cache_policy = PrefixCachePolicy(
+		enabled=prefix_cache,
+		scratch=prefix_cache_root,
+		max_disk_bytes=prefix_cache_max_disk_bytes,
+		max_memory_bytes=prefix_cache_max_memory_bytes,
+		max_entries=prefix_cache_max_entries,
+		on_error=prefix_cache_on_error,
+		verify_fraction=prefix_cache_verify_fraction,
+	)
+	executor = PipelineTrialExecutor(config, scan_path, cache_policy)
 	return IndependentExperimentRunner(
 		config,
 		build_experiment_inputs(scan_path),
@@ -345,6 +474,34 @@ def validate_command(experiment_path: Path, json_output: bool) -> None:
 
 
 def _shared_options(function):
+	function = click.option(
+		"--prefix-cache-verify-fraction",
+		type=click.FloatRange(min=0, max=1),
+		default=0.0,
+		show_default=True,
+	)(function)
+	function = click.option(
+		"--prefix-cache-on-error",
+		type=click.Choice(["rebuild", "bypass", "fail"]),
+		default="rebuild",
+		show_default=True,
+	)(function)
+	function = click.option(
+		"--prefix-cache-max-entries",
+		type=click.IntRange(min=1),
+		default=64,
+		show_default=True,
+	)(function)
+	function = click.option(
+		"--prefix-cache-max-memory-bytes", type=click.IntRange(min=1),
+	)(function)
+	function = click.option(
+		"--prefix-cache-max-disk-bytes", type=click.IntRange(min=1),
+	)(function)
+	function = click.option(
+		"--prefix-cache-root", type=click.Path(file_okay=False, path_type=Path),
+	)(function)
+	function = click.option("--prefix-cache/--no-prefix-cache", default=False)(function)
 	function = click.option("--failure", type=click.Choice(["continue", "fail_fast"]),
 		default="continue", show_default=True)(function)
 	function = click.option("--override-limits", is_flag=True)(function)
@@ -362,12 +519,26 @@ def dry_run_command(
 	root: Path,
 	override_limits: bool,
 	failure: str,
+	prefix_cache: bool,
+	prefix_cache_root: Path | None,
+	prefix_cache_max_disk_bytes: int | None,
+	prefix_cache_max_memory_bytes: int | None,
+	prefix_cache_max_entries: int,
+	prefix_cache_on_error: str,
+	prefix_cache_verify_fraction: float,
 ) -> None:
 	"""Resolve and validate candidates without data execution."""
 
 	runner = _runner(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
+		prefix_cache=prefix_cache,
+		prefix_cache_root=prefix_cache_root,
+		prefix_cache_max_disk_bytes=prefix_cache_max_disk_bytes,
+		prefix_cache_max_memory_bytes=prefix_cache_max_memory_bytes,
+		prefix_cache_max_entries=prefix_cache_max_entries,
+		prefix_cache_on_error=prefix_cache_on_error,
+		prefix_cache_verify_fraction=prefix_cache_verify_fraction,
 	)
 	if runner.config.promotion is None:
 		preflight, _ = runner.prepare()
@@ -398,12 +569,26 @@ def run_command(
 	root: Path,
 	override_limits: bool,
 	failure: str,
+	prefix_cache: bool,
+	prefix_cache_root: Path | None,
+	prefix_cache_max_disk_bytes: int | None,
+	prefix_cache_max_memory_bytes: int | None,
+	prefix_cache_max_entries: int,
+	prefix_cache_on_error: str,
+	prefix_cache_verify_fraction: float,
 ) -> None:
 	"""Execute independent candidates and emit deterministic results."""
 
 	runner = _runner(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
+		prefix_cache=prefix_cache,
+		prefix_cache_root=prefix_cache_root,
+		prefix_cache_max_disk_bytes=prefix_cache_max_disk_bytes,
+		prefix_cache_max_memory_bytes=prefix_cache_max_memory_bytes,
+		prefix_cache_max_entries=prefix_cache_max_entries,
+		prefix_cache_on_error=prefix_cache_on_error,
+		prefix_cache_verify_fraction=prefix_cache_verify_fraction,
 	)
 	if runner.config.promotion is not None:
 		summary = FidelityExperimentRunner(
@@ -558,12 +743,26 @@ def resume_command(
 	recover_stale: bool,
 	stale_after: float,
 	invalidate_stale_promotions: bool,
+	prefix_cache: bool,
+	prefix_cache_root: Path | None,
+	prefix_cache_max_disk_bytes: int | None,
+	prefix_cache_max_memory_bytes: int | None,
+	prefix_cache_max_entries: int,
+	prefix_cache_on_error: str,
+	prefix_cache_verify_fraction: float,
 ) -> None:
 	"""Reuse compatible successes and explicitly retry selected terminal states."""
 
 	runner = _runner(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
+		prefix_cache=prefix_cache,
+		prefix_cache_root=prefix_cache_root,
+		prefix_cache_max_disk_bytes=prefix_cache_max_disk_bytes,
+		prefix_cache_max_memory_bytes=prefix_cache_max_memory_bytes,
+		prefix_cache_max_entries=prefix_cache_max_entries,
+		prefix_cache_on_error=prefix_cache_on_error,
+		prefix_cache_verify_fraction=prefix_cache_verify_fraction,
 	)
 	resume_policy = _resume_policy(
 			mismatch=mismatch,
@@ -607,12 +806,26 @@ def rerun_command(
 	stale_after: float,
 	trial_ids: tuple[str, ...],
 	invalidate_stale_promotions: bool,
+	prefix_cache: bool,
+	prefix_cache_root: Path | None,
+	prefix_cache_max_disk_bytes: int | None,
+	prefix_cache_max_memory_bytes: int | None,
+	prefix_cache_max_entries: int,
+	prefix_cache_on_error: str,
+	prefix_cache_verify_fraction: float,
 ) -> None:
 	"""Force a new attempt, optionally limited to one or more resolved trial IDs."""
 
 	runner = _runner(
 		experiment_path, scan_path, root,
 		override_limits=override_limits, failure=failure,
+		prefix_cache=prefix_cache,
+		prefix_cache_root=prefix_cache_root,
+		prefix_cache_max_disk_bytes=prefix_cache_max_disk_bytes,
+		prefix_cache_max_memory_bytes=prefix_cache_max_memory_bytes,
+		prefix_cache_max_entries=prefix_cache_max_entries,
+		prefix_cache_on_error=prefix_cache_on_error,
+		prefix_cache_verify_fraction=prefix_cache_verify_fraction,
 	)
 	resume_policy = _resume_policy(
 			mismatch=mismatch,

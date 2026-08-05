@@ -134,6 +134,7 @@ class ExperimentPreflight(ConfigModel):
 	trial_output_roots: tuple[Path, ...]
 	candidates: tuple[dict[str, JsonValue], ...]
 	validation_failures: tuple[ValidationFailure, ...] = ()
+	prefix_cache: dict[str, JsonValue] | None = None
 
 
 class TrialExecution(ConfigModel):
@@ -344,6 +345,10 @@ class IndependentExperimentRunner:
 					"reduce trials/output or rerun with override_limits=True"
 				)
 		workers = self._effective_workers()
+		prefix_planner = getattr(self.executor, "plan_prefix_cache", None)
+		prefix_cache = None
+		if callable(prefix_planner):
+			prefix_cache = json_value(prefix_planner(tuple(prepared)))
 		preflight = ExperimentPreflight(
 			experiment_id=self.config.experiment_id,
 			sampler=self.config.sampler.name,
@@ -363,6 +368,7 @@ class IndependentExperimentRunner:
 				"algorithms": [stage.algorithm for stage in item.selected.recon.pipeline],
 			} for item in prepared),
 			validation_failures=tuple(failures),
+			prefix_cache=prefix_cache,
 		)
 		return preflight, tuple(prepared)
 
