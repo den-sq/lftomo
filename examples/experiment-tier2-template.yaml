@@ -131,4 +131,4 @@ promotion:
   failures: exclude
 
 metadata:
-  purpose: Immutable Tier-2 operator template; pin dataset and protocol before execution.
+  purpose: Tamper-evident Tier-2 operator template; pin inputs before execution.

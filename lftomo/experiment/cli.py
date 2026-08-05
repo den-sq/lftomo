@@ -489,7 +489,7 @@ def tier2_plan_command(
 	max_memory_gb: float,
 	output: Path,
 ) -> None:
-	"""Freeze an immutable bounded Tier-2 protocol before loading projections."""
+	"""Write a tamper-evident bounded Tier-2 protocol before loading projections."""
 
 	config = load_experiment_config(experiment_path)
 	preview_documents = {
@@ -525,14 +525,16 @@ def tier2_plan_command(
 @click.argument("plan_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def tier2_audit_command(plan_path: Path, root: Path) -> None:
-	"""Audit a completed real-data bundle against its frozen Tier-2 protocol."""
+	"""Audit a completed real-data bundle against its recorded Tier-2 protocol."""
 
 	plan = Tier2ExperimentPlan.model_validate_json(plan_path.read_text(encoding="utf-8"))
 	summary = FidelityRunSummary.model_validate_json(
 		(root / "fidelity-results.json").read_text(encoding="utf-8")
 	)
 	previews = PreviewBundle.model_validate_json(
-		(root / "previews" / "mapping.json").read_text(encoding="utf-8")
+		(root / "private" / "preview-mapping" / "mapping.json").read_text(
+			encoding="utf-8"
+		)
 	)
 	audit = audit_tier2_results(plan, summary, previews)
 	click.echo(json.dumps(audit.model_dump(mode="json"), sort_keys=True, indent=2))

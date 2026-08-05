@@ -1,4 +1,4 @@
-"""Immutable Tier-2 experiment planning and result-audit contracts."""
+"""Tamper-evident Tier-2 experiment planning and result-audit contracts."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ class Tier2Bounds(ConfigModel):
 
 
 class Tier2ExperimentPlan(ConfigModel):
-	"""Frozen provenance and review protocol written before loading Tier-2 data."""
+	"""Content-addressed provenance and review protocol recorded before Tier-2 data."""
 
 	schema_version: Literal[1] = 1
 	protocol_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -89,7 +89,7 @@ def build_tier2_plan(
 	blinding_key_id: str,
 	bounds: Tier2Bounds,
 ) -> Tier2ExperimentPlan:
-	"""Validate a production protocol and freeze every comparison-bearing pin."""
+	"""Validate a production protocol and pin every comparison-bearing fact."""
 
 	if config.promotion is None or len(config.fidelities) < 2:
 		raise ValueError("Tier-2 protocol requires a multi-fidelity promotion policy")
@@ -192,7 +192,7 @@ def write_tier2_plan(path: str | Path, plan: Tier2ExperimentPlan) -> None:
 	"""Atomically publish a pre-data-execution protocol."""
 
 	if plan.protocol_id != _sha256(plan.identity_payload()):
-		raise ValueError("Tier-2 protocol_id does not match its immutable payload")
+		raise ValueError("Tier-2 protocol_id does not match its content-addressed payload")
 	atomic_write_model(Path(path), plan)
 
 
@@ -211,9 +211,9 @@ def audit_tier2_results(
 
 	errors = []
 	if summary.experiment_id != plan.experiment_id:
-		errors.append("result experiment_id differs from the frozen protocol")
+		errors.append("result experiment_id differs from the recorded protocol")
 	if previews.contract != plan.preview or not previews.contract.blinded:
-		errors.append("preview contract or blinding differs from the frozen protocol")
+		errors.append("preview contract or blinding differs from the recorded protocol")
 	required = set(plan.raw_metric_ids)
 	for level in summary.levels:
 		for attempt in level.attempts:

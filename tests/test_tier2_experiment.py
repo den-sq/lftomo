@@ -16,7 +16,7 @@ from lftomo.experiment import (
 pytestmark = pytest.mark.tier2
 
 
-def test_tier2_experiment_bundle_matches_immutable_protocol():
+def test_tier2_experiment_bundle_matches_recorded_protocol():
 	root_value = os.environ.get("LFTOMO_TIER2_EXPERIMENT_ROOT")
 	plan_value = os.environ.get("LFTOMO_TIER2_EXPERIMENT_PLAN")
 	if not root_value or not plan_value:
@@ -30,7 +30,9 @@ def test_tier2_experiment_bundle_matches_immutable_protocol():
 		(root / "fidelity-results.json").read_text(encoding="utf-8")
 	)
 	previews = PreviewBundle.model_validate_json(
-		(root / "previews" / "mapping.json").read_text(encoding="utf-8")
+		(root / "private" / "preview-mapping" / "mapping.json").read_text(
+			encoding="utf-8"
+		)
 	)
 
 	audit = audit_tier2_results(plan, summary, previews)

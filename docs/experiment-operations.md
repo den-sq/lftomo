@@ -35,8 +35,9 @@ valid alternatives but must not be followed by another negative log.
 The experiment YAML owns the candidate space, sampler seed/budget, objectives, windows,
 fidelities, guards, and promotion rules. The scan YAML owns immutable acquisition facts
 and must include `metadata.dataset_content_hash`. Paths and labels are descriptive;
-dataset/configuration/calibration hashes, code/environment, resolved candidate, sampler
-coordinate, fidelity, and metric protocol form `TrialId`.
+dataset/configuration/calibration hashes, code/environment, resolved candidate, fidelity,
+and metric protocol form `TrialId`. Sampler coordinates remain recorded provenance but
+do not prevent reuse of an identical resolved candidate discovered by another sampler.
 
 ```console
 lftomo-experiment validate experiment.yaml
@@ -84,8 +85,8 @@ trials/<trial-id>/identity.json
 trials/<trial-id>/attempts/<attempt-id>.json
 promotions/<from>--<to>/active.json
 previews/<blind-id>/*.png
-previews/private-mapping/<blind-id>.json
-previews/mapping.json
+private/preview-mapping/entries/<blind-id>.json
+private/preview-mapping/mapping.json
 experiment-results.json
 fidelity-results.json
 leaderboard.md
@@ -94,9 +95,9 @@ leaderboard.md
 Attempt files move atomically through pending/running/terminal state. A successful result
 contains raw metrics and Pareto rank; failures cannot contain a final result. Blinded
 filenames use only opaque IDs and every candidate uses the same scale, crop, and selected
-slice rule. Keep `previews/private-mapping/` and `mapping.json` access-controlled during
-review. Screening strips writer stages. Only promoted trials at `final_fidelity_id` regain
-the configured full writer.
+slice rule. Keep the entire `private/` tree access-controlled and share only `previews/`
+during blinded review. Screening strips writer stages. Only promoted trials at
+`final_fidelity_id` regain the configured full writer.
 
 ## Inspect, resume, and rerun
 
@@ -121,12 +122,15 @@ partial data to quarantine. Changed lower-fidelity results invalidate the active
 boundary. Review the change before using `--invalidate-stale-promotions`; the old decision
 is quarantined, never overwritten as though it had not existed.
 
-## Freeze and audit a Tier-2 protocol
+## Record and audit a Tier-2 protocol
 
-Real-data comparisons require immutable provenance before projection payloads are opened:
-the dataset and scan/calibration hashes, clean Git commit, dependency/hardware environment,
-environment-lock hash, projection-manifest hash, metric protocol hashes, exact windows,
-resource bounds, preview contract, blinding key ID, and finalist policy.
+Real-data comparisons require pinned, tamper-evident provenance before projection payloads
+are opened: the dataset and scan/calibration hashes, clean Git commit,
+dependency/hardware environment, environment-lock hash, projection-manifest hash, metric
+protocol hashes, exact windows, resource bounds, preview contract, blinding key ID, and
+finalist policy. `protocol_id` content-addresses these facts; the write and audit paths
+reject a plan whose current payload no longer matches that ID. The model itself is not
+strictly frozen.
 
 ```console
 lftomo-experiment tier2-plan experiment.yaml scan.yaml \
@@ -152,7 +156,7 @@ After the bounded real-data run and blinded review:
 lftomo-experiment tier2-audit tier2-plan.json /scratch/run-2026-08-04
 ```
 
-The audit requires the frozen experiment ID/preview contract, every raw metric, Pareto
+The audit requires the recorded experiment ID/preview contract, every raw metric, Pareto
 ranks, held-out values in promotion records, and finalized finalist output. The optional
 `tests/test_tier2_experiment.py` performs the same audit when
 `LFTOMO_TIER2_EXPERIMENT_PLAN` and `LFTOMO_TIER2_EXPERIMENT_ROOT` are set and pytest is
@@ -161,12 +165,12 @@ invoked with `--run-tier2`.
 ## Test tiers and limits
 
 The default hermetic suite proves a known winner through real repeated-stripe and split
-phase stages, deterministic promotion, persistence/resume, previews, protocol freezing,
-and finalist output. It also covers failures, interruption, mismatch policies, concurrent
-claims, guards, ties, and stale decisions with small synthetic data.
+phase stages, deterministic promotion, persistence/resume, previews, content-addressed
+protocol planning, and finalist output. It also covers failures, interruption, mismatch
+policies, concurrent claims, guards, ties, and stale decisions with small synthetic data.
 
 Real Tier-2 execution is intentionally not a per-push CI job. It depends on mounted lab
-data, frozen environment and projection manifests, sufficient scratch capacity, and a
+data, pinned environment and projection manifests, sufficient scratch capacity, and a
 human-controlled blinding secret. Run it deliberately on the recon-data capability and
 publish only the audit/report artifacts required for review. Screening results demonstrate
 performance on their declared windows and projection sample; they do not prove a candidate

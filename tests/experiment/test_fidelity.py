@@ -376,5 +376,6 @@ def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp
 	assert result.metrics == {"quality": 0.25}
 	assert result.outputs[0].role == "blinded_preview"
 	assert result.outputs[0].path.is_file()
-	assert (tmp_path / "previews" / "mapping.json").is_file()
+	assert (tmp_path / "private" / "preview-mapping" / "mapping.json").is_file()
+	assert not any((tmp_path / "previews").rglob("*.json"))
 	assert "preview_images" not in str(result.artifacts)
