@@ -10,10 +10,8 @@ from pathlib import Path
 from typing import Any, Literal, Mapping
 from uuid import uuid4
 
-import cv2
 import numpy as np
 from pydantic import Field, JsonValue
-import tifffile as tf
 
 from lftomo.config import ConfigModel
 from lftomo.evaluation import (
@@ -437,6 +435,9 @@ def export_blinded_previews(
 	max_bytes: int | None = None,
 ) -> PreviewBundle:
 	"""Write consistently scaled/cropped previews and a reversible private mapping."""
+
+	import cv2
+	import tifffile as tf
 
 	if not blinding_key:
 		raise ValueError("blinding_key must not be empty")
