@@ -44,6 +44,10 @@ class StageContract:
 	expected_input: type[Any] | None = None
 	produced_output: type[Any] | None = None
 	mutates_input: bool = False
+	# Prefix caching is fail-closed: a Stage must explicitly promise that its
+	# output is deterministic and fully represented by its config, contract,
+	# backend, PipelineState inputs, and declared artifacts before reuse.
+	cacheable_prefix: bool = False
 	window_axes: tuple[str, ...] = ()
 	required_metadata: tuple[str, ...] = ()
 	consumes_artifacts: tuple[str, ...] = ()

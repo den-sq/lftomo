@@ -37,6 +37,7 @@ class LayoutConvertStage(Stage):
 			produces_domain=PRESERVE,
 			locality=Locality.VOLUME,
 			mutates_input=False,
+			cacheable_prefix=True,
 		)
 
 	@classmethod

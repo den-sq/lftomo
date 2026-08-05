@@ -32,6 +32,7 @@ def _contract(memory_multiplier: float) -> StageContract:
 		produces_domain=PRESERVE, locality=Locality.SINOGRAM,
 		bounded_views_from=(ProjOrder,),
 		mutates_input=True,
+		cacheable_prefix=True,
 		window_axes=("Y",),
 		resources=ResourceHints(memory_multiplier=memory_multiplier),
 	)
@@ -180,6 +181,7 @@ class FourierWaveletStripeStage(Stage):
 		shape = compatibility or SinoOrder
 		self.contract = StageContract(
 			expected_input=shape, produced_output=shape, mutates_input=True,
+			cacheable_prefix=True,
 			accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
@@ -233,7 +235,7 @@ class AllOfTheStripeStage(Stage):
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
-			mutates_input=True, window_axes=("Y",),
+			mutates_input=True, cacheable_prefix=True, window_axes=("Y",),
 			resources=ResourceHints(memory_multiplier=3.0),
 		)
 

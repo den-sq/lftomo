@@ -16,6 +16,7 @@ nav:
    - Experiment runner: experiment-runner.md
    - Fidelity experiments: fidelity-experiments.md
    - Experiment operations: experiment-operations.md
+   - Common-prefix cache: prefix-cache.md
    - Reconstruction evaluation: evaluation.md
  - API reference:
    - Configuration models: api/config.md

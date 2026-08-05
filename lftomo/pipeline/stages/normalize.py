@@ -48,6 +48,7 @@ class WeightedNormalizeStage(Stage):
 		accepts=(ProjOrder, SinoOrder),
 		prefers=ProjOrder,
 		mutates_input=True,
+		cacheable_prefix=True,
 		window_axes=("Y",),
 		required_metadata=("metadata.flat_fields",),
 		resources=ResourceHints(memory_multiplier=1.0),
@@ -148,6 +149,7 @@ class BeamTrackingNormalizeStage(Stage):
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
 		locality=Locality.PROJECTION, mutates_input=True, window_axes=("Y", "Theta"),
+		cacheable_prefix=True,
 		produces_artifacts=("beam_tracking_qc",),
 		resources=ResourceHints(memory_multiplier=2.0),
 	)
@@ -244,6 +246,7 @@ class BeamKeyframesNormalizeStage(Stage):
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
 		locality=Locality.PROJECTION, mutates_input=True, window_axes=("Y", "Theta"),
+		cacheable_prefix=True,
 		produces_artifacts=("beam_keyframe_qc",), resources=ResourceHints(memory_multiplier=2.0),
 	)
 
@@ -323,6 +326,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
 		locality=Locality.PROJECTION, mutates_input=True, window_axes=("Y", "Theta"),
+		cacheable_prefix=True,
 		consumes_artifacts=("calibration_bundle",), produces_artifacts=("beam_basis_qc",),
 		resources=ResourceHints(memory_multiplier=2.0),
 	)
@@ -495,6 +499,7 @@ class ThetaSwitchNormalizeStage(Stage):
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
 		mutates_input=True,
+		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("metadata.flat_fields",),
 		resources=ResourceHints(memory_multiplier=2.0),
@@ -517,6 +522,7 @@ class ThetaSwitchNormalizeStage(Stage):
 			produces_domain=DataDomain.TRANSMISSION,
 			locality=Locality.PROJECTION,
 			mutates_input=True,
+			cacheable_prefix=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("metadata.flat_fields",),
 			resources=ResourceHints(memory_multiplier=2.0),

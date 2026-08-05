@@ -176,3 +176,8 @@ publish only the audit/report artifacts required for review. Screening results d
 performance on their declared windows and projection sample; they do not prove a candidate
 is globally best, physically correct, or safe on all acquisitions. Final selection remains
 a scientific decision supported by—rather than delegated to—the leaderboard.
+
+Common-prefix reuse is a separate opt-in optimization. See [Common-prefix
+cache](prefix-cache.md) for its fail-closed Stage contracts, explicit scratch/resource
+bounds, immutable snapshot rules, independent verification, and benchmark gate. It does
+not change trial identity or make caching the default.

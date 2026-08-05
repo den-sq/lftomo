@@ -75,6 +75,16 @@ from .protocol import (
 	build_tier2_plan,
 	write_tier2_plan,
 )
+from .prefix_cache import (
+	PrefixCacheDecision,
+	PrefixCacheEvent,
+	PrefixCachePlan,
+	PrefixCachePolicy,
+	PrefixCacheStore,
+	PrefixCachingPipelineExecutor,
+	PrefixPlanningCandidate,
+	plan_common_prefixes,
+)
 
 __all__ = [
 	"AggregationPolicy",
@@ -107,6 +117,13 @@ __all__ = [
 	"ParetoRecord",
 	"PersistedExperimentRunner",
 	"PersistedExperimentStore",
+	"PrefixCacheDecision",
+	"PrefixCacheEvent",
+	"PrefixCachePlan",
+	"PrefixCachePolicy",
+	"PrefixCacheStore",
+	"PrefixCachingPipelineExecutor",
+	"PrefixPlanningCandidate",
 	"PreviewBundle",
 	"PromotionCandidate",
 	"PromotionDecision",
@@ -140,6 +157,7 @@ __all__ = [
 	"build_tier2_plan",
 	"export_blinded_previews",
 	"promotion_lineage",
+	"plan_common_prefixes",
 	"select_candidates",
 	"successive_halving",
 	"write_tier2_plan",
