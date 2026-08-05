@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 from pathlib import Path
-import platform
 import subprocess
 from typing import Any
 
@@ -60,6 +58,12 @@ from .runner import (
 	TrialExecution,
 	json_value,
 )
+from .runtime import (
+	RuntimeCompatibilityReport,
+	RuntimeCompatibilityError,
+	collect_environment_identity,
+	require_runtime_compatibility,
+)
 from .store import (
 	PersistedExperimentRunner,
 	PersistedExperimentStore,
@@ -91,7 +95,11 @@ def _git(arguments: list[str], root: Path) -> str | None:
 	return result.stdout.strip()
 
 
-def build_experiment_inputs(scan_path: str | Path) -> ExperimentInputs:
+def build_experiment_inputs(
+	scan_path: str | Path,
+	*,
+	environment: EnvironmentIdentity | None = None,
+) -> ExperimentInputs:
 	"""Derive invocation identity without opening projection payloads."""
 
 	scan, resolved = load_scan(scan_path)
@@ -105,12 +113,6 @@ def build_experiment_inputs(scan_path: str | Path) -> ExperimentInputs:
 	commit = os.environ.get("LFTOMO_GIT_COMMIT") or _git(["rev-parse", "HEAD"], repository)
 	commit = commit or "unknown0"
 	dirty = _git(["status", "--porcelain"], repository)
-	dependencies = {}
-	for package in ("numpy", "scipy", "pydantic"):
-		try:
-			dependencies[package] = version(package)
-		except PackageNotFoundError:
-			continue
 	calibration_hash = scan.metadata.get("calibration_hash")
 	return ExperimentInputs(
 		dataset=DatasetIdentity(
@@ -125,13 +127,7 @@ def build_experiment_inputs(scan_path: str | Path) -> ExperimentInputs:
 		code=CodeIdentity(
 			version="0.1.0", git_commit=commit, dirty=bool(dirty),
 		),
-		environment=EnvironmentIdentity(
-			python=platform.python_version(),
-			platform=platform.platform(),
-			backend="numpy",
-			dependencies=dependencies,
-			hardware={"cpu_count": os.cpu_count() or 1},
-		),
+		environment=environment or collect_environment_identity(),
 		description={"dataset_path": resolved},
 	)
 
@@ -418,6 +414,10 @@ def _runner(
 	prefix_cache_verify_fraction: float,
 ) -> IndependentExperimentRunner:
 	config = load_experiment_config(experiment_path)
+	try:
+		runtime_report: RuntimeCompatibilityReport = require_runtime_compatibility(config)
+	except RuntimeCompatibilityError as error:
+		raise click.ClickException(str(error)) from error
 	if prefix_cache and (
 		prefix_cache_root is None
 		or prefix_cache_max_disk_bytes is None
@@ -439,7 +439,7 @@ def _runner(
 	executor = PipelineTrialExecutor(config, scan_path, cache_policy)
 	return IndependentExperimentRunner(
 		config,
-		build_experiment_inputs(scan_path),
+		build_experiment_inputs(scan_path, environment=runtime_report.environment),
 		root,
 		executor,
 		validator=executor.validate,
@@ -448,6 +448,7 @@ def _runner(
 			override_limits=override_limits,
 			failure=failure,
 		),
+		runtime_report=runtime_report,
 	)
 
 

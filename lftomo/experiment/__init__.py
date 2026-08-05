@@ -85,6 +85,15 @@ from .prefix_cache import (
 	PrefixPlanningCandidate,
 	plan_common_prefixes,
 )
+from .runtime import (
+	RuntimeCompatibilityDiagnostic,
+	RuntimeCompatibilityError,
+	RuntimeCompatibilityReport,
+	RuntimeSmokeCheck,
+	check_runtime_compatibility,
+	collect_environment_identity,
+	require_runtime_compatibility,
+)
 
 __all__ = [
 	"AggregationPolicy",
@@ -132,6 +141,10 @@ __all__ = [
 	"PromotionPolicy",
 	"PromotionRank",
 	"ResourcePolicy",
+	"RuntimeCompatibilityDiagnostic",
+	"RuntimeCompatibilityError",
+	"RuntimeCompatibilityReport",
+	"RuntimeSmokeCheck",
 	"ResumeDecision",
 	"ResumePolicy",
 	"SamplerIdentity",
@@ -152,12 +165,15 @@ __all__ = [
 	"WindowReference",
 	"canonical_json",
 	"compare_trial_identities",
+	"check_runtime_compatibility",
+	"collect_environment_identity",
 	"aggregate_window_metrics",
 	"audit_tier2_results",
 	"build_tier2_plan",
 	"export_blinded_previews",
 	"promotion_lineage",
 	"plan_common_prefixes",
+	"require_runtime_compatibility",
 	"select_candidates",
 	"successive_halving",
 	"write_tier2_plan",

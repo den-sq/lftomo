@@ -9,7 +9,7 @@ import json
 import os
 from pathlib import Path
 import socket
-from typing import Iterator, Literal
+from typing import Iterator, Literal, Mapping
 from uuid import uuid4
 
 from pydantic import Field
@@ -30,6 +30,7 @@ from .runner import (
 	IndependentExperimentRunner,
 	PreparedTrial,
 	atomic_write_model,
+	json_value,
 )
 
 
@@ -97,7 +98,12 @@ class PersistedExperimentStore:
 		self.root = Path(root)
 		self.metadata_path = self.root / "store.json"
 
-	def initialize(self, config: ExperimentConfig) -> StoreMetadata:
+	def initialize(
+		self,
+		config: ExperimentConfig,
+		*,
+		manifest_metadata: Mapping[str, object] | None = None,
+	) -> StoreMetadata:
 		self.root.mkdir(parents=True, exist_ok=True)
 		if self.metadata_path.exists():
 			metadata = self._load_metadata()
@@ -106,6 +112,16 @@ class PersistedExperimentStore:
 					"experiment store belongs to a different experiment config: "
 					f"{metadata.experiment_id} != {config.experiment_id}"
 				)
+			manifest_path = self.root / "manifest.json"
+			if manifest_path.exists() and manifest_metadata is not None:
+				manifest = ExperimentManifest.model_validate_json(
+					manifest_path.read_text(encoding="utf-8")
+				)
+				merged = dict(manifest.metadata)
+				merged.update(json_value(manifest_metadata))
+				atomic_write_model(manifest_path, manifest.model_copy(update={
+					"metadata": merged,
+				}))
 			return metadata
 		metadata = StoreMetadata(experiment_id=config.experiment_id, created_at=_utcnow())
 		atomic_write_model(self.metadata_path, metadata)
@@ -113,6 +129,7 @@ class PersistedExperimentStore:
 			experiment_id=config.experiment_id,
 			config=config,
 			created_at=metadata.created_at,
+			metadata={} if manifest_metadata is None else json_value(manifest_metadata),
 		))
 		return metadata
 
@@ -397,17 +414,31 @@ class PersistedExperimentStore:
 			if current is not None and current.owner == owner:
 				path.unlink()
 
-	def refresh_manifest(self, config: ExperimentConfig) -> ExperimentManifest:
+	def refresh_manifest(
+		self,
+		config: ExperimentConfig,
+		*,
+		manifest_metadata: Mapping[str, object] | None = None,
+	) -> ExperimentManifest:
 		metadata = self._load_metadata()
 		attempts = [
 			attempt for history in self.histories() for attempt in history.attempts
 		]
 		attempts.sort(key=lambda item: (item.created_at, item.attempt_id))
+		manifest_path = self.root / "manifest.json"
+		prior_metadata = {}
+		if manifest_path.exists():
+			prior_metadata = dict(ExperimentManifest.model_validate_json(
+				manifest_path.read_text(encoding="utf-8")
+			).metadata)
+		if manifest_metadata is not None:
+			prior_metadata.update(json_value(manifest_metadata))
 		manifest = ExperimentManifest(
 			experiment_id=config.experiment_id,
 			config=config,
 			created_at=metadata.created_at,
 			attempt_ids=tuple(item.attempt_id for item in attempts),
+			metadata=prior_metadata,
 		)
 		atomic_write_model(self.root / "manifest.json", manifest)
 		return manifest
@@ -439,8 +470,11 @@ class PersistedExperimentRunner:
 			return self.runner._execute(self.store.allocate(trial))
 
 	def run(self) -> ExperimentRunSummary:
-		self.store.initialize(self.runner.config)
 		preflight, trials = self.runner.prepare()
+		manifest_metadata = {"runtime_compatibility": preflight.runtime}
+		self.store.initialize(
+			self.runner.config, manifest_metadata=manifest_metadata,
+		)
 		if preflight.validation_failures:
 			raise ValueError(
 				"candidate preflight failed: "
@@ -470,7 +504,9 @@ class PersistedExperimentRunner:
 					break
 		attempts.sort(key=lambda item: item.trial_id.value)
 		attempts, leaderboard = self.runner._rank(trials, attempts)
-		self.store.refresh_manifest(self.runner.config)
+		self.store.refresh_manifest(
+			self.runner.config, manifest_metadata=manifest_metadata,
+		)
 		summary = ExperimentRunSummary(
 			experiment_id=self.runner.config.experiment_id,
 			preflight=preflight,

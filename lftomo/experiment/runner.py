@@ -47,6 +47,11 @@ from .models import (
 	canonical_json,
 )
 from .selection import SelectedCandidate, select_candidates
+from .runtime import (
+	RuntimeCompatibilityError,
+	RuntimeCompatibilityReport,
+	check_runtime_compatibility,
+)
 
 
 FailurePolicy = Literal["continue", "fail_fast"]
@@ -135,6 +140,7 @@ class ExperimentPreflight(ConfigModel):
 	candidates: tuple[dict[str, JsonValue], ...]
 	validation_failures: tuple[ValidationFailure, ...] = ()
 	prefix_cache: dict[str, JsonValue] | None = None
+	runtime: RuntimeCompatibilityReport
 
 
 class TrialExecution(ConfigModel):
@@ -211,6 +217,7 @@ class IndependentExperimentRunner:
 		policy: ExperimentRunPolicy | None = None,
 		fidelity_id: str | None = None,
 		promotion_lineage: dict[str, Any] | None = None,
+		runtime_report: RuntimeCompatibilityReport | None = None,
 	):
 		self.config = config
 		self.inputs = inputs
@@ -221,6 +228,7 @@ class IndependentExperimentRunner:
 		self.policy = policy or ExperimentRunPolicy()
 		self.fidelity_id = fidelity_id or config.fidelities[0].id
 		self.promotion_lineage = promotion_lineage or {}
+		self.runtime_report = runtime_report
 
 	def _fidelity(self) -> FidelityIdentity:
 		try:
@@ -294,6 +302,12 @@ class IndependentExperimentRunner:
 		"""Select, validate, identify, and guard trials without reading dataset payloads."""
 
 		from lftomo.pipeline.stages import create_stage
+		runtime = self.runtime_report or check_runtime_compatibility(
+			self.config, backend=self.inputs.environment.backend,
+		)
+		self.runtime_report = runtime
+		if not runtime.compatible:
+			raise RuntimeCompatibilityError(runtime)
 
 		selected = select_candidates(self.config)
 		prepared = []
@@ -369,6 +383,7 @@ class IndependentExperimentRunner:
 			} for item in prepared),
 			validation_failures=tuple(failures),
 			prefix_cache=prefix_cache,
+			runtime=runtime,
 		)
 		return preflight, tuple(prepared)
 
@@ -540,6 +555,7 @@ class IndependentExperimentRunner:
 			config=self.config,
 			created_at=_utcnow(),
 			attempt_ids=tuple(item.attempt_id for item in attempts),
+			metadata={"runtime_compatibility": json_value(preflight.runtime)},
 		)
 		atomic_write_model(self.root / "manifest.json", manifest)
 		summary = ExperimentRunSummary(
