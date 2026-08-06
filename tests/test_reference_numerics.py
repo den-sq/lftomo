@@ -4,15 +4,36 @@ import numpy as np
 import pytest
 import tifffile as tf
 
+import lftomo.reference as reference_module
 from lftomo.reference import (
 	NumericalTolerance,
 	ReferenceNotReproducible,
+	RuntimeEnvironmentError,
+	_validate_tomopy_numpy_runtime,
 	aligned_producer_window,
 	checksum_manifest,
 	compare_slice,
 	run_reference_archive,
 	sha256_file,
 )
+
+
+@pytest.mark.parametrize(("numpy_version", "tomopy_version", "compatible"), (
+	("1.26.4", "1.14.4", True),
+	("2.0.0", "1.15.2", False),
+	("2.0.0", "1.15.3", True),
+))
+def test_reference_runtime_rejects_only_incompatible_tomopy_numpy_pair(
+	monkeypatch, numpy_version, tomopy_version, compatible,
+):
+	monkeypatch.setattr(reference_module.np, "__version__", numpy_version)
+	monkeypatch.setattr(reference_module, "package_version", lambda _name: tomopy_version)
+
+	if compatible:
+		_validate_tomopy_numpy_runtime()
+	else:
+		with pytest.raises(RuntimeEnvironmentError, match="requires TomoPy >=1.15.3"):
+			_validate_tomopy_numpy_runtime()
 
 
 def test_phase_contrast_rows_use_aligned_inclusive_producer_chunk():

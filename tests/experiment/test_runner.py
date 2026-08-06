@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import threading
@@ -23,6 +24,7 @@ from lftomo.experiment.runner import (
 	IndependentExperimentRunner,
 	TrialExecution,
 )
+import lftomo.experiment.runner as runner_module
 from lftomo.experiment.selection import select_candidates
 from lftomo.experiment.cli import main
 
@@ -189,6 +191,28 @@ def test_failure_isolation_and_interruption_never_publish_success(tmp_path):
 	).run().attempts[0]
 	assert interrupted.status == "interrupted"
 	assert interrupted.result is None
+
+
+def test_attempt_finish_is_clamped_when_wall_clock_moves_backwards(monkeypatch, tmp_path):
+	base = datetime(2026, 8, 5, tzinfo=timezone.utc)
+	timestamps = iter((
+		base,
+		base + timedelta(microseconds=2),
+		base + timedelta(microseconds=1),
+		base + timedelta(microseconds=3),
+	))
+	monkeypatch.setattr(runner_module, "_utcnow", lambda: next(timestamps))
+
+	summary = IndependentExperimentRunner(
+		experiment_config(candidate=candidate_space((0.01,)), concurrency=1),
+		inputs(), tmp_path,
+		lambda *_args: TrialExecution(metrics={"quality": 0.01}),
+	).run()
+	attempt = summary.attempts[0]
+
+	assert attempt.status == "succeeded"
+	assert attempt.finished_at == attempt.started_at
+	assert attempt.result.finalized_at == attempt.started_at
 
 
 def test_preflight_reports_validation_failures_and_enforces_resource_guards(tmp_path):

@@ -9,11 +9,11 @@ import os
 import platform
 from typing import Any, Callable, Literal, Mapping
 
-from packaging.version import InvalidVersion, Version
 from pydantic import Field
 
 from lftomo.config import ConfigModel
 from lftomo.pipeline.core import RuntimeRequirement
+from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 
 from .models import EnvironmentIdentity, ExperimentConfig
 
@@ -289,16 +289,7 @@ def check_runtime_compatibility(
 	if tomopy_runtime is not None:
 		numpy_version = versions.get("numpy")
 		tomopy_version = versions.get("tomopy")
-		try:
-			incompatible_pair = (
-				numpy_version is not None
-				and tomopy_version is not None
-				and Version(numpy_version) >= Version("2.0")
-				and Version(tomopy_version) < Version("1.15.3")
-			)
-		except InvalidVersion:
-			incompatible_pair = False
-		if incompatible_pair:
+		if tomopy_numpy_incompatible(numpy_version, tomopy_version):
 			diagnostics.append(RuntimeCompatibilityDiagnostic(
 				capability="tomopy",
 				severity="error",

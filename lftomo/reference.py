@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
+from importlib.metadata import PackageNotFoundError, version as package_version
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
@@ -14,6 +15,7 @@ import tifffile as tf
 import yaml
 
 from lftomo.pipeline import DataDomain, NumpyBackend, PipelineState, validate_pipeline
+from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
 from lftomo.util.shapes import ProjOrder
@@ -25,6 +27,23 @@ class ReferenceNotReproducible(RuntimeError):
 
 class RuntimeEnvironmentError(RuntimeError):
 	"""The numerical runtime violates the reconstruction environment contract."""
+
+
+def _validate_tomopy_numpy_runtime() -> None:
+	"""Reject only the TomoPy/NumPy pairing known to be incompatible."""
+
+	try:
+		tomopy_version = package_version("tomopy")
+	except PackageNotFoundError as error:
+		raise RuntimeEnvironmentError(
+			"TomoPy is required for Tier-2 numerical reproduction. "
+			"Recreate the environment.yml runtime."
+		) from error
+	if tomopy_numpy_incompatible(np.__version__, tomopy_version):
+		raise RuntimeEnvironmentError(
+			f"NumPy {np.__version__} requires TomoPy >=1.15.3; "
+			f"found TomoPy {tomopy_version}. Recreate the environment.yml runtime."
+		)
 
 
 @dataclass(frozen=True)
@@ -308,11 +327,7 @@ def run_reference_archive(root: str | Path, producer: str,
 	if exact_producer_unavailable or legacy_unversioned_copy:
 		reason = source_metadata.get("reproduction_note") or provenance_note
 		raise ReferenceNotReproducible(str(reason))
-	if np.lib.NumpyVersion(np.__version__) >= np.lib.NumpyVersion("2.0.0"):
-		raise RuntimeEnvironmentError(
-			f"TomoPy numerical reproduction requires NumPy <2; found {np.__version__}. "
-			"Recreate the pinned environment.yml runtime."
-		)
+	_validate_tomopy_numpy_runtime()
 	selected = list(slices or metadata["reference_selection"]["slices"])
 	if not selected:
 		raise ValueError("reference selection must not be empty")

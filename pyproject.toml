@@ -7,7 +7,7 @@ name = "lftomo"
 version = "0.1.0"
 description = "Large-format tomography reconstruction utilities."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.15"
 dependencies = [
 	"numpy",
 	"click",
@@ -42,8 +42,9 @@ dev = [
 ]
 docs = [
 	"mkdocs",
-	"mkdocs-jupyter",
+	"mkdocs-jupyter>=0.25",
 	"mkdocstrings[python]",
+	"pymdown-extensions",
 ]
 super-resolution = [
 	"torch",

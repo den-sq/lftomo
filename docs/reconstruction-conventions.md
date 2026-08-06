@@ -3,18 +3,17 @@
 ## TomoPy dependency scope
 
 Core configuration, orchestration, and non-TomoPy consumers support the
-package's ordinary NumPy dependency. TomoPy reconstruction requires the
-`tomopy` extra and NumPy 1.x because TomoPy 1.x uses copy semantics that changed
-in NumPy 2:
+package's ordinary NumPy dependency. TomoPy reconstruction requires TomoPy
+1.15.3 or newer because that release supports NumPy 2 copy semantics:
 
 ```shell
 pip install -e ".[tomopy]"
 ```
 
 For real reconstruction deployments, prefer `environment.yml`; it obtains the
-compiled stack from conda and pins `numpy<2`. Development environments that run
-the reconstruction tests should install `.[dev,tomopy]` after creating that
-conda environment.
+compatible NumPy/TomoPy compiled stack from conda. Development environments
+that run the reconstruction tests should install `.[dev,tomopy]` after creating
+that conda environment.
 
 ## Projection angles
 

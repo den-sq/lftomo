@@ -79,6 +79,12 @@ def _utcnow() -> datetime:
 	return datetime.now(timezone.utc)
 
 
+def _finish_timestamp(started_at: datetime) -> datetime:
+	"""Return a wall-clock finish that cannot violate lifecycle ordering."""
+
+	return max(_utcnow(), started_at)
+
+
 def json_value(value: Any) -> JsonValue:
 	"""Convert runtime artifacts to the experiment record's JSON value contract."""
 
@@ -531,7 +537,7 @@ class IndependentExperimentRunner:
 			execution_identity = trial.identity.model_copy(deep=True)
 			with bind_execution_context(context):
 				execution = self.executor(execution_identity, trial.output_root)
-			finished = _utcnow()
+			finished = _finish_timestamp(started)
 			elapsed = time.perf_counter() - clock
 			peak = execution.peak_memory_bytes or max(memory_before, _peak_memory_bytes())
 			result = FinalResult(
@@ -558,7 +564,7 @@ class IndependentExperimentRunner:
 				result=result,
 			)
 		except BaseException as error:
-			finished = _utcnow()
+			finished = _finish_timestamp(started)
 			traceback_text = traceback.format_exc()
 			secrets = (
 				active_secret_values() if self.event_writer is None else self.event_writer.secrets
