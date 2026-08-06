@@ -237,7 +237,16 @@ def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_
 	call_count = len(calls)
 	resumed = FidelityExperimentRunner(config, inputs(), tmp_path, execute).run()
 	assert len(calls) == call_count
-	assert resumed.model_dump(mode="json") == summary.model_dump(mode="json")
+	assert resumed.promotions == summary.promotions
+	for resumed_level, original_level in zip(resumed.levels, summary.levels):
+		assert resumed_level.attempts == original_level.attempts
+		assert resumed_level.leaderboard == original_level.leaderboard
+		assert resumed_level.preflight.model_dump(
+			mode="json", exclude={"path_resources"},
+		) == original_level.preflight.model_dump(
+			mode="json", exclude={"path_resources"},
+		)
+		assert resumed_level.preflight.path_resources.accepted is True
 
 
 def test_tier2_plan_rejects_dirty_code_and_missing_held_out_protocol():

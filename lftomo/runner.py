@@ -31,6 +31,7 @@ from lftomo.pipeline import (
 	Pipeline,
 	PipelineState,
 	Stage,
+	StageObserver,
 	expand_recon_sweeps,
 	validate_pipeline,
 )
@@ -392,7 +393,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			output_path: str | Path | None = None, backend: Backend | None = None, *,
 			calibration_bundle: CalibrationBundleRef | None = None,
 			verify_calibration_hashes: bool = True,
-			state_executor: PipelineStateExecutor | None = None) -> list[RunResult]:
+			state_executor: PipelineStateExecutor | None = None,
+			stage_observer: StageObserver | None = None) -> list[RunResult]:
 	"""Load, expand, and execute every concrete run described by YAML files."""
 	recon, resolved_pipeline_path = load_recon(pipeline_path)
 	scan, resolved_scan_path = load_scan(scan_path)
@@ -470,7 +472,12 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			backend=backend,
 		)
 		if state_executor is None:
-			state = Pipeline(stages, backend=backend, validation_mode="complete").run(state)
+			state = Pipeline(
+				stages,
+				backend=backend,
+				validation_mode="complete",
+				observer=stage_observer,
+			).run(state)
 		else:
 			state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
 		results.append(RunResult(

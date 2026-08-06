@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import socket
-from typing import Iterator, Literal
+from typing import Callable, Iterator, Literal, Mapping
 from uuid import uuid4
 
 from pydantic import Field
@@ -25,11 +25,26 @@ from .models import (
 	TrialIdentity,
 	compare_trial_identities,
 )
+from .resources import (
+	PathRelocationCompatibility,
+	PathResourceReport,
+	compare_path_resource_reports,
+)
+from .events import (
+	AttemptProgress,
+	CancellationDetails,
+	CancellationToken,
+	ExperimentStatus,
+	FailureContext,
+	ProgressEventWriter,
+	secret_material_paths,
+)
 from .runner import (
 	ExperimentRunSummary,
 	IndependentExperimentRunner,
 	PreparedTrial,
 	atomic_write_model,
+	json_value,
 )
 
 
@@ -97,7 +112,18 @@ class PersistedExperimentStore:
 		self.root = Path(root)
 		self.metadata_path = self.root / "store.json"
 
-	def initialize(self, config: ExperimentConfig) -> StoreMetadata:
+	def initialize(
+		self,
+		config: ExperimentConfig,
+		*,
+		manifest_metadata: Mapping[str, object] | None = None,
+	) -> StoreMetadata:
+		unsafe = secret_material_paths(config)
+		if unsafe:
+			raise ValueError(
+				"secret-bearing fields cannot be persisted in an experiment config: "
+				+ ", ".join(unsafe)
+			)
 		self.root.mkdir(parents=True, exist_ok=True)
 		if self.metadata_path.exists():
 			metadata = self._load_metadata()
@@ -106,6 +132,16 @@ class PersistedExperimentStore:
 					"experiment store belongs to a different experiment config: "
 					f"{metadata.experiment_id} != {config.experiment_id}"
 				)
+			manifest_path = self.root / "manifest.json"
+			if manifest_path.exists() and manifest_metadata is not None:
+				manifest = ExperimentManifest.model_validate_json(
+					manifest_path.read_text(encoding="utf-8")
+				)
+				merged = dict(manifest.metadata)
+				merged.update(json_value(manifest_metadata))
+				atomic_write_model(manifest_path, manifest.model_copy(update={
+					"metadata": merged,
+				}))
 			return metadata
 		metadata = StoreMetadata(experiment_id=config.experiment_id, created_at=_utcnow())
 		atomic_write_model(self.metadata_path, metadata)
@@ -113,6 +149,7 @@ class PersistedExperimentStore:
 			experiment_id=config.experiment_id,
 			config=config,
 			created_at=metadata.created_at,
+			metadata={} if manifest_metadata is None else json_value(manifest_metadata),
 		))
 		return metadata
 
@@ -128,10 +165,40 @@ class PersistedExperimentStore:
 			)
 		return StoreMetadata.model_validate(document)
 
+	def validate_path_relocation(
+		self,
+		current: PathResourceReport,
+	) -> PathRelocationCompatibility:
+		"""Compare operational roots with an existing manifest before claims."""
+
+		manifest_path = self.root / "manifest.json"
+		if not manifest_path.exists():
+			return PathRelocationCompatibility(compatible=True, cache_reusable=True)
+		manifest = ExperimentManifest.model_validate_json(
+			manifest_path.read_text(encoding="utf-8")
+		)
+		prior_document = manifest.metadata.get("path_resource_preflight")
+		if prior_document is None:
+			return PathRelocationCompatibility(compatible=True, cache_reusable=False)
+		prior = PathResourceReport.model_validate(prior_document)
+		comparison = compare_path_resource_reports(prior, current)
+		if not comparison.compatible:
+			reasons = "; ".join(
+				item.message for item in comparison.diagnostics if item.severity == "error"
+			)
+			raise ValueError(f"incompatible experiment resource relocation: {reasons}")
+		return comparison
+
 	def _trial_root(self, identity: TrialIdentity) -> Path:
 		return self.root / "trials" / identity.trial_id.value
 
 	def register_trial(self, identity: TrialIdentity) -> Path:
+		unsafe = secret_material_paths(identity)
+		if unsafe:
+			raise ValueError(
+				"secret-bearing fields cannot be persisted in a trial identity: "
+				+ ", ".join(unsafe)
+			)
 		trial_root = self._trial_root(identity)
 		path = trial_root / "identity.json"
 		if path.exists():
@@ -217,6 +284,105 @@ class PersistedExperimentStore:
 			metadata=metadata,
 			trials=trials,
 			quarantined=tuple(sorted(path for path in after - before if path.is_file())),
+		)
+
+	def _progress_from_attempt(self, attempt: TrialAttemptRecord) -> AttemptProgress:
+		state = {
+			"pending": "planned",
+			"running": "started",
+			"succeeded": "succeeded",
+			"failed": "failed",
+			"interrupted": "interrupted",
+			"skipped": "skipped",
+			"incompatible": "skipped",
+		}[attempt.status]
+		failure = None
+		if attempt.failure is not None:
+			failure = FailureContext(
+				type=attempt.failure.type,
+				message=attempt.failure.message,
+				traceback=attempt.failure.traceback,
+				window_id=attempt.failure.window_id,
+				stage_occurrence_id=attempt.failure.stage_id,
+				stage_algorithm=attempt.failure.stage_algorithm,
+			)
+		return AttemptProgress(
+			experiment_id=self._load_metadata().experiment_id,
+			fidelity_id=attempt.identity.fidelity.id,
+			candidate_key=attempt.identity.candidate.value,
+			trial_id=attempt.trial_id.value,
+			attempt_id=attempt.attempt_id,
+			structural_variant=attempt.identity.sampler.explicit_case,
+			state=state,
+			updated_at=attempt.finished_at or attempt.started_at or attempt.created_at,
+			started_at=attempt.started_at,
+			finished_at=attempt.finished_at,
+			elapsed_seconds=attempt.elapsed_seconds,
+			resource_bytes=attempt.peak_memory_bytes,
+			failure=failure,
+		)
+
+	def write_progress(self, progress: AttemptProgress) -> None:
+		atomic_write_model(
+			self.root / "trials" / progress.trial_id / "progress"
+			/ f"{progress.attempt_id}.json",
+			progress,
+		)
+
+	def record_cancellation(self, details: CancellationDetails) -> None:
+		atomic_write_model(self.root / "cancellation.json", details)
+
+	def status(self) -> ExperimentStatus:
+		"""Reconstruct authoritative current state without consulting JSONL events."""
+
+		metadata = self._load_metadata()
+		attempts = []
+		for history in self.histories():
+			latest = history.latest
+			if latest is None:
+				continue
+			path = (
+				self.root / "trials" / latest.trial_id.value / "progress"
+				/ f"{latest.attempt_id}.json"
+			)
+			try:
+				progress = AttemptProgress.model_validate_json(path.read_text(encoding="utf-8"))
+			except (OSError, ValueError):
+				progress = self._progress_from_attempt(latest)
+			attempts.append(progress)
+		attempts.sort(key=lambda item: (item.fidelity_id, item.trial_id, item.attempt_id))
+		counts: dict[str, int] = {}
+		for progress in attempts:
+			counts[progress.state] = counts.get(progress.state, 0) + 1
+		states = set(counts)
+		if not states:
+			state = "planned"
+		elif states <= {"succeeded", "reused", "skipped"}:
+			state = "succeeded"
+		elif "started" in states or "planned" in states:
+			state = "running"
+		elif states == {"failed"}:
+			state = "failed"
+		elif "interrupted" in states:
+			state = "interrupted" if states <= {"interrupted", "succeeded"} else "mixed"
+		else:
+			state = "mixed"
+		cancellation = None
+		cancellation_path = self.root / "cancellation.json"
+		if cancellation_path.exists():
+			cancellation = CancellationDetails.model_validate_json(
+				cancellation_path.read_text(encoding="utf-8")
+			)
+			if not cancellation.requested:
+				cancellation = None
+		updated = max((item.updated_at for item in attempts), default=metadata.created_at)
+		return ExperimentStatus(
+			experiment_id=metadata.experiment_id,
+			state=state,
+			updated_at=updated,
+			attempts=tuple(attempts),
+			counts=counts,
+			cancellation=cancellation,
 		)
 
 	def _comparable_history(self, identity: TrialIdentity) -> TrialHistory | None:
@@ -330,6 +496,34 @@ class PersistedExperimentStore:
 		atomic_write_model(
 			trial.output_root / "attempts" / f"{attempt.attempt_id}.json", attempt,
 		)
+		self.write_progress(self._progress_from_attempt(attempt))
+		return attempt
+
+	def record_cancellation_before_claim(
+		self,
+		trial: PreparedTrial,
+		reason: str,
+	) -> TrialAttemptRecord:
+		"""Record resumable cancellation without claiming or starting an executor."""
+
+		self.register_trial(trial.identity)
+		allocated = self.allocate(trial)
+		finished = _utcnow()
+		attempt = TrialAttemptRecord(
+			attempt_id=allocated.attempt_id,
+			sequence=allocated.sequence,
+			previous_attempt_id=allocated.previous_attempt_id,
+			trial_id=trial.identity.trial_id,
+			identity=trial.identity,
+			status="interrupted",
+			created_at=finished,
+			finished_at=finished,
+			failure=FailureRecord(type="CancellationRequested", message=reason),
+		)
+		atomic_write_model(
+			trial.output_root / "attempts" / f"{attempt.attempt_id}.json", attempt,
+		)
+		self.write_progress(self._progress_from_attempt(attempt))
 		return attempt
 
 	def _claim_path(self, identity: TrialIdentity) -> Path:
@@ -397,17 +591,31 @@ class PersistedExperimentStore:
 			if current is not None and current.owner == owner:
 				path.unlink()
 
-	def refresh_manifest(self, config: ExperimentConfig) -> ExperimentManifest:
+	def refresh_manifest(
+		self,
+		config: ExperimentConfig,
+		*,
+		manifest_metadata: Mapping[str, object] | None = None,
+	) -> ExperimentManifest:
 		metadata = self._load_metadata()
 		attempts = [
 			attempt for history in self.histories() for attempt in history.attempts
 		]
 		attempts.sort(key=lambda item: (item.created_at, item.attempt_id))
+		manifest_path = self.root / "manifest.json"
+		prior_metadata = {}
+		if manifest_path.exists():
+			prior_metadata = dict(ExperimentManifest.model_validate_json(
+				manifest_path.read_text(encoding="utf-8")
+			).metadata)
+		if manifest_metadata is not None:
+			prior_metadata.update(json_value(manifest_metadata))
 		manifest = ExperimentManifest(
 			experiment_id=config.experiment_id,
 			config=config,
 			created_at=metadata.created_at,
 			attempt_ids=tuple(item.attempt_id for item in attempts),
+			metadata=prior_metadata,
 		)
 		atomic_write_model(self.root / "manifest.json", manifest)
 		return manifest
@@ -422,25 +630,89 @@ class PersistedExperimentRunner:
 		*,
 		policy: ResumePolicy | None = None,
 		trial_ids: set[str] | None = None,
+		event_writer: ProgressEventWriter | None = None,
+		cancellation: CancellationToken | None = None,
+		before_execute: Callable[[object], None] | None = None,
 	):
 		self.runner = runner
 		self.store = PersistedExperimentStore(runner.root)
 		self.policy = policy or ResumePolicy()
 		self.trial_ids = trial_ids
+		self.event_writer = event_writer or runner.event_writer
+		self.cancellation = cancellation or runner.cancellation
+		self.runner.event_writer = self.event_writer
+		self.runner.cancellation = self.cancellation
+		self.runner.progress_sink = self.store.write_progress
+		self.before_execute = before_execute
 
 	def _one(self, trial: PreparedTrial) -> TrialAttemptRecord:
+		if self.cancellation.requested:
+			attempt = self.store.record_cancellation_before_claim(
+				trial, self.cancellation.reason or "cancellation requested",
+			)
+			if self.event_writer is not None:
+				self.event_writer.emit(
+					"trial.finalized", "trial interrupted before claim",
+					severity="warning", fidelity_id=trial.identity.fidelity.id,
+					candidate_key=trial.identity.candidate.value,
+					trial_id=trial.identity.trial_id.value,
+					attempt_id=attempt.attempt_id, lifecycle_state="interrupted",
+				)
+			return attempt
+		if self.event_writer is not None:
+			self.event_writer.emit(
+				"trial.claim", "claiming trial",
+				fidelity_id=trial.identity.fidelity.id,
+				candidate_key=trial.identity.candidate.value,
+				trial_id=trial.identity.trial_id.value,
+				structural_variant=trial.identity.sampler.explicit_case,
+				sampler_index=trial.selected.index,
+				lifecycle_state="planned",
+			)
 		with self.store.claim(trial.identity, self.policy):
 			decision = self.store.decide(trial.identity, self.policy)
 			if decision.action == "reuse":
 				assert decision.prior_attempt is not None
+				if self.event_writer is not None:
+					self.event_writer.emit(
+						"trial.reused", "reused compatible successful trial",
+						fidelity_id=trial.identity.fidelity.id,
+						candidate_key=trial.identity.candidate.value,
+						trial_id=trial.identity.trial_id.value,
+						attempt_id=decision.prior_attempt.attempt_id,
+						lifecycle_state="reused",
+					)
 				return decision.prior_attempt
 			if decision.action in ("skip", "incompatible"):
-				return self.store.record_nonexecution(trial, decision)
+				attempt = self.store.record_nonexecution(trial, decision)
+				if self.event_writer is not None:
+					self.event_writer.emit(
+						"trial.skipped", decision.reason,
+						severity="warning",
+						fidelity_id=trial.identity.fidelity.id,
+						candidate_key=trial.identity.candidate.value,
+						trial_id=trial.identity.trial_id.value,
+						attempt_id=attempt.attempt_id,
+						lifecycle_state="skipped",
+					)
+				return attempt
 			return self.runner._execute(self.store.allocate(trial))
 
 	def run(self) -> ExperimentRunSummary:
-		self.store.initialize(self.runner.config)
 		preflight, trials = self.runner.prepare()
+		if self.before_execute is not None:
+			self.before_execute(preflight)
+		if self.event_writer is not None:
+			self.event_writer.activate()
+		relocation = self.store.validate_path_relocation(preflight.path_resources)
+		manifest_metadata = {
+			"runtime_compatibility": preflight.runtime,
+			"path_resource_preflight": preflight.path_resources,
+			"path_resource_relocation": relocation,
+		}
+		self.store.initialize(
+			self.runner.config, manifest_metadata=manifest_metadata,
+		)
 		if preflight.validation_failures:
 			raise ValueError(
 				"candidate preflight failed: "
@@ -455,27 +727,66 @@ class PersistedExperimentRunner:
 				trial for trial in trials if trial.identity.trial_id.value in self.trial_ids
 			)
 		attempts = []
+		unstarted = 0
 		with ThreadPoolExecutor(max_workers=preflight.max_concurrency) as pool:
-			futures: dict[Future, PreparedTrial] = {
-				pool.submit(self._one, trial): trial for trial in trials
-			}
-			for future in as_completed(futures):
-				attempt = future.result()
-				attempts.append(attempt)
-				if self.runner.policy.failure == "fail_fast" and attempt.status not in (
-					"succeeded", "skipped",
-				):
-					for pending in futures:
-						pending.cancel()
-					break
+			remaining = iter(trials)
+			futures: dict[Future, PreparedTrial] = {}
+			for _ in range(min(preflight.max_concurrency, len(trials))):
+				trial = next(remaining)
+				futures[pool.submit(self._one, trial)] = trial
+			stop = False
+			while futures:
+				done, _ = wait(futures, return_when=FIRST_COMPLETED)
+				for future in done:
+					futures.pop(future)
+					attempt = future.result()
+					attempts.append(attempt)
+					if self.runner.policy.failure == "fail_fast" and attempt.status not in (
+						"succeeded", "skipped",
+					):
+						stop = True
+				if self.cancellation.requested:
+					stop = True
+				while not stop and len(futures) < preflight.max_concurrency:
+					try:
+						trial = next(remaining)
+					except StopIteration:
+						break
+					futures[pool.submit(self._one, trial)] = trial
+			if stop:
+				unstarted = sum(1 for _ in remaining)
 		attempts.sort(key=lambda item: item.trial_id.value)
 		attempts, leaderboard = self.runner._rank(trials, attempts)
-		self.store.refresh_manifest(self.runner.config)
+		self.store.refresh_manifest(
+			self.runner.config, manifest_metadata=manifest_metadata,
+		)
+		interruption = None
+		if self.cancellation.requested:
+			interruption = CancellationDetails(
+				requested=True,
+				reason=self.cancellation.reason,
+				requested_at=self.cancellation.requested_at,
+				interrupted_attempt_ids=tuple(
+					item.attempt_id for item in attempts if item.status == "interrupted"
+				),
+				unstarted_candidates=unstarted,
+			)
+			self.store.record_cancellation(interruption)
+			if self.event_writer is not None:
+				self.event_writer.emit(
+					"cancellation.finalized",
+					"cancellation finalized after in-flight attempts reached durable states",
+					severity="warning", lifecycle_state="interrupted",
+					details=interruption.model_dump(mode="json"),
+				)
+		elif (self.store.root / "cancellation.json").exists():
+			self.store.record_cancellation(CancellationDetails())
 		summary = ExperimentRunSummary(
 			experiment_id=self.runner.config.experiment_id,
 			preflight=preflight,
 			attempts=tuple(attempts),
 			leaderboard=leaderboard,
+			interruption=interruption,
 		)
 		self.runner._write_outputs(summary)
 		return summary

@@ -10,10 +10,25 @@ import tifffile as tf
 import h5py
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import (
+	PipelineState,
+	ResourceHints,
+	RuntimeRequirement,
+	Stage,
+	StageContract,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.io import np_convert
 from lftomo.util.shapes import ReconOrder
+
+
+_CLOUDVOLUME_RUNTIME_REQUIREMENT = RuntimeRequirement(
+	capability="neuroglancer",
+	package="cloud-volume",
+	module="cloudvolume",
+	probe_attributes=("CloudVolume",),
+	corrective_action="install lftomo with the neuroglancer extra",
+)
 
 
 _OUTPUT_DTYPES = {
@@ -179,6 +194,7 @@ class NeuroglancerWriteStage(Stage):
 		window_axes=("Y",),
 		produces_artifacts=("output_files", "neuroglancer_source"),
 		resources=ResourceHints(memory_multiplier=2.0),
+		runtime_requirements=(_CLOUDVOLUME_RUNTIME_REQUIREMENT,),
 	)
 
 	def __init__(self, path: str | Path | None = None, layer_name: str = "reconstruction",

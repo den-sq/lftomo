@@ -5,8 +5,16 @@ from __future__ import annotations
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import (
+	Locality,
+	PipelineState,
+	ResourceHints,
+	RuntimeRequirement,
+	Stage,
+	StageContract,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.runtime import tomopy_requirement
 from lftomo.pipeline.stages._layout import (
 	configured_layout,
 	n_rows,
@@ -23,7 +31,10 @@ from lftomo.prep.stripe import (
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
-def _contract(memory_multiplier: float) -> StageContract:
+def _contract(
+	memory_multiplier: float,
+	runtime_requirements: tuple[RuntimeRequirement, ...] = (),
+) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
@@ -35,6 +46,7 @@ def _contract(memory_multiplier: float) -> StageContract:
 		cacheable_prefix=True,
 		window_axes=("Y",),
 		resources=ResourceHints(memory_multiplier=memory_multiplier),
+		runtime_requirements=runtime_requirements,
 	)
 
 
@@ -214,7 +226,10 @@ class AllOfTheStripeStage(Stage):
 	"""Run TomoPy's combined Vo dead, large, and sorting algorithms."""
 
 	name = "stripe.all_of_the_stripe"
-	contract = _contract(3.0)
+	contract = _contract(
+		3.0,
+		runtime_requirements=(tomopy_requirement("remove_all_stripe"),),
+	)
 
 	def __init__(self, snr: float = 3, la_size: int = 61, sm_size: int = 21,
 				dim: int = 1, ncore: int | None = None, nchunk: int | None = None):
@@ -237,6 +252,7 @@ class AllOfTheStripeStage(Stage):
 			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
 			mutates_input=True, cacheable_prefix=True, window_axes=("Y",),
 			resources=ResourceHints(memory_multiplier=3.0),
+			runtime_requirements=type(self).contract.runtime_requirements,
 		)
 
 	@classmethod

@@ -9,7 +9,6 @@ from scipy.signal import medfilt2d
 from scipy.ndimage import median_filter
 from scipy.ndimage import binary_dilation
 from scipy.ndimage import uniform_filter1d
-from tomopy.util import mproc
 
 
 from lftomo.util.mem import SharedNPArray

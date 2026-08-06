@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 import numpy as np
 
@@ -20,6 +20,22 @@ class ResourceHints:
 	memory_multiplier: float = 1.0
 	preferred_cpus: int | None = None
 	requires_gpu: bool = False
+
+
+@dataclass(frozen=True)
+class RuntimeRequirement:
+	"""Optional runtime capability required by a Stage implementation.
+
+	The declaration lives with the Stage contract so experiment preflight can
+	discover dependencies from the authoritative registry instead of maintaining
+	a parallel algorithm-key table.
+	"""
+
+	capability: str
+	package: str
+	module: str
+	probe_attributes: tuple[str, ...] = ()
+	corrective_action: str = ""
 
 
 class Locality(Enum):
@@ -38,7 +54,8 @@ class StageContract:
 	``expected_input`` and ``produced_output`` are shape classes, usually from
 	``lftomo.util.shapes`` such as ``ProjOrder``, ``SinoOrder``, or
 	``ReconOrder``. These contract fields are consumed by the Pipeline validator
-	defined by issue #18 / PR #42.
+	defined by issue #18 / PR #42. ``runtime_requirements`` declares invariant
+	optional dependencies and bounded post-import API probes for preflight.
 	"""
 
 	expected_input: type[Any] | None = None
@@ -64,6 +81,7 @@ class StageContract:
 	produces_domain: DataDomain | ContractEffect | None = None
 	resamples_detector: bool = False
 	requires_row_identity: bool = False
+	runtime_requirements: tuple[RuntimeRequirement, ...] = ()
 
 	@property
 	def accepted_layouts(self) -> tuple[type[Any], ...] | None:
@@ -209,6 +227,11 @@ class Stage(ABC):
 		"""Execute the Stage and return the next PipelineState."""
 
 
+StageObserver = Callable[
+	[Literal["started", "completed", "failed"], int, Stage, BaseException | None], None,
+]
+
+
 class Pipeline:
 	"""Sequential Pipeline over an ordered list of Stages."""
 
@@ -217,7 +240,8 @@ class Pipeline:
 			validation_mode: str = "fragment",
 			initial_layout: type[Any] | None = None,
 			initial_domain: DataDomain | None = None,
-			bounded_workers: int = 1):
+			bounded_workers: int = 1, observer: StageObserver | None = None,
+			checkpoint: Callable[[], None] | None = None):
 		if bounded_workers < 1:
 			raise ValueError("bounded_workers must be positive")
 		self.stages = tuple(stages)
@@ -227,6 +251,8 @@ class Pipeline:
 		self.initial_layout = initial_layout
 		self.initial_domain = initial_domain
 		self.bounded_workers = bounded_workers
+		self.observer = observer
+		self.checkpoint = checkpoint
 		self.plan = None
 		self._validated = False
 		if validate and scan is not None:
@@ -269,17 +295,52 @@ class Pipeline:
 			if segment.kind is ExecutionKind.BOUNDED_SINOGRAM:
 				from lftomo.pipeline.execution import run_bounded_sinogram_segment
 
-				state = run_bounded_sinogram_segment(
-					state, segment_stages, max_workers=self.bounded_workers,
-				)
+				stage_indices = {
+					id(stage): offset
+					for offset, stage in enumerate(segment_stages, start=segment.start)
+				}
+				if self.observer is not None:
+					for offset, stage in enumerate(segment_stages, start=segment.start):
+						self.observer("started", offset, stage, None)
+				try:
+					state = run_bounded_sinogram_segment(
+						state,
+						segment_stages,
+						max_workers=self.bounded_workers,
+						failure_observer=(
+							None if self.observer is None else lambda stage, error: self.observer(
+								"failed",
+								stage_indices[id(stage)],
+								stage,
+								error,
+							)
+						),
+						checkpoint=self.checkpoint,
+					)
+				except BaseException:
+					raise
+				if self.observer is not None:
+					for offset, stage in enumerate(segment_stages, start=segment.start):
+						self.observer("completed", offset, stage, None)
 				for stage in segment_stages:
 					state.layout = stage.contract.output_layout(state.layout)
 					state.domain = stage.contract.output_domain(state.domain)
 				continue
-			for stage in segment_stages:
+			for index, stage in enumerate(segment_stages, start=segment.start):
+				if self.checkpoint is not None:
+					self.checkpoint()
 				input_layout = state.layout
 				input_domain = state.domain
-				state = stage.run(state)
+				if self.observer is not None:
+					self.observer("started", index, stage, None)
+				try:
+					state = stage.run(state)
+				except BaseException as error:
+					if self.observer is not None:
+						self.observer("failed", index, stage, error)
+					raise
+				if self.observer is not None:
+					self.observer("completed", index, stage, None)
 				output_layout = stage.contract.output_layout(input_layout)
 				output_domain = stage.contract.output_domain(input_domain)
 				if output_layout is not None:

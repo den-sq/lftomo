@@ -8,7 +8,7 @@ import hashlib
 import math
 import os
 from pathlib import Path
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 from uuid import uuid4
 
 import numpy as np
@@ -41,6 +41,9 @@ from .runner import (
 	TrialExecutor,
 	atomic_write_model,
 )
+from .resources import PathResourceRequest
+from .runtime import RuntimeCompatibilityReport
+from .events import CancellationDetails, CancellationToken, ProgressEventWriter
 from .store import PersistedExperimentRunner, ResumePolicy
 
 
@@ -571,6 +574,7 @@ class FidelityRunSummary(ConfigModel):
 	experiment_id: str
 	levels: tuple[ExperimentRunSummary, ...]
 	promotions: tuple[PromotionDecision, ...]
+	interruption: CancellationDetails | None = None
 
 
 class FidelityExperimentRunner:
@@ -589,6 +593,11 @@ class FidelityExperimentRunner:
 		resume_policy: ResumePolicy | None = None,
 		manual_promotions: Mapping[str, set[str]] | None = None,
 		invalidate_stale_promotions: bool = False,
+		path_resources: PathResourceRequest | None = None,
+		runtime_report: RuntimeCompatibilityReport | None = None,
+		event_writer: ProgressEventWriter | None = None,
+		cancellation: CancellationToken | None = None,
+		before_execute: Callable[[object], None] | None = None,
 	):
 		if config.promotion is None:
 			raise ValueError("fidelity execution requires an explicit promotion policy")
@@ -602,6 +611,11 @@ class FidelityExperimentRunner:
 		self.resume_policy = resume_policy or ResumePolicy()
 		self.manual_promotions = manual_promotions or {}
 		self.invalidate_stale_promotions = invalidate_stale_promotions
+		self.path_resources = path_resources
+		self.runtime_report = runtime_report
+		self.event_writer = event_writer
+		self.cancellation = cancellation or CancellationToken()
+		self.before_execute = before_execute
 
 	def run(self) -> FidelityRunSummary:
 		levels = []
@@ -610,6 +624,13 @@ class FidelityExperimentRunner:
 		lineage: dict[str, PromotionLineage] = {}
 		decision_store = PromotionDecisionStore(self.root)
 		for index, fidelity in enumerate(self.config.fidelities):
+			if self.cancellation.requested:
+				break
+			if self.event_writer is not None:
+				self.event_writer.emit(
+					"fidelity.started", f"fidelity {fidelity.id} started",
+					fidelity_id=fidelity.id, completed_candidates=0,
+				)
 			runner = IndependentExperimentRunner(
 				self.config,
 				self.inputs,
@@ -620,6 +641,10 @@ class FidelityExperimentRunner:
 				policy=self.run_policy,
 				fidelity_id=fidelity.id,
 				promotion_lineage=lineage,
+				path_resources=self.path_resources,
+				runtime_report=self.runtime_report,
+				event_writer=self.event_writer,
+				cancellation=self.cancellation,
 			)
 			trial_ids = None
 			if selected_keys is not None:
@@ -632,8 +657,24 @@ class FidelityExperimentRunner:
 				runner,
 				policy=self.resume_policy,
 				trial_ids=trial_ids,
+				event_writer=self.event_writer,
+				cancellation=self.cancellation,
+				before_execute=self.before_execute,
 			).run()
 			levels.append(level)
+			if self.event_writer is not None:
+				self.event_writer.emit(
+					"fidelity.completed", f"fidelity {fidelity.id} completed",
+					severity="warning" if level.interruption is not None else "info",
+					fidelity_id=fidelity.id,
+					completed_candidates=len(level.attempts),
+					total_candidates=level.preflight.unique_candidates,
+					lifecycle_state=(
+						"interrupted" if level.interruption is not None else "succeeded"
+					),
+				)
+			if self.cancellation.requested:
+				break
 			if index == len(self.config.fidelities) - 1:
 				break
 			promotion_candidates = []
@@ -670,6 +711,14 @@ class FidelityExperimentRunner:
 				stale="invalidate" if self.invalidate_stale_promotions else "fail",
 			)
 			decisions.append(decision)
+			if self.event_writer is not None:
+				self.event_writer.emit(
+					"promotion.decision",
+					f"promotion {fidelity.id} to {next_fidelity.id} selected "
+					f"{len(decision.promoted_candidate_keys)} candidates",
+					fidelity_id=fidelity.id,
+					details=decision.model_dump(mode="json"),
+				)
 			selected_keys = set(decision.promoted_candidate_keys)
 			lineage = promotion_lineage(decision)
 			if not selected_keys:
@@ -678,6 +727,10 @@ class FidelityExperimentRunner:
 			experiment_id=self.config.experiment_id,
 			levels=tuple(levels),
 			promotions=tuple(decisions),
+			interruption=next((
+				level.interruption for level in reversed(levels)
+				if level.interruption is not None
+			), None),
 		)
 		atomic_write_model(self.root / "fidelity-results.json", summary)
 		return summary

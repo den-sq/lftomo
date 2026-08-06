@@ -22,6 +22,7 @@ dependencies = [
 	"scikit-image",
 	"pydantic>=2",
 	"PyYAML",
+	"packaging",
 ]
 
 [project.scripts]
@@ -33,9 +34,7 @@ bac = [
 	"hotopy",
 ]
 tomopy = [
-	# TomoPy 1.x calls NumPy APIs whose copy semantics changed in NumPy 2.
-	"numpy<2",
-	"tomopy",
+	"tomopy>=1.15.3",
 ]
 dev = [
 	"pytest",

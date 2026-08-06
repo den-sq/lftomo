@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Sequence
+import threading
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -17,6 +18,8 @@ def run_bounded_sinogram_segment(
 	stages: Sequence[Stage],
 	*,
 	max_workers: int = 1,
+	failure_observer: Callable[[Stage, BaseException], None] | None = None,
+	checkpoint: Callable[[], None] | None = None,
 ) -> PipelineState:
 	"""Gather, process, and scatter each row once for an entire Stage chain."""
 
@@ -33,10 +36,25 @@ def run_bounded_sinogram_segment(
 		if not callable(getattr(stage, "run_sinogram", None)):
 			raise TypeError(f"{stage.name} declares bounded views but has no run_sinogram kernel")
 
+	reported_failure = threading.Event()
+	failure_lock = threading.Lock()
+
 	def process(index: int) -> None:
+		if checkpoint is not None:
+			checkpoint()
 		scratch = sinogram_scratch(data, state.layout, index)
 		for stage in stages:
-			result = stage.run_sinogram(scratch, state)
+			if checkpoint is not None:
+				checkpoint()
+			try:
+				result = stage.run_sinogram(scratch, state)
+			except BaseException as error:
+				if failure_observer is not None:
+					with failure_lock:
+						if not reported_failure.is_set():
+							reported_failure.set()
+							failure_observer(stage, error)
+				raise
 			if result is not None and result is not scratch:
 				scratch = np.asarray(result)
 		sinogram_view(data, state.layout, index)[:] = scratch

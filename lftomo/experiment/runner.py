@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import resource
 import time
+import traceback
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
@@ -47,6 +48,28 @@ from .models import (
 	canonical_json,
 )
 from .selection import SelectedCandidate, select_candidates
+from .runtime import (
+	RuntimeCompatibilityError,
+	RuntimeCompatibilityReport,
+	check_runtime_compatibility,
+)
+from .resources import (
+	PathResourceRequest,
+	PathResourceReport,
+	require_path_resources,
+)
+from .events import (
+	AttemptProgress,
+	CancellationDetails,
+	CancellationToken,
+	ExecutionContext,
+	FailureContext,
+	ProgressEventWriter,
+	ProgressSink,
+	active_secret_values,
+	bind_execution_context,
+	redact_secrets,
+)
 
 
 FailurePolicy = Literal["continue", "fail_fast"]
@@ -74,7 +97,9 @@ def json_value(value: Any) -> JsonValue:
 	return repr(value)
 
 
-def _atomic_text(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str) -> None:
+	"""Publish a text artifact atomically with a durable temporary file."""
+
 	path.parent.mkdir(parents=True, exist_ok=True)
 	temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
 	try:
@@ -92,7 +117,7 @@ def atomic_write_model(path: Path, value: Any) -> None:
 	"""Publish a JSON model atomically so partial writes are never successful records."""
 
 	payload = value.model_dump(mode="json") if hasattr(value, "model_dump") else value
-	_atomic_text(path, json.dumps(json_value(payload), sort_keys=True, indent=2) + "\n")
+	atomic_write_text(path, json.dumps(json_value(payload), sort_keys=True, indent=2) + "\n")
 
 
 class ExperimentInputs(ConfigModel):
@@ -124,6 +149,7 @@ class ExperimentPreflight(ConfigModel):
 	"""Dry-run-visible deterministic execution plan and safety estimates."""
 
 	experiment_id: str
+	fidelity_id: str
 	sampler: str
 	seed: int
 	requested_coordinates: int
@@ -135,6 +161,8 @@ class ExperimentPreflight(ConfigModel):
 	candidates: tuple[dict[str, JsonValue], ...]
 	validation_failures: tuple[ValidationFailure, ...] = ()
 	prefix_cache: dict[str, JsonValue] | None = None
+	runtime: RuntimeCompatibilityReport
+	path_resources: PathResourceReport
 
 
 class TrialExecution(ConfigModel):
@@ -173,6 +201,7 @@ class ExperimentRunSummary(ConfigModel):
 	preflight: ExperimentPreflight
 	attempts: tuple[TrialAttemptRecord, ...]
 	leaderboard: tuple[LeaderboardEntry, ...]
+	interruption: CancellationDetails | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +240,11 @@ class IndependentExperimentRunner:
 		policy: ExperimentRunPolicy | None = None,
 		fidelity_id: str | None = None,
 		promotion_lineage: dict[str, Any] | None = None,
+		runtime_report: RuntimeCompatibilityReport | None = None,
+		path_resources: PathResourceRequest | None = None,
+		event_writer: ProgressEventWriter | None = None,
+		cancellation: CancellationToken | None = None,
+		progress_sink: ProgressSink | None = None,
 	):
 		self.config = config
 		self.inputs = inputs
@@ -221,6 +255,11 @@ class IndependentExperimentRunner:
 		self.policy = policy or ExperimentRunPolicy()
 		self.fidelity_id = fidelity_id or config.fidelities[0].id
 		self.promotion_lineage = promotion_lineage or {}
+		self.runtime_report = runtime_report
+		self.path_resources = path_resources
+		self.event_writer = event_writer
+		self.cancellation = cancellation or CancellationToken()
+		self.progress_sink = progress_sink or self._write_progress
 
 	def _fidelity(self) -> FidelityIdentity:
 		try:
@@ -294,6 +333,12 @@ class IndependentExperimentRunner:
 		"""Select, validate, identify, and guard trials without reading dataset payloads."""
 
 		from lftomo.pipeline.stages import create_stage
+		runtime = self.runtime_report or check_runtime_compatibility(
+			self.config, backend=self.inputs.environment.backend,
+		)
+		self.runtime_report = runtime
+		if not runtime.compatible:
+			raise RuntimeCompatibilityError(runtime)
 
 		selected = select_candidates(self.config)
 		prepared = []
@@ -338,19 +383,39 @@ class IndependentExperimentRunner:
 			self.config.output.max_bytes,
 			self._fidelity().max_output_bytes,
 		) if value is not None]
-		if limits and total_output is not None and total_output > min(limits):
-			if not self.policy.override_limits:
-				raise ValueError(
-					f"screening output estimate {total_output} bytes exceeds limit {min(limits)}; "
-					"reduce trials/output or rerun with override_limits=True"
-				)
 		workers = self._effective_workers()
 		prefix_planner = getattr(self.executor, "plan_prefix_cache", None)
 		prefix_cache = None
 		if callable(prefix_planner):
 			prefix_cache = json_value(prefix_planner(tuple(prepared)))
+		path_request = self.path_resources or PathResourceRequest(result_root=self.root)
+		if (
+			path_request.result_root.expanduser().resolve(strict=False)
+			!= self.root.expanduser().resolve(strict=False)
+		):
+			raise ValueError("path resource result_root must match the experiment runner root")
+		path_updates: dict[str, Any] = {}
+		if path_request.estimated_result_bytes is None:
+			path_updates["estimated_result_bytes"] = total_output
+		if (
+			path_request.result_guard_bytes is None
+			and limits
+			and not self.policy.override_limits
+		):
+			path_updates["result_guard_bytes"] = min(limits)
+		if prefix_cache is not None:
+			if path_request.cache_root is None and prefix_cache.get("scratch") is not None:
+				path_updates["cache_root"] = Path(prefix_cache["scratch"])
+			if path_request.estimated_cache_bytes is None:
+				path_updates["estimated_cache_bytes"] = prefix_cache.get(
+					"estimated_unique_snapshot_bytes"
+				)
+		path_request = path_request.model_copy(update=path_updates)
+		self.path_resources = path_request
+		path_report = require_path_resources(path_request)
 		preflight = ExperimentPreflight(
 			experiment_id=self.config.experiment_id,
+			fidelity_id=self.fidelity_id,
 			sampler=self.config.sampler.name,
 			seed=self.config.sampler.seed,
 			requested_coordinates=requested,
@@ -369,11 +434,64 @@ class IndependentExperimentRunner:
 			} for item in prepared),
 			validation_failures=tuple(failures),
 			prefix_cache=prefix_cache,
+			runtime=runtime,
+			path_resources=path_report,
 		)
 		return preflight, tuple(prepared)
 
 	def _attempt_path(self, trial: PreparedTrial) -> Path:
 		return trial.output_root / "attempts" / f"{trial.attempt_id}.json"
+
+	def _progress_path(self, progress: AttemptProgress) -> Path:
+		return (
+			self.root / "trials" / progress.trial_id / "progress"
+			/ f"{progress.attempt_id}.json"
+		)
+
+	def _write_progress(self, progress: AttemptProgress) -> None:
+		atomic_write_model(self._progress_path(progress), progress)
+
+	def _initial_progress(self, trial: PreparedTrial, now: datetime) -> AttemptProgress:
+		return AttemptProgress(
+			experiment_id=self.config.experiment_id,
+			fidelity_id=trial.identity.fidelity.id,
+			candidate_key=trial.identity.candidate.value,
+			trial_id=trial.identity.trial_id.value,
+			attempt_id=trial.attempt_id,
+			structural_variant=trial.identity.sampler.explicit_case,
+			sampler_index=trial.selected.index,
+			state="planned",
+			updated_at=now,
+		)
+
+	def _emit_attempt(
+		self,
+		kind: str,
+		message: str,
+		progress: AttemptProgress,
+		**fields: Any,
+	) -> None:
+		self.progress_sink(progress)
+		if self.event_writer is not None:
+			self.event_writer.emit(
+				kind,
+				message,
+				fidelity_id=progress.fidelity_id,
+				candidate_key=progress.candidate_key,
+				trial_id=progress.trial_id,
+				attempt_id=progress.attempt_id,
+				structural_variant=progress.structural_variant,
+				sampler_index=progress.sampler_index,
+				window_id=progress.window_id,
+				stage_occurrence_id=progress.stage_occurrence_id,
+				stage_algorithm=progress.stage_algorithm,
+				lifecycle_state=progress.state,
+				elapsed_seconds=progress.elapsed_seconds,
+				resource_bytes=progress.resource_bytes,
+				output_bytes=progress.output_bytes,
+				cache_bytes=progress.cache_bytes,
+				**fields,
+			)
 
 	def _execute(self, trial: PreparedTrial) -> TrialAttemptRecord:
 		created = _utcnow()
@@ -388,16 +506,31 @@ class IndependentExperimentRunner:
 		}
 		pending = TrialAttemptRecord(**base)
 		atomic_write_model(self._attempt_path(trial), pending)
+		progress = self._initial_progress(trial, created)
+		self._emit_attempt("trial.planned", "trial attempt planned", progress)
 		started = _utcnow()
 		running = TrialAttemptRecord(**base, status="running", started_at=started)
 		atomic_write_model(self._attempt_path(trial), running)
+		progress = progress.model_copy(update={
+			"state": "started", "updated_at": started, "started_at": started,
+		})
+		self._emit_attempt("trial.started", "trial attempt started", progress)
 		clock = time.perf_counter()
 		memory_before = _peak_memory_bytes()
+		context = ExecutionContext(
+			writer=self.event_writer,
+			progress_sink=self.progress_sink,
+			cancellation=self.cancellation,
+			progress=progress,
+			clock_started=clock,
+		)
 		try:
+			self.cancellation.raise_if_requested()
 			# The deep copy is deliberate: executor mutation can never leak into
 			# another logical candidate or the recorded identity.
 			execution_identity = trial.identity.model_copy(deep=True)
-			execution = self.executor(execution_identity, trial.output_root)
+			with bind_execution_context(context):
+				execution = self.executor(execution_identity, trial.output_root)
 			finished = _utcnow()
 			elapsed = time.perf_counter() - clock
 			peak = execution.peak_memory_bytes or max(memory_before, _peak_memory_bytes())
@@ -426,6 +559,14 @@ class IndependentExperimentRunner:
 			)
 		except BaseException as error:
 			finished = _utcnow()
+			traceback_text = traceback.format_exc()
+			secrets = (
+				active_secret_values() if self.event_writer is None else self.event_writer.secrets
+			)
+			clean_message = str(redact_secrets(
+				str(error) or type(error).__name__, secrets=secrets,
+			))
+			clean_traceback = str(redact_secrets(traceback_text, secrets=secrets))
 			interrupted = isinstance(error, (KeyboardInterrupt, InterruptedError))
 			attempt = TrialAttemptRecord(
 				**base,
@@ -436,10 +577,49 @@ class IndependentExperimentRunner:
 				peak_memory_bytes=max(memory_before, _peak_memory_bytes()),
 				failure=FailureRecord(
 					type=type(error).__name__,
-					message=str(error) or type(error).__name__,
+					message=clean_message,
+					stage_id=context.progress.stage_occurrence_id,
+					stage_algorithm=context.progress.stage_algorithm,
+					window_id=context.progress.window_id,
+					traceback=clean_traceback,
 				),
 			)
 		atomic_write_model(self._attempt_path(trial), attempt)
+		final_state = attempt.status
+		assert final_state in ("succeeded", "failed", "interrupted")
+		failure = None
+		if attempt.failure is not None:
+			failure = FailureContext(
+				type=attempt.failure.type,
+				message=attempt.failure.message,
+				traceback=attempt.failure.traceback,
+				window_id=attempt.failure.window_id,
+				stage_occurrence_id=attempt.failure.stage_id,
+				stage_algorithm=attempt.failure.stage_algorithm,
+			)
+		output_bytes = None
+		if attempt.result is not None:
+			known_sizes = [item.bytes for item in attempt.result.outputs if item.bytes is not None]
+			output_bytes = sum(known_sizes) if known_sizes else None
+		progress = context.progress.model_copy(update={
+			"state": final_state,
+			"updated_at": attempt.finished_at,
+			"finished_at": attempt.finished_at,
+			"elapsed_seconds": attempt.elapsed_seconds,
+			"resource_bytes": attempt.peak_memory_bytes,
+			"output_bytes": output_bytes,
+			"failure": failure,
+		})
+		self._emit_attempt(
+			"trial.finalized",
+			f"trial attempt {final_state}",
+			progress,
+			severity="error" if final_state == "failed" else (
+				"warning" if final_state == "interrupted" else "info"
+			),
+			failure_type=None if failure is None else failure.type,
+			traceback=None if failure is None else failure.traceback,
+		)
 		return attempt
 
 	def _rank(
@@ -522,17 +702,32 @@ class IndependentExperimentRunner:
 			)
 		attempts: list[TrialAttemptRecord] = []
 		workers = preflight.max_concurrency
+		unstarted = 0
 		with ThreadPoolExecutor(max_workers=workers) as pool:
-			future_to_trial: dict[Future, PreparedTrial] = {
-				pool.submit(self._execute, trial): trial for trial in trials
-			}
-			for future in as_completed(future_to_trial):
-				attempt = future.result()
-				attempts.append(attempt)
-				if self.policy.failure == "fail_fast" and attempt.status != "succeeded":
-					for pending in future_to_trial:
-						pending.cancel()
-					break
+			remaining = iter(trials)
+			future_to_trial: dict[Future, PreparedTrial] = {}
+			for _ in range(min(workers, len(trials))):
+				trial = next(remaining)
+				future_to_trial[pool.submit(self._execute, trial)] = trial
+			stop = False
+			while future_to_trial:
+				done, _ = wait(future_to_trial, return_when=FIRST_COMPLETED)
+				for future in done:
+					future_to_trial.pop(future)
+					attempt = future.result()
+					attempts.append(attempt)
+					if self.policy.failure == "fail_fast" and attempt.status != "succeeded":
+						stop = True
+				if self.cancellation.requested:
+					stop = True
+				while not stop and len(future_to_trial) < workers:
+					try:
+						trial = next(remaining)
+					except StopIteration:
+						break
+					future_to_trial[pool.submit(self._execute, trial)] = trial
+			if stop:
+				unstarted = sum(1 for _ in remaining)
 		attempts.sort(key=lambda item: item.trial_id.value)
 		attempts, leaderboard = self._rank(trials, attempts)
 		manifest = ExperimentManifest(
@@ -540,6 +735,10 @@ class IndependentExperimentRunner:
 			config=self.config,
 			created_at=_utcnow(),
 			attempt_ids=tuple(item.attempt_id for item in attempts),
+			metadata={
+				"runtime_compatibility": json_value(preflight.runtime),
+				"path_resource_preflight": json_value(preflight.path_resources),
+			},
 		)
 		atomic_write_model(self.root / "manifest.json", manifest)
 		summary = ExperimentRunSummary(
@@ -547,6 +746,15 @@ class IndependentExperimentRunner:
 			preflight=preflight,
 			attempts=tuple(attempts),
 			leaderboard=leaderboard,
+			interruption=CancellationDetails(
+				requested=True,
+				reason=self.cancellation.reason,
+				requested_at=self.cancellation.requested_at,
+				interrupted_attempt_ids=tuple(
+					item.attempt_id for item in attempts if item.status == "interrupted"
+				),
+				unstarted_candidates=unstarted,
+			) if self.cancellation.requested else None,
 		)
 		self._write_outputs(summary)
 		return summary
@@ -554,7 +762,7 @@ class IndependentExperimentRunner:
 	def _write_outputs(self, summary: ExperimentRunSummary) -> None:
 		payload = summary.model_dump(mode="json")
 		atomic_write_model(self.root / "experiment-results.json", payload)
-		_atomic_text(
+		atomic_write_text(
 			self.root / "experiment-results.yaml",
 			yaml.safe_dump(json_value(payload), sort_keys=False),
 		)
@@ -569,4 +777,4 @@ class IndependentExperimentRunner:
 				f"`{entry.candidate_key[:12]}` | `{canonical_json(entry.metrics)}` "
 				f"| `{entry.output_root}` |"
 			)
-		_atomic_text(self.root / "leaderboard.md", "\n".join(lines) + "\n")
+		atomic_write_text(self.root / "leaderboard.md", "\n".join(lines) + "\n")

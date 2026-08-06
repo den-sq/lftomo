@@ -15,6 +15,7 @@ from lftomo.experiment import (
 	DatasetIdentity,
 	EnvironmentIdentity,
 	ExperimentConfig,
+	PathResourceError,
 )
 from lftomo.experiment.runner import (
 	ExperimentInputs,
@@ -210,8 +211,9 @@ def test_preflight_reports_validation_failures_and_enforces_resource_guards(tmp_
 		lambda *_args: TrialExecution(metrics={"quality": 1}),
 		policy=ExperimentRunPolicy(estimated_output_bytes_per_trial=30),
 	)
-	with pytest.raises(ValueError, match="override_limits=True"):
+	with pytest.raises(PathResourceError, match="override the configured guard") as raised:
 		guarded.prepare()
+	assert raised.value.report.diagnostics[0].code == "guard_exceeded"
 	overridden = IndependentExperimentRunner(
 		experiment_config(output_limit=50), inputs(), tmp_path / "override",
 		lambda *_args: TrialExecution(metrics={"quality": 1}),

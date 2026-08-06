@@ -9,6 +9,7 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
+from lftomo.pipeline.runtime import ASTRA_RUNTIME_REQUIREMENT, tomopy_requirement
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 
 
@@ -27,6 +28,9 @@ class GridrecStage(Stage):
 	"""Reconstruct projection or sinogram-order data with TomoPy gridrec."""
 
 	name = "recon.gridrec"
+	contract = StageContract(
+		runtime_requirements=(tomopy_requirement("circ_mask", "recon"),),
+	)
 
 	def __init__(
 		self,
@@ -81,6 +85,7 @@ class GridrecStage(Stage):
 			window_axes=("Y",),
 			consumes_artifacts=() if center is not None else ("center",),
 			resources=ResourceHints(memory_multiplier=2.0, preferred_cpus=self.ncore),
+			runtime_requirements=type(self).contract.runtime_requirements,
 		)
 
 	@classmethod
@@ -183,6 +188,10 @@ class AstraCudaStage(GridrecStage):
 
 	method = ""
 	iterative = False
+	contract = StageContract(runtime_requirements=(
+		tomopy_requirement("astra", "circ_mask", "recon"),
+		ASTRA_RUNTIME_REQUIREMENT,
+	))
 
 	def __init__(
 		self,
@@ -230,6 +239,7 @@ class AstraCudaStage(GridrecStage):
 			window_axes=("Y",),
 			consumes_artifacts=self.contract.consumes_artifacts,
 			resources=ResourceHints(memory_multiplier=3.0, preferred_cpus=1, requires_gpu=True),
+			runtime_requirements=self.contract.runtime_requirements,
 		)
 
 	@classmethod

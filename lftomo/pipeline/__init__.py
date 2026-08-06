@@ -9,8 +9,10 @@ from lftomo.pipeline.core import (
 	Pipeline,
 	PipelineState,
 	ResourceHints,
+	RuntimeRequirement,
 	Stage,
 	StageContract,
+	StageObserver,
 )
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.pipeline.planning import (
@@ -57,6 +59,7 @@ __all__ = [
 	"Pipeline",
 	"PipelineState",
 	"ResourceHints",
+	"RuntimeRequirement",
 	"ContractEffect",
 	"DataDomain",
 	"PRESERVE",
@@ -78,6 +81,7 @@ __all__ = [
 	"ValidationMode",
 	"Stage",
 	"StageContract",
+	"StageObserver",
 	"CandidateLimitError",
 	"CandidateSpaceError",
 	"ContinuousDomainError",

@@ -23,7 +23,7 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from lftomo.config import ConfigModel, StageConfig
-from lftomo.pipeline import Pipeline, PipelineState, Stage
+from lftomo.pipeline import Pipeline, PipelineState, Stage, StageObserver
 
 from .models import canonical_json
 
@@ -352,7 +352,12 @@ def _directory_bytes(path: Path) -> int:
 	return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
-def _run_stages(state: PipelineState, stages: Sequence[Stage]) -> PipelineState:
+def _run_stages(
+	state: PipelineState,
+	stages: Sequence[Stage],
+	observer: StageObserver | None = None,
+	checkpoint: Callable[[], None] | None = None,
+) -> PipelineState:
 	if not stages:
 		return state
 	return Pipeline(
@@ -361,6 +366,8 @@ def _run_stages(state: PipelineState, stages: Sequence[Stage]) -> PipelineState:
 		validation_mode="fragment",
 		initial_layout=state.layout,
 		initial_domain=state.domain,
+		observer=observer,
+		checkpoint=checkpoint,
 	).run(state)
 
 
@@ -688,11 +695,13 @@ class PrefixCacheStore:
 		configs: Sequence[StageConfig],
 		*,
 		runtime_identity: Any,
+		observer: StageObserver | None = None,
+		checkpoint: Callable[[], None] | None = None,
 	) -> tuple[PipelineState, PrefixCacheEvent]:
 		"""Load/build one prefix, isolate a fork, then execute the suffix."""
 
 		if decision.action != "cache" or decision.stage_count == 0:
-			result = _run_stages(state, stages)
+			result = _run_stages(state, stages, observer, checkpoint)
 			return result, PrefixCacheEvent(
 				status="independent" if decision.action == "independent" else "bypass",
 				stage_count=decision.stage_count,
@@ -700,7 +709,7 @@ class PrefixCacheStore:
 				reason=decision.reason,
 			)
 		if state.backend.name != "numpy":
-			result = _run_stages(state, stages)
+			result = _run_stages(state, stages, observer, checkpoint)
 			return result, PrefixCacheEvent(
 				status="bypass",
 				stage_count=decision.stage_count,
@@ -713,7 +722,7 @@ class PrefixCacheStore:
 		if len(prefix_stages) != decision.stage_count or any(
 			not _cacheable(stage) for stage in prefix_stages
 		):
-			result = _run_stages(state, stages)
+			result = _run_stages(state, stages, observer, checkpoint)
 			return result, PrefixCacheEvent(
 				status="bypass",
 				stage_count=decision.stage_count,
@@ -743,7 +752,7 @@ class PrefixCacheStore:
 		except Exception as error:
 			if self.policy.on_error == "fail":
 				raise PrefixCacheError(f"cache identity is insufficient: {error}") from error
-			result = _run_stages(state, stages)
+			result = _run_stages(state, stages, observer, checkpoint)
 			return result, PrefixCacheEvent(
 				status="bypass",
 				stage_count=decision.stage_count,
@@ -785,7 +794,9 @@ class PrefixCacheStore:
 				if not cache_hit:
 					invalidation = self._invalidation_fields(prefix_id, identity)
 					started = time.perf_counter()
-					built = _run_stages(_clone_initial_state(state), prefix_stages)
+					built = _run_stages(
+						_clone_initial_state(state), prefix_stages, observer, checkpoint,
+					)
 					build_seconds = time.perf_counter() - started
 					manifest, evicted = self._publish(
 						prefix_id, cache_key, identity, decision.stage_count, built,
@@ -798,7 +809,7 @@ class PrefixCacheStore:
 		except PrefixCacheError as error:
 			if self.policy.on_error == "fail":
 				raise
-			result = _run_stages(state, stages)
+			result = _run_stages(state, stages, observer, checkpoint)
 			return result, PrefixCacheEvent(
 				status="bypass",
 				prefix_id=prefix_id,
@@ -810,7 +821,9 @@ class PrefixCacheStore:
 				reason=str(error),
 			)
 		if cache_hit and self._sampled(decision.candidate_id):
-			check = _run_stages(_clone_initial_state(state), prefix_stages)
+			check = _run_stages(
+				_clone_initial_state(state), prefix_stages, observer, checkpoint,
+			)
 			if not (
 				_equivalent(
 					np.asarray(check.working_array), np.asarray(fork.working_array),
@@ -828,7 +841,9 @@ class PrefixCacheStore:
 					raise PrefixCacheIntegrityError(
 						"sampled independent prefix differs from cached snapshot"
 					)
-				return _run_stages(check, suffix_stages), PrefixCacheEvent(
+				return _run_stages(
+					check, suffix_stages, observer, checkpoint,
+				), PrefixCacheEvent(
 					status="bypass",
 					prefix_id=prefix_id,
 					cache_key=cache_key,
@@ -840,7 +855,9 @@ class PrefixCacheStore:
 					reason="sampled independent prefix differs from cached snapshot",
 				)
 			verified = True
-		return _run_stages(fork, suffix_stages), PrefixCacheEvent(
+		return _run_stages(
+			fork, suffix_stages, observer, checkpoint,
+		), PrefixCacheEvent(
 			status=status,
 			prefix_id=prefix_id,
 			cache_key=cache_key,
@@ -880,9 +897,11 @@ class PrefixCachingPipelineExecutor:
 		configs: Sequence[StageConfig],
 		*,
 		runtime_identity: Any,
+		observer: StageObserver | None = None,
+		checkpoint: Callable[[], None] | None = None,
 	) -> tuple[PipelineState, PrefixCacheEvent]:
 		if self.store is None:
-			result = _run_stages(state, stages)
+			result = _run_stages(state, stages, observer, checkpoint)
 			return result, PrefixCacheEvent(
 				status="independent",
 				stage_count=decision.stage_count,
@@ -891,4 +910,6 @@ class PrefixCachingPipelineExecutor:
 			)
 		return self.store.execute(
 			decision, state, stages, configs, runtime_identity=runtime_identity,
+			observer=observer,
+			checkpoint=checkpoint,
 		)

@@ -7,8 +7,16 @@ import numpy as np
 from skimage.measure import shannon_entropy
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import (
+	Locality,
+	PipelineState,
+	ResourceHints,
+	RuntimeRequirement,
+	Stage,
+	StageContract,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.runtime import tomopy_requirement
 from lftomo.pipeline.stages._layout import (
 	configured_layout,
 	n_projections,
@@ -23,7 +31,10 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 LOGGER = logging.getLogger(__name__)
 
 
-def _contract(memory_multiplier: float = 1.0) -> StageContract:
+def _contract(
+	memory_multiplier: float = 1.0,
+	runtime_requirements: tuple[RuntimeRequirement, ...] = (),
+) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
@@ -35,6 +46,7 @@ def _contract(memory_multiplier: float = 1.0) -> StageContract:
 		window_axes=("Y",),
 		produces_artifacts=("center",),
 		resources=ResourceHints(memory_multiplier=memory_multiplier),
+		runtime_requirements=runtime_requirements,
 	)
 
 
@@ -133,7 +145,10 @@ class EntropyLocalCenterStage(Stage):
 	"""Select the lowest-entropy gridrec result from a local center sweep."""
 
 	name = "center.entropy_local"
-	contract = _contract(memory_multiplier=2.0)
+	contract = _contract(
+		memory_multiplier=2.0,
+		runtime_requirements=(tomopy_requirement("circ_mask", "recon"),),
+	)
 
 	def __init__(
 		self,
@@ -217,7 +232,12 @@ class VoCenterStage(Stage):
 	"""Find center with TomoPy's Vo method, optionally fitting row tilt."""
 
 	name = "center.vo"
-	contract = _contract(memory_multiplier=2.0)
+	contract = _contract(
+		memory_multiplier=2.0,
+		runtime_requirements=(
+			tomopy_requirement("circ_mask", "find_center_vo", "recon"),
+		),
+	)
 
 	def __init__(
 		self,
@@ -311,7 +331,9 @@ class PhaseCorrelationCenterStage(Stage):
 	"""Find center from the first and last projections by phase correlation."""
 
 	name = "center.pc"
-	contract = _contract()
+	contract = _contract(
+		runtime_requirements=(tomopy_requirement("find_center_pc"),),
+	)
 
 	def __init__(self, tol: float = 0.5, rotc_guess: float | None = None):
 		if tol <= 0:
@@ -323,6 +345,7 @@ class PhaseCorrelationCenterStage(Stage):
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.ATTENUATION,), produces_domain=PRESERVE,
 			locality=Locality.PROJECTION, produces_artifacts=("center",),
+			runtime_requirements=type(self).contract.runtime_requirements,
 		)
 
 	@classmethod
