@@ -71,25 +71,26 @@ def loader(modules):
 	return load
 
 
-def test_numpy_2_tomopy_1_is_rejected_with_actionable_structured_diagnostic():
+def test_numpy_2_tomopy_before_1_15_3_is_rejected_with_actionable_diagnostic():
 	report = check_runtime_compatibility(
 		config(kind="recon", algorithm="gridrec"),
 		package_versions={
-			"numpy": "2.4.6", "scipy": "1.16.0", "pydantic": "2.11.0",
-			"tomopy": "1.14.0",
+			"numpy": "2.0.0", "scipy": "1.16.0", "pydantic": "2.11.0",
+			"tomopy": "1.15.2",
 		},
-		module_loader=loader({"tomopy": tomopy_module()}),
+		module_loader=loader({"tomopy": tomopy_module("1.15.2")}),
 	)
 
 	assert report.compatible is False
 	diagnostic = next(
 		item for item in report.diagnostics
-		if item.package == "numpy" and item.requirement == "<2"
+		if item.package == "tomopy" and item.requirement == ">=1.15.3"
 	)
 	assert diagnostic.stage_ids == ("algorithm",)
-	assert "NumPy 2.4.6" in diagnostic.message
-	assert "activate/rebuild" in diagnostic.corrective_action
-	with pytest.raises(RuntimeCompatibilityError, match="numpy<2"):
+	assert "NumPy 2.0.0" in diagnostic.message
+	assert "TomoPy 1.15.2" in diagnostic.message
+	assert "TomoPy 1.15.3 or newer" in diagnostic.corrective_action
+	with pytest.raises(RuntimeCompatibilityError, match="TomoPy >=1.15.3"):
 		raise RuntimeCompatibilityError(report)
 
 
@@ -110,14 +111,15 @@ def test_compatible_tomopy_runtime_runs_bounded_import_and_api_smoke_check():
 	assert report.environment.dependencies["tomopy"] == "1.14.0"
 
 
-def test_numpy_2_with_future_tomopy_2_is_not_blocked_by_a_static_version_ceiling():
+@pytest.mark.parametrize("tomopy_version", ["1.15.3", "1.15.4", "2.0.0"])
+def test_numpy_2_with_fixed_or_newer_tomopy_is_accepted(tomopy_version):
 	report = check_runtime_compatibility(
 		config(kind="recon", algorithm="gridrec"),
 		package_versions={
 			"numpy": "2.4.6", "scipy": "1.16.0", "pydantic": "2.11.0",
-			"tomopy": "2.0.0",
+			"tomopy": tomopy_version,
 		},
-		module_loader=loader({"tomopy": tomopy_module("2.0.0")}),
+		module_loader=loader({"tomopy": tomopy_module(tomopy_version)}),
 	)
 
 	assert report.compatible is True

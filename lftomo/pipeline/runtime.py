@@ -6,8 +6,8 @@ from lftomo.pipeline.core import RuntimeRequirement
 
 
 _TOMOPY_CORRECTIVE_ACTION = (
-	"install the lftomo tomopy extra in this interpreter with numpy<2 "
-	"(for example: python -m pip install 'lftomo[tomopy]' 'numpy<2')"
+	"install the lftomo tomopy extra with TomoPy 1.15.3 or newer in this interpreter "
+	"(for example: python -m pip install 'lftomo[tomopy]')"
 )
 
 

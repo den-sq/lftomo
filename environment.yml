@@ -6,13 +6,12 @@ channels:
   - defaults
 dependencies:
   - python>=3.11
-  # TomoPy 1.14 still uses NumPy 1.x copy semantics internally.
-  - numpy<2
+  - numpy
   - click
   - psutil
   - h5py
   - tifffile
-  - tomopy
+  - tomopy>=1.15.3
   - scipy
   - pywavelets
   - numexpr

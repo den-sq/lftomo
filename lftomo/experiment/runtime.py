@@ -281,42 +281,38 @@ def check_runtime_compatibility(
 				message="module import and required API attributes passed",
 			))
 
-	# TomoPy 1.x uses NumPy APIs whose copy semantics changed in NumPy 2.
+	# TomoPy 1.15.3 fixed the NumPy 2 copy-semantics incompatibility.
 	tomopy_runtime = next(
 		(item for item in enabled if item.declaration.capability == "tomopy"),
 		None,
 	)
-	tomopy_smoke_passed = any(
-		check.capability == "tomopy" and check.status == "passed"
-		for check in smoke_checks
-	)
-	if tomopy_runtime is not None and tomopy_smoke_passed:
+	if tomopy_runtime is not None:
 		numpy_version = versions.get("numpy")
 		tomopy_version = versions.get("tomopy")
 		try:
 			incompatible_pair = (
 				numpy_version is not None
 				and tomopy_version is not None
-				and Version(numpy_version).major >= 2
-				and Version(tomopy_version).major < 2
+				and Version(numpy_version) >= Version("2.0")
+				and Version(tomopy_version) < Version("1.15.3")
 			)
 		except InvalidVersion:
-			incompatible_pair = True
+			incompatible_pair = False
 		if incompatible_pair:
 			diagnostics.append(RuntimeCompatibilityDiagnostic(
 				capability="tomopy",
 				severity="error",
 				message=(
-					f"NumPy {numpy_version} is incompatible with TomoPy {tomopy_version}; "
-					"the current TomoPy 1.x runtime contract requires numpy<2"
+					f"NumPy {numpy_version} requires TomoPy >=1.15.3; "
+					f"found TomoPy {tomopy_version}"
 				),
-				package="numpy",
-				installed_version=numpy_version,
-				requirement="<2",
-				evidence="known TomoPy 1.x / NumPy 2.x incompatibility",
+				package="tomopy",
+				installed_version=tomopy_version,
+				requirement=">=1.15.3",
+				evidence="TomoPy releases before 1.15.3 are incompatible with NumPy 2",
 				corrective_action=(
-					"activate/rebuild the lftomo environment with numpy<2 and verify that "
-					"this same interpreter imports TomoPy"
+					"install TomoPy 1.15.3 or newer in this interpreter and verify that "
+					"this same interpreter imports it"
 				),
 				stage_ids=tuple(sorted(tomopy_runtime.stage_ids)),
 			))
