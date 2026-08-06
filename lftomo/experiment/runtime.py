@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 import os
 import platform
 from typing import Any, Callable, Literal, Mapping
 
-from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 from pydantic import Field
 
 from lftomo.config import ConfigModel
+from lftomo.pipeline.core import RuntimeRequirement
 
 from .models import EnvironmentIdentity, ExperimentConfig
 
@@ -82,90 +82,15 @@ class RuntimeCompatibilityError(ValueError):
 		super().__init__(report.human_summary())
 
 
-@dataclass(frozen=True)
-class _FeatureRule:
-	name: str
-	stage_keys: frozenset[str]
-	package: str
-	module: str
-	requirement: str | None
-	attributes: tuple[str, ...]
-	corrective_action: str
+@dataclass
+class _EnabledRequirement:
+	declaration: RuntimeRequirement
+	stage_ids: set[str] = field(default_factory=set)
+	attribute_stage_ids: dict[str, set[str]] = field(default_factory=dict)
 
-
-_TOMOPY_KEYS = frozenset({
-	"center.entropy_local",
-	"center.pc",
-	"center.vo",
-	"recon.gridrec",
-	"recon.bp_cuda",
-	"recon.cgls_cuda",
-	"recon.em_cuda",
-	"recon.fbp_cuda",
-	"recon.fp_cuda",
-	"recon.sart_cuda",
-	"recon.sirt_cuda",
-	"stripe.all_of_the_stripe",
-})
-_ASTRA_KEYS = frozenset(key for key in _TOMOPY_KEYS if key.endswith("_cuda"))
-_TOMOPY_APIS = {
-	"center.entropy_local": ("recon",),
-	"center.pc": ("find_center_pc",),
-	"center.vo": ("find_center_vo",),
-	"recon.gridrec": ("recon", "circ_mask"),
-	"stripe.all_of_the_stripe": ("remove_all_stripe",),
-}
-
-_FEATURE_RULES = (
-	_FeatureRule(
-		name="tomopy",
-		stage_keys=_TOMOPY_KEYS,
-		package="tomopy",
-		module="tomopy",
-		requirement=">=1,<2",
-		attributes=(),
-		corrective_action=(
-			"install the lftomo tomopy extra in this interpreter with numpy<2 "
-			"(for example: python -m pip install 'lftomo[tomopy]' 'numpy<2')"
-		),
-	),
-	_FeatureRule(
-		name="astra-cuda",
-		stage_keys=_ASTRA_KEYS,
-		package="astra-toolbox",
-		module="astra",
-		requirement=None,
-		attributes=(),
-		corrective_action="install a compatible ASTRA Toolbox build in this interpreter",
-	),
-	_FeatureRule(
-		name="bac",
-		stage_keys=frozenset({"phase.bac", "phase.bronnikov_aided"}),
-		package="hotopy",
-		module="hotopy.holo",
-		requirement=None,
-		attributes=("BronnikovAidedCorrection",),
-		corrective_action="install lftomo with the bac extra in this interpreter",
-	),
-	_FeatureRule(
-		name="super-resolution",
-		stage_keys=frozenset({"super_resolve.drht"}),
-		package="torch",
-		module="torch",
-		requirement=None,
-		attributes=("load", "no_grad"),
-		corrective_action="install lftomo with the super-resolution extra",
-	),
-	_FeatureRule(
-		name="neuroglancer",
-		stage_keys=frozenset({"write.neuroglancer"}),
-		package="cloud-volume",
-		module="cloudvolume",
-		requirement=None,
-		attributes=("CloudVolume",),
-		corrective_action="install lftomo with the neuroglancer extra",
-	),
-)
+	@property
+	def checked_attributes(self) -> tuple[str, ...]:
+		return tuple(sorted(self.attribute_stage_ids))
 
 
 def _possible_stage_keys(config: ExperimentConfig) -> dict[str, set[str]]:
@@ -189,6 +114,38 @@ def _possible_stage_keys(config: ExperimentConfig) -> dict[str, set[str]]:
 	return keys
 
 
+def _enabled_runtime_requirements(
+	stage_keys: Mapping[str, set[str]],
+) -> tuple[_EnabledRequirement, ...]:
+	"""Collect and deduplicate runtime requirements owned by selectable Stages."""
+
+	from lftomo.pipeline.stages import STAGE_REGISTRY
+
+	enabled: dict[tuple[str, str, str], _EnabledRequirement] = {}
+	for stage_key, stage_ids in sorted(stage_keys.items()):
+		stage_type = STAGE_REGISTRY.get(stage_key)
+		if stage_type is None:
+			continue
+		for declaration in stage_type.contract.runtime_requirements:
+			identity = (
+				declaration.capability,
+				declaration.package,
+				declaration.module,
+			)
+			item = enabled.get(identity)
+			if item is None:
+				item = _EnabledRequirement(declaration=declaration)
+				enabled[identity] = item
+			elif item.declaration.corrective_action != declaration.corrective_action:
+				raise ValueError(
+					f"conflicting corrective actions declared for {declaration.capability!r}"
+				)
+			item.stage_ids.update(stage_ids)
+			for attribute in declaration.probe_attributes:
+				item.attribute_stage_ids.setdefault(attribute, set()).update(stage_ids)
+	return tuple(enabled[identity] for identity in sorted(enabled))
+
+
 def _metadata_version(package: str) -> str | None:
 	try:
 		return version(package)
@@ -206,13 +163,6 @@ def _normalized_versions(
 		package: lookup.get(package.lower().replace("_", "-"))
 		for package in sorted(packages)
 	}
-
-
-def _version_satisfies(installed: str, requirement: str) -> bool:
-	try:
-		return Version(installed) in SpecifierSet(requirement)
-	except (InvalidVersion, InvalidSpecifier):
-		return False
 
 
 def collect_environment_identity(
@@ -251,44 +201,40 @@ def check_runtime_compatibility(
 	"""
 
 	stage_keys = _possible_stage_keys(config)
-	enabled = [rule for rule in _FEATURE_RULES if rule.stage_keys & set(stage_keys)]
+	enabled = _enabled_runtime_requirements(stage_keys)
 	package_names = {"numpy", "scipy", "pydantic"}
-	package_names.update(rule.package for rule in enabled)
+	package_names.update(item.declaration.package for item in enabled)
 	versions = _normalized_versions(package_names, package_versions)
 	diagnostics: list[RuntimeCompatibilityDiagnostic] = []
 	smoke_checks: list[RuntimeSmokeCheck] = []
 
-	for rule in enabled:
-		active_keys = rule.stage_keys & set(stage_keys)
-		stage_ids = tuple(sorted({
-			stage_id for key in active_keys for stage_id in stage_keys[key]
-		}))
-		attributes = set(rule.attributes)
-		if rule.name == "tomopy":
-			for key in active_keys:
-				attributes.update(_TOMOPY_APIS.get(key, ("recon", "astra") if key in _ASTRA_KEYS else ()))
-		checked_attributes = tuple(sorted(attributes))
-		installed = versions.get(rule.package)
+	for item in enabled:
+		declaration = item.declaration
+		stage_ids = tuple(sorted(item.stage_ids))
+		checked_attributes = item.checked_attributes
+		installed = versions.get(declaration.package)
 		module = None
 		try:
-			module = module_loader(rule.module)
+			module = module_loader(declaration.module)
 		except Exception as error:
 			smoke_checks.append(RuntimeSmokeCheck(
-				capability=rule.name,
-				module=rule.module,
+				capability=declaration.capability,
+				module=declaration.module,
 				status="failed",
 				checked_attributes=checked_attributes,
 				message=f"{type(error).__name__}: {error}",
 			))
 			diagnostics.append(RuntimeCompatibilityDiagnostic(
-				capability=rule.name,
+				capability=declaration.capability,
 				severity="error",
-				message=f"enabled capability {rule.name!r} cannot import {rule.module!r}",
-				package=rule.package,
+				message=(
+					f"enabled capability {declaration.capability!r} cannot import "
+					f"{declaration.module!r}"
+				),
+				package=declaration.package,
 				installed_version=installed,
-				requirement=rule.requirement,
 				evidence=f"bounded import failed: {type(error).__name__}: {error}",
-				corrective_action=rule.corrective_action,
+				corrective_action=declaration.corrective_action,
 				stage_ids=stage_ids,
 			))
 			continue
@@ -296,67 +242,55 @@ def check_runtime_compatibility(
 			module_version = getattr(module, "__version__", None)
 			if isinstance(module_version, str) and module_version:
 				installed = module_version
-				versions[rule.package] = module_version
+				versions[declaration.package] = module_version
 		missing_attributes = tuple(
 			attribute for attribute in checked_attributes if not hasattr(module, attribute)
 		)
 		if missing_attributes:
+			missing_stage_ids = tuple(sorted({
+				stage_id
+				for attribute in missing_attributes
+				for stage_id in item.attribute_stage_ids[attribute]
+			}))
 			smoke_checks.append(RuntimeSmokeCheck(
-				capability=rule.name,
-				module=rule.module,
+				capability=declaration.capability,
+				module=declaration.module,
 				status="failed",
 				checked_attributes=checked_attributes,
 				message=f"missing required API attributes: {', '.join(missing_attributes)}",
 			))
 			diagnostics.append(RuntimeCompatibilityDiagnostic(
-				capability=rule.name,
+				capability=declaration.capability,
 				severity="error",
 				message=(
-					f"{rule.module!r} is importable but lacks required APIs: "
+					f"{declaration.module!r} is importable but lacks required APIs: "
 					f"{', '.join(missing_attributes)}"
 				),
-				package=rule.package,
+				package=declaration.package,
 				installed_version=installed,
-				requirement=rule.requirement,
 				evidence="bounded API smoke check",
-				corrective_action=rule.corrective_action,
-				stage_ids=stage_ids,
+				corrective_action=declaration.corrective_action,
+				stage_ids=missing_stage_ids,
 			))
 		else:
 			smoke_checks.append(RuntimeSmokeCheck(
-				capability=rule.name,
-				module=rule.module,
+				capability=declaration.capability,
+				module=declaration.module,
 				status="passed",
 				checked_attributes=checked_attributes,
 				message="module import and required API attributes passed",
 			))
-		if rule.requirement is not None:
-			if installed is None:
-				diagnostics.append(RuntimeCompatibilityDiagnostic(
-					capability=rule.name,
-					severity="error",
-					message=f"{rule.package!r} is importable but its version cannot be determined",
-					package=rule.package,
-					requirement=rule.requirement,
-					evidence="distribution metadata and module __version__ are both absent",
-					corrective_action=rule.corrective_action,
-					stage_ids=stage_ids,
-				))
-			elif not _version_satisfies(installed, rule.requirement):
-				diagnostics.append(RuntimeCompatibilityDiagnostic(
-					capability=rule.name,
-					severity="error",
-					message=f"{rule.package} {installed} does not satisfy {rule.requirement}",
-					package=rule.package,
-					installed_version=installed,
-					requirement=rule.requirement,
-					evidence="active package version",
-					corrective_action=rule.corrective_action,
-					stage_ids=stage_ids,
-				))
 
 	# TomoPy 1.x uses NumPy APIs whose copy semantics changed in NumPy 2.
-	if any(rule.name == "tomopy" for rule in enabled):
+	tomopy_runtime = next(
+		(item for item in enabled if item.declaration.capability == "tomopy"),
+		None,
+	)
+	tomopy_smoke_passed = any(
+		check.capability == "tomopy" and check.status == "passed"
+		for check in smoke_checks
+	)
+	if tomopy_runtime is not None and tomopy_smoke_passed:
 		numpy_version = versions.get("numpy")
 		tomopy_version = versions.get("tomopy")
 		try:
@@ -384,10 +318,7 @@ def check_runtime_compatibility(
 					"activate/rebuild the lftomo environment with numpy<2 and verify that "
 					"this same interpreter imports TomoPy"
 				),
-				stage_ids=tuple(sorted({
-					stage_id for key in _TOMOPY_KEYS & set(stage_keys)
-					for stage_id in stage_keys[key]
-				})),
+				stage_ids=tuple(sorted(tomopy_runtime.stage_ids)),
 			))
 
 	environment = collect_environment_identity(
@@ -398,7 +329,9 @@ def check_runtime_compatibility(
 	return RuntimeCompatibilityReport(
 		compatible=not any(item.severity == "error" for item in diagnostics),
 		environment=environment,
-		enabled_features=tuple(sorted(rule.name for rule in enabled)),
+		enabled_features=tuple(sorted({
+			item.declaration.capability for item in enabled
+		})),
 		diagnostics=tuple(diagnostics),
 		smoke_checks=tuple(smoke_checks),
 	)

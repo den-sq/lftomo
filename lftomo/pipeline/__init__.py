@@ -9,6 +9,7 @@ from lftomo.pipeline.core import (
 	Pipeline,
 	PipelineState,
 	ResourceHints,
+	RuntimeRequirement,
 	Stage,
 	StageContract,
 )
@@ -57,6 +58,7 @@ __all__ = [
 	"Pipeline",
 	"PipelineState",
 	"ResourceHints",
+	"RuntimeRequirement",
 	"ContractEffect",
 	"DataDomain",
 	"PRESERVE",

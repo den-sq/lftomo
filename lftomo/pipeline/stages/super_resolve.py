@@ -17,17 +17,35 @@ from types import SimpleNamespace
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import (
+	PipelineState,
+	ResourceHints,
+	RuntimeRequirement,
+	Stage,
+	StageContract,
+)
 from lftomo.util.shapes import SinoOrder
 
 
-def _contract() -> StageContract:
+_TORCH_RUNTIME_REQUIREMENT = RuntimeRequirement(
+	capability="super-resolution",
+	package="torch",
+	module="torch",
+	probe_attributes=("load", "no_grad"),
+	corrective_action="install lftomo with the super-resolution extra",
+)
+
+
+def _contract(
+	runtime_requirements: tuple[RuntimeRequirement, ...] = (),
+) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
 		window_axes=("Y", "Theta"),
 		produces_artifacts=("super_resolution",),
 		resources=ResourceHints(memory_multiplier=5.0),
+		runtime_requirements=runtime_requirements,
 	)
 
 
@@ -94,7 +112,7 @@ class DRHTStage(Stage):
 	"""
 
 	name = "super_resolve.drht"
-	contract = _contract()
+	contract = _contract(runtime_requirements=(_TORCH_RUNTIME_REQUIREMENT,))
 
 	def __init__(self, repo_path: str | Path | None = None,
 				checkpoint_path: str | Path | None = None, device: str = "cuda",

@@ -6,7 +6,14 @@ import numpy as np
 from multiprocessing.pool import ThreadPool
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import (
+	Locality,
+	PipelineState,
+	ResourceHints,
+	RuntimeRequirement,
+	Stage,
+	StageContract,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import (
 	configured_layout,
@@ -16,6 +23,15 @@ from lftomo.pipeline.stages._layout import (
 	resolve_layout,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
+
+
+_BAC_RUNTIME_REQUIREMENT = RuntimeRequirement(
+	capability="bac",
+	package="hotopy",
+	module="hotopy.holo",
+	probe_attributes=("BronnikovAidedCorrection",),
+	corrective_action="install lftomo with the bac extra in this interpreter",
+)
 
 
 PLANCK_CONSTANT = 6.58211928e-19  # keV s
@@ -505,6 +521,7 @@ class BronnikovAidedCorrectionStage(Stage):
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		resources=ResourceHints(memory_multiplier=2.0),
+		runtime_requirements=(_BAC_RUNTIME_REQUIREMENT,),
 	)
 
 	def __init__(self, alpha: float, gamma: float = 1.0, enabled: bool = True,
@@ -533,6 +550,7 @@ class BronnikovAidedCorrectionStage(Stage):
 			locality=Locality.PROJECTION,
 			window_axes=("Y", "Theta"),
 			resources=ResourceHints(memory_multiplier=2.0),
+			runtime_requirements=type(self).contract.runtime_requirements,
 		)
 		self.alpha = alpha
 		self.gamma = gamma

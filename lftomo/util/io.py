@@ -13,7 +13,6 @@ import numpy as np
 from natsort import natsorted
 from numpy.typing import ArrayLike
 from skimage import measure
-import tomopy
 import tifffile as tf
 
 from .log import log, LOG
@@ -282,6 +281,8 @@ def write_centers(center_mem: SharedNPArray, path: PathLike, center_range, angle
 	if not (disk_write or calc_entropy):
 		log.write("Center Finding", "Given no tasks (disk write or entropy calculation.)", LOG.ERROR)
 		return
+
+	import tomopy
 
 	center_entropy = {}
 

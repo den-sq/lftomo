@@ -22,6 +22,22 @@ class ResourceHints:
 	requires_gpu: bool = False
 
 
+@dataclass(frozen=True)
+class RuntimeRequirement:
+	"""Optional runtime capability required by a Stage implementation.
+
+	The declaration lives with the Stage contract so experiment preflight can
+	discover dependencies from the authoritative registry instead of maintaining
+	a parallel algorithm-key table.
+	"""
+
+	capability: str
+	package: str
+	module: str
+	probe_attributes: tuple[str, ...] = ()
+	corrective_action: str = ""
+
+
 class Locality(Enum):
 	"""Smallest independent unit on which a Stage operates."""
 
@@ -38,7 +54,8 @@ class StageContract:
 	``expected_input`` and ``produced_output`` are shape classes, usually from
 	``lftomo.util.shapes`` such as ``ProjOrder``, ``SinoOrder``, or
 	``ReconOrder``. These contract fields are consumed by the Pipeline validator
-	defined by issue #18 / PR #42.
+	defined by issue #18 / PR #42. ``runtime_requirements`` declares invariant
+	optional dependencies and bounded post-import API probes for preflight.
 	"""
 
 	expected_input: type[Any] | None = None
@@ -64,6 +81,7 @@ class StageContract:
 	produces_domain: DataDomain | ContractEffect | None = None
 	resamples_detector: bool = False
 	requires_row_identity: bool = False
+	runtime_requirements: tuple[RuntimeRequirement, ...] = ()
 
 	@property
 	def accepted_layouts(self) -> tuple[type[Any], ...] | None:

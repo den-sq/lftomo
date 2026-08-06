@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -19,17 +21,20 @@ from lftomo.experiment.runner import (
 	TrialExecution,
 )
 from lftomo.experiment.store import PersistedExperimentRunner
+from lftomo.pipeline import RuntimeRequirement, Stage, StageContract
+from lftomo.pipeline.stages import STAGE_REGISTRY
 
 
 HASHES = [f"{index:064x}" for index in range(1, 5)]
 
 
-def config(*, kind="phase", algorithm="paganin", sweep=None):
+def config(*, kind="phase", algorithm="paganin", sweep=None, pipeline=None):
+	stages = pipeline or [{
+		"id": "algorithm", "kind": kind, "algorithm": algorithm,
+	}]
 	document = {
 		"name": "runtime-preflight",
-		"candidate_space": {"pipeline": [{
-			"id": "algorithm", "kind": kind, "algorithm": algorithm,
-		}]},
+		"candidate_space": {"pipeline": stages},
 		"sampler": {"name": "exhaustive", "seed": 1},
 		"metrics": [{
 			"id": "quality", "metric": "quality", "protocol_version": "1",
@@ -103,6 +108,98 @@ def test_compatible_tomopy_runtime_runs_bounded_import_and_api_smoke_check():
 	assert report.smoke_checks[0].status == "passed"
 	assert report.smoke_checks[0].checked_attributes == ("circ_mask", "recon")
 	assert report.environment.dependencies["tomopy"] == "1.14.0"
+
+
+def test_numpy_2_with_future_tomopy_2_is_not_blocked_by_a_static_version_ceiling():
+	report = check_runtime_compatibility(
+		config(kind="recon", algorithm="gridrec"),
+		package_versions={
+			"numpy": "2.4.6", "scipy": "1.16.0", "pydantic": "2.11.0",
+			"tomopy": "2.0.0",
+		},
+		module_loader=loader({"tomopy": tomopy_module("2.0.0")}),
+	)
+
+	assert report.compatible is True
+	assert report.diagnostics == ()
+
+
+def test_stage_owned_requirements_are_discovered_without_a_runtime_key_table(monkeypatch):
+	class ExternalStage(Stage):
+		contract = StageContract(runtime_requirements=(RuntimeRequirement(
+			capability="external",
+			package="external-package",
+			module="external_module",
+			corrective_action="install the external Stage dependency",
+		),))
+
+		def run(self, state):
+			return state
+
+	monkeypatch.setitem(STAGE_REGISTRY, "phase.external", ExternalStage)
+	report = check_runtime_compatibility(
+		config(kind="phase", algorithm="external"),
+		package_versions={
+			"numpy": "1.26.4", "scipy": "1.13.0", "pydantic": "2.11.0",
+			"external-package": None,
+		},
+		module_loader=loader({}),
+	)
+
+	assert report.compatible is False
+	assert report.enabled_features == ("external",)
+	assert report.diagnostics[0].stage_ids == ("algorithm",)
+	assert report.diagnostics[0].corrective_action == "install the external Stage dependency"
+
+
+def test_stage_registry_can_be_inspected_without_importing_optional_tomopy():
+	script = """
+import importlib.abc
+import sys
+
+class BlockTomopy(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "tomopy" or fullname.startswith("tomopy."):
+            raise ModuleNotFoundError("blocked optional TomoPy")
+
+sys.meta_path.insert(0, BlockTomopy())
+from lftomo.pipeline.stages import STAGE_REGISTRY
+assert STAGE_REGISTRY
+assert "tomopy" not in sys.modules
+"""
+	result = subprocess.run(
+		[sys.executable, "-c", script],
+		check=False,
+		capture_output=True,
+		text=True,
+	)
+	assert result.returncode == 0, result.stderr
+
+
+def test_shared_stage_requirement_is_imported_once_with_all_stage_api_probes():
+	loaded = []
+
+	def recording_loader(name):
+		loaded.append(name)
+		return tomopy_module()
+
+	report = check_runtime_compatibility(
+		config(pipeline=[
+			{"id": "center", "kind": "center", "algorithm": "pc"},
+			{"id": "reconstruction", "kind": "recon", "algorithm": "gridrec"},
+		]),
+		package_versions={
+			"numpy": "1.26.4", "scipy": "1.13.0", "pydantic": "2.11.0",
+			"tomopy": "1.14.0",
+		},
+		module_loader=recording_loader,
+	)
+
+	assert report.compatible is True
+	assert loaded == ["tomopy"]
+	assert report.smoke_checks[0].checked_attributes == (
+		"circ_mask", "find_center_pc", "recon",
+	)
 
 
 def test_missing_enabled_optional_feature_is_rejected():
