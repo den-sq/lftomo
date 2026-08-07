@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from packaging.version import InvalidVersion, Version
+
 from lftomo.pipeline.core import RuntimeRequirement
 
 
@@ -9,6 +11,22 @@ _TOMOPY_CORRECTIVE_ACTION = (
 	"install the lftomo tomopy extra with TomoPy 1.15.3 or newer in this interpreter "
 	"(for example: python -m pip install 'lftomo[tomopy]')"
 )
+
+
+def tomopy_numpy_incompatible(
+	numpy_version: str | None, tomopy_version: str | None,
+) -> bool:
+	"""Return whether the versions are the one known-incompatible pairing."""
+
+	if numpy_version is None or tomopy_version is None:
+		return False
+	try:
+		return (
+			Version(numpy_version) >= Version("2.0")
+			and Version(tomopy_version) < Version("1.15.3")
+		)
+	except InvalidVersion:
+		return False
 
 
 def tomopy_requirement(*probe_attributes: str) -> RuntimeRequirement:
@@ -31,4 +49,8 @@ ASTRA_RUNTIME_REQUIREMENT = RuntimeRequirement(
 )
 
 
-__all__ = ["ASTRA_RUNTIME_REQUIREMENT", "tomopy_requirement"]
+__all__ = [
+	"ASTRA_RUNTIME_REQUIREMENT",
+	"tomopy_numpy_incompatible",
+	"tomopy_requirement",
+]

@@ -125,6 +125,43 @@ def test_multipage_tiff_source_is_never_modified(tmp_path, orientation, crop):
 	np.testing.assert_array_equal(tf.imread(path), before)
 
 
+def test_tiff_memmap_format_error_uses_decoder_fallback(tmp_path, monkeypatch):
+	values = np.arange(3 * 4 * 5, dtype=np.uint16).reshape(3, 4, 5)
+	path = tmp_path / "source.tif"
+	tf.imwrite(path, values, photometric="minisblack")
+	source = TIFFFrameSeries(path)
+
+	def unsupported_memmap(*args, **kwargs):
+		raise ValueError("image data are not memory-mappable")
+
+	monkeypatch.setattr(tf, "memmap", unsupported_memmap)
+	actual = source.read_oriented_window(1, 3, "identity")
+	np.testing.assert_array_equal(actual, values[:, 1:3])
+
+
+@pytest.mark.parametrize("multipage", [True, False], ids=["multipage", "frame-series"])
+def test_tiff_memmap_index_error_is_not_swallowed(tmp_path, monkeypatch, multipage):
+	values = np.arange(2 * 3 * 4, dtype=np.uint16).reshape(2, 3, 4)
+	if multipage:
+		path = tmp_path / "source.tif"
+		tf.imwrite(path, values, photometric="minisblack")
+		source = TIFFFrameSeries(path)
+	else:
+		paths = []
+		for index, frame in enumerate(values):
+			path = tmp_path / f"source-{index}.tif"
+			tf.imwrite(path, frame)
+			paths.append(path)
+		source = TIFFFrameSeries(paths)
+
+	def broken_memmap(*args, **kwargs):
+		raise IndexError("unexpected memmap indexing failure")
+
+	monkeypatch.setattr(tf, "memmap", broken_memmap)
+	with pytest.raises(IndexError, match="unexpected memmap indexing failure"):
+		source.read_oriented_window(0, 2, "identity")
+
+
 def test_nonfinite_values_are_counted_and_ignored_but_empty_pixels_fail(tmp_path):
 	path = tmp_path / "nonfinite.h5"
 	values = np.array([

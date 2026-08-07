@@ -4,7 +4,7 @@ Tier-2 numerical tests execute the bundled canonical producer pipeline against
 the canonical `scan.yaml`, reconstruct the selected detector-row window, and
 compare it with the immutable TIFF archive. They do not refresh references.
 The runner must use the pinned `environment.yml` contract, particularly
-`numpy<2`, because TomoPy 1.14 is not compatible with NumPy 2 copy semantics.
+TomoPy 1.15.3 or newer, which supports the environment's NumPy 2 runtime.
 
 The harness bounds memory in three ways:
 

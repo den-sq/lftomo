@@ -20,6 +20,9 @@ from lftomo.config.models import ConfigModel
 
 FOUR_MAP_ORDER = ("pre_gain", "post_gain", "pre_dark", "post_dark")
 Orientation = Literal["identity", "flip_x", "flip_y", "rotate_180", "transpose"]
+_TIFF_FILE_ERROR = getattr(tf, "TiffFileError", ValueError)
+_TIFF_SOURCE_ERRORS = (OSError, ValueError, IndexError, _TIFF_FILE_ERROR)
+_TIFF_MEMMAP_ERRORS = (OSError, ValueError, _TIFF_FILE_ERROR)
 
 
 class FlatMedianError(ValueError):
@@ -154,7 +157,7 @@ class TIFFFrameSeries:
 			with tf.TiffFile(self.paths[0]) as tif:
 				shape = tuple(tif.series[0].shape)
 				self.dtype = np.dtype(tif.series[0].dtype)
-		except (OSError, ValueError, IndexError) as error:
+		except _TIFF_SOURCE_ERRORS as error:
 			raise FlatMedianSourceError(f"cannot open TIFF source {self.paths[0]}: {error}") from error
 		if len(self.paths) == 1 and len(shape) == 3:
 			self._multipage = True
@@ -168,7 +171,7 @@ class TIFFFrameSeries:
 					with tf.TiffFile(path) as tif:
 						other_shape = tuple(tif.series[0].shape)
 						other_dtype = np.dtype(tif.series[0].dtype)
-				except (OSError, ValueError, IndexError) as error:
+				except _TIFF_SOURCE_ERRORS as error:
 					raise FlatMedianSourceError(f"cannot open TIFF source {path}: {error}") from error
 				if other_shape != shape or other_dtype != self.dtype:
 					raise FlatMedianSourceError(
@@ -181,16 +184,18 @@ class TIFFFrameSeries:
 	def _read_raw(self, y_slice: slice, x_slice: slice) -> np.ndarray:
 		if self._multipage:
 			try:
-				return np.asarray(tf.memmap(self.paths[0])[:, y_slice, x_slice])
-			except (OSError, ValueError):
+				mapped = tf.memmap(self.paths[0])
+			except _TIFF_MEMMAP_ERRORS:
 				with tf.TiffFile(self.paths[0]) as tif:
 					return np.stack([page.asarray()[y_slice, x_slice] for page in tif.pages])
+			return np.asarray(mapped[:, y_slice, x_slice])
 		frames = []
 		for path in self.paths:
 			try:
-				frames.append(np.asarray(tf.memmap(path)[y_slice, x_slice]))
-			except (OSError, ValueError):
-				frames.append(np.asarray(tf.imread(path))[y_slice, x_slice])
+				frame = tf.memmap(path)
+			except _TIFF_MEMMAP_ERRORS:
+				frame = tf.imread(path)
+			frames.append(np.asarray(frame)[y_slice, x_slice])
 		return np.stack(frames)
 
 	def read_oriented_window(

@@ -2,7 +2,7 @@
 
 This is the end-to-end runbook for candidate selection, independent trials, persisted
 resume, multi-fidelity promotion, blinded review, and finalist output. Start from
-[`examples/experiment-tier2-template.yaml`](../examples/experiment-tier2-template.yaml)
+[`examples/experiment-tier2-template.yaml`](https://github.com/den-sq/lftomo/blob/master/examples/experiment-tier2-template.yaml)
 for a complete pipeline that deliberately contains two ordered stripe occurrences and a
 separated Paganin-filter/negative-log phase chain.
 

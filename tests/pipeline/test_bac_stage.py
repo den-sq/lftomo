@@ -1,6 +1,8 @@
 import numpy as np
 import builtins
 import pytest
+import sys
+from types import ModuleType
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import DataDomain, PRESERVE, Pipeline, PipelineState
@@ -24,7 +26,19 @@ def _state(array, config):
 	)
 
 
-def test_bac_aliases_are_registered_and_process_each_projection(monkeypatch):
+@pytest.fixture
+def hotopy_holo(monkeypatch):
+	"""Provide only the optional module boundary exercised by the BAC Stage."""
+
+	hotopy = ModuleType("hotopy")
+	holo = ModuleType("hotopy.holo")
+	hotopy.holo = holo
+	monkeypatch.setitem(sys.modules, "hotopy", hotopy)
+	monkeypatch.setitem(sys.modules, "hotopy.holo", holo)
+	return holo
+
+
+def test_bac_aliases_are_registered_and_process_each_projection(monkeypatch, hotopy_holo):
 	config = StageConfig(
 		kind="phase",
 		algorithm="bronnikov_aided",
@@ -41,7 +55,7 @@ def test_bac_aliases_are_registered_and_process_each_projection(monkeypatch):
 		def __call__(self, image):
 			return image + 2
 
-	monkeypatch.setattr("hotopy.holo.BronnikovAidedCorrection", FakeBAC)
+	monkeypatch.setattr(hotopy_holo, "BronnikovAidedCorrection", FakeBAC, raising=False)
 	stage = create_stage(config)
 	result = Pipeline([stage]).run(_state(working, config))
 
@@ -53,7 +67,7 @@ def test_bac_aliases_are_registered_and_process_each_projection(monkeypatch):
 	np.testing.assert_array_equal(working, -(before + 2))
 
 
-def test_disabled_bac_is_noop(monkeypatch):
+def test_disabled_bac_is_noop(monkeypatch, hotopy_holo):
 	config = StageConfig(
 		kind="phase",
 		algorithm="bac",
@@ -61,8 +75,10 @@ def test_disabled_bac_is_noop(monkeypatch):
 	)
 	working = np.ones((2, 3, 4), dtype=np.float32)
 	monkeypatch.setattr(
-		"hotopy.holo.BronnikovAidedCorrection",
+		hotopy_holo,
+		"BronnikovAidedCorrection",
 		lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not construct")),
+		raising=False,
 	)
 
 	stage = create_stage(config)
@@ -77,7 +93,7 @@ def test_disabled_bac_is_noop(monkeypatch):
 	assert stage.contract.mutates_input is False
 
 
-def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch):
+def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch, hotopy_holo):
 	config = StageConfig(
 		kind="phase", algorithm="bac",
 		params={"alpha": 2, "gamma": 1.25, "order": "projection"},
@@ -94,7 +110,7 @@ def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch
 			assert image.flags.c_contiguous
 			return image + 1
 
-	monkeypatch.setattr("hotopy.holo.BronnikovAidedCorrection", FakeBAC)
+	monkeypatch.setattr(hotopy_holo, "BronnikovAidedCorrection", FakeBAC, raising=False)
 	state = _state(np.transpose(working, (1, 0, 2)), config)
 	state.working_array = working
 	state.scan.n_projections = working.shape[0]

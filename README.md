@@ -3,12 +3,13 @@ Large Format Tomography Package
 
 ## Installation
 
-Use the conda/mamba environment as the runtime contract for reconstruction
-deployments. TomoPy and other compiled scientific packages should come from
-conda-forge / bioconda rather than a standalone PyPI-only environment.
+Use the conda environment as the compiled runtime and default-test contract for
+reconstruction deployments. TomoPy and other compiled scientific packages
+should come from conda-forge / bioconda rather than a standalone PyPI-only
+environment. Supported Python versions are 3.11 through 3.14.
 
 ```shell
-mamba env create -f environment.yml
+CONDA_CHANNEL_PRIORITY=strict conda env create --solver libmamba -f environment.yml
 conda activate lftomo
 ```
 
@@ -18,7 +19,14 @@ fast editable-install path when it is available; plain `pip` is also fine.
 ```shell
 uv pip install -e ".[dev,tomopy]"
 # or: pip install -e ".[dev,tomopy]"
+python -m pip check
+python -m pytest -q
 ```
+
+To qualify the environment from scratch, remove the named environment first
+and repeat those commands. The environment file intentionally excludes docs
+and optional algorithms so its dependency solution is not affected by tools a
+reconstruction or default unit test does not use.
 
 Bronnikov-aided correction is optional because it executes through hotopy.
 Install it only on deployments that use `phase.bac`:
@@ -30,6 +38,17 @@ pip install -e ".[bac]"
 Do not treat a uv-only virtualenv as the supported deployment path for
 TomoPy-heavy reconstruction work. Use it only as pip-compatible glue inside the
 conda environment.
+
+Build documentation in a separate virtual environment. The `docs` extra is the
+source of truth for documentation tools and is not part of `environment.yml`:
+
+```shell
+python -m venv .venv-docs
+. .venv-docs/bin/activate
+python -m pip install -e ".[docs]"
+python -m pip check
+python -m mkdocs build --strict
+```
 
 ## Run a pipeline
 
