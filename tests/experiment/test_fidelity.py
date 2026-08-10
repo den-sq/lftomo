@@ -445,3 +445,77 @@ def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp
 	assert (tmp_path / "private" / "preview-mapping" / "mapping.json").is_file()
 	assert not any((tmp_path / "previews").rglob("*.json"))
 	assert "preview_images" not in str(result.artifacts)
+
+
+def test_pipeline_executor_stages_configured_tiffs_for_runner_publication(monkeypatch, tmp_path):
+	document = experiment(values=(0.01,)).model_dump(mode="json")
+	document["output"] = {"screening": "configured_writers", "max_bytes": 1000}
+	config = ExperimentConfig.model_validate(document)
+	executor = PipelineTrialExecutor(config, "scan.yaml")
+	executor.configure_output_staging(
+		result_root=tmp_path, scratch_root=tmp_path / "scratch",
+	)
+	scan = SimpleNamespace(detector=SimpleNamespace(rows=20), n_projections=100)
+	monkeypatch.setattr("lftomo.experiment.cli.load_scan", lambda _path: (scan, _path))
+	recon = Recon.model_validate({
+		"pipeline": [
+			{"id": "read", "kind": "read", "algorithm": "tiff_stack"},
+			{"id": "metrics", "kind": "evaluate", "algorithm": "metrics"},
+			{"id": "write", "kind": "write", "algorithm": "tiff_slices"},
+		],
+	})
+	identity = SimpleNamespace(
+		candidate=SimpleNamespace(value="a" * 64),
+		trial_id=SimpleNamespace(value="b" * 64),
+		resolved_recon=recon,
+		fidelity=SimpleNamespace(
+			id="screen", projection_limit=10, projection_stride=2,
+			windows=(SimpleNamespace(
+				id="tune-a", y_start=2, y_stop=4, halo=0,
+				theta_start=None, theta_stop=None,
+			),),
+		),
+	)
+	artifact = {
+		"aggregates": {"quality": {"value": 0.25}},
+		"observations": [{
+			"metric": "quality", "window_id": "tune-a", "valid": True,
+			"value": 0.25,
+		}],
+	}
+
+	def fake_run(pipeline_path, _scan_path, **_kwargs):
+		runtime = Recon.from_yaml(Path(pipeline_path).read_text(encoding="utf-8"))
+		path = runtime.output_path / "slice-0000.tif"
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_bytes(b"tiff-bytes")
+		return [SimpleNamespace(artifacts={
+			"metrics": artifact,
+			"output_files": [path],
+		})]
+
+	monkeypatch.setattr("lftomo.experiment.cli.run_reconstruction", fake_run)
+	context = ExecutionContext(
+		writer=None,
+		progress_sink=lambda _progress: None,
+		cancellation=CancellationToken(),
+		progress=AttemptProgress(
+			experiment_id=config.experiment_id, fidelity_id="screen",
+			candidate_key="a" * 64, trial_id="b" * 64,
+			attempt_id="attempt-staging-0000", state="started",
+			updated_at=datetime.now(timezone.utc),
+		),
+	)
+	with bind_execution_context(context):
+		result = executor(identity, tmp_path / "trials" / ("b" * 64))
+
+	assert not result.outputs
+	assert len(result.pending_outputs) == 1
+	pending = result.pending_outputs[0]
+	assert pending.role == "screening_output"
+	assert pending.temporary_path.read_bytes() == b"tiff-bytes"
+	assert pending.temporary_path.is_relative_to(tmp_path / "scratch")
+	assert pending.relative_path == (
+		Path("published") / "screen" / ("b" * 64)
+		/ "windows" / "tune-a" / "output" / "slice-0000.tif"
+	)

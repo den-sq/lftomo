@@ -488,6 +488,41 @@ class OutputRecord(ConfigModel):
 	complete: Literal[True] = True
 
 
+class PendingOutput(ConfigModel):
+	"""One complete temporary artifact awaiting budgeted atomic publication."""
+
+	role: str = Field(min_length=1)
+	temporary_path: Path
+	relative_path: Path
+
+	@model_validator(mode="after")
+	def _relative_path_is_safe(self):
+		if self.relative_path.is_absolute() or ".." in self.relative_path.parts:
+			raise ValueError("pending output relative_path must stay within the result root")
+		if not self.relative_path.parts:
+			raise ValueError("pending output relative_path must not be empty")
+		return self
+
+
+class OutputLimits(ConfigModel):
+	"""Effective runtime output limits for one attempt and their override state."""
+
+	experiment_bytes: int | None = Field(default=None, gt=0)
+	fidelity_bytes: int | None = Field(default=None, gt=0)
+	policy_bytes: int | None = Field(default=None, gt=0)
+	override_limits: bool = False
+
+
+class OutputAccounting(ConfigModel):
+	"""Durable output-byte usage after one serialized publication decision."""
+
+	limits: OutputLimits
+	experiment_committed_bytes: int = Field(default=0, ge=0)
+	fidelity_committed_bytes: int = Field(default=0, ge=0)
+	policy_committed_bytes: int = Field(default=0, ge=0)
+	attempt_committed_bytes: int = Field(default=0, ge=0)
+
+
 class ParetoRecord(ConfigModel):
 	"""Slots populated later by deterministic cross-candidate ranking."""
 
@@ -540,6 +575,7 @@ class TrialAttemptRecord(ConfigModel):
 	finished_at: datetime | None = None
 	elapsed_seconds: float | None = Field(default=None, ge=0)
 	peak_memory_bytes: int | None = Field(default=None, ge=0)
+	output_accounting: OutputAccounting | None = None
 	observations: dict[str, JsonValue] = Field(default_factory=dict)
 	pareto: ParetoRecord = Field(default_factory=ParetoRecord)
 	failure: FailureRecord | None = None

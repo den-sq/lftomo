@@ -694,6 +694,27 @@ class ExecutionContext:
 				f"failed to project prefix cache event {event!r}: {error}"
 			) from error
 
+	def output_event(
+		self,
+		event: Literal["committed", "limit_exceeded"],
+		message: str,
+		*,
+		output_bytes: int,
+		details: Mapping[str, Any],
+	) -> None:
+		"""Publish a budgeted output decision with its durable byte totals."""
+
+		self.progress = self.progress.model_copy(update={
+			"updated_at": _utcnow(),
+			"elapsed_seconds": time.perf_counter() - self.clock_started,
+			"output_bytes": output_bytes,
+		})
+		self._publish(
+			f"output.{event}", message,
+			severity="error" if event == "limit_exceeded" else "info",
+			details=dict(details),
+		)
+
 
 _CURRENT_EXECUTION: ContextVar[ExecutionContext | None] = ContextVar(
 	"lftomo_experiment_execution", default=None,

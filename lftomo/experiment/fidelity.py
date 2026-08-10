@@ -8,6 +8,7 @@ import hashlib
 import math
 import os
 from pathlib import Path
+import shutil
 from typing import Any, Callable, Literal, Mapping
 from uuid import uuid4
 
@@ -26,6 +27,7 @@ from lftomo.evaluation import (
 from .models import (
 	AggregationPolicy,
 	ExperimentConfig,
+	PendingOutput,
 	PromotionLineage,
 	PromotionPolicy,
 	TrialId,
@@ -41,6 +43,7 @@ from .runner import (
 	TrialExecutor,
 	atomic_write_model,
 )
+from .outputs import OutputBudgetLedger, OutputLimitExceeded
 from .resources import PathResourceRequest
 from .runtime import RuntimeCompatibilityReport
 from .events import CancellationDetails, CancellationToken, ProgressEventWriter
@@ -451,6 +454,10 @@ def export_blinded_previews(
 	*,
 	blinding_key: str,
 	max_bytes: int | None = None,
+	ledger: OutputBudgetLedger | None = None,
+	attempt_id: str | None = None,
+	trial_id: str | None = None,
+	staging_root: str | Path | None = None,
 ) -> PreviewBundle:
 	"""Serialize bundle updates so mappings and global byte guards remain atomic."""
 
@@ -466,6 +473,10 @@ def export_blinded_previews(
 				contract,
 				blinding_key=blinding_key,
 				max_bytes=max_bytes,
+				ledger=ledger,
+				attempt_id=attempt_id,
+				trial_id=trial_id,
+				staging_root=staging_root,
 			)
 		finally:
 			fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -478,8 +489,28 @@ def _export_blinded_previews_unlocked(
 	*,
 	blinding_key: str,
 	max_bytes: int | None = None,
+	ledger: OutputBudgetLedger | None = None,
+	attempt_id: str | None = None,
+	trial_id: str | None = None,
+	staging_root: str | Path | None = None,
 ) -> PreviewBundle:
 	"""Write consistently scaled/cropped previews and a reversible private mapping."""
+
+	if ledger is not None:
+		if attempt_id is None or trial_id is None or staging_root is None:
+			raise ValueError(
+				"budgeted preview publication requires attempt_id, trial_id, and staging_root"
+			)
+		return _export_budgeted_blinded_previews(
+			images,
+			root,
+			contract,
+			blinding_key=blinding_key,
+			ledger=ledger,
+			attempt_id=attempt_id,
+			trial_id=trial_id,
+			staging_root=Path(staging_root),
+		)
 
 	import cv2
 	import tifffile as tf
@@ -539,8 +570,12 @@ def _export_blinded_previews_unlocked(
 			replaced_bytes = path.stat().st_size if path.exists() else 0
 			if max_bytes is not None and total - replaced_bytes + encoded_bytes > max_bytes:
 				temporary.unlink()
-				raise ValueError(
-					f"preview output would exceed configured guard {max_bytes} bytes"
+				raise OutputLimitExceeded(
+					scope="policy",
+					limit_bytes=max_bytes,
+					committed_bytes=total - replaced_bytes,
+					requested_bytes=encoded_bytes,
+					artifact_label="preview",
 				)
 			os.replace(temporary, path)
 			total = total - replaced_bytes + encoded_bytes
@@ -567,6 +602,126 @@ def _export_blinded_previews_unlocked(
 	)
 	atomic_write_model(mapping_path, bundle)
 	return bundle
+
+
+def _export_budgeted_blinded_previews(
+	images: Mapping[str, np.ndarray | Mapping[str, np.ndarray]],
+	root: str | Path,
+	contract: PreviewContract,
+	*,
+	blinding_key: str,
+	ledger: OutputBudgetLedger,
+	attempt_id: str,
+	trial_id: str,
+	staging_root: Path,
+) -> PreviewBundle:
+	"""Stage previews and private mappings into one output-ledger transaction."""
+
+	import cv2
+	import tifffile as tf
+
+	if not blinding_key:
+		raise ValueError("blinding_key must not be empty")
+	root = Path(root).resolve(strict=False)
+	private_root = root / "private" / "preview-mapping"
+	mapping_path = private_root / "mapping.json"
+	entry_root = private_root / "entries"
+	if mapping_path.exists():
+		existing = PreviewBundle.model_validate_json(mapping_path.read_text(encoding="utf-8"))
+		if existing.contract != contract:
+			raise ValueError("preview contract differs from the existing blinded bundle")
+	entries = {
+		entry.blind_id: entry for entry in (
+			PreviewMappingEntry.model_validate_json(path.read_text(encoding="utf-8"))
+			for path in entry_root.glob("*.json")
+		)
+	}
+	total = sum(
+		path.stat().st_size for path in (root / "previews").glob("*/*")
+		if path.is_file() and path.suffix in (".png", ".tif", ".tiff")
+	)
+	pending = []
+	try:
+		for candidate_key in sorted(images):
+			blind_id = hashlib.sha256(
+				f"{blinding_key}:{candidate_key}".encode("utf-8")
+			).hexdigest()[:16]
+			raw = images[candidate_key]
+			if isinstance(raw, Mapping):
+				slices = sorted(raw.items())
+			else:
+				array = np.asarray(raw)
+				slices = [(f"{index:04d}", image) for index, image in enumerate(
+					array if array.ndim == 3 else [array]
+				)]
+			files = []
+			for label, image in slices:
+				array = np.asarray(image)
+				if array.ndim != 2:
+					raise ValueError("preview images must be two-dimensional slices")
+				if contract.crop is not None:
+					crop = contract.crop
+					array = array[crop.y_start:crop.y_stop, crop.x_start:crop.x_stop]
+				scaled = np.clip(
+					(array.astype(np.float64) - contract.scale_min)
+					/ (contract.scale_max - contract.scale_min),
+					0,
+					1,
+				)
+				encoded = np.round(scaled * 65535).astype(np.uint16)
+				suffix = ".png" if contract.format == "png" else ".tif"
+				relative = Path("previews") / blind_id / f"{label}{suffix}"
+				temporary = staging_root / relative
+				temporary.parent.mkdir(parents=True, exist_ok=True)
+				if contract.format == "png":
+					if not cv2.imwrite(str(temporary), encoded):
+						raise OSError(f"failed to write preview {temporary}")
+				else:
+					tf.imwrite(temporary, encoded)
+				target = root / relative
+				total -= target.stat().st_size if target.exists() else 0
+				total += temporary.stat().st_size
+				files.append(target)
+				pending.append(PendingOutput(
+					role="blinded_preview",
+					temporary_path=temporary,
+					relative_path=relative,
+				))
+			entry = PreviewMappingEntry(
+				blind_id=blind_id, candidate_key=candidate_key, files=tuple(files),
+			)
+			prior = entries.get(blind_id)
+			if prior is not None:
+				entry = entry.model_copy(update={
+					"files": tuple(sorted(set(prior.files) | set(entry.files))),
+				})
+			entries[blind_id] = entry
+			fragment_relative = Path("private") / "preview-mapping" / "entries" / f"{blind_id}.json"
+			fragment = staging_root / fragment_relative
+			atomic_write_model(fragment, entry)
+			pending.append(PendingOutput(
+				role="preview_private_metadata",
+				temporary_path=fragment,
+				relative_path=fragment_relative,
+			))
+		bundle = PreviewBundle(
+			contract=contract,
+			mapping_path=mapping_path,
+			entries=tuple(sorted(entries.values(), key=lambda item: item.blind_id)),
+			total_bytes=total,
+		)
+		mapping_relative = Path("private") / "preview-mapping" / "mapping.json"
+		staged_mapping = staging_root / mapping_relative
+		atomic_write_model(staged_mapping, bundle)
+		pending.append(PendingOutput(
+			role="preview_private_metadata",
+			temporary_path=staged_mapping,
+			relative_path=mapping_relative,
+		))
+		ledger.publish(tuple(pending), attempt_id=attempt_id, trial_id=trial_id)
+		return bundle
+	finally:
+		shutil.rmtree(staging_root, ignore_errors=True)
 
 
 class FidelityRunSummary(ConfigModel):

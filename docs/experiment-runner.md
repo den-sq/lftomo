@@ -78,6 +78,46 @@ in `TrialExecution`. Otherwise the runner records the process-wide `RUSAGE_SELF`
 high-water mark. Concurrent thread-based trials therefore share the fallback value; use
 an executor-supplied measurement when isolated per-trial memory accounting matters.
 
+## Runtime output accounting
+
+Output estimates are preflight warnings and early guards; they are not the runtime
+accounting source. Complete pipeline writers place TIFFs in an attempt-scoped staging
+root. After all windows finish, the runner measures and hashes the complete set, takes
+the experiment output-ledger lock, checks every applicable cumulative budget, and only
+then atomically replaces the published files. A rejected attempt removes its staging
+files and cannot contribute a finalist result.
+
+The counted roles are `screening_output`, `finalist_output`, and `blinded_preview`.
+Pipeline YAML, attempt records, progress records, prefix-cache snapshots, and temporary
+publication files are not final output and do not consume these fields. Their storage is
+covered by the result, cache, and scratch path-resource policies instead. Unknown-size
+formats need enough scratch space for one complete in-flight artifact per writer; when
+no scratch root is supplied, the runner uses a hidden result-local staging directory so
+the final replacement still has a same-filesystem atomic boundary.
+
+The three byte fields have distinct cumulative scopes over counted roles:
+
+- `resources.max_output_bytes` limits all committed output in the experiment root;
+- `FidelityReference.max_output_bytes` limits committed output at that fidelity; and
+- `output.max_bytes` limits the configured output roles across the invocation.
+
+The ledger serializes check-and-publication, so concurrent finalists cannot both spend
+the same remaining bytes. A replacement at the same logical path subtracts the prior
+file before adding the new one, which prevents forced reruns from double counting.
+Exactly-at-limit publication is allowed; one byte over raises `OutputLimitExceeded`
+before a durable replacement. `output-ledger.json`, per-attempt records, summaries, and
+`output.committed`/`output.limit_exceeded` events retain the actual bytes and effective
+limits. Resume reconstructs the ledger from the latest successful attempt records,
+validates recorded sizes and hashes, and quarantines unrecorded files under the managed
+`published/` tree.
+
+Resource limits remain deliberately identity-bearing: they define the bounded protocol
+under which the candidate set is allowed to finish. `--override-limits` does not rewrite
+that identity; it disables both estimate and runtime rejection for the invocation and is
+recorded in the replay bundle, manifest metadata, summaries, and accounting snapshots.
+Blinded preview export uses the same temporary-write, measured-byte,
+`OutputLimitExceeded`, and serialized-publication semantics for its policy limit.
+
 ## Progress events
 
 `progress.jsonl` is an append-only, derived live tail. Atomic attempt projections in the

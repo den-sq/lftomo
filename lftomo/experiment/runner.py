@@ -39,7 +39,9 @@ from .models import (
 	FidelityIdentity,
 	FinalResult,
 	MetricProtocolIdentity,
+	OutputAccounting,
 	OutputRecord,
+	PendingOutput,
 	ParetoRecord,
 	TrialAttemptRecord,
 	TrialDescription,
@@ -70,6 +72,11 @@ from .events import (
 	active_secret_values,
 	bind_execution_context,
 	redact_secrets,
+)
+from .outputs import (
+	OutputBudgetLedger,
+	OutputLimitExceeded,
+	output_role_is_counted,
 )
 
 
@@ -179,6 +186,9 @@ class TrialExecution(ConfigModel):
 	window_metrics: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
 	artifacts: dict[str, JsonValue] = Field(default_factory=dict)
 	outputs: tuple[OutputRecord, ...] = ()
+	pending_outputs: tuple[PendingOutput, ...] = ()
+	outputs_committed: bool = False
+	output_accounting: OutputAccounting | None = None
 	peak_memory_bytes: int | None = Field(
 		default=None,
 		ge=0,
@@ -208,6 +218,7 @@ class ExperimentRunSummary(ConfigModel):
 	preflight: ExperimentPreflight
 	attempts: tuple[TrialAttemptRecord, ...]
 	leaderboard: tuple[LeaderboardEntry, ...]
+	output_accounting: OutputAccounting | None = None
 	interruption: CancellationDetails | None = None
 
 
@@ -268,6 +279,21 @@ class IndependentExperimentRunner:
 		self.event_writer = event_writer
 		self.cancellation = cancellation or CancellationToken()
 		self.progress_sink = progress_sink or self._write_progress
+		configure_output = getattr(self.executor, "configure_output_staging", None)
+		if callable(configure_output):
+			configure_output(
+				result_root=self.root,
+				scratch_root=(
+					None if self.path_resources is None else self.path_resources.scratch_root
+				),
+				override_limits=self.policy.override_limits,
+			)
+		self.output_ledger = OutputBudgetLedger(
+			self.root,
+			self.config,
+			self.fidelity_id,
+			override_limits=self.policy.override_limits,
+		)
 
 	def _fidelity(self) -> FidelityIdentity:
 		try:
@@ -543,6 +569,8 @@ class IndependentExperimentRunner:
 			progress=progress,
 			clock_started=clock,
 		)
+		output_accounting = None
+		pending_outputs: tuple[PendingOutput, ...] = ()
 		try:
 			self.cancellation.raise_if_requested()
 			# The deep copy is deliberate: executor mutation can never leak into
@@ -550,6 +578,53 @@ class IndependentExperimentRunner:
 			execution_identity = trial.identity.model_copy(deep=True)
 			with bind_execution_context(context):
 				execution = self.executor(execution_identity, trial.output_root)
+			legacy_pending = []
+			retained_outputs = list(execution.outputs) if execution.outputs_committed else []
+			for output in execution.outputs:
+				if execution.outputs_committed:
+					continue
+				if not output_role_is_counted(output.role):
+					retained_outputs.append(output)
+					continue
+				try:
+					relative = output.path.resolve().relative_to(trial.output_root.resolve())
+				except ValueError as error:
+					raise RuntimeError(
+						"budgeted executor output must be staged inside its trial root or "
+						"returned through TrialExecution.pending_outputs"
+					) from error
+				legacy_pending.append(PendingOutput(
+					role=output.role,
+					temporary_path=output.path,
+					relative_path=(
+						Path("published") / trial.identity.fidelity.id
+						/ trial.identity.trial_id.value / "legacy" / relative
+					),
+				))
+			pending_outputs = tuple(execution.pending_outputs) + tuple(legacy_pending)
+			if execution.outputs_committed:
+				output_accounting = (
+					execution.output_accounting
+					or self.output_ledger.accounting_for_attempt(trial.attempt_id)
+				)
+			if pending_outputs:
+				published, output_accounting = self.output_ledger.publish(
+					pending_outputs,
+					attempt_id=trial.attempt_id,
+					trial_id=trial.identity.trial_id.value,
+				)
+				execution = execution.model_copy(update={
+					"outputs": tuple(retained_outputs) + published,
+					"pending_outputs": (),
+				})
+				context.output_event(
+					"committed",
+					f"committed {output_accounting.attempt_committed_bytes} output bytes",
+					output_bytes=output_accounting.attempt_committed_bytes,
+					details=output_accounting.model_dump(mode="json"),
+				)
+			elif output_accounting is None:
+				output_accounting = self.output_ledger.snapshot()
 			finished = _finish_timestamp(started)
 			elapsed = time.perf_counter() - clock
 			peak = execution.peak_memory_bytes or max(memory_before, _peak_memory_bytes())
@@ -569,6 +644,7 @@ class IndependentExperimentRunner:
 				finished_at=finished,
 				elapsed_seconds=elapsed,
 				peak_memory_bytes=peak,
+				output_accounting=output_accounting,
 				observations={
 					"metrics": json_value(execution.metrics),
 					"artifacts": json_value(execution.artifacts),
@@ -577,6 +653,12 @@ class IndependentExperimentRunner:
 				result=result,
 			)
 		except ProgressInfrastructureError as error:
+			self.output_ledger.rollback_attempt(trial.attempt_id)
+			for item in pending_outputs:
+				try:
+					item.temporary_path.unlink(missing_ok=True)
+				except OSError:
+					pass
 			# Progress/store plumbing is experiment infrastructure. It must abort the
 			# coordinator instead of masquerading as an independent candidate failure.
 			# Persist an interrupted attempt directly when possible so the authoritative
@@ -633,6 +715,12 @@ class IndependentExperimentRunner:
 			self.cancellation.request(f"progress infrastructure failure: {clean_message}")
 			raise
 		except BaseException as error:
+			self.output_ledger.rollback_attempt(trial.attempt_id)
+			for item in pending_outputs:
+				try:
+					item.temporary_path.unlink(missing_ok=True)
+				except OSError:
+					pass
 			finished = _finish_timestamp(started)
 			traceback_text = traceback.format_exc()
 			secrets = (
@@ -643,6 +731,18 @@ class IndependentExperimentRunner:
 			))
 			clean_traceback = str(redact_secrets(traceback_text, secrets=secrets))
 			interrupted = isinstance(error, (KeyboardInterrupt, InterruptedError))
+			details = {}
+			if isinstance(error, OutputLimitExceeded):
+				details = error.failure_details()
+				output_accounting = self.output_ledger.snapshot()
+				context.output_event(
+					"limit_exceeded", clean_message,
+					output_bytes=output_accounting.attempt_committed_bytes,
+					details={
+						**output_accounting.model_dump(mode="json"),
+						**details,
+					},
+				)
 			attempt = TrialAttemptRecord(
 				**base,
 				status="interrupted" if interrupted else "failed",
@@ -650,6 +750,7 @@ class IndependentExperimentRunner:
 				finished_at=finished,
 				elapsed_seconds=time.perf_counter() - clock,
 				peak_memory_bytes=max(memory_before, _peak_memory_bytes()),
+				output_accounting=output_accounting,
 				failure=FailureRecord(
 					type=type(error).__name__,
 					message=clean_message,
@@ -657,9 +758,17 @@ class IndependentExperimentRunner:
 					stage_algorithm=context.progress.stage_algorithm,
 					window_id=context.progress.window_id,
 					traceback=clean_traceback,
+					details=details,
 				),
 			)
 		atomic_write_model(self._attempt_path(trial), attempt)
+		if attempt.status == "succeeded":
+			self.output_ledger.finalize_attempt(trial.attempt_id)
+			for item in pending_outputs:
+				try:
+					item.temporary_path.unlink(missing_ok=True)
+				except OSError:
+					pass
 		final_state = attempt.status
 		assert final_state in ("succeeded", "failed", "interrupted")
 		failure = None
@@ -771,6 +880,7 @@ class IndependentExperimentRunner:
 
 	def run(self) -> ExperimentRunSummary:
 		preflight, trials = self.prepare()
+		self.output_ledger.reconcile()
 		if preflight.validation_failures:
 			raise ValueError(
 				"candidate preflight failed: "
@@ -814,6 +924,8 @@ class IndependentExperimentRunner:
 			metadata={
 				"runtime_compatibility": json_value(preflight.runtime),
 				"path_resource_preflight": json_value(preflight.path_resources),
+				"output_accounting": json_value(self.output_ledger.snapshot()),
+				"override_limits": self.policy.override_limits,
 			},
 		)
 		atomic_write_model(self.root / "manifest.json", manifest)
@@ -822,6 +934,7 @@ class IndependentExperimentRunner:
 			preflight=preflight,
 			attempts=tuple(attempts),
 			leaderboard=leaderboard,
+			output_accounting=self.output_ledger.snapshot(),
 			interruption=CancellationDetails(
 				requested=True,
 				reason=self.cancellation.reason,

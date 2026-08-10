@@ -25,6 +25,7 @@ from .models import (
 	EnvironmentIdentity,
 	ExperimentConfig,
 	OutputRecord,
+	PendingOutput,
 	canonical_json,
 )
 from .fidelity import (
@@ -64,6 +65,7 @@ from .runtime import (
 )
 from .resources import PathContextRoots, PathResourceRequest
 from .events import ProgressInfrastructureError, current_execution_context
+from .outputs import OutputBudgetLedger
 from .lifecycle import ExperimentLifecycle, load_experiment, validate_experiment
 from .store import ResumePolicy
 
@@ -139,6 +141,36 @@ class PipelineTrialExecutor:
 		self.prefix_cache_policy = prefix_cache_policy or PrefixCachePolicy()
 		self.prefix_executor = PrefixCachingPipelineExecutor(self.prefix_cache_policy)
 		self._prefix_decisions: dict[str, PrefixCacheDecision] = {}
+		self._result_root: Path | None = None
+		self._output_staging_root: Path | None = None
+		self._override_limits = False
+
+	def configure_output_staging(
+		self,
+		*,
+		result_root: str | Path,
+		scratch_root: str | Path | None,
+		override_limits: bool = False,
+	) -> None:
+		"""Bind operational output roots without adding them to scientific identity."""
+
+		self._result_root = Path(result_root).resolve(strict=False)
+		self._output_staging_root = (
+			self._result_root / ".output-staging"
+			if scratch_root is None
+			else Path(scratch_root).resolve(strict=False) / "lftomo-output-staging"
+		)
+		self._override_limits = override_limits
+
+	def _budget_ledger(self, fidelity_id: str) -> OutputBudgetLedger:
+		if self._result_root is None:
+			raise RuntimeError("output publication requires a configured result root")
+		return OutputBudgetLedger(
+			self._result_root,
+			self.config,
+			fidelity_id,
+			override_limits=self._override_limits,
+		)
 
 	def replay_document(self) -> dict[str, Any]:
 		"""Return the normalized non-secret adapter inputs needed for replay."""
@@ -358,21 +390,39 @@ class PipelineTrialExecutor:
 
 	def __call__(self, identity, output_root: Path) -> TrialExecution:
 		output_root.mkdir(parents=True, exist_ok=True)
+		context = current_execution_context()
+		result_root = self._result_root or output_root.parents[1].resolve(strict=False)
+		if self._result_root is None:
+			self._result_root = result_root
+		staging_parent = self._output_staging_root or result_root / ".output-staging"
+		trial_id = getattr(getattr(identity, "trial_id", None), "value", output_root.name)
+		attempt_id = (
+			context.progress.attempt_id if context is not None
+			else f"standalone-{os.getpid()}"
+		)
+		staging_root = (
+			staging_parent / trial_id / attempt_id
+		)
+		if staging_root.exists():
+			raise RuntimeError(f"output staging root already exists: {staging_root}")
+		staging_root.mkdir(parents=True)
 		window_metrics: dict[str, dict[str, Any]] = {}
 		metric_ids = {reference.metric: reference.id for reference in self.config.metrics}
 		artifacts = {}
 		outputs = []
+		pending_outputs = []
 		preview_images = {}
 		preview_contract = None
+		committed_output_accounting = None
 		for window_index, window in enumerate(identity.fidelity.windows):
-			context = current_execution_context()
 			if context is not None:
 				context.window_started(
 					window.id, position=window_index + 1,
 					total=len(identity.fidelity.windows),
 				)
 			window_root = output_root / "windows" / window.id
-			recon = self._window_recon(identity, window, window_root)
+			staging_window_root = staging_root / "windows" / window.id
+			recon = self._window_recon(identity, window, staging_window_root)
 			window_root.mkdir(parents=True, exist_ok=True)
 			pipeline_path = window_root / "resolved-recon.yaml"
 			pipeline_path.write_text(recon.to_yaml(), encoding="utf-8")
@@ -446,13 +496,22 @@ class PipelineTrialExecutor:
 			for path in result.artifacts.get("output_files", ()):
 				path = Path(path)
 				if path.is_file():
-					outputs.append(OutputRecord(
+					try:
+						relative = path.resolve().relative_to(staging_root.resolve())
+					except ValueError as error:
+						raise RuntimeError(
+							f"writer output escaped attempt staging root: {path}"
+						) from error
+					pending_outputs.append(PendingOutput(
 						role="finalist_output" if (
 							self.config.output.write_full_finalists
 							and identity.fidelity.id == self.config.output.final_fidelity_id
 						) else "screening_output",
-						path=path,
-						bytes=path.stat().st_size,
+						temporary_path=path,
+						relative_path=(
+							Path("published") / identity.fidelity.id
+							/ trial_id / relative
+						),
 					))
 			if context is not None:
 				context.window_completed(window.id)
@@ -469,10 +528,14 @@ class PipelineTrialExecutor:
 				)
 			bundle = export_blinded_previews(
 				{identity.candidate.value: preview_images},
-				output_root.parents[1],
+				result_root,
 				preview_contract,
 				blinding_key=blinding_key,
 				max_bytes=self.config.output.max_bytes,
+				ledger=self._budget_ledger(identity.fidelity.id),
+				attempt_id=attempt_id,
+				trial_id=trial_id,
+				staging_root=staging_root / "preview-publication",
 			)
 			entry = next(
 				item for item in bundle.entries if item.candidate_key == identity.candidate.value
@@ -480,6 +543,9 @@ class PipelineTrialExecutor:
 			outputs.extend(OutputRecord(
 				role="blinded_preview", path=path, bytes=path.stat().st_size,
 			) for path in entry.files)
+			committed_output_accounting = self._budget_ledger(
+				identity.fidelity.id,
+			).accounting_for_attempt(attempt_id)
 		aggregates = aggregate_window_metrics(window_metrics, self.config)
 		return TrialExecution(
 			metrics=json_value(aggregates.tuning),
@@ -490,6 +556,9 @@ class PipelineTrialExecutor:
 				"held_out_metrics": json_value(aggregates.held_out),
 			},
 			outputs=tuple(outputs),
+			pending_outputs=tuple(pending_outputs),
+			outputs_committed=committed_output_accounting is not None,
+			output_accounting=committed_output_accounting,
 		)
 
 

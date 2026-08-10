@@ -329,6 +329,10 @@ class PersistedExperimentStore:
 			finished_at=attempt.finished_at,
 			elapsed_seconds=attempt.elapsed_seconds,
 			resource_bytes=attempt.peak_memory_bytes,
+			output_bytes=(
+				None if attempt.output_accounting is None
+				else attempt.output_accounting.attempt_committed_bytes
+			),
 			failure=failure,
 		)
 
@@ -808,10 +812,12 @@ class PersistedExperimentRunner:
 			"runtime_compatibility": preflight.runtime,
 			"path_resource_preflight": preflight.path_resources,
 			"path_resource_relocation": relocation,
+			"override_limits": self.runner.policy.override_limits,
 		}
 		self.store.initialize(
 			self.runner.config, manifest_metadata=manifest_metadata,
 		)
+		self.runner.output_ledger.reconcile()
 		if preflight.validation_failures:
 			raise ValueError(
 				"candidate preflight failed: "
@@ -871,6 +877,8 @@ class PersistedExperimentRunner:
 				unstarted = sum(1 for _ in remaining)
 		attempts.sort(key=lambda item: item.trial_id.value)
 		attempts, leaderboard = self.runner._rank(trials, attempts)
+		output_accounting = self.runner.output_ledger.snapshot()
+		manifest_metadata["output_accounting"] = output_accounting
 		self.store.refresh_manifest(
 			self.runner.config, manifest_metadata=manifest_metadata,
 		)
@@ -900,6 +908,7 @@ class PersistedExperimentRunner:
 			preflight=preflight,
 			attempts=tuple(attempts),
 			leaderboard=leaderboard,
+			output_accounting=output_accounting,
 			interruption=interruption,
 		)
 		self.runner._write_outputs(summary)
