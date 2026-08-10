@@ -15,6 +15,7 @@ from lftomo.experiment import (
 	ExperimentConfig,
 	ExperimentLifecycle,
 	ExperimentStatus,
+	ProgressEvent,
 	ProgressEventWriter,
 	ReplayBundle,
 	ResumePolicy,
@@ -102,8 +103,8 @@ class ReplayableExecutor:
 	def __call__(self, identity, _root):
 		context = current_execution_context()
 		assert context is not None
-		context.window_started("screen")
-		context.stage_started("phase", "paganin")
+		context.window_started("screen", position=1, total=1)
+		context.stage_started("phase", "paganin", position=1, total=1)
 		try:
 			if self.delay:
 				deadline = time.monotonic() + self.delay
@@ -132,6 +133,142 @@ def lifecycle(tmp_path, executor, *, values=(0.01, 0.02), callback=None, token=N
 	return ExperimentLifecycle(
 		runner, callback=callback, cancellation=token,
 	)
+
+
+def sampled_variant_config():
+	return ExperimentConfig.model_validate({
+		"name": "sampled-variant-progress",
+		"candidate_space": {
+			"pipeline": [
+				{
+					"id": "phase-a", "kind": "phase", "algorithm": "paganin",
+					"params": {"alpha": 0.01},
+				},
+				{
+					"id": "phase-b", "kind": "phase", "algorithm": "paganin",
+					"params": {"alpha": 0.02},
+				},
+			],
+			"variants": [
+				{"name": "single", "stages": ["phase-a"]},
+				{"name": "chain", "stages": ["phase-a", "phase-b"]},
+			],
+		},
+		"sampler": {"name": "sobol", "seed": 41, "budget": 8},
+		"resources": {"max_concurrency": 2},
+		"metrics": [{
+			"id": "quality", "metric": "artifact.ring_score", "protocol_version": "1",
+			"direction": "minimize",
+		}],
+		"objectives": [{"metric_id": "quality"}],
+		"windows": [{"id": "screen", "y_start": 0, "y_stop": 1}],
+		"fidelities": [{"id": "screen", "windows": ["screen"]}],
+		"aggregation": {"metric_ids": ["quality"]},
+	})
+
+
+class VariantProgressExecutor(ReplayableExecutor):
+	def __call__(self, identity, _root):
+		import traceback
+
+		context = current_execution_context()
+		assert context is not None
+		context.window_started("screen", position=1, total=1)
+		stages = identity.resolved_recon.pipeline
+		for position, stage in enumerate(stages, start=1):
+			context.stage_started(
+				stage.id, stage.algorithm, position=position, total=len(stages),
+			)
+			context.heartbeat()
+			if identity.sampler.explicit_case == "chain" and position == len(stages):
+				error = ValueError("injected chain failure")
+				context.stage_failed(stage.id, stage.algorithm, error, traceback.format_exc())
+				raise error
+			context.stage_completed(stage.id, stage.algorithm)
+		context.window_completed("screen")
+		return TrialExecution(metrics={"quality": float(len(stages))})
+
+
+def test_progress_reports_aggregate_counts_human_context_and_resume_dispositions(tmp_path):
+	executor = VariantProgressExecutor()
+	runner = IndependentExperimentRunner(
+		sampled_variant_config(), inputs(), tmp_path / "results", executor,
+		validator=executor.validate, identity_validator=executor.validate_identity,
+	)
+	api = ExperimentLifecycle(runner)
+	summary = api.run()
+	assert sorted(attempt.status for attempt in summary.attempts) == ["failed", "succeeded"]
+	events = read_progress_events(api.root / "progress.jsonl")
+
+	started = next(event for event in events if event.kind == "fidelity.started")
+	assert started.total_candidates == 2
+	assert started.completed_candidates == 0
+	assert started.remaining_candidates == 2
+	progress = [event for event in events if event.kind == "fidelity.progress"]
+	assert [event.completed_candidates for event in progress] == [1, 2]
+	assert all(
+		event.completed_candidates + event.active_candidates + event.remaining_candidates
+		== event.total_candidates
+		for event in progress
+	)
+	completed = next(event for event in events if event.kind == "fidelity.completed")
+	assert completed.succeeded_candidates == 1
+	assert completed.failed_candidates == 1
+	assert completed.active_candidates == 0
+	assert completed.remaining_candidates == 0
+	experiment_completed = next(
+		event for event in events if event.kind == "experiment.completed"
+	)
+	assert experiment_completed.lifecycle_state == "failed"
+
+	trials = [event for event in events if event.kind == "trial.started"]
+	assert {event.structural_variant for event in trials} == {"single", "chain"}
+	assert len({event.sampler_position for event in trials}) == 2
+	assert all(1 <= event.sampler_position <= 8 for event in trials)
+	assert {event.sampler_total for event in trials} == {8}
+	stage_starts = [event for event in events if event.kind == "stage.started"]
+	assert {(event.stage_position, event.stage_total) for event in stage_starts} == {
+		(1, 1), (1, 2), (2, 2),
+	}
+	assert all(event.window_position == 1 and event.window_total == 1 for event in stage_starts)
+	heartbeats = [event for event in events if event.kind == "stage.heartbeat"]
+	assert heartbeats and all(event.stage_elapsed_seconds is not None for event in heartbeats)
+	failure = next(
+		event for event in events
+		if event.kind == "trial.finalized" and event.lifecycle_state == "failed"
+	)
+	assert failure.failure_type == "ValueError"
+	assert failure.failure_message == "injected chain failure"
+
+	prior_sequence = events[-1].sequence
+	resumed = ExperimentLifecycle(IndependentExperimentRunner(
+		sampled_variant_config(), inputs(), api.root, executor,
+		validator=executor.validate, identity_validator=executor.validate_identity,
+	))
+	resumed.resume()
+	resume_events = [
+		event for event in read_progress_events(api.root / "progress.jsonl")
+		if event.sequence > prior_sequence
+	]
+	resume_completed = next(
+		event for event in resume_events if event.kind == "fidelity.completed"
+	)
+	assert resume_completed.reused_candidates == 1
+	assert resume_completed.skipped_candidates == 1
+	assert resume_completed.completed_candidates == 2
+
+
+def test_progress_schema_one_remains_backward_compatible_with_absent_display_fields():
+	event = ProgressEvent.model_validate({
+		"sequence": 1,
+		"timestamp": "2026-08-10T00:00:00Z",
+		"experiment_id": "legacy",
+		"kind": "trial.started",
+		"message": "legacy schema-one event",
+	})
+	assert event.schema_version == 1
+	assert event.sampler_position is None
+	assert event.remaining_candidates is None
 
 
 def test_public_lifecycle_persists_ordered_events_and_store_only_status(tmp_path):

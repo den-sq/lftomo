@@ -351,6 +351,7 @@ class ExperimentLifecycle:
 			self.events.emit(
 				"experiment.failed", str(error) or type(error).__name__,
 				severity="error", failure_type=type(error).__name__,
+				failure_message=str(error) or type(error).__name__,
 				traceback=traceback.format_exc(),
 				lifecycle_state=(
 					"interrupted" if isinstance(error, (KeyboardInterrupt, InterruptedError))
@@ -362,16 +363,41 @@ class ExperimentLifecycle:
 		if isinstance(summary, FidelityRunSummary):
 			completed_candidates = sum(len(level.attempts) for level in summary.levels)
 			total_candidates = sum(
-				level.preflight.unique_candidates for level in summary.levels
+				len(level.attempts) + (
+					0 if level.interruption is None
+					else level.interruption.unstarted_candidates
+				)
+				for level in summary.levels
 			)
 		else:
 			completed_candidates = len(summary.attempts)
-			total_candidates = summary.preflight.unique_candidates
+			total_candidates = len(summary.attempts) + (
+				0 if summary.interruption is None
+				else summary.interruption.unstarted_candidates
+			)
+		attempts = (
+			[attempt for level in summary.levels for attempt in level.attempts]
+			if isinstance(summary, FidelityRunSummary)
+			else list(summary.attempts)
+		)
+		has_terminal_failures = any(
+			attempt.status != "succeeded" for attempt in attempts
+		)
+		message = (
+			"experiment interrupted" if interrupted
+			else "experiment completed with unsuccessful candidates"
+			if has_terminal_failures
+			else "experiment completed"
+		)
 		self.events.emit(
 			"experiment.completed",
-			"experiment interrupted" if interrupted else "experiment completed",
-			severity="warning" if interrupted else "info",
-			lifecycle_state="interrupted" if interrupted else "succeeded",
+			message,
+			severity="warning" if interrupted or has_terminal_failures else "info",
+			lifecycle_state=(
+				"interrupted" if interrupted
+				else "failed" if has_terminal_failures
+				else "succeeded"
+			),
 			completed_candidates=completed_candidates,
 			total_candidates=total_candidates,
 		)

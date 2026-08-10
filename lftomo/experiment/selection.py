@@ -181,14 +181,14 @@ def _deduplicate(candidates: list[SelectedCandidate]) -> tuple[SelectedCandidate
 		counts[candidate.candidate_key] = 0
 	return tuple(
 		SelectedCandidate(
-			index=index,
+			index=item.index,
 			recon=item.recon,
 			parameters=item.parameters,
 			candidate_key=item.candidate_key,
 			sampler=item.sampler,
 			duplicate_coordinates=counts[item.candidate_key],
 		)
-		for index, item in enumerate(by_key.values())
+		for item in by_key.values()
 	)
 
 
@@ -245,6 +245,10 @@ def select_candidates(config: ExperimentConfig) -> tuple[SelectedCandidate, ...]
 				name=config.sampler.name,
 				seed=config.sampler.seed,
 				coordinate=coordinate,
+				explicit_case=(
+					str(parameters["pipeline.variant"])
+					if "pipeline.variant" in parameters else None
+				),
 			),
 		))
 	return _deduplicate(candidates)

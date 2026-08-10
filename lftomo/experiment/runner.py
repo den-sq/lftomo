@@ -217,6 +217,7 @@ class PreparedTrial:
 	identity: TrialIdentity
 	output_root: Path
 	attempt_id: str
+	sampler_total: int
 	sequence: int = 0
 	previous_attempt_id: str | None = None
 
@@ -348,6 +349,9 @@ class IndependentExperimentRunner:
 			raise RuntimeCompatibilityError(runtime)
 
 		selected = select_candidates(self.config)
+		requested = (
+			len(selected) + sum(item.duplicate_coordinates for item in selected)
+		)
 		prepared = []
 		failures = []
 		for item in selected:
@@ -379,10 +383,8 @@ class IndependentExperimentRunner:
 				identity=identity,
 				output_root=trial_root,
 				attempt_id=f"attempt-{identity.trial_id.value[:12]}-0000",
+				sampler_total=requested,
 			))
-		requested = (
-			len(selected) + sum(item.duplicate_coordinates for item in selected)
-		)
 		estimated = self.policy.estimated_output_bytes_per_trial
 		total_output = None if estimated is None else estimated * len(prepared)
 		limits = [value for value in (
@@ -467,6 +469,8 @@ class IndependentExperimentRunner:
 			attempt_id=trial.attempt_id,
 			structural_variant=trial.identity.sampler.explicit_case,
 			sampler_index=trial.selected.index,
+			sampler_position=trial.selected.index + 1,
+			sampler_total=trial.sampler_total,
 			state="planned",
 			updated_at=now,
 		)
@@ -489,9 +493,17 @@ class IndependentExperimentRunner:
 				attempt_id=progress.attempt_id,
 				structural_variant=progress.structural_variant,
 				sampler_index=progress.sampler_index,
+				sampler_position=progress.sampler_position,
+				sampler_total=progress.sampler_total,
 				window_id=progress.window_id,
+				window_position=progress.window_position,
+				window_total=progress.window_total,
+				window_elapsed_seconds=progress.window_elapsed_seconds,
 				stage_occurrence_id=progress.stage_occurrence_id,
 				stage_algorithm=progress.stage_algorithm,
+				stage_position=progress.stage_position,
+				stage_total=progress.stage_total,
+				stage_elapsed_seconds=progress.stage_elapsed_seconds,
 				lifecycle_state=progress.state,
 				elapsed_seconds=progress.elapsed_seconds,
 				resource_bytes=progress.resource_bytes,
@@ -681,6 +693,7 @@ class IndependentExperimentRunner:
 				"warning" if final_state == "interrupted" else "info"
 			),
 			failure_type=None if failure is None else failure.type,
+			failure_message=None if failure is None else failure.message,
 			traceback=None if failure is None else failure.traceback,
 		)
 		return attempt

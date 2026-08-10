@@ -340,13 +340,18 @@ class PipelineTrialExecutor:
 			)
 			algorithm = getattr(config, "algorithm", None) or stage.name
 			if phase == "started":
-				context.stage_started(occurrence_id, algorithm)
+				context.stage_started(
+					occurrence_id, algorithm, position=index + 1, total=len(configs),
+				)
 			elif phase == "completed":
-				context.stage_completed(occurrence_id, algorithm)
+				context.stage_completed(
+					occurrence_id, algorithm, position=index + 1, total=len(configs),
+				)
 			else:
 				assert error is not None
 				context.stage_failed(
 					occurrence_id, algorithm, error, traceback.format_exc(),
+					position=index + 1, total=len(configs),
 				)
 
 		return bind, observe
@@ -359,10 +364,13 @@ class PipelineTrialExecutor:
 		outputs = []
 		preview_images = {}
 		preview_contract = None
-		for window in identity.fidelity.windows:
+		for window_index, window in enumerate(identity.fidelity.windows):
 			context = current_execution_context()
 			if context is not None:
-				context.window_started(window.id)
+				context.window_started(
+					window.id, position=window_index + 1,
+					total=len(identity.fidelity.windows),
+				)
 			window_root = output_root / "windows" / window.id
 			recon = self._window_recon(identity, window, window_root)
 			window_root.mkdir(parents=True, exist_ok=True)
