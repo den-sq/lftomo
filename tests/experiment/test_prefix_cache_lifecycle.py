@@ -1,5 +1,7 @@
 """Full-environment regression for prefix-cache/lifecycle adapter integration."""
 
+import threading
+
 import h5py
 import numpy as np
 import pytest
@@ -29,7 +31,10 @@ from lftomo.experiment.prefix_cache import PrefixCacheEvent
 from lftomo.experiment.runner import ExperimentInputs
 
 
-def _lifecycle(tmp_path, monkeypatch, *, result_name="results"):
+def _lifecycle(
+	tmp_path, monkeypatch, *, result_name="results",
+	max_concurrency=1, window_count=1,
+):
 	"""Build a tiny real adapter/lifecycle run with a shared cacheable prefix."""
 
 	import tomopy
@@ -106,14 +111,20 @@ def _lifecycle(tmp_path, monkeypatch, *, result_name="results"):
 			},
 		]},
 		"sampler": {"name": "exhaustive", "seed": 11},
-		"resources": {"max_concurrency": 1},
+		"resources": {"max_concurrency": max_concurrency},
 		"metrics": [{
 			"id": "rings", "metric": "artifact.ring_score",
 			"protocol_version": "1", "direction": "minimize",
 		}],
 		"objectives": [{"metric_id": "rings"}],
-		"windows": [{"id": "tune", "y_start": 1, "y_stop": 3}],
-		"fidelities": [{"id": "screen", "windows": ["tune"]}],
+		"windows": [
+			{"id": f"tune-{index + 1}", "y_start": index * 2, "y_stop": index * 2 + 2}
+			for index in range(window_count)
+		],
+		"fidelities": [{
+			"id": "screen",
+			"windows": [f"tune-{index + 1}" for index in range(window_count)],
+		}],
 		"aggregation": {"metric_ids": ["rings"]},
 		"output": {"screening": "metrics_only"},
 	})
@@ -218,4 +229,52 @@ def test_cache_progress_programming_error_aborts_experiment_not_candidate(
 	assert status.counts.get("failed", 0) == 0
 	assert status.counts.get("interrupted", 0) == 1
 	assert status.attempts[0].failure.type == "ProgressInfrastructureError"
+	assert read_progress_events(api.root / "progress.jsonl")[-1].kind == "experiment.failed"
+
+
+def test_cache_progress_infrastructure_abort_stops_other_worker_without_false_failure(
+	tmp_path, monkeypatch,
+):
+	api, _executor = _lifecycle(
+		tmp_path, monkeypatch, max_concurrency=2, window_count=2,
+	)
+	original_projection = PrefixCacheEvent.progress_projection
+	workers_at_cache_event = threading.Barrier(2)
+	cancellation_requested = threading.Event()
+	statuses = []
+	statuses_lock = threading.Lock()
+	original_request = api.cancellation.request
+
+	def record_request(reason):
+		requested = original_request(reason)
+		cancellation_requested.set()
+		return requested
+
+	def one_worker_fails(event):
+		with statuses_lock:
+			statuses.append(event.status)
+		workers_at_cache_event.wait(timeout=5)
+		if event.status == "miss":
+			raise TypeError("invalid concurrent cache progress projection")
+		assert event.status == "hit"
+		assert cancellation_requested.wait(timeout=5)
+		return original_projection(event)
+
+	with monkeypatch.context() as collision:
+		collision.setattr(api.cancellation, "request", record_request)
+		collision.setattr(PrefixCacheEvent, "progress_projection", one_worker_fails)
+		with pytest.raises(
+			ProgressInfrastructureError,
+			match="failed to publish prefix cache progress",
+		):
+			api.run()
+
+	status = api.status()
+	assert sorted(statuses[:2]) == ["hit", "miss"]
+	assert status.counts.get("failed", 0) == 0
+	assert status.counts.get("interrupted", 0) == 2
+	assert {attempt.failure.type for attempt in status.attempts} == {
+		"ExperimentCancelled", "ProgressInfrastructureError",
+	}
+	assert all(attempt.state == "interrupted" for attempt in status.attempts)
 	assert read_progress_events(api.root / "progress.jsonl")[-1].kind == "experiment.failed"
