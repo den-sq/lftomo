@@ -119,6 +119,7 @@ from .resources import (
 )
 from .events import (
 	AttemptProgress,
+	AttemptTimeoutExceeded,
 	active_secret_values,
 	CancellationDetails,
 	CancellationToken,
@@ -132,6 +133,7 @@ from .events import (
 	redact_secrets,
 	secret_material_paths,
 )
+from .timeouts import TimeoutIsolationUnsupported
 from .lifecycle import (
 	ExperimentLifecycle,
 	ExperimentValidation,
@@ -144,6 +146,7 @@ from .lifecycle import (
 __all__ = [
 	"AggregationPolicy",
 	"AttemptProgress",
+	"AttemptTimeoutExceeded",
 	"active_secret_values",
 	"CandidateKey",
 	"CancellationDetails",
@@ -228,6 +231,7 @@ __all__ = [
 	"Tier2Audit",
 	"Tier2Bounds",
 	"Tier2ExperimentPlan",
+	"TimeoutIsolationUnsupported",
 	"TrialAttemptRecord",
 	"TrialDescription",
 	"TrialId",

@@ -118,6 +118,38 @@ recorded in the replay bundle, manifest metadata, summaries, and accounting snap
 Blinded preview export uses the same temporary-write, measured-byte,
 `OutputLimitExceeded`, and serialized-publication semantics for its policy limit.
 
+## Fidelity deadlines
+
+`FidelityReference.timeout_seconds` is a per-attempt wall-clock deadline. The monotonic
+clock starts with `trial.started` and covers prefix-cache work, every window and Stage,
+evaluation, staged output encoding, budgeted publication, and the return to the parent
+needed before durable attempt finalization. Window, Stage, cache, heartbeat, and output
+boundaries check the attempt-local deadline before admitting more work.
+
+A cooperative check is not sufficient for native TomoPy/NumPy calls that do not return.
+Timeout-bearing attempts therefore run in a spawned process group. At the deadline the
+parent first raises the attempt-local timeout signal, then terminates the worker process
+group if it does not exit cooperatively. The process is joined, output-ledger
+transactions are rolled back, and attempt staging is removed before `trial.timeout` and
+the terminal failed attempt are persisted. No timed-out worker remains able to mutate
+the result root. An executor must explicitly support this spawned, killable contract and
+be serializable; otherwise preflight raises `TimeoutIsolationUnsupported` instead of
+treating the configured limit as advisory. The built-in `PipelineTrialExecutor` supports
+the contract and commits its staged outputs inside the isolated boundary.
+
+Timeout failures use `AttemptTimeoutExceeded`. Attempt records and `trial.timeout`
+events include the configured seconds, measured elapsed time, and the last known
+window/Stage context. They follow the ordinary `continue` or `fail_fast` failure policy,
+remain eligible for explicit `retry_failed`, and are never compatible-success reuse.
+Deadlines are attempt-local: expiry does not request experiment-wide cancellation or
+interrupt unrelated concurrent attempts. External operator cancellation remains
+experiment-wide and terminates isolated workers without waiting for their deadlines.
+
+As with output budgets, the timeout stays identity-bearing deliberately: it is part of
+the bounded protocol under which a candidate was allowed to finish. Raising it creates
+a different trial identity rather than silently reusing a success obtained under a
+different execution contract.
+
 ## Progress events
 
 `progress.jsonl` is an append-only, derived live tail. Atomic attempt projections in the

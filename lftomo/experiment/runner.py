@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pickle
 import resource
 import time
 import traceback
@@ -62,6 +63,7 @@ from .resources import (
 )
 from .events import (
 	AttemptProgress,
+	AttemptTimeoutExceeded,
 	CancellationDetails,
 	CancellationToken,
 	ExecutionContext,
@@ -77,6 +79,11 @@ from .outputs import (
 	OutputBudgetLedger,
 	OutputLimitExceeded,
 	output_role_is_counted,
+)
+from .timeouts import (
+	IsolatedExecutionError,
+	TimeoutIsolationUnsupported,
+	run_isolated_executor,
 )
 
 
@@ -363,6 +370,13 @@ class IndependentExperimentRunner:
 			workers = min(workers, max(1, budget // memory))
 		return max(1, workers)
 
+	def _fidelity_produces_outputs(self) -> bool:
+		is_final = self.fidelity_id == self.config.output.final_fidelity_id
+		return (
+			self.config.output.screening in ("configured_writers", "metrics_and_previews")
+			or (is_final and self.config.output.write_full_finalists)
+		)
+
 	def prepare(self) -> tuple[ExperimentPreflight, tuple[PreparedTrial, ...]]:
 		"""Select, validate, identify, and guard trials without reading dataset payloads."""
 
@@ -373,6 +387,29 @@ class IndependentExperimentRunner:
 		self.runtime_report = runtime
 		if not runtime.compatible:
 			raise RuntimeCompatibilityError(runtime)
+		timeout_seconds = self._fidelity().timeout_seconds
+		if timeout_seconds is not None:
+			if not getattr(self.executor, "supports_isolated_execution", False):
+				raise TimeoutIsolationUnsupported(
+					f"fidelity {self.fidelity_id!r} declares timeout_seconds but executor "
+					f"{type(self.executor).__name__} does not support killable isolation"
+				)
+			if (
+				self._fidelity_produces_outputs()
+				and not getattr(self.executor, "supports_isolated_output_publication", False)
+			):
+				raise TimeoutIsolationUnsupported(
+					f"fidelity {self.fidelity_id!r} can publish outputs but executor "
+					f"{type(self.executor).__name__} cannot commit them inside the "
+					"killable timeout boundary"
+				)
+			try:
+				pickle.dumps(self.executor)
+			except Exception as error:
+				raise TimeoutIsolationUnsupported(
+					f"executor {type(self.executor).__name__} cannot cross the spawned "
+					f"timeout boundary: {error}"
+				) from error
 
 		selected = select_candidates(self.config)
 		requested = (
@@ -553,6 +590,7 @@ class IndependentExperimentRunner:
 		atomic_write_model(self._attempt_path(trial), pending)
 		progress = self._initial_progress(trial, created)
 		self._emit_attempt("trial.planned", "trial attempt planned", progress)
+		clock = time.perf_counter()
 		started = _utcnow()
 		running = TrialAttemptRecord(**base, status="running", started_at=started)
 		atomic_write_model(self._attempt_path(trial), running)
@@ -560,24 +598,41 @@ class IndependentExperimentRunner:
 			"state": "started", "updated_at": started, "started_at": started,
 		})
 		self._emit_attempt("trial.started", "trial attempt started", progress)
-		clock = time.perf_counter()
 		memory_before = _peak_memory_bytes()
+		timeout_seconds = trial.identity.fidelity.timeout_seconds
 		context = ExecutionContext(
 			writer=self.event_writer,
 			progress_sink=self.progress_sink,
 			cancellation=self.cancellation,
 			progress=progress,
 			clock_started=clock,
+			deadline=(None if timeout_seconds is None else clock + timeout_seconds),
+			timeout_seconds=timeout_seconds,
 		)
 		output_accounting = None
 		pending_outputs: tuple[PendingOutput, ...] = ()
+		attempt_persisted = False
 		try:
 			self.cancellation.raise_if_requested()
 			# The deep copy is deliberate: executor mutation can never leak into
 			# another logical candidate or the recorded identity.
 			execution_identity = trial.identity.model_copy(deep=True)
-			with bind_execution_context(context):
-				execution = self.executor(execution_identity, trial.output_root)
+			if timeout_seconds is None:
+				with bind_execution_context(context):
+					execution = self.executor(execution_identity, trial.output_root)
+			else:
+				execution = run_isolated_executor(
+					self.executor,
+					execution_identity,
+					trial.output_root,
+					context,
+					timeout_seconds=timeout_seconds,
+				)
+				if execution.pending_outputs:
+					raise TimeoutIsolationUnsupported(
+						"timeout-isolated executors must commit staged outputs inside the "
+						"killable boundary"
+					)
 			legacy_pending = []
 			retained_outputs = list(execution.outputs) if execution.outputs_committed else []
 			for output in execution.outputs:
@@ -625,6 +680,7 @@ class IndependentExperimentRunner:
 				)
 			elif output_accounting is None:
 				output_accounting = self.output_ledger.snapshot()
+			context.checkpoint()
 			finished = _finish_timestamp(started)
 			elapsed = time.perf_counter() - clock
 			peak = execution.peak_memory_bytes or max(memory_before, _peak_memory_bytes())
@@ -652,8 +708,24 @@ class IndependentExperimentRunner:
 				},
 				result=result,
 			)
+			context.checkpoint()
+			atomic_write_model(self._attempt_path(trial), attempt)
+			context.checkpoint()
+			self.output_ledger.finalize_attempt(trial.attempt_id)
+			for item in pending_outputs:
+				try:
+					item.temporary_path.unlink(missing_ok=True)
+				except OSError:
+					pass
+			attempt_persisted = True
 		except ProgressInfrastructureError as error:
 			self.output_ledger.rollback_attempt(trial.attempt_id)
+			cleanup_attempt = getattr(self.executor, "cleanup_attempt_outputs", None)
+			if callable(cleanup_attempt):
+				try:
+					cleanup_attempt(trial.identity, trial.attempt_id)
+				except OSError:
+					pass
 			for item in pending_outputs:
 				try:
 					item.temporary_path.unlink(missing_ok=True)
@@ -716,13 +788,23 @@ class IndependentExperimentRunner:
 			raise
 		except BaseException as error:
 			self.output_ledger.rollback_attempt(trial.attempt_id)
+			cleanup_attempt = getattr(self.executor, "cleanup_attempt_outputs", None)
+			if callable(cleanup_attempt):
+				try:
+					cleanup_attempt(trial.identity, trial.attempt_id)
+				except OSError:
+					pass
 			for item in pending_outputs:
 				try:
 					item.temporary_path.unlink(missing_ok=True)
 				except OSError:
 					pass
 			finished = _finish_timestamp(started)
-			traceback_text = traceback.format_exc()
+			traceback_text = (
+				error.remote_traceback
+				if isinstance(error, IsolatedExecutionError)
+				else traceback.format_exc()
+			)
 			secrets = (
 				active_secret_values() if self.event_writer is None else self.event_writer.secrets
 			)
@@ -731,9 +813,13 @@ class IndependentExperimentRunner:
 			))
 			clean_traceback = str(redact_secrets(traceback_text, secrets=secrets))
 			interrupted = isinstance(error, (KeyboardInterrupt, InterruptedError))
-			details = {}
-			if isinstance(error, OutputLimitExceeded):
-				details = error.failure_details()
+			details_method = getattr(error, "failure_details", None)
+			details = details_method() if callable(details_method) else {}
+			is_output_limit = isinstance(error, OutputLimitExceeded) or (
+				isinstance(error, IsolatedExecutionError)
+				and error.failure_type == "OutputLimitExceeded"
+			)
+			if is_output_limit:
 				output_accounting = self.output_ledger.snapshot()
 				context.output_event(
 					"limit_exceeded", clean_message,
@@ -743,6 +829,13 @@ class IndependentExperimentRunner:
 						**details,
 					},
 				)
+			if isinstance(error, AttemptTimeoutExceeded):
+				context.timeout_event(error)
+			failure_type = (
+				error.failure_type
+				if isinstance(error, IsolatedExecutionError)
+				else type(error).__name__
+			)
 			attempt = TrialAttemptRecord(
 				**base,
 				status="interrupted" if interrupted else "failed",
@@ -752,7 +845,7 @@ class IndependentExperimentRunner:
 				peak_memory_bytes=max(memory_before, _peak_memory_bytes()),
 				output_accounting=output_accounting,
 				failure=FailureRecord(
-					type=type(error).__name__,
+					type=failure_type,
 					message=clean_message,
 					stage_id=context.progress.stage_occurrence_id,
 					stage_algorithm=context.progress.stage_algorithm,
@@ -761,14 +854,8 @@ class IndependentExperimentRunner:
 					details=details,
 				),
 			)
-		atomic_write_model(self._attempt_path(trial), attempt)
-		if attempt.status == "succeeded":
-			self.output_ledger.finalize_attempt(trial.attempt_id)
-			for item in pending_outputs:
-				try:
-					item.temporary_path.unlink(missing_ok=True)
-				except OSError:
-					pass
+		if not attempt_persisted:
+			atomic_write_model(self._attempt_path(trial), attempt)
 		final_state = attempt.status
 		assert final_state in ("succeeded", "failed", "interrupted")
 		failure = None

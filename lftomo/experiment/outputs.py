@@ -412,6 +412,9 @@ class OutputBudgetLedger:
 		with self._locked():
 			if not self.transactions.exists():
 				return
+			for directory in tuple(self.transactions.glob(f"{attempt_id}-*")):
+				if not (directory / "transaction.json").exists():
+					shutil.rmtree(directory, ignore_errors=True)
 			for path in tuple(self.transactions.glob("*/transaction.json")):
 				transaction = self._read_transaction(path)
 				if transaction.attempt_id == attempt_id:
@@ -468,6 +471,9 @@ class OutputBudgetLedger:
 		with self._locked():
 			state = self._load()
 			if self.transactions.exists():
+				for directory in tuple(self.transactions.iterdir()):
+					if directory.is_dir() and not (directory / "transaction.json").exists():
+						shutil.rmtree(directory, ignore_errors=True)
 				for path in tuple(self.transactions.glob("*/transaction.json")):
 					transaction = self._read_transaction(path)
 					attempt_path = (

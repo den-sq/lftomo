@@ -64,7 +64,12 @@ from .runtime import (
 	require_runtime_compatibility,
 )
 from .resources import PathContextRoots, PathResourceRequest
-from .events import ProgressInfrastructureError, current_execution_context
+from .events import (
+	AttemptTimeoutExceeded,
+	ExperimentCancelled,
+	ProgressInfrastructureError,
+	current_execution_context,
+)
 from .outputs import OutputBudgetLedger
 from .lifecycle import ExperimentLifecycle, load_experiment, validate_experiment
 from .store import ResumePolicy
@@ -130,6 +135,9 @@ def build_experiment_inputs(
 class PipelineTrialExecutor:
 	"""Run one resolved candidate through the existing complete-pipeline runner."""
 
+	supports_isolated_execution = True
+	supports_isolated_output_publication = True
+
 	def __init__(
 		self,
 		config: ExperimentConfig,
@@ -144,6 +152,15 @@ class PipelineTrialExecutor:
 		self._result_root: Path | None = None
 		self._output_staging_root: Path | None = None
 		self._override_limits = False
+
+	def __getstate__(self):
+		state = dict(self.__dict__)
+		state.pop("prefix_executor", None)
+		return state
+
+	def __setstate__(self, state):
+		self.__dict__.update(state)
+		self.prefix_executor = PrefixCachingPipelineExecutor(self.prefix_cache_policy)
 
 	def configure_output_staging(
 		self,
@@ -171,6 +188,18 @@ class PipelineTrialExecutor:
 			fidelity_id,
 			override_limits=self._override_limits,
 		)
+
+	def cleanup_attempt_outputs(self, identity, attempt_id: str) -> None:
+		"""Remove disposable output staging after failure or hard termination."""
+
+		if self._result_root is None:
+			return
+		staging_parent = self._output_staging_root or self._result_root / ".output-staging"
+		path = staging_parent / identity.trial_id.value / attempt_id
+		if path.exists():
+			import shutil
+
+			shutil.rmtree(path)
 
 	def replay_document(self) -> dict[str, Any]:
 		"""Return the normalized non-secret adapter inputs needed for replay."""
@@ -297,7 +326,7 @@ class PipelineTrialExecutor:
 					"evict", cache_bytes=cache_bytes,
 					details={"evicted_keys": event.evicted_keys},
 				)
-		except ProgressInfrastructureError:
+		except (ProgressInfrastructureError, ExperimentCancelled, AttemptTimeoutExceeded):
 			raise
 		except Exception as error:
 			raise ProgressInfrastructureError(
@@ -526,6 +555,8 @@ class PipelineTrialExecutor:
 				raise ValueError(
 					"metrics_and_previews screening requires LFTOMO_PREVIEW_BLINDING_KEY"
 				)
+			if context is not None:
+				context.checkpoint()
 			bundle = export_blinded_previews(
 				{identity.candidate.value: preview_images},
 				result_root,
@@ -537,6 +568,8 @@ class PipelineTrialExecutor:
 				trial_id=trial_id,
 				staging_root=staging_root / "preview-publication",
 			)
+			if context is not None:
+				context.checkpoint()
 			entry = next(
 				item for item in bundle.entries if item.candidate_key == identity.candidate.value
 			)
@@ -546,7 +579,34 @@ class PipelineTrialExecutor:
 			committed_output_accounting = self._budget_ledger(
 				identity.fidelity.id,
 			).accounting_for_attempt(attempt_id)
+		if context is not None:
+			context.checkpoint()
 		aggregates = aggregate_window_metrics(window_metrics, self.config)
+		if context is not None:
+			context.checkpoint()
+		if getattr(identity.fidelity, "timeout_seconds", None) is not None and pending_outputs:
+			if context is not None:
+				context.checkpoint()
+			published, committed_output_accounting = self._budget_ledger(
+				identity.fidelity.id,
+			).publish(
+				tuple(pending_outputs),
+				attempt_id=attempt_id,
+				trial_id=trial_id,
+			)
+			if context is not None:
+				context.checkpoint()
+			outputs.extend(published)
+			for item in pending_outputs:
+				item.temporary_path.unlink(missing_ok=True)
+			pending_outputs.clear()
+			if context is not None:
+				context.output_event(
+					"committed",
+					f"committed {committed_output_accounting.attempt_committed_bytes} output bytes",
+					output_bytes=committed_output_accounting.attempt_committed_bytes,
+					details=committed_output_accounting.model_dump(mode="json"),
+				)
 		return TrialExecution(
 			metrics=json_value(aggregates.tuning),
 			window_metrics=json_value(window_metrics),

@@ -242,6 +242,40 @@ class ExperimentCancelled(InterruptedError):
 	"""Raised at cooperative boundaries after a cancellation request."""
 
 
+class AttemptTimeoutExceeded(TimeoutError):
+	"""One attempt exceeded its fidelity wall-clock deadline."""
+
+	def __init__(
+		self,
+		*,
+		timeout_seconds: float,
+		elapsed_seconds: float,
+		window_id: str | None = None,
+		stage_occurrence_id: str | None = None,
+		stage_algorithm: str | None = None,
+	):
+		self.timeout_seconds = timeout_seconds
+		self.elapsed_seconds = elapsed_seconds
+		self.window_id = window_id
+		self.stage_occurrence_id = stage_occurrence_id
+		self.stage_algorithm = stage_algorithm
+		location = stage_occurrence_id or window_id
+		context = "" if location is None else f" at {location}"
+		super().__init__(
+			f"attempt exceeded fidelity timeout {timeout_seconds:g}s after "
+			f"{elapsed_seconds:.6f}s{context}"
+		)
+
+	def failure_details(self) -> dict[str, JsonValue]:
+		return {
+			"timeout_seconds": self.timeout_seconds,
+			"elapsed_seconds": self.elapsed_seconds,
+			"window_id": self.window_id,
+			"stage_occurrence_id": self.stage_occurrence_id,
+			"stage_algorithm": self.stage_algorithm,
+		}
+
+
 class ProgressInfrastructureError(RuntimeError):
 	"""A durable progress projection or event could not be published safely."""
 
@@ -441,13 +475,16 @@ class ExecutionContext:
 	cancellation: CancellationToken
 	progress: AttemptProgress
 	clock_started: float = field(default_factory=time.perf_counter)
+	deadline: float | None = None
+	timeout_seconds: float | None = None
+	attempt_timeout_signal: Any | None = None
 	window_clock_started: float | None = None
 	stage_clocks_started: dict[str, float] = field(default_factory=dict)
 
 	def _persist_progress(self, kind: str) -> None:
 		try:
 			self.progress_sink(self.progress)
-		except ProgressInfrastructureError:
+		except (ProgressInfrastructureError, ExperimentCancelled, AttemptTimeoutExceeded):
 			raise
 		except Exception as error:
 			raise ProgressInfrastructureError(
@@ -500,6 +537,43 @@ class ExecutionContext:
 
 	def checkpoint(self) -> None:
 		self.cancellation.raise_if_requested()
+		timed_out = (
+			self.attempt_timeout_signal is not None
+			and self.attempt_timeout_signal.is_set()
+		) or (
+			self.deadline is not None and time.perf_counter() >= self.deadline
+		)
+		if timed_out:
+			assert self.timeout_seconds is not None
+			raise AttemptTimeoutExceeded(
+				timeout_seconds=self.timeout_seconds,
+				elapsed_seconds=time.perf_counter() - self.clock_started,
+				window_id=self.progress.window_id,
+				stage_occurrence_id=self.progress.stage_occurrence_id,
+				stage_algorithm=self.progress.stage_algorithm,
+			)
+
+	def timeout_event(self, error: AttemptTimeoutExceeded) -> None:
+		"""Persist the specific deadline failure before terminal finalization."""
+
+		failure = FailureContext(
+			type=type(error).__name__,
+			message=str(error),
+			window_id=error.window_id,
+			stage_occurrence_id=error.stage_occurrence_id,
+			stage_algorithm=error.stage_algorithm,
+		)
+		self.progress = self.progress.model_copy(update={
+			"updated_at": _utcnow(),
+			"elapsed_seconds": error.elapsed_seconds,
+			"failure": failure,
+		})
+		self._publish(
+			"trial.timeout", str(error), severity="error",
+			failure_type=type(error).__name__,
+			failure_message=str(error),
+			details=error.failure_details(),
+		)
 
 	def window_started(
 		self, window_id: str, *, position: int | None = None, total: int | None = None,
@@ -518,6 +592,7 @@ class ExecutionContext:
 		)
 
 	def window_completed(self, window_id: str) -> None:
+		self.checkpoint()
 		window_elapsed = (
 			None if self.window_clock_started is None
 			else time.perf_counter() - self.window_clock_started
@@ -570,6 +645,7 @@ class ExecutionContext:
 		position: int | None = None,
 		total: int | None = None,
 	) -> None:
+		self.checkpoint()
 		started = self.stage_clocks_started.pop(occurrence_id, None)
 		stage_elapsed = (
 			None if started is None else time.perf_counter() - started
@@ -631,6 +707,7 @@ class ExecutionContext:
 		position: int | None = None,
 		total: int | None = None,
 	) -> None:
+		self.checkpoint()
 		secrets = () if self.writer is None else self.writer.secrets
 		message = str(redact_secrets(
 			str(error) or type(error).__name__, secrets=secrets,
@@ -676,6 +753,7 @@ class ExecutionContext:
 		"""
 
 		try:
+			self.checkpoint()
 			changes = {
 				"updated_at": _utcnow(),
 				"elapsed_seconds": time.perf_counter() - self.clock_started,
@@ -687,7 +765,7 @@ class ExecutionContext:
 				f"cache.{event}", f"prefix cache {event}",
 				details={} if details is None else dict(details),
 			)
-		except ProgressInfrastructureError:
+		except (ProgressInfrastructureError, ExperimentCancelled, AttemptTimeoutExceeded):
 			raise
 		except Exception as error:
 			raise ProgressInfrastructureError(
