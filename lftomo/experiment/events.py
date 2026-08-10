@@ -218,6 +218,10 @@ class ExperimentCancelled(InterruptedError):
 	"""Raised at cooperative boundaries after a cancellation request."""
 
 
+class ProgressInfrastructureError(RuntimeError):
+	"""A durable progress projection or event could not be published safely."""
+
+
 class CancellationToken:
 	"""Thread-safe cooperative cancellation request shared with callers."""
 
@@ -414,28 +418,45 @@ class ExecutionContext:
 	progress: AttemptProgress
 	clock_started: float = field(default_factory=time.perf_counter)
 
+	def _persist_progress(self, kind: str) -> None:
+		try:
+			self.progress_sink(self.progress)
+		except ProgressInfrastructureError:
+			raise
+		except Exception as error:
+			raise ProgressInfrastructureError(
+				f"failed to persist progress projection for {kind!r}: {error}"
+			) from error
+
 	def _publish(self, kind: str, message: str, **fields: Any) -> None:
-		self.progress_sink(self.progress)
-		if self.writer is not None:
-			self.writer.emit(
-				kind,
-				message,
-				fidelity_id=self.progress.fidelity_id,
-				candidate_key=self.progress.candidate_key,
-				trial_id=self.progress.trial_id,
-				attempt_id=self.progress.attempt_id,
-				structural_variant=self.progress.structural_variant,
-				sampler_index=self.progress.sampler_index,
-				window_id=self.progress.window_id,
-				stage_occurrence_id=self.progress.stage_occurrence_id,
-				stage_algorithm=self.progress.stage_algorithm,
-				lifecycle_state=self.progress.state,
-				elapsed_seconds=self.progress.elapsed_seconds,
-				resource_bytes=self.progress.resource_bytes,
-				output_bytes=self.progress.output_bytes,
-				cache_bytes=self.progress.cache_bytes,
-				**fields,
-			)
+		self._persist_progress(kind)
+		try:
+			if self.writer is not None:
+				self.writer.emit(
+					kind,
+					message,
+					fidelity_id=self.progress.fidelity_id,
+					candidate_key=self.progress.candidate_key,
+					trial_id=self.progress.trial_id,
+					attempt_id=self.progress.attempt_id,
+					structural_variant=self.progress.structural_variant,
+					sampler_index=self.progress.sampler_index,
+					window_id=self.progress.window_id,
+					stage_occurrence_id=self.progress.stage_occurrence_id,
+					stage_algorithm=self.progress.stage_algorithm,
+					lifecycle_state=self.progress.state,
+					elapsed_seconds=self.progress.elapsed_seconds,
+					resource_bytes=self.progress.resource_bytes,
+					output_bytes=self.progress.output_bytes,
+					cache_bytes=self.progress.cache_bytes,
+					**fields,
+				)
+		except ProgressInfrastructureError:
+			raise
+		except Exception as error:
+			raise ProgressInfrastructureError(
+				f"failed to publish progress event {kind!r}: {error}"
+			) from error
 
 	def update(self, kind: str, message: str, **changes: Any) -> None:
 		changes.setdefault("updated_at", _utcnow())
@@ -461,7 +482,7 @@ class ExecutionContext:
 		self.progress = self.progress.model_copy(update={
 			"updated_at": _utcnow(), "window_id": None,
 		})
-		self.progress_sink(self.progress)
+		self._persist_progress("window.completed")
 
 	def stage_started(self, occurrence_id: str, algorithm: str | None) -> None:
 		self.checkpoint()
@@ -480,7 +501,7 @@ class ExecutionContext:
 			"stage_occurrence_id": None,
 			"stage_algorithm": None,
 		})
-		self.progress_sink(self.progress)
+		self._persist_progress("stage.completed")
 
 	def stage_failed(
 		self,
@@ -511,16 +532,37 @@ class ExecutionContext:
 			severity="error", failure_type=failure.type, traceback=traceback_text,
 		)
 
-	def cache_event(self, status: str, **counters: Any) -> None:
-		kind = f"cache.{status}"
-		changes = {
-			"updated_at": _utcnow(),
-			"elapsed_seconds": time.perf_counter() - self.clock_started,
-		}
-		if counters.get("cache_bytes") is not None:
-			changes["cache_bytes"] = counters["cache_bytes"]
-		self.progress = self.progress.model_copy(update=changes)
-		self._publish(kind, f"prefix cache {status}", details=counters)
+	def cache_event(
+		self,
+		event: str,
+		*,
+		cache_bytes: int | None = None,
+		details: Mapping[str, Any] | None = None,
+	) -> None:
+		"""Publish one explicitly projected cache event.
+
+		``event`` owns the lifecycle event kind. Cache implementation status and
+		measurements belong in ``details`` and cannot collide with this call surface.
+		"""
+
+		try:
+			changes = {
+				"updated_at": _utcnow(),
+				"elapsed_seconds": time.perf_counter() - self.clock_started,
+			}
+			if cache_bytes is not None:
+				changes["cache_bytes"] = cache_bytes
+			self.progress = self.progress.model_copy(update=changes)
+			self._publish(
+				f"cache.{event}", f"prefix cache {event}",
+				details={} if details is None else dict(details),
+			)
+		except ProgressInfrastructureError:
+			raise
+		except Exception as error:
+			raise ProgressInfrastructureError(
+				f"failed to project prefix cache event {event!r}: {error}"
+			) from error
 
 
 _CURRENT_EXECUTION: ContextVar[ExecutionContext | None] = ContextVar(

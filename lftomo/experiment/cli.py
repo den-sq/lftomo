@@ -63,7 +63,7 @@ from .runtime import (
 	require_runtime_compatibility,
 )
 from .resources import PathContextRoots, PathResourceRequest
-from .events import current_execution_context
+from .events import ProgressInfrastructureError, current_execution_context
 from .lifecycle import ExperimentLifecycle, load_experiment, validate_experiment
 from .store import ResumePolicy
 
@@ -247,6 +247,32 @@ class PipelineTrialExecutor:
 		}
 
 	@staticmethod
+	def _publish_prefix_cache_progress(active, event) -> None:
+		"""Publish cache observability as infrastructure, never candidate science."""
+
+		try:
+			cache_event, cache_bytes, details = event.progress_projection()
+			active.cache_event(
+				cache_event, cache_bytes=cache_bytes, details=details,
+			)
+			if event.verified:
+				active.cache_event(
+					"verify", cache_bytes=cache_bytes,
+					details={"cache_key": event.cache_key},
+				)
+			if event.evicted_keys:
+				active.cache_event(
+					"evict", cache_bytes=cache_bytes,
+					details={"evicted_keys": event.evicted_keys},
+				)
+		except ProgressInfrastructureError:
+			raise
+		except Exception as error:
+			raise ProgressInfrastructureError(
+				f"failed to publish prefix cache progress: {error}"
+			) from error
+
+	@staticmethod
 	def _estimated_snapshot_bytes(scan, identity, window) -> int | None:
 		columns = scan.detector.columns
 		if columns is None:
@@ -363,16 +389,7 @@ class PipelineTrialExecutor:
 					result.artifacts["prefix_cache"] = event.model_dump(mode="json")
 					active = current_execution_context()
 					if active is not None:
-						counters = event.model_dump(mode="json")
-						active.cache_event(
-							"rebuild" if event.status == "rebuilt" else event.status,
-							cache_bytes=event.cache_bytes_after,
-							**counters,
-						)
-						if event.verified:
-							active.cache_event("verify", cache_key=event.cache_key)
-						if event.evicted_keys:
-							active.cache_event("evict", evicted_keys=event.evicted_keys)
+						self._publish_prefix_cache_progress(active, event)
 					return result
 				return Pipeline(
 					list(stages),

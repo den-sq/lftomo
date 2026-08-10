@@ -92,6 +92,14 @@ Error policy is explicit:
 No mode guesses that a weak identity, unknown Stage, unsupported backend, or oversized
 snapshot is safe to share.
 
+Cache provenance is projected explicitly into lifecycle events: the lifecycle kind
+(`cache.miss`, `cache.hit`, `cache.rebuild`, and so on), the top-level cache-byte counter,
+and implementation details are separate fields. A progress/store programming or I/O
+error raises `ProgressInfrastructureError` at the experiment boundary; it is not recorded
+as an independent scientific failure for every candidate under `failure=continue`.
+Presentation callback failures remain isolated because callbacks do not own durable
+state.
+
 ## Equivalence verification and benchmarking
 
 `--prefix-cache-verify-fraction` selects a deterministic subset of hits by trial/window

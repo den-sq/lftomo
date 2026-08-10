@@ -64,6 +64,7 @@ from .events import (
 	CancellationToken,
 	ExecutionContext,
 	FailureContext,
+	ProgressInfrastructureError,
 	ProgressEventWriter,
 	ProgressSink,
 	active_secret_values,
@@ -563,6 +564,62 @@ class IndependentExperimentRunner:
 				},
 				result=result,
 			)
+		except ProgressInfrastructureError as error:
+			# Progress/store plumbing is experiment infrastructure. It must abort the
+			# coordinator instead of masquerading as an independent candidate failure.
+			# Persist an interrupted attempt directly when possible so the authoritative
+			# store does not retain a stale "started" projection after the abort.
+			finished = _finish_timestamp(started)
+			traceback_text = traceback.format_exc()
+			secrets = (
+				active_secret_values() if self.event_writer is None else self.event_writer.secrets
+			)
+			clean_message = str(redact_secrets(
+				str(error) or type(error).__name__, secrets=secrets,
+			))
+			clean_traceback = str(redact_secrets(traceback_text, secrets=secrets))
+			attempt = TrialAttemptRecord(
+				**base,
+				status="interrupted",
+				started_at=started,
+				finished_at=finished,
+				elapsed_seconds=time.perf_counter() - clock,
+				peak_memory_bytes=max(memory_before, _peak_memory_bytes()),
+				failure=FailureRecord(
+					type=type(error).__name__,
+					message=clean_message,
+					stage_id=context.progress.stage_occurrence_id,
+					stage_algorithm=context.progress.stage_algorithm,
+					window_id=context.progress.window_id,
+					traceback=clean_traceback,
+				),
+			)
+			atomic_write_model(self._attempt_path(trial), attempt)
+			progress = context.progress.model_copy(update={
+				"state": "interrupted",
+				"updated_at": finished,
+				"finished_at": finished,
+				"elapsed_seconds": attempt.elapsed_seconds,
+				"failure": FailureContext(
+					type=type(error).__name__, message=clean_message,
+					traceback=clean_traceback,
+					window_id=context.progress.window_id,
+					stage_occurrence_id=context.progress.stage_occurrence_id,
+					stage_algorithm=context.progress.stage_algorithm,
+				),
+			})
+			try:
+				self.progress_sink(progress)
+			except Exception as projection_error:
+				# The infrastructure error may itself be a failed progress sink. The
+				# attempt record above remains the best available durable projection.
+				error.add_note(
+					"authoritative attempt projection was written, but the progress "
+					f"projection also failed: {type(projection_error).__name__}: "
+					f"{projection_error}"
+				)
+			self.cancellation.request(f"progress infrastructure failure: {clean_message}")
+			raise
 		except BaseException as error:
 			finished = _finish_timestamp(started)
 			traceback_text = traceback.format_exc()
