@@ -626,11 +626,6 @@ class FidelityExperimentRunner:
 		for index, fidelity in enumerate(self.config.fidelities):
 			if self.cancellation.requested:
 				break
-			if self.event_writer is not None:
-				self.event_writer.emit(
-					"fidelity.started", f"fidelity {fidelity.id} started",
-					fidelity_id=fidelity.id, completed_candidates=0,
-				)
 			runner = IndependentExperimentRunner(
 				self.config,
 				self.inputs,
@@ -662,17 +657,6 @@ class FidelityExperimentRunner:
 				before_execute=self.before_execute,
 			).run()
 			levels.append(level)
-			if self.event_writer is not None:
-				self.event_writer.emit(
-					"fidelity.completed", f"fidelity {fidelity.id} completed",
-					severity="warning" if level.interruption is not None else "info",
-					fidelity_id=fidelity.id,
-					completed_candidates=len(level.attempts),
-					total_candidates=level.preflight.unique_candidates,
-					lifecycle_state=(
-						"interrupted" if level.interruption is not None else "succeeded"
-					),
-				)
 			if self.cancellation.requested:
 				break
 			if index == len(self.config.fidelities) - 1:

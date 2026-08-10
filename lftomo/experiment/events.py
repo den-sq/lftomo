@@ -138,20 +138,36 @@ class ProgressEvent(ConfigModel):
 	fidelity_id: str | None = None
 	completed_candidates: int | None = Field(default=None, ge=0)
 	total_candidates: int | None = Field(default=None, ge=0)
+	succeeded_candidates: int | None = Field(default=None, ge=0)
+	failed_candidates: int | None = Field(default=None, ge=0)
+	interrupted_candidates: int | None = Field(default=None, ge=0)
+	skipped_candidates: int | None = Field(default=None, ge=0)
+	reused_candidates: int | None = Field(default=None, ge=0)
+	active_candidates: int | None = Field(default=None, ge=0)
+	remaining_candidates: int | None = Field(default=None, ge=0)
 	candidate_key: str | None = None
 	trial_id: str | None = None
 	attempt_id: str | None = None
 	structural_variant: str | None = None
 	sampler_index: int | None = Field(default=None, ge=0)
+	sampler_position: int | None = Field(default=None, ge=1)
+	sampler_total: int | None = Field(default=None, ge=1)
 	window_id: str | None = None
+	window_position: int | None = Field(default=None, ge=1)
+	window_total: int | None = Field(default=None, ge=1)
+	window_elapsed_seconds: float | None = Field(default=None, ge=0)
 	stage_occurrence_id: str | None = None
 	stage_algorithm: str | None = None
+	stage_position: int | None = Field(default=None, ge=1)
+	stage_total: int | None = Field(default=None, ge=1)
+	stage_elapsed_seconds: float | None = Field(default=None, ge=0)
 	lifecycle_state: LifecycleState | None = None
 	elapsed_seconds: float | None = Field(default=None, ge=0)
 	resource_bytes: int | None = Field(default=None, ge=0)
 	output_bytes: int | None = Field(default=None, ge=0)
 	cache_bytes: int | None = Field(default=None, ge=0)
 	failure_type: str | None = None
+	failure_message: str | None = None
 	traceback: str | None = None
 	details: dict[str, JsonValue] = Field(default_factory=dict)
 
@@ -178,14 +194,22 @@ class AttemptProgress(ConfigModel):
 	attempt_id: str
 	structural_variant: str | None = None
 	sampler_index: int | None = Field(default=None, ge=0)
+	sampler_position: int | None = Field(default=None, ge=1)
+	sampler_total: int | None = Field(default=None, ge=1)
 	state: LifecycleState
 	updated_at: datetime
 	started_at: datetime | None = None
 	finished_at: datetime | None = None
 	elapsed_seconds: float | None = Field(default=None, ge=0)
 	window_id: str | None = None
+	window_position: int | None = Field(default=None, ge=1)
+	window_total: int | None = Field(default=None, ge=1)
+	window_elapsed_seconds: float | None = Field(default=None, ge=0)
 	stage_occurrence_id: str | None = None
 	stage_algorithm: str | None = None
+	stage_position: int | None = Field(default=None, ge=1)
+	stage_total: int | None = Field(default=None, ge=1)
+	stage_elapsed_seconds: float | None = Field(default=None, ge=0)
 	resource_bytes: int | None = Field(default=None, ge=0)
 	output_bytes: int | None = Field(default=None, ge=0)
 	cache_bytes: int | None = Field(default=None, ge=0)
@@ -216,6 +240,10 @@ class ExperimentStatus(ConfigModel):
 
 class ExperimentCancelled(InterruptedError):
 	"""Raised at cooperative boundaries after a cancellation request."""
+
+
+class ProgressInfrastructureError(RuntimeError):
+	"""A durable progress projection or event could not be published safely."""
 
 
 class CancellationToken:
@@ -413,29 +441,56 @@ class ExecutionContext:
 	cancellation: CancellationToken
 	progress: AttemptProgress
 	clock_started: float = field(default_factory=time.perf_counter)
+	window_clock_started: float | None = None
+	stage_clocks_started: dict[str, float] = field(default_factory=dict)
+
+	def _persist_progress(self, kind: str) -> None:
+		try:
+			self.progress_sink(self.progress)
+		except ProgressInfrastructureError:
+			raise
+		except Exception as error:
+			raise ProgressInfrastructureError(
+				f"failed to persist progress projection for {kind!r}: {error}"
+			) from error
 
 	def _publish(self, kind: str, message: str, **fields: Any) -> None:
-		self.progress_sink(self.progress)
-		if self.writer is not None:
-			self.writer.emit(
-				kind,
-				message,
-				fidelity_id=self.progress.fidelity_id,
-				candidate_key=self.progress.candidate_key,
-				trial_id=self.progress.trial_id,
-				attempt_id=self.progress.attempt_id,
-				structural_variant=self.progress.structural_variant,
-				sampler_index=self.progress.sampler_index,
-				window_id=self.progress.window_id,
-				stage_occurrence_id=self.progress.stage_occurrence_id,
-				stage_algorithm=self.progress.stage_algorithm,
-				lifecycle_state=self.progress.state,
-				elapsed_seconds=self.progress.elapsed_seconds,
-				resource_bytes=self.progress.resource_bytes,
-				output_bytes=self.progress.output_bytes,
-				cache_bytes=self.progress.cache_bytes,
-				**fields,
-			)
+		self._persist_progress(kind)
+		try:
+			if self.writer is not None:
+				self.writer.emit(
+					kind,
+					message,
+					fidelity_id=self.progress.fidelity_id,
+					candidate_key=self.progress.candidate_key,
+					trial_id=self.progress.trial_id,
+					attempt_id=self.progress.attempt_id,
+					structural_variant=self.progress.structural_variant,
+					sampler_index=self.progress.sampler_index,
+					sampler_position=self.progress.sampler_position,
+					sampler_total=self.progress.sampler_total,
+					window_id=self.progress.window_id,
+					window_position=self.progress.window_position,
+					window_total=self.progress.window_total,
+					window_elapsed_seconds=self.progress.window_elapsed_seconds,
+					stage_occurrence_id=self.progress.stage_occurrence_id,
+					stage_algorithm=self.progress.stage_algorithm,
+					stage_position=self.progress.stage_position,
+					stage_total=self.progress.stage_total,
+					stage_elapsed_seconds=self.progress.stage_elapsed_seconds,
+					lifecycle_state=self.progress.state,
+					elapsed_seconds=self.progress.elapsed_seconds,
+					resource_bytes=self.progress.resource_bytes,
+					output_bytes=self.progress.output_bytes,
+					cache_bytes=self.progress.cache_bytes,
+					**fields,
+				)
+		except ProgressInfrastructureError:
+			raise
+		except Exception as error:
+			raise ProgressInfrastructureError(
+				f"failed to publish progress event {kind!r}: {error}"
+			) from error
 
 	def update(self, kind: str, message: str, **changes: Any) -> None:
 		changes.setdefault("updated_at", _utcnow())
@@ -446,41 +501,125 @@ class ExecutionContext:
 	def checkpoint(self) -> None:
 		self.cancellation.raise_if_requested()
 
-	def window_started(self, window_id: str) -> None:
+	def window_started(
+		self, window_id: str, *, position: int | None = None, total: int | None = None,
+	) -> None:
 		self.checkpoint()
+		self.window_clock_started = time.perf_counter()
 		self.update(
-			"window.started", f"window {window_id} started",
+			"window.started", (
+				f"window {position}/{total} {window_id} started"
+				if position is not None and total is not None
+				else f"window {window_id} started"
+			),
 			window_id=window_id, stage_occurrence_id=None, stage_algorithm=None,
+			window_position=position, window_total=total, window_elapsed_seconds=0,
+			stage_position=None, stage_total=None, stage_elapsed_seconds=None,
 		)
 
 	def window_completed(self, window_id: str) -> None:
+		window_elapsed = (
+			None if self.window_clock_started is None
+			else time.perf_counter() - self.window_clock_started
+		)
 		self.update(
-			"window.completed", f"window {window_id} completed",
+			"window.completed", (
+				f"window {self.progress.window_position}/{self.progress.window_total} "
+				f"{window_id} completed"
+				if self.progress.window_position is not None
+				and self.progress.window_total is not None
+				else f"window {window_id} completed"
+			),
 			window_id=window_id, stage_occurrence_id=None, stage_algorithm=None,
+			window_elapsed_seconds=window_elapsed,
+			stage_position=None, stage_total=None, stage_elapsed_seconds=None,
 		)
 		self.progress = self.progress.model_copy(update={
 			"updated_at": _utcnow(), "window_id": None,
+			"window_position": None, "window_total": None,
+			"window_elapsed_seconds": None,
 		})
-		self.progress_sink(self.progress)
+		self.window_clock_started = None
+		self._persist_progress("window.completed")
 
-	def stage_started(self, occurrence_id: str, algorithm: str | None) -> None:
+	def stage_started(
+		self,
+		occurrence_id: str,
+		algorithm: str | None,
+		*,
+		position: int | None = None,
+		total: int | None = None,
+	) -> None:
 		self.checkpoint()
+		self.stage_clocks_started[occurrence_id] = time.perf_counter()
 		self.update(
-			"stage.started", f"Stage {occurrence_id} started",
+			"stage.started", (
+				f"Stage {position}/{total} {occurrence_id}:{algorithm} started"
+				if position is not None and total is not None
+				else f"Stage {occurrence_id} started"
+			),
 			stage_occurrence_id=occurrence_id, stage_algorithm=algorithm,
+			stage_position=position, stage_total=total, stage_elapsed_seconds=0,
 		)
 
-	def stage_completed(self, occurrence_id: str, algorithm: str | None) -> None:
+	def stage_completed(
+		self,
+		occurrence_id: str,
+		algorithm: str | None,
+		*,
+		position: int | None = None,
+		total: int | None = None,
+	) -> None:
+		started = self.stage_clocks_started.pop(occurrence_id, None)
+		stage_elapsed = (
+			None if started is None else time.perf_counter() - started
+		)
+		position = self.progress.stage_position if position is None else position
+		total = self.progress.stage_total if total is None else total
 		self.update(
-			"stage.completed", f"Stage {occurrence_id} completed",
+			"stage.completed", (
+				f"Stage {position}/{total} "
+				f"{occurrence_id}:{algorithm} completed"
+				if position is not None and total is not None
+				else f"Stage {occurrence_id} completed"
+			),
 			stage_occurrence_id=occurrence_id, stage_algorithm=algorithm,
+			stage_position=position, stage_total=total,
+			stage_elapsed_seconds=stage_elapsed,
 		)
 		self.progress = self.progress.model_copy(update={
 			"updated_at": _utcnow(),
 			"stage_occurrence_id": None,
 			"stage_algorithm": None,
+			"stage_position": None,
+			"stage_total": None,
+			"stage_elapsed_seconds": None,
 		})
-		self.progress_sink(self.progress)
+		self._persist_progress("stage.completed")
+
+	def heartbeat(self) -> None:
+		"""Publish exact current-boundary elapsed time without inventing a percentage."""
+
+		self.checkpoint()
+		if self.progress.stage_occurrence_id is not None:
+			started = self.stage_clocks_started.get(self.progress.stage_occurrence_id)
+			stage_elapsed = (
+				None if started is None else time.perf_counter() - started
+			)
+			self.update(
+				"stage.heartbeat",
+				f"Stage {self.progress.stage_occurrence_id} is running",
+				stage_elapsed_seconds=stage_elapsed,
+			)
+		elif self.progress.window_id is not None:
+			window_elapsed = (
+				None if self.window_clock_started is None
+				else time.perf_counter() - self.window_clock_started
+			)
+			self.update(
+				"window.heartbeat", f"window {self.progress.window_id} is running",
+				window_elapsed_seconds=window_elapsed,
+			)
 
 	def stage_failed(
 		self,
@@ -488,6 +627,9 @@ class ExecutionContext:
 		algorithm: str | None,
 		error: BaseException,
 		traceback_text: str,
+		*,
+		position: int | None = None,
+		total: int | None = None,
 	) -> None:
 		secrets = () if self.writer is None else self.writer.secrets
 		message = str(redact_secrets(
@@ -499,28 +641,58 @@ class ExecutionContext:
 			traceback=traceback_text, window_id=self.progress.window_id,
 			stage_occurrence_id=occurrence_id, stage_algorithm=algorithm,
 		)
+		started = self.stage_clocks_started.pop(occurrence_id, None)
+		position = self.progress.stage_position if position is None else position
+		total = self.progress.stage_total if total is None else total
 		self.progress = self.progress.model_copy(update={
 			"updated_at": _utcnow(),
 			"elapsed_seconds": time.perf_counter() - self.clock_started,
 			"stage_occurrence_id": occurrence_id,
 			"stage_algorithm": algorithm,
+			"stage_position": position,
+			"stage_total": total,
+			"stage_elapsed_seconds": (
+				None if started is None else time.perf_counter() - started
+			),
 			"failure": failure,
 		})
 		self._publish(
 			"stage.failed", f"Stage {occurrence_id} failed: {failure.message}",
-			severity="error", failure_type=failure.type, traceback=traceback_text,
+			severity="error", failure_type=failure.type,
+			failure_message=failure.message, traceback=traceback_text,
 		)
 
-	def cache_event(self, status: str, **counters: Any) -> None:
-		kind = f"cache.{status}"
-		changes = {
-			"updated_at": _utcnow(),
-			"elapsed_seconds": time.perf_counter() - self.clock_started,
-		}
-		if counters.get("cache_bytes") is not None:
-			changes["cache_bytes"] = counters["cache_bytes"]
-		self.progress = self.progress.model_copy(update=changes)
-		self._publish(kind, f"prefix cache {status}", details=counters)
+	def cache_event(
+		self,
+		event: str,
+		*,
+		cache_bytes: int | None = None,
+		details: Mapping[str, Any] | None = None,
+	) -> None:
+		"""Publish one explicitly projected cache event.
+
+		``event`` owns the lifecycle event kind. Cache implementation status and
+		measurements belong in ``details`` and cannot collide with this call surface.
+		"""
+
+		try:
+			changes = {
+				"updated_at": _utcnow(),
+				"elapsed_seconds": time.perf_counter() - self.clock_started,
+			}
+			if cache_bytes is not None:
+				changes["cache_bytes"] = cache_bytes
+			self.progress = self.progress.model_copy(update=changes)
+			self._publish(
+				f"cache.{event}", f"prefix cache {event}",
+				details={} if details is None else dict(details),
+			)
+		except ProgressInfrastructureError:
+			raise
+		except Exception as error:
+			raise ProgressInfrastructureError(
+				f"failed to project prefix cache event {event!r}: {error}"
+			) from error
 
 
 _CURRENT_EXECUTION: ContextVar[ExecutionContext | None] = ContextVar(

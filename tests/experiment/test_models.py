@@ -108,6 +108,7 @@ def test_sampled_structural_variants_are_atomically_materialized(sampler_name):
 		assert item.recon.variants == []
 		assert all(stage.sweep is None for stage in item.recon.pipeline)
 		variant = item.parameters["pipeline.variant"]
+		assert item.sampler.explicit_case == variant
 		assert tuple(stage.id for stage in item.recon.pipeline) == expected_stages[variant]
 	assert structural.model_dump(mode="json") == original
 

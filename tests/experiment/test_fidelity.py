@@ -1,5 +1,6 @@
-from types import SimpleNamespace
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -8,6 +9,8 @@ import pytest
 from lftomo.config import Recon
 from lftomo.evaluation import ImageROI, PreviewContract
 from lftomo.experiment import (
+	AttemptProgress,
+	CancellationToken,
 	CodeIdentity,
 	ConfigurationIdentity,
 	DatasetIdentity,
@@ -15,14 +18,17 @@ from lftomo.experiment import (
 	ExperimentConfig,
 	FidelityExperimentRunner,
 	PathResourceError,
+	ProgressEventWriter,
 	PromotionCandidate,
 	PromotionDecisionStore,
 	ResumePolicy,
 	aggregate_window_metrics,
 	export_blinded_previews,
+	read_progress_events,
 	successive_halving,
 )
 from lftomo.experiment.cli import PipelineTrialExecutor
+from lftomo.experiment.events import ExecutionContext, bind_execution_context
 from lftomo.experiment.runner import (
 	ExperimentInputs,
 	ExperimentRunPolicy,
@@ -227,6 +233,7 @@ def test_blinded_previews_share_scale_crop_and_have_reversible_private_mapping(t
 def test_full_fidelity_workflow_promotes_only_winners_and_resumes_boundary(tmp_path):
 	config = experiment()
 	calls = []
+	writer = ProgressEventWriter(tmp_path, config.experiment_id)
 
 	def execute(identity, _root):
 		value = alpha(identity)
@@ -240,7 +247,9 @@ def test_full_fidelity_workflow_promotes_only_winners_and_resumes_boundary(tmp_p
 			},
 		)
 
-	first = FidelityExperimentRunner(config, inputs(), tmp_path, execute).run()
+	first = FidelityExperimentRunner(
+		config, inputs(), tmp_path, execute, event_writer=writer,
+	).run()
 	assert [len(level.attempts) for level in first.levels] == [4, 2]
 	assert len(calls) == 6
 	assert sorted(value for fidelity, value in calls if fidelity == "final") == [0.01, 0.02]
@@ -248,10 +257,27 @@ def test_full_fidelity_workflow_promotes_only_winners_and_resumes_boundary(tmp_p
 		attempt.result.promotion.from_fidelity == "screen"
 		for attempt in first.levels[1].attempts
 	)
+	events = read_progress_events(tmp_path / "progress.jsonl")
+	assert [event.total_candidates for event in events if event.kind == "fidelity.started"] == [
+		4, 2,
+	]
+	assert [
+		event.completed_candidates for event in events if event.kind == "fidelity.completed"
+	] == [4, 2]
 
-	resumed = FidelityExperimentRunner(config, inputs(), tmp_path, execute).run()
+	prior_sequence = events[-1].sequence
+	resumed = FidelityExperimentRunner(
+		config, inputs(), tmp_path, execute, event_writer=writer,
+	).run()
 	assert len(calls) == 6
 	assert resumed.promotions[0].decision_id == first.promotions[0].decision_id
+	resume_events = [
+		event for event in read_progress_events(tmp_path / "progress.jsonl")
+		if event.sequence > prior_sequence and event.kind == "fidelity.completed"
+	]
+	assert [(event.total_candidates, event.reused_candidates) for event in resume_events] == [
+		(4, 4), (2, 2),
+	]
 
 
 def test_level_specific_memory_and_output_guards_apply_during_preflight(tmp_path):
@@ -327,6 +353,45 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 	)
 	final = executor._window_recon(SimpleNamespace(**base), window, Path("final-window"))
 	assert any(stage.kind == "write" for stage in final.pipeline)
+
+
+def test_pipeline_stage_observer_reports_resolved_variant_positions(tmp_path):
+	executor = PipelineTrialExecutor(experiment(values=(0.01,)), "scan.yaml")
+	configs = (
+		SimpleNamespace(id="stripe", kind="stripe", algorithm="vo_sort"),
+		SimpleNamespace(id="reconstruct", kind="recon", algorithm="gridrec"),
+	)
+	stages = (
+		SimpleNamespace(name="stripe.vo_sort"),
+		SimpleNamespace(name="recon.gridrec"),
+	)
+	writer = ProgressEventWriter(tmp_path, "experiment", durable=True)
+	context = ExecutionContext(
+		writer=writer,
+		progress_sink=lambda _progress: None,
+		cancellation=CancellationToken(),
+		progress=AttemptProgress(
+			experiment_id="experiment", fidelity_id="screen",
+			candidate_key="candidate", trial_id="trial", attempt_id="attempt",
+			state="started", updated_at=datetime.now(timezone.utc),
+		),
+	)
+	with bind_execution_context(context):
+		bind, observe = executor._stage_observer(configs)
+		bind(stages)
+		# Bounded segments announce all starts before their completion callbacks.
+		observe("started", 0, stages[0], None)
+		observe("started", 1, stages[1], None)
+		observe("completed", 0, stages[0], None)
+		observe("completed", 1, stages[1], None)
+	events = read_progress_events(tmp_path / "progress.jsonl")
+	assert [
+		(event.stage_occurrence_id, event.stage_position, event.stage_total)
+		for event in events
+	] == [
+		("stripe", 1, 2), ("reconstruct", 2, 2),
+		("stripe", 1, 2), ("reconstruct", 2, 2),
+	]
 
 
 def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp_path):

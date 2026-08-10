@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import os
@@ -51,6 +52,9 @@ from .runner import (
 STORE_SCHEMA_VERSION = 1
 MismatchPolicy = Literal["rerun", "skip", "fail"]
 ResumeAction = Literal["execute", "reuse", "skip", "incompatible"]
+CoordinatorOutcome = Literal[
+	"succeeded", "failed", "interrupted", "skipped", "reused",
+]
 
 
 def _utcnow() -> datetime:
@@ -74,6 +78,12 @@ class ResumePolicy(ConfigModel):
 	force: bool = False
 	recover_stale: bool = False
 	stale_after_seconds: float = Field(default=3600.0, gt=0)
+
+
+@dataclass(frozen=True)
+class _CoordinatedAttempt:
+	attempt: TrialAttemptRecord
+	outcome: CoordinatorOutcome
 
 
 class ClaimRecord(ConfigModel):
@@ -465,6 +475,7 @@ class PersistedExperimentStore:
 			identity=trial.identity,
 			output_root=trial.output_root,
 			attempt_id=f"attempt-{trial.identity.trial_id.value[:12]}-{sequence:04d}",
+			sampler_total=trial.sampler_total,
 			sequence=sequence,
 			previous_attempt_id=None if prior is None else prior.attempt_id,
 		)
@@ -645,7 +656,7 @@ class PersistedExperimentRunner:
 		self.runner.progress_sink = self.store.write_progress
 		self.before_execute = before_execute
 
-	def _one(self, trial: PreparedTrial) -> TrialAttemptRecord:
+	def _one(self, trial: PreparedTrial) -> _CoordinatedAttempt:
 		if self.cancellation.requested:
 			attempt = self.store.record_cancellation_before_claim(
 				trial, self.cancellation.reason or "cancellation requested",
@@ -656,9 +667,14 @@ class PersistedExperimentRunner:
 					severity="warning", fidelity_id=trial.identity.fidelity.id,
 					candidate_key=trial.identity.candidate.value,
 					trial_id=trial.identity.trial_id.value,
-					attempt_id=attempt.attempt_id, lifecycle_state="interrupted",
+					attempt_id=attempt.attempt_id,
+					structural_variant=trial.identity.sampler.explicit_case,
+					sampler_index=trial.selected.index,
+					sampler_position=trial.selected.index + 1,
+					sampler_total=trial.sampler_total,
+					lifecycle_state="interrupted",
 				)
-			return attempt
+			return _CoordinatedAttempt(attempt, "interrupted")
 		if self.event_writer is not None:
 			self.event_writer.emit(
 				"trial.claim", "claiming trial",
@@ -667,6 +683,8 @@ class PersistedExperimentRunner:
 				trial_id=trial.identity.trial_id.value,
 				structural_variant=trial.identity.sampler.explicit_case,
 				sampler_index=trial.selected.index,
+				sampler_position=trial.selected.index + 1,
+				sampler_total=trial.sampler_total,
 				lifecycle_state="planned",
 			)
 		with self.store.claim(trial.identity, self.policy):
@@ -680,9 +698,13 @@ class PersistedExperimentRunner:
 						candidate_key=trial.identity.candidate.value,
 						trial_id=trial.identity.trial_id.value,
 						attempt_id=decision.prior_attempt.attempt_id,
+						structural_variant=trial.identity.sampler.explicit_case,
+						sampler_index=trial.selected.index,
+						sampler_position=trial.selected.index + 1,
+						sampler_total=trial.sampler_total,
 						lifecycle_state="reused",
 					)
-				return decision.prior_attempt
+				return _CoordinatedAttempt(decision.prior_attempt, "reused")
 			if decision.action in ("skip", "incompatible"):
 				attempt = self.store.record_nonexecution(trial, decision)
 				if self.event_writer is not None:
@@ -693,10 +715,87 @@ class PersistedExperimentRunner:
 						candidate_key=trial.identity.candidate.value,
 						trial_id=trial.identity.trial_id.value,
 						attempt_id=attempt.attempt_id,
+						structural_variant=trial.identity.sampler.explicit_case,
+						sampler_index=trial.selected.index,
+						sampler_position=trial.selected.index + 1,
+						sampler_total=trial.sampler_total,
 						lifecycle_state="skipped",
 					)
-				return attempt
-			return self.runner._execute(self.store.allocate(trial))
+				return _CoordinatedAttempt(attempt, "skipped")
+			attempt = self.runner._execute(self.store.allocate(trial))
+			assert attempt.status in ("succeeded", "failed", "interrupted")
+			return _CoordinatedAttempt(attempt, attempt.status)
+
+	@staticmethod
+	def _aggregate_fields(
+		counts: Mapping[CoordinatorOutcome, int], *, total: int, active: int,
+	) -> dict[str, int]:
+		completed = sum(counts.values())
+		return {
+			"completed_candidates": completed,
+			"total_candidates": total,
+			"succeeded_candidates": counts["succeeded"],
+			"failed_candidates": counts["failed"],
+			"interrupted_candidates": counts["interrupted"],
+			"skipped_candidates": counts["skipped"],
+			"reused_candidates": counts["reused"],
+			"active_candidates": active,
+			"remaining_candidates": max(0, total - completed - active),
+		}
+
+	def _emit_aggregate(
+		self,
+		kind: str,
+		counts: Mapping[CoordinatorOutcome, int],
+		*,
+		total: int,
+		active: int,
+		trial: PreparedTrial | None = None,
+		outcome: _CoordinatedAttempt | None = None,
+	) -> None:
+		if self.event_writer is None:
+			return
+		fields = self._aggregate_fields(counts, total=total, active=active)
+		completed = fields["completed_candidates"]
+		message = (
+			f"fidelity {self.runner.fidelity_id}: {completed}/{total} complete | "
+			f"{fields['succeeded_candidates']} succeeded | "
+			f"{fields['failed_candidates']} failed | {active} active | "
+			f"{fields['remaining_candidates']} remaining"
+		)
+		context = {}
+		if trial is not None:
+			context = {
+				"candidate_key": trial.identity.candidate.value,
+				"trial_id": trial.identity.trial_id.value,
+				"attempt_id": None if outcome is None else outcome.attempt.attempt_id,
+				"structural_variant": trial.identity.sampler.explicit_case,
+				"sampler_index": trial.selected.index,
+				"sampler_position": trial.selected.index + 1,
+				"sampler_total": trial.sampler_total,
+				"lifecycle_state": None if outcome is None else outcome.outcome,
+			}
+		if outcome is not None and outcome.attempt.failure is not None:
+			context.update({
+				"failure_type": outcome.attempt.failure.type,
+				"failure_message": outcome.attempt.failure.message,
+			})
+		severity = "info"
+		if kind == "fidelity.started":
+			context["lifecycle_state"] = "started"
+		elif kind == "fidelity.completed":
+			if counts["interrupted"] or fields["remaining_candidates"]:
+				context["lifecycle_state"] = "interrupted"
+				severity = "warning"
+			elif counts["failed"]:
+				context["lifecycle_state"] = "failed"
+				severity = "warning"
+			else:
+				context["lifecycle_state"] = "succeeded"
+		self.event_writer.emit(
+			kind, message, severity=severity,
+			fidelity_id=self.runner.fidelity_id, **fields, **context,
+		)
 
 	def run(self) -> ExperimentRunSummary:
 		preflight, trials = self.runner.prepare()
@@ -728,9 +827,18 @@ class PersistedExperimentRunner:
 			)
 		attempts = []
 		unstarted = 0
+		total = len(trials)
+		counts: dict[CoordinatorOutcome, int] = {
+			"succeeded": 0,
+			"failed": 0,
+			"interrupted": 0,
+			"skipped": 0,
+			"reused": 0,
+		}
+		self._emit_aggregate("fidelity.started", counts, total=total, active=0)
 		with ThreadPoolExecutor(max_workers=preflight.max_concurrency) as pool:
 			remaining = iter(trials)
-			futures: dict[Future, PreparedTrial] = {}
+			futures: dict[Future[_CoordinatedAttempt], PreparedTrial] = {}
 			for _ in range(min(preflight.max_concurrency, len(trials))):
 				trial = next(remaining)
 				futures[pool.submit(self._one, trial)] = trial
@@ -738,21 +846,27 @@ class PersistedExperimentRunner:
 			while futures:
 				done, _ = wait(futures, return_when=FIRST_COMPLETED)
 				for future in done:
-					futures.pop(future)
-					attempt = future.result()
-					attempts.append(attempt)
-					if self.runner.policy.failure == "fail_fast" and attempt.status not in (
-						"succeeded", "skipped",
+					trial = futures.pop(future)
+					outcome = future.result()
+					attempts.append(outcome.attempt)
+					counts[outcome.outcome] += 1
+					if self.runner.policy.failure == "fail_fast" and outcome.outcome not in (
+						"succeeded", "skipped", "reused",
 					):
 						stop = True
-				if self.cancellation.requested:
-					stop = True
-				while not stop and len(futures) < preflight.max_concurrency:
-					try:
-						trial = next(remaining)
-					except StopIteration:
-						break
-					futures[pool.submit(self._one, trial)] = trial
+					if self.cancellation.requested:
+						stop = True
+					if not stop:
+						try:
+							next_trial = next(remaining)
+						except StopIteration:
+							pass
+						else:
+							futures[pool.submit(self._one, next_trial)] = next_trial
+					self._emit_aggregate(
+						"fidelity.progress", counts, total=total, active=len(futures),
+						trial=trial, outcome=outcome,
+					)
 			if stop:
 				unstarted = sum(1 for _ in remaining)
 		attempts.sort(key=lambda item: item.trial_id.value)
@@ -789,4 +903,7 @@ class PersistedExperimentRunner:
 			interruption=interruption,
 		)
 		self.runner._write_outputs(summary)
+		self._emit_aggregate(
+			"fidelity.completed", counts, total=total, active=0,
+		)
 		return summary

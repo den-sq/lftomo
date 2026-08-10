@@ -185,6 +185,28 @@ class PrefixCacheEvent(ConfigModel):
 	verified: bool = False
 	reason: str | None = None
 
+	def progress_projection(self) -> tuple[str, int | None, dict[str, Any]]:
+		"""Return the lifecycle kind, top-level byte counter, and typed details."""
+
+		kind = "rebuild" if self.status == "rebuilt" else self.status
+		return kind, self.cache_bytes_after, {
+			"cache_status": self.status,
+			"prefix_id": self.prefix_id,
+			"cache_key": self.cache_key,
+			"stage_count": self.stage_count,
+			"snapshot_bytes": self.snapshot_bytes,
+			"fork_strategy": self.fork_strategy,
+			"invalidation_fields": self.invalidation_fields,
+			"evicted_keys": self.evicted_keys,
+			"recovered_partials": self.recovered_partials,
+			"build_seconds": self.build_seconds,
+			"load_seconds": self.load_seconds,
+			"read_bytes": self.read_bytes,
+			"written_bytes": self.written_bytes,
+			"verified": self.verified,
+			"reason": self.reason,
+		}
+
 
 @dataclass(frozen=True)
 class PrefixPlanningCandidate:

@@ -78,6 +78,35 @@ in `TrialExecution`. Otherwise the runner records the process-wide `RUSAGE_SELF`
 high-water mark. Concurrent thread-based trials therefore share the fallback value; use
 an executor-supplied measurement when isolated per-trial memory accounting matters.
 
+## Progress events
+
+`progress.jsonl` is an append-only, derived live tail. Atomic attempt projections in the
+result store remain authoritative for status and recovery. Schema-one readers must
+accept events that predate optional display fields; new schema-one writers populate the
+fields whenever the corresponding context is known.
+
+Each scheduled fidelity emits `fidelity.started`, one `fidelity.progress` event after
+every terminal execution/reuse/skip outcome, and `fidelity.completed`. The coordinator
+that owns worker submission also owns these counts, so concurrent producers cannot race
+them. `completed_candidates` is the sum of succeeded, failed, interrupted, skipped, and
+reused outcomes. `remaining_candidates` excludes active work:
+
+```text
+completed_candidates + active_candidates + remaining_candidates = total_candidates
+```
+
+The fidelity total is the set actually scheduled at that level. After promotion it is
+the promoted set, not the original sampler population.
+
+Candidate events retain stable hashes while also carrying a one-based sampler position,
+the sampler total, and selected structural variant. Window and Stage events carry
+one-based positions and totals from the resolved fidelity and resolved candidate
+pipeline, respectively. Boundary events report measured trial/window/Stage elapsed
+time. Executors may emit `stage.heartbeat` or `window.heartbeat` through their active
+execution context when a long-running implementation has no finer internal units; a
+percentage is never inferred. Failure events include a redacted one-line message,
+failure type, and durable traceback context.
+
 ## Resume and rerun
 
 `run` initializes a versioned filesystem store. The store retains an immutable identity
