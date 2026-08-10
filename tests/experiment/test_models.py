@@ -24,6 +24,7 @@ from lftomo.experiment import (
 	WindowIdentity,
 	canonical_json,
 	compare_trial_identities,
+	select_candidates,
 )
 
 
@@ -69,6 +70,46 @@ def experiment_document(candidate=None, *, sampler=None):
 		"aggregation": {"name": "mean", "metric_ids": ["nrmse"]},
 		"output": {"screening": "metrics_only"},
 	}
+
+
+@pytest.mark.parametrize("sampler_name", ["sobol", "random"])
+def test_sampled_structural_variants_are_atomically_materialized(sampler_name):
+	structural = Recon.model_validate({
+		"pipeline": [
+			{"id": "read", "kind": "read", "algorithm": "hdf5_dxchange"},
+			{"id": "stripe-a", "kind": "stripe", "algorithm": "fw"},
+			{"id": "stripe-b", "kind": "stripe", "algorithm": "vo_sort"},
+			{"id": "write", "kind": "write", "algorithm": "tiff_slices"},
+		],
+		"variants": [
+			{"name": "fourier", "stages": ["read", "stripe-a", "write"]},
+			{"name": "sorting", "stages": ["read", "stripe-b", "write"]},
+		],
+	})
+	original = structural.model_dump(mode="json")
+	config = ExperimentConfig.model_validate(experiment_document(
+		structural,
+		sampler={"name": sampler_name, "seed": 41, "budget": 8},
+	))
+
+	first = select_candidates(config)
+	second = select_candidates(config)
+
+	expected_stages = {
+		"fourier": ("read", "stripe-a", "write"),
+		"sorting": ("read", "stripe-b", "write"),
+	}
+	assert {item.parameters["pipeline.variant"] for item in first} == set(expected_stages)
+	assert [item.candidate_key for item in first] == [item.candidate_key for item in second]
+	assert [item.sampler.coordinate for item in first] == [
+		item.sampler.coordinate for item in second
+	]
+	for item in first:
+		assert item.recon.variants == []
+		assert all(stage.sweep is None for stage in item.recon.pipeline)
+		variant = item.parameters["pipeline.variant"]
+		assert tuple(stage.id for stage in item.recon.pipeline) == expected_stages[variant]
+	assert structural.model_dump(mode="json") == original
 
 
 def trial_identity(*, recon=None):

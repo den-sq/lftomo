@@ -155,9 +155,16 @@ def _resolve_unit_candidate(recon: Recon, units: np.ndarray) -> tuple[Recon, dic
 		resolved, values = _sample_stage(stage, stage_units, index)
 		resolved_stages.append(resolved)
 		parameters.update(values)
-	resolved = recon.model_copy(deep=True)
-	resolved.pipeline = resolved_stages
-	resolved.variants = []
+	# Validate the final materialized candidate as one coherent model.  Assigning
+	# the selected subset to a copy first would make its still-attached structural
+	# variants temporarily reference omitted Stage IDs, and validate_assignment
+	# correctly rejects that intermediate state.
+	document = recon.model_dump(mode="python")
+	document.update({
+		"pipeline": [stage.model_dump(mode="python") for stage in resolved_stages],
+		"variants": [],
+	})
+	resolved = Recon.model_validate(document)
 	if variant is not None:
 		parameters = {"pipeline.variant": variant, **parameters}
 	return resolved, parameters
