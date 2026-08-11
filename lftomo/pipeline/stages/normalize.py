@@ -20,7 +20,6 @@ from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	Locality,
 	PipelineState,
-	ResourceHints,
 	Stage,
 	StageContract,
 	allocate_output,
@@ -97,7 +96,6 @@ class WeightedNormalizeStage(Stage):
 		cacheable_prefix=True,
 		window_axes=("Y",),
 		required_metadata=("metadata.flat_fields",),
-		resources=ResourceHints(memory_multiplier=1.0),
 		produces_artifacts=("flat_fields",),
 	)
 
@@ -198,7 +196,6 @@ class BeamTrackingNormalizeStage(Stage):
 		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
 		produces_artifacts=("beam_tracking_qc",),
-		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
 	def __init__(
@@ -294,7 +291,7 @@ class BeamKeyframesNormalizeStage(Stage):
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
 		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
-		produces_artifacts=("beam_keyframe_qc",), resources=ResourceHints(memory_multiplier=2.0),
+		produces_artifacts=("beam_keyframe_qc",),
 	)
 
 	def __init__(self, *, component: str = "beam_keyframes", dark_component: str | None = None,
@@ -375,7 +372,6 @@ class BeamBasisFitNormalizeStage(Stage):
 		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
 		consumes_artifacts=("calibration_bundle",), produces_artifacts=("beam_basis_qc",),
-		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
 	def __init__(
@@ -549,7 +545,6 @@ class ThetaSwitchNormalizeStage(Stage):
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("metadata.flat_fields",),
-		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
 	def __init__(self, gain_averaging: bool = False, pre_subtracted: bool = False,
@@ -573,7 +568,6 @@ class ThetaSwitchNormalizeStage(Stage):
 			window_axes=("Y", "Theta"),
 			required_metadata=("metadata.flat_fields",),
 			produces_artifacts=("flat_fields",),
-			resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.order = order
 		self.floor_nonpositive = floor_nonpositive

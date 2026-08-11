@@ -10,14 +10,14 @@ import numpy as np
 import tifffile as tf
 
 from lftomo.config import HDF5DxchangeProjections, StageConfig, TIFFStackProjections
-from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
 from lftomo.util.shapes import ProjOrder, SinoOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
-def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_multiplier: float,
+def _output_contract(order: str, *, required_metadata: tuple[str, ...],
 		produces_artifacts: tuple[str, ...] = ()) -> StageContract:
 	if order not in ("projection", "sinogram"):
 		raise ValueError("read order must be 'projection' or 'sinogram'")
@@ -28,7 +28,6 @@ def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_m
 		window_axes=("Theta", "Y"),
 		required_metadata=required_metadata,
 		produces_artifacts=produces_artifacts,
-		resources=ResourceHints(memory_multiplier=memory_multiplier),
 	)
 
 
@@ -117,7 +116,6 @@ class HDF5DxchangeReadStage(Stage):
 		self.contract = _output_contract(
 			order,
 			required_metadata=("projections.path", "projections.data_path"),
-			memory_multiplier=1.0,
 			produces_artifacts=(
 				("white_fields", "dark_fields") if calibration_policy == "required" else ()
 			),
@@ -266,7 +264,6 @@ class TIFFStackReadStage(Stage):
 		self.contract = _output_contract(
 			order,
 			required_metadata=("projections.path", "projections.pattern"),
-			memory_multiplier=2.0,
 		)
 
 	@classmethod

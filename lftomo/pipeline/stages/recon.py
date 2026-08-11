@@ -93,7 +93,7 @@ class GridrecStage(Stage):
 			locality=Locality.SINOGRAM,
 			window_axes=("Y",),
 			consumes_artifacts=() if center is not None else ("center",),
-			resources=ResourceHints(memory_multiplier=2.0, preferred_cpus=self.ncore),
+			resources=ResourceHints(preferred_cpus=self.ncore),
 			runtime_requirements=type(self).contract.runtime_requirements,
 		)
 
@@ -298,7 +298,7 @@ class AstraCudaStage(GridrecStage):
 			locality=Locality.SINOGRAM,
 			window_axes=("Y",),
 			consumes_artifacts=self.contract.consumes_artifacts,
-			resources=ResourceHints(memory_multiplier=3.0, preferred_cpus=1, requires_gpu=True),
+			resources=ResourceHints(preferred_cpus=1, requires_gpu=True),
 			runtime_requirements=self.contract.runtime_requirements,
 		)
 

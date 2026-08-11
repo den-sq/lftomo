@@ -164,7 +164,7 @@ def test_phase_filter_is_a_manager_issued_producer_artifact():
 		assert isinstance(result.artifacts["phase_filter"], ManagedBuffer)
 
 
-def test_planner_emits_liveness_alias_and_three_memory_components():
+def test_planner_emits_liveness_alias_and_managed_artifact_allocations():
 	scan = _scan()
 	stages = [
 		TIFFStackReadStage(order="projection"),
@@ -183,16 +183,22 @@ def test_planner_emits_liveness_alias_and_three_memory_components():
 	assert recon_alias.proof == "internal_liveness"
 	assert any(event.role == "flat_fields" for event in plan.allocation_schedule)
 	assert any(event.role == "phase_filter" for event in plan.allocation_schedule)
-	assert plan.peak_memory.shared_memory_bytes > 0
-	assert plan.peak_memory.per_worker_private_scratch_bytes > 0
-	assert plan.peak_memory.external_engine_temporary_bytes > 0
+	allocated = sum(
+		event.bytes for event in plan.allocation_schedule
+		if event.action is BufferAction.ALLOCATE
+	)
+	assert allocated > 0
 
 	unaliased = validate_pipeline(stages, scan, mode="complete", enable_aliasing=False)
 	unaliased_recon = next(
 		event for event in unaliased.allocation_schedule if event.role == "reconstruction"
 	)
 	assert unaliased_recon.action is BufferAction.ALLOCATE
-	assert unaliased.peak_memory.shared_memory_bytes > plan.peak_memory.shared_memory_bytes
+	unaliased_allocated = sum(
+		event.bytes for event in unaliased.allocation_schedule
+		if event.action is BufferAction.ALLOCATE
+	)
+	assert unaliased_allocated > allocated
 
 	pinned = validate_pipeline(
 		stages, scan, mode="complete", external_pins=("raw_staging",),
@@ -257,10 +263,10 @@ def test_engine_alias_is_refused_when_normalized_capacity_is_too_small():
 	assert normalized.bytes < reconstruction.bytes
 	assert reconstruction.action is BufferAction.ALLOCATE
 	assert reconstruction.physical_role == "reconstruction"
-	assert plan.peak_memory.shared_memory_bytes == sum(
+	assert sum(
 		event.bytes for event in plan.allocation_schedule
 		if event.action is BufferAction.ALLOCATE
-	)
+	) > reconstruction.bytes
 
 
 def _actual_gridrec(*, engine_aliasing: bool):

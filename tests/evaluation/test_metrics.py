@@ -216,7 +216,7 @@ def test_evaluation_stage_preserves_array_contract_and_emits_json_artifact(monke
 	np.testing.assert_array_equal(result.artifacts["preview_images"]["top-0"], working[0])
 	assert artifact.metadata["bounded_axis"] == "Y"
 	assert artifact.metadata["maximum_kernel_input_shape"] == [24, 24]
-	assert stage.contract.resources.memory_multiplier == 4
+	assert stage.contract.resources.preferred_cpus == 1
 	assert kernel_shapes and set(kernel_shapes) == {(24, 24)}
 	json.dumps(result.artifacts["metrics"], allow_nan=False)
 

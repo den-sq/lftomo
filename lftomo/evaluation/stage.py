@@ -43,7 +43,7 @@ class EvaluationStage(Stage):
 		mutates_input=False,
 		window_axes=("Y",),
 		produces_artifacts=("metrics",),
-		resources=ResourceHints(memory_multiplier=4.0, preferred_cpus=1),
+		resources=ResourceHints(preferred_cpus=1),
 	)
 
 	def __init__(

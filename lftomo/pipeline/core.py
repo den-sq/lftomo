@@ -21,7 +21,6 @@ if TYPE_CHECKING:
 class ResourceHints:
 	"""Cooperative resource hints declared by a Stage."""
 
-	memory_multiplier: float = 1.0
 	preferred_cpus: int | None = None
 	requires_gpu: bool = False
 

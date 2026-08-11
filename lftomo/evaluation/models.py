@@ -148,7 +148,6 @@ class MetricDefinition(ConfigModel):
 	undefined: Literal["record_invalid", "fail_stage"]
 	protocol_version: str
 	resource_scope: Literal["scalar", "slice", "volume"] = "slice"
-	memory_multiplier: float = Field(default=1.0, ge=1)
 
 
 class MetricObservation(ConfigModel):

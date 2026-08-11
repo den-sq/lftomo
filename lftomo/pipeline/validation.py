@@ -352,7 +352,7 @@ def validate_pipeline(
 		index = stop
 
 	resolved_steps = tuple(steps)
-	schedule, peak_memory = build_allocation_schedule(
+	schedule = build_allocation_schedule(
 		resolved_steps, stages, scan,
 		enable_aliasing=enable_aliasing,
 		enable_engine_aliasing=enable_engine_aliasing,
@@ -360,5 +360,5 @@ def validate_pipeline(
 	)
 	return PipelinePlan(
 		steps=resolved_steps, segments=tuple(segments), warnings=tuple(warnings),
-		allocation_schedule=schedule, peak_memory=peak_memory,
+		allocation_schedule=schedule,
 	)

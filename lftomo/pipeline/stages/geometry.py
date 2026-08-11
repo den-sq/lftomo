@@ -8,7 +8,7 @@ from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality, PipelineState, ResourceHints, Stage, StageContract,
+	Locality, PipelineState, Stage, StageContract,
 	allocate_output, commit_output, working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -38,7 +38,6 @@ def _contract(order: str | None = None, *, resamples_detector: bool = False,
 		resamples_detector=resamples_detector,
 		mutates_input=mutates_input,
 		window_axes=("Y", "Theta"),
-		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
 
@@ -230,7 +229,6 @@ class AffineSkewMovementStage(Stage):
 				produces_domain=PRESERVE, locality=Locality.VOLUME,
 				fused_transition=True, resamples_detector=active_resample,
 				mutates_input=False,
-				resources=ResourceHints(memory_multiplier=2.0),
 			)
 
 	@classmethod

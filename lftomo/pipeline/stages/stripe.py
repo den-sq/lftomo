@@ -8,7 +8,6 @@ from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	Locality,
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
@@ -32,10 +31,7 @@ from lftomo.prep.stripe import (
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
-def _contract(
-	memory_multiplier: float,
-	runtime_requirements: tuple[RuntimeRequirement, ...] = (),
-) -> StageContract:
+def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
@@ -46,7 +42,6 @@ def _contract(
 		mutates_input=True,
 		cacheable_prefix=True,
 		window_axes=("Y",),
-		resources=ResourceHints(memory_multiplier=memory_multiplier),
 		runtime_requirements=runtime_requirements,
 	)
 
@@ -72,7 +67,7 @@ def _run_sinogram_stage(
 
 class VoSortStripeStage(Stage):
 	name = "stripe.vo_sort"
-	contract = _contract(3.0)
+	contract = _contract()
 
 	def __init__(self, size: int = 21, dim: int = 1, ncore: int | None = None):
 		self.size = size
@@ -92,7 +87,7 @@ class VoSortStripeStage(Stage):
 
 class VoDeadStripeStage(Stage):
 	name = "stripe.vo_dead"
-	contract = _contract(2.0)
+	contract = _contract()
 
 	def __init__(self, snr: int = 3, size: int = 51, norm: bool = True):
 		self.snr = snr
@@ -114,7 +109,7 @@ class VoDeadStripeStage(Stage):
 
 class VoLargeStripeStage(Stage):
 	name = "stripe.vo_large"
-	contract = _contract(3.0)
+	contract = _contract()
 
 	def __init__(self, snr: int = 3, size: int = 51,
 				drop_ratio: float = 0.1, norm: bool = True):
@@ -141,7 +136,7 @@ class VoFamilyStripeStage(Stage):
 	"""Execute an explicitly ordered sequence of Vo stripe-removal methods."""
 
 	name = "stripe.vo_family"
-	contract = _contract(3.0)
+	contract = _contract()
 
 	def __init__(self, order: list[str] | tuple[str, ...] = (
 				"remove_dead_vo", "remove_large_vo", "remove_sort_vo"),
@@ -180,7 +175,7 @@ class VoFamilyStripeStage(Stage):
 
 class FourierWaveletStripeStage(Stage):
 	name = "stripe.fw"
-	contract = _contract(2.0)
+	contract = _contract()
 
 	def __init__(self, level: int | None = None, wname: str = "db5",
 				sigma: float = 2.0, zero_pad: bool = False,
@@ -199,7 +194,7 @@ class FourierWaveletStripeStage(Stage):
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
 			bounded_views_from=(ProjOrder,),
-			window_axes=("Y",), resources=ResourceHints(memory_multiplier=2.0),
+			window_axes=("Y",),
 		)
 		self.level = level
 		self.wname = wavelet or wname
@@ -228,7 +223,6 @@ class AllOfTheStripeStage(Stage):
 
 	name = "stripe.all_of_the_stripe"
 	contract = _contract(
-		3.0,
 		runtime_requirements=(tomopy_requirement("remove_all_stripe"),),
 	)
 
@@ -252,7 +246,6 @@ class AllOfTheStripeStage(Stage):
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
 			mutates_input=True, cacheable_prefix=True, window_axes=("Y",),
-			resources=ResourceHints(memory_multiplier=3.0),
 			runtime_requirements=type(self).contract.runtime_requirements,
 		)
 

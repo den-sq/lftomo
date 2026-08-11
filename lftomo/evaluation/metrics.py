@@ -197,20 +197,20 @@ REFERENCE_DEFINITIONS = (
 		name="reference.nrmse", direction="minimize", units="ratio",
 		normalization="reference dynamic range", required_inputs=("reference",),
 		default_aggregation="mean", undefined="record_invalid",
-		protocol_version=PROTOCOL_VERSION, resource_scope="slice", memory_multiplier=2,
+		protocol_version=PROTOCOL_VERSION, resource_scope="slice",
 	),
 	MetricDefinition(
 		name="reference.correlation", direction="maximize", units="unitless",
 		normalization="Pearson product-moment", required_inputs=("reference",),
 		default_aggregation="mean", undefined="record_invalid",
-		protocol_version=PROTOCOL_VERSION, resource_scope="slice", memory_multiplier=2,
+		protocol_version=PROTOCOL_VERSION, resource_scope="slice",
 	),
 	MetricDefinition(
 		name="reference.normalized_bias", direction="minimize", units="ratio",
 		normalization="absolute mean bias / reference dynamic range",
 		required_inputs=("reference",), default_aggregation="mean",
 		undefined="record_invalid", protocol_version=PROTOCOL_VERSION,
-		resource_scope="slice", memory_multiplier=2,
+		resource_scope="slice",
 	),
 )
 
@@ -233,7 +233,7 @@ RING_DEFINITIONS = (
 		name="artifact.ring_score", direction="minimize", units="ratio",
 		normalization="radial-profile residual RMS / image dynamic range",
 		default_aggregation="mean", undefined="record_invalid",
-		protocol_version=PROTOCOL_VERSION, resource_scope="slice", memory_multiplier=1.25,
+		protocol_version=PROTOCOL_VERSION, resource_scope="slice",
 	),
 )
 

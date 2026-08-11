@@ -9,7 +9,6 @@ from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	Locality,
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
@@ -159,7 +158,6 @@ class PaganinFilterStage(Stage):
 			cacheable_prefix=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm") if enabled else (),
-			resources=ResourceHints(memory_multiplier=2.0),
 			accepts_domain=(DataDomain.TRANSMISSION,) if enabled else (
 				DataDomain.TRANSMISSION, DataDomain.ATTENUATION,
 			),
@@ -311,7 +309,6 @@ class PaganinStage(Stage):
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
 		produces_artifacts=("phase_filter",),
-		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
@@ -335,7 +332,6 @@ class PaganinStage(Stage):
 			cacheable_prefix=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm") if enabled else (),
-			resources=ResourceHints(memory_multiplier=2.0),
 			accepts_domain=(DataDomain.TRANSMISSION,) if enabled else (
 				DataDomain.TRANSMISSION, DataDomain.ATTENUATION,
 			),
@@ -389,7 +385,6 @@ class PaganinPhaseAbsorptionStage(Stage):
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
 		produces_artifacts=("phase_filter",),
-		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
@@ -410,7 +405,6 @@ class PaganinPhaseAbsorptionStage(Stage):
 			cacheable_prefix=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
-			resources=ResourceHints(memory_multiplier=2.0),
 			accepts_domain=(DataDomain.TRANSMISSION,),
 			produces_domain=DataDomain.ATTENUATION,
 			locality=Locality.PROJECTION,
@@ -477,7 +471,6 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
 			window_axes=("Y", "Theta"),
-			resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.alpha = alpha
 		self.gamma = gamma
@@ -541,7 +534,6 @@ class BronnikovAidedCorrectionStage(Stage):
 		mutates_input=True,
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
-		resources=ResourceHints(memory_multiplier=2.0),
 		runtime_requirements=(_BAC_RUNTIME_REQUIREMENT,),
 	)
 
@@ -570,7 +562,6 @@ class BronnikovAidedCorrectionStage(Stage):
 			produces_domain=DataDomain.ATTENUATION if enabled else PRESERVE,
 			locality=Locality.PROJECTION,
 			window_axes=("Y", "Theta"),
-			resources=ResourceHints(memory_multiplier=2.0),
 			runtime_requirements=type(self).contract.runtime_requirements,
 		)
 		self.alpha = alpha

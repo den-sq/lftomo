@@ -19,7 +19,6 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
@@ -47,7 +46,6 @@ def _contract(
 		produced_output=SinoOrder,
 		window_axes=("Y", "Theta"),
 		produces_artifacts=("super_resolution",),
-		resources=ResourceHints(memory_multiplier=5.0),
 		runtime_requirements=runtime_requirements,
 	)
 

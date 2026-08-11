@@ -6,7 +6,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality, PipelineState, ResourceHints, Stage, StageContract,
+	Locality, PipelineState, Stage, StageContract,
 	allocate_output, commit_output, working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -28,7 +28,6 @@ class HelicalIndexRemapStage(Stage):
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
 		window_axes=("Y", "Theta"),
-		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
 	def __init__(self, pitch_px_per_projection: float | None = None,
@@ -52,7 +51,6 @@ class HelicalIndexRemapStage(Stage):
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
 			requires_row_identity=enabled,
-			resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.pitch_px_per_projection = pitch_px_per_projection
 		self.enabled = enabled

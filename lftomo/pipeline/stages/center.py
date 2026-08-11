@@ -10,7 +10,6 @@ from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	Locality,
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
@@ -32,10 +31,7 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 LOGGER = logging.getLogger(__name__)
 
 
-def _contract(
-	memory_multiplier: float = 1.0,
-	runtime_requirements: tuple[RuntimeRequirement, ...] = (),
-) -> StageContract:
+def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
@@ -46,7 +42,6 @@ def _contract(
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("center",),
-		resources=ResourceHints(memory_multiplier=memory_multiplier),
 		runtime_requirements=runtime_requirements,
 	)
 
@@ -116,7 +111,7 @@ class ManualCenterStage(Stage):
 			accepts=(ProjOrder, SinoOrder),
 			accepts_domain=(DataDomain.ATTENUATION,),
 			produces_domain=PRESERVE,
-			produces_artifacts=("center",), resources=ResourceHints(),
+			produces_artifacts=("center",),
 		)
 		self.value_px = value_px
 		self.slope = np.tan(tilt_radians) if tilt_radians is not None else tilt
@@ -147,7 +142,6 @@ class EntropyLocalCenterStage(Stage):
 
 	name = "center.entropy_local"
 	contract = _contract(
-		memory_multiplier=2.0,
 		runtime_requirements=(tomopy_requirement("circ_mask", "recon"),),
 	)
 
@@ -234,7 +228,6 @@ class VoCenterStage(Stage):
 
 	name = "center.vo"
 	contract = _contract(
-		memory_multiplier=2.0,
 		runtime_requirements=(
 			tomopy_requirement("circ_mask", "find_center_vo", "recon"),
 		),

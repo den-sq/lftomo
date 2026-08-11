@@ -12,7 +12,6 @@ import h5py
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
@@ -57,7 +56,6 @@ class TIFFSlicesWriteStage(Stage):
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files",),
-		resources=ResourceHints(memory_multiplier=1.0),
 	)
 
 	def __init__(self, dtype: str = "float32",
@@ -132,7 +130,6 @@ class HDF5VolumeWriteStage(Stage):
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files",),
-		resources=ResourceHints(memory_multiplier=1.0),
 	)
 
 	def __init__(self, path: str | Path | None = None, dataset: str = "reconstruction",
@@ -195,7 +192,6 @@ class NeuroglancerWriteStage(Stage):
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files", "neuroglancer_source"),
-		resources=ResourceHints(memory_multiplier=2.0),
 		runtime_requirements=(_CLOUDVOLUME_RUNTIME_REQUIREMENT,),
 	)
 

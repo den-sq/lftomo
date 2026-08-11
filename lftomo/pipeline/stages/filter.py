@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
+from lftomo.pipeline.core import Locality, PipelineState, Stage, StageContract, working_view
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import configured_layout, n_projections, projection_view, resolve_layout
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -27,7 +27,6 @@ class BilateralFilterStage(Stage):
 		produced_output=SinoOrder,
 		mutates_input=True,
 		window_axes=("Y", "Theta"),
-		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
 	def __init__(self, diameter: int = 3, sigma_color: float = 1,
@@ -44,7 +43,7 @@ class BilateralFilterStage(Stage):
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.PROJECTION,
-			window_axes=("Y", "Theta"), resources=ResourceHints(memory_multiplier=2.0),
+			window_axes=("Y", "Theta"),
 		)
 		self.diameter = diameter
 		self.sigma_color = sigma_color

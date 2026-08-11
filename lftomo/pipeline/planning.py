@@ -88,15 +88,6 @@ class BufferScheduleEvent:
 
 
 @dataclass(frozen=True)
-class PeakMemoryEstimate:
-	"""Preflight memory components that deliberately avoid one opaque multiplier."""
-
-	shared_memory_bytes: int = 0
-	per_worker_private_scratch_bytes: int = 0
-	external_engine_temporary_bytes: int = 0
-
-
-@dataclass(frozen=True)
 class PipelinePlan:
 	"""Validated ordered Stage plan with concrete execution segments."""
 
@@ -104,7 +95,6 @@ class PipelinePlan:
 	segments: tuple[PlanSegment, ...] = ()
 	warnings: tuple[str, ...] = ()
 	allocation_schedule: tuple[BufferScheduleEvent, ...] = ()
-	peak_memory: PeakMemoryEstimate = PeakMemoryEstimate()
 
 	@property
 	def full_volume_materializations(self) -> tuple[Materialization, ...]:
@@ -253,16 +243,14 @@ def build_allocation_schedule(
 	steps: tuple[PlanStep, ...], stages: tuple[Stage, ...] | list[Stage], scan: Any, *,
 	enable_aliasing: bool = True, enable_engine_aliasing: bool = True,
 	external_pins: tuple[str, ...] = (),
-) -> tuple[tuple[BufferScheduleEvent, ...], PeakMemoryEstimate]:
-	"""Build a named physical-buffer schedule and its three peak components."""
+) -> tuple[BufferScheduleEvent, ...]:
+	"""Build the named physical-buffer schedule required for execution."""
 
 	events: list[BufferScheduleEvent] = []
 	physical: dict[str, int] = {}
 	live: dict[str, str] = {}
 	retired: dict[str, list[str]] = {}
 	current_role: str | None = None
-	private_scratch = 0
-	external_temp = 0
 
 	def publish(index: int, action: BufferAction, role: str, size: int,
 			physical_role: str, proof: str | None = None):
@@ -273,11 +261,6 @@ def build_allocation_schedule(
 		))
 
 	for step, stage in zip(steps, stages):
-		input_bytes = _nbytes(step.input_buffer)
-		multiplier = max(0.0, stage.contract.resources.memory_multiplier - 1.0)
-		private_scratch = max(private_scratch, int(input_bytes * multiplier))
-		if any(item.kind is MaterializationKind.TOMOPY_BOUNDARY for item in step.materializations):
-			external_temp = max(external_temp, input_bytes)
 		artifact_specs: list[tuple[str, int]] = []
 		if "flat_fields" in stage.contract.produces_artifacts and step.output_buffer is not None:
 			shape = _shape_tuple(step.output_buffer.shape)
@@ -336,8 +319,4 @@ def build_allocation_schedule(
 				physical[old_physical], old_physical)
 		current_role = role
 
-	return tuple(events), PeakMemoryEstimate(
-		shared_memory_bytes=sum(physical.values()),
-		per_worker_private_scratch_bytes=private_scratch,
-		external_engine_temporary_bytes=external_temp,
-	)
+	return tuple(events)
