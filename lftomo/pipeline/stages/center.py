@@ -133,7 +133,8 @@ class ManualCenterStage(Stage):
 		if self.slope == 0:
 			return _store_center(state, self.value_px)
 		y_size = n_rows(data, layout)
-		rows = np.arange(y_size, dtype=np.float32)
+		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
+		rows = source_y + np.arange(y_size, dtype=np.float32)
 		return _store_center(state, self.value_px + (rows - self.reference_y) * self.slope)
 
 

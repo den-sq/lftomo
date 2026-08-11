@@ -7,6 +7,7 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	Locality,
+	PadRequirement,
 	PipelineState,
 	RuntimeRequirement,
 	Stage,
@@ -35,7 +36,9 @@ def _managed_phase_filter(
 		state.artifacts["phase_filter_signature"] = signature
 		return values
 	previous = state.artifacts.get("phase_filter")
-	artifact = state.storage.allocate(values.shape, values.dtype, role="phase_filter")
+	artifact = state.storage.allocate(
+		values.shape, values.dtype, role="phase_filter", reuse_from=("phase_filter",),
+	)
 	artifact.array()[...] = values
 	state.artifacts["phase_filter"] = artifact
 	state.artifacts["phase_filter_signature"] = signature
@@ -197,6 +200,7 @@ class PaganinFilterStage(Stage):
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
 			produces_artifacts=("phase_filter",) if enabled else (),
+			required_pad=PadRequirement(phase_fft_y=enabled),
 		)
 
 	@classmethod
@@ -367,6 +371,7 @@ class PaganinStage(Stage):
 			produces_domain=DataDomain.ATTENUATION if enabled else PRESERVE,
 			locality=Locality.PROJECTION,
 			produces_artifacts=("phase_filter",) if enabled else (),
+			required_pad=PadRequirement(phase_fft_y=enabled),
 		)
 
 	@classmethod
@@ -434,6 +439,7 @@ class PaganinPhaseAbsorptionStage(Stage):
 			produces_domain=DataDomain.ATTENUATION,
 			locality=Locality.PROJECTION,
 			produces_artifacts=("phase_filter",),
+			required_pad=PadRequirement(phase_fft_y=True),
 		)
 
 	@classmethod

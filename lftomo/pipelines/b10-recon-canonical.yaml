@@ -8,10 +8,11 @@ metadata:
   producer: b10_recon
   lftomo_snapshot: ddfcdf628254f0dadd219b076fa01da527ca6123
   representative_dataset: phase_contrast_hdf5
+  producer_window_size: 12
 pipeline:
   - kind: read
     algorithm: hdf5_dxchange
-    params: {order: projection, calibration_policy: required, theta_count: 1969, window_size: 12}
+    params: {order: projection, calibration_policy: required, theta_count: 1969}
   - kind: normalize
     algorithm: weighted
     params: {pre_subtracted: true, timing_source: /measurement/instrument/time_stamp}

@@ -8,7 +8,7 @@ from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality, PipelineState, Stage, StageContract,
+	AxisPad, Locality, PadRequirement, PipelineState, Stage, StageContract,
 	allocate_output, commit_output, working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -23,7 +23,8 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 def _contract(order: str | None = None, *, resamples_detector: bool = False,
-		mutates_input: bool = True) -> StageContract:
+		mutates_input: bool = True,
+		required_pad: PadRequirement = PadRequirement()) -> StageContract:
 	compatibility = configured_layout(order)
 	shape = compatibility or SinoOrder
 	return StageContract(
@@ -38,6 +39,7 @@ def _contract(order: str | None = None, *, resamples_detector: bool = False,
 		resamples_detector=resamples_detector,
 		mutates_input=mutates_input,
 		window_axes=("Y", "Theta"),
+		required_pad=required_pad,
 	)
 
 
@@ -179,6 +181,10 @@ class MovementCorrectStage(Stage):
 		active = enabled and (y != 0 or x != 0)
 		self.contract = _contract(
 			array_order, resamples_detector=active, mutates_input=active,
+			required_pad=PadRequirement(fixed=AxisPad(
+				y=int(np.ceil(abs(y))) if active else 0,
+				x=int(np.ceil(abs(x))) if active else 0,
+			)),
 		)
 
 	@classmethod
@@ -260,6 +266,10 @@ class AffineSkewMovementStage(Stage):
 			self.contract = _contract(
 				resamples_detector=active_resample,
 				mutates_input=active_resample,
+				required_pad=PadRequirement(fixed=AxisPad(
+					y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
+					x=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
+				)),
 			)
 		else:
 			source = SinoOrder if target is ProjOrder else ProjOrder
@@ -270,6 +280,10 @@ class AffineSkewMovementStage(Stage):
 				produces_domain=PRESERVE, locality=Locality.VOLUME,
 				fused_transition=True, resamples_detector=active_resample,
 				mutates_input=False,
+				required_pad=PadRequirement(fixed=AxisPad(
+					y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
+					x=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
+				)),
 			)
 
 	@classmethod

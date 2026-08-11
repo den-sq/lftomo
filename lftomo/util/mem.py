@@ -85,6 +85,7 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		self._physical: dict[str, dict] = {}
 		self._retired: dict[str, list[str]] = {}
 		self._events: list[dict] = []
+		self._minimum_capacities: dict[str, int] = {}
 
 		self.__mem_queue = []
 		for mem in queue_mem or ():
@@ -128,7 +129,20 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 				name = alias_from.name
 				alias_kind = proof
 		if name is None:
-			result = self.SharedNPArray(shape, dtype, *tuple(aliases))
+			reserved = max(required, self._minimum_capacities.get(role, 0))
+			if reserved > required:
+				full_set = [(shape, dtype)] + list(aliases)
+				memory = self.SharedMemory(reserved)
+				self._physical[memory.name] = {
+					"capacity": int(reserved), "active_roles": set(), "pins": set(),
+				}
+				buffers = [
+					SharedNPArray(memory.name, item_shape, item_dtype)
+					for item_shape, item_dtype in full_set
+				]
+				result = buffers[0] if len(buffers) == 1 else buffers
+			else:
+				result = self.SharedNPArray(shape, dtype, *tuple(aliases))
 			buffers = result if isinstance(result, list) else [result]
 			for index, buffer in enumerate(buffers):
 				buffer._role = role if index == 0 else None
@@ -136,7 +150,7 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 				self._physical[buffers[0].name]["active_roles"].add(role)
 			self._events.append({
 				"action": "allocate", "role": role, "name": buffers[0].name,
-				"bytes": required, "alias": None,
+				"bytes": self._physical[buffers[0].name]["capacity"], "alias": None,
 			})
 			return result
 
@@ -151,6 +165,15 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 			"bytes": required, "alias": alias_kind,
 		})
 		return buffer
+
+	def reserve(self, role: str, capacity: int) -> None:
+		"""Set the minimum capacity for the next physical allocation of a role."""
+
+		if capacity < 0:
+			raise ValueError("reserved storage capacity cannot be negative")
+		self._minimum_capacities[role] = max(
+			self._minimum_capacities.get(role, 0), int(capacity),
+		)
 
 	def fork(self, source, *, label: str):
 		"""Return a manager-owned copy of an existing buffer."""

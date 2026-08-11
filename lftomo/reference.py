@@ -233,6 +233,9 @@ def _phase_contrast_configs(recon, window: tuple[int, int]):
 	window_start, window_stop = window
 	for stage in result.pipeline:
 		if stage.kind == "read":
+			# Frozen producer metadata carried its machine window in Stage params;
+			# current execution receives the selected global rows from this helper.
+			stage.params.pop("window_size", None)
 			stage.params.update({
 				"y_start": window_start, "y_stop": window_stop,
 			})

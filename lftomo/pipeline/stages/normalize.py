@@ -48,6 +48,7 @@ def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 		return state.working_array, source
 	output, data = allocate_output(
 		state, source.shape, np.float32, role="normalized",
+		reuse_from=("normalized", "reconstruction"),
 	)
 	data[...] = source
 	return output, data
@@ -69,7 +70,9 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 	if state.storage is None:
 		state.artifacts["flat_fields"] = fields
 		return fields
-	artifact = state.storage.allocate(fields.shape, fields.dtype, role="flat_fields")
+	artifact = state.storage.allocate(
+		fields.shape, fields.dtype, role="flat_fields", reuse_from=("flat_fields",),
+	)
 	artifact.array()[...] = fields
 	state.artifacts["flat_fields"] = artifact
 	return artifact.array()

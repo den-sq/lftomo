@@ -171,16 +171,36 @@ class HDF5VolumeWriteStage(Stage):
 			raise ValueError("write.hdf5_volume expects a (Y, Z, X) reconstruction array")
 		path = self._path(state)
 		path.parent.mkdir(parents=True, exist_ok=True)
-		if path.exists() and not self.overwrite:
-			raise FileExistsError(f"HDF5 output already exists: {path}")
-		with h5py.File(path, "w") as handle:
-			handle.create_dataset(
-				self.dataset,
-				data=data,
-				compression=self.compression,
-				compression_opts=self.compression_opts if self.compression else None,
-				chunks=self.chunks,
-			)
+		streaming = state.artifacts.get("streaming_window")
+		if streaming is None:
+			if path.exists() and not self.overwrite:
+				raise FileExistsError(f"HDF5 output already exists: {path}")
+			with h5py.File(path, "w") as handle:
+				handle.create_dataset(
+					self.dataset,
+					data=data,
+					compression=self.compression,
+					compression_opts=self.compression_opts if self.compression else None,
+					chunks=self.chunks,
+				)
+		else:
+			first = bool(streaming["first"])
+			if first and path.exists() and not self.overwrite:
+				raise FileExistsError(f"HDF5 output already exists: {path}")
+			mode = "w" if first else "r+"
+			with h5py.File(path, mode) as handle:
+				if first:
+					handle.create_dataset(
+						self.dataset,
+						shape=(int(streaming["total_rows"]), data.shape[1], data.shape[2]),
+						dtype=data.dtype,
+						compression=self.compression,
+						compression_opts=self.compression_opts if self.compression else None,
+						chunks=self.chunks,
+					)
+				handle[self.dataset][
+					int(streaming["output_start"]):int(streaming["output_stop"])
+				] = data
 		state.artifacts["output_files"] = [path]
 		return state
 
@@ -234,39 +254,52 @@ class NeuroglancerWriteStage(Stage):
 		if root is None:
 			raise ValueError("write.neuroglancer requires a path or Recon.output_path")
 		layer = Path(root) / self.layer_name
-		if layer.exists():
+		streaming = state.artifacts.get("streaming_window")
+		first = streaming is None or bool(streaming["first"])
+		if first and layer.exists():
 			if not self.overwrite:
 				raise FileExistsError(f"Neuroglancer layer already exists: {layer}")
 			import shutil
 
 			shutil.rmtree(layer)
-		layer.mkdir(parents=True)
+		if first:
+			layer.mkdir(parents=True, exist_ok=True)
 
 		try:
 			from cloudvolume import CloudVolume
 		except ImportError as error:
 			raise RuntimeError("write.neuroglancer requires the neuroglancer optional dependencies") from error
 		resolution = self.resolution_nm_xyz or (int(state.scan.pixel_size_um * 1000),) * 3
-		volume_size = (data.shape[2], data.shape[1], data.shape[0])
-		info = CloudVolume.create_new_info(
-			num_channels=1,
-			layer_type="image",
-			data_type=self.data_type or data.dtype.name,
-			encoding="raw",
-			resolution=list(resolution),
-			voxel_offset=[0, 0, 0],
-			chunk_size=list(self.chunk_xyz),
-			volume_size=list(volume_size),
-		)
 		cloudpath = f"precomputed://file://{layer.as_posix()}"
-		volume = CloudVolume(
-			cloudpath, info=info, mip=0, compress=False, progress=False,
-			parallel=1, cache=False, fill_missing=False, bounded=True,
-		)
-		volume.commit_info()
+		if first:
+			total_rows = data.shape[0] if streaming is None else int(streaming["total_rows"])
+			volume_size = (data.shape[2], data.shape[1], total_rows)
+			info = CloudVolume.create_new_info(
+				num_channels=1,
+				layer_type="image",
+				data_type=self.data_type or data.dtype.name,
+				encoding="raw",
+				resolution=list(resolution),
+				voxel_offset=[0, 0, 0],
+				chunk_size=list(self.chunk_xyz),
+				volume_size=list(volume_size),
+			)
+			volume = CloudVolume(
+				cloudpath, info=info, mip=0, compress=False, progress=False,
+				parallel=1, cache=False, fill_missing=False, bounded=True,
+			)
+			volume.commit_info()
+		else:
+			volume = CloudVolume(
+				cloudpath, mip=0, compress=False, progress=False,
+				parallel=1, cache=False, fill_missing=False, bounded=True,
+			)
+		output_start = 0 if streaming is None else int(streaming["output_start"])
 		for start in range(0, data.shape[0], self.block_slices):
 			stop = min(data.shape[0], start + self.block_slices)
-			volume[:, :, start:stop] = np.transpose(data[start:stop], (2, 1, 0))
+			volume[:, :, output_start + start:output_start + stop] = np.transpose(
+				data[start:stop], (2, 1, 0),
+			)
 		state.artifacts["output_files"] = [layer / "info"]
 		state.artifacts["neuroglancer_source"] = cloudpath
 		return state

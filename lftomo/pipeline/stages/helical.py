@@ -51,6 +51,7 @@ class HelicalIndexRemapStage(Stage):
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
 			requires_row_identity=enabled,
+			requires_full_axes=("Y",) if enabled else (),
 		)
 		self.pitch_px_per_projection = pitch_px_per_projection
 		self.enabled = enabled

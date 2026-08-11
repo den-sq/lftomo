@@ -42,6 +42,29 @@ def test_hdf5_writer_writes_volume_and_records_output(tmp_path):
 	assert result.artifacts["output_files"] == [path]
 
 
+def test_hdf5_writer_places_streaming_interiors_at_global_output_rows(tmp_path):
+	config = StageConfig(
+		kind="write", algorithm="hdf5_volume",
+		params={"dataset": "recon", "compression": None},
+	)
+	stage = create_stage(config)
+	first = _state(np.full((2, 3, 4), 1, np.float32), config, tmp_path)
+	first.artifacts["streaming_window"] = {
+		"first": True, "last": False, "total_rows": 4,
+		"output_start": 0, "output_stop": 2,
+	}
+	second = _state(np.full((2, 3, 4), 2, np.float32), config, tmp_path)
+	second.artifacts["streaming_window"] = {
+		"first": False, "last": True, "total_rows": 4,
+		"output_start": 2, "output_stop": 4,
+	}
+	stage.run(first)
+	stage.run(second)
+	with h5py.File(tmp_path / "reconstruction.h5") as handle:
+		np.testing.assert_array_equal(handle["recon"][:2], 1)
+		np.testing.assert_array_equal(handle["recon"][2:], 2)
+
+
 def test_neuroglancer_writer_transposes_blocks_for_cloudvolume(tmp_path, monkeypatch):
 	calls = {}
 
@@ -75,3 +98,39 @@ def test_neuroglancer_writer_transposes_blocks_for_cloudvolume(tmp_path, monkeyp
 	assert calls["info"]["resolution"] == [700, 700, 700]
 	assert calls["writes"][0][1].shape == (4, 3, 1)
 	assert result.artifacts["neuroglancer_source"].endswith("/ct")
+
+
+def test_neuroglancer_writer_offsets_streaming_blocks(tmp_path, monkeypatch):
+	calls = {"writes": []}
+
+	class FakeCloudVolume:
+		@staticmethod
+		def create_new_info(**kwargs):
+			calls["info"] = kwargs
+			return kwargs
+
+		def __init__(self, cloudpath, **kwargs):
+			calls.setdefault("constructors", []).append(kwargs)
+
+		def commit_info(self):
+			pass
+
+		def __setitem__(self, key, value):
+			calls["writes"].append((key, value.copy()))
+
+	monkeypatch.setitem(sys.modules, "cloudvolume", SimpleNamespace(CloudVolume=FakeCloudVolume))
+	config = StageConfig(
+		kind="write", algorithm="neuroglancer",
+		params={"layer_name": "ct", "block_slices": 2},
+	)
+	stage = create_stage(config)
+	for first, start, value in ((True, 0, 1), (False, 2, 2)):
+		state = _state(np.full((2, 3, 4), value, np.uint16), config, tmp_path)
+		state.artifacts["streaming_window"] = {
+			"first": first, "last": not first, "total_rows": 4,
+			"output_start": start, "output_stop": start + 2,
+		}
+		stage.run(state)
+	assert calls["info"]["volume_size"] == [4, 3, 4]
+	assert calls["writes"][0][0][2] == slice(0, 2)
+	assert calls["writes"][1][0][2] == slice(2, 4)

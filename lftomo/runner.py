@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -26,18 +27,25 @@ from lftomo.calibration import (
 )
 from lftomo.config import HDF5DxchangeProjections, Recon, Scan, StageConfig
 from lftomo.pipeline import (
+	AxisPad,
 	Backend,
 	CandidateLimitError,
 	NumpyBackend,
 	Pipeline,
 	PipelineRunContext,
 	PipelineState,
+	StreamingPlan,
 	Stage,
 	StageObserver,
+	WindowConfig,
+	crop_reconstruction_to_interior,
 	expand_recon_sweeps,
+	resolve_streaming_plan,
 	validate_pipeline,
 )
 from lftomo.pipeline.stages import create_stage
+from lftomo.pipeline.domains import DataDomain
+from lftomo.storage import ManagedBuffer, buffer_view
 
 
 PipelineStateExecutor = Callable[
@@ -391,12 +399,217 @@ def _estimated_output_bytes(scan: Scan, recon: Recon) -> int | None:
 	return selected_rows * columns * columns * np.dtype(np.float32).itemsize
 
 
+class _ReplayCenterArtifactStage(Stage):
+	"""Main-pass placeholder for a center produced by the replay pre-pass."""
+
+	def __init__(self, source: Stage):
+		self.name = f"{source.name}.prepass_artifact"
+		self.contract = source.contract
+		self.occurrence_id = getattr(source, "occurrence_id", None)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if "center" not in state.artifacts:
+			raise RuntimeError("center replay pre-pass did not produce a center artifact")
+		return state
+
+
+def _window_recon(recon: Recon, window) -> Recon:
+	resolved = recon.model_copy(deep=True)
+	for config in resolved.pipeline:
+		if config.kind == "read":
+			config.params["y_start"] = window.source_start
+			config.params["y_stop"] = window.source_stop
+	return resolved
+
+
+def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
+	resolved = scan.model_copy(deep=False)
+	resolved.metadata = dict(scan.metadata)
+	fields = resolved.metadata.get("flat_fields")
+	if fields is not None:
+		values = np.asarray(fields)
+		if values.ndim == 3:
+			if values.shape[1] == plan.selection[1] - plan.selection[0]:
+				start = window.source_start - plan.selection[0]
+				stop = window.source_stop - plan.selection[0]
+			elif values.shape[1] == scan.detector.rows:
+				start, stop = window.source_start, window.source_stop
+			else:
+				raise ValueError(
+					"resolved flat_fields do not cover the selected streaming rows"
+				)
+			resolved.metadata["flat_fields"] = values[:, start:stop]
+	return resolved
+
+
+def _detached_artifact(value: Any) -> Any:
+	if isinstance(value, ManagedBuffer):
+		return buffer_view(value).copy()
+	if isinstance(value, dict):
+		return {key: _detached_artifact(item) for key, item in value.items()}
+	if isinstance(value, list):
+		return [_detached_artifact(item) for item in value]
+	if isinstance(value, tuple):
+		return tuple(_detached_artifact(item) for item in value)
+	if isinstance(value, np.ndarray):
+		return value.copy()
+	return deepcopy(value)
+
+
+def _retire_window_state(state: PipelineState) -> None:
+	if state.storage is None:
+		return
+	handles = [state.working_array]
+	handles.extend(state.artifacts.values())
+	seen = set()
+	for value in handles:
+		if not isinstance(value, ManagedBuffer) or value.name in seen:
+			continue
+		seen.add(value.name)
+		state.storage.retire(value, role=getattr(value, "role", None))
+
+
+def _planned_pipeline(
+	stages: list[Stage], scan: Scan, backend: Backend,
+	available_artifacts: dict[str, Any], observer: StageObserver | None, recon: Recon,
+) -> Pipeline:
+	plan = validate_pipeline(
+		stages, scan, backend, available_artifacts=available_artifacts,
+		mode="complete", enable_aliasing=recon.buffer_aliasing,
+		enable_engine_aliasing=recon.tomopy_input_aliasing,
+	)
+	pipeline = Pipeline(
+		stages, backend=backend, validate=False, observer=observer,
+	)
+	pipeline.plan = plan
+	pipeline._validated = True
+	return pipeline
+
+
+def _center_artifacts(state: PipelineState) -> dict[str, Any]:
+	return {
+		key: _detached_artifact(value)
+		for key, value in state.artifacts.items()
+		if key == "center" or key.startswith("center_")
+	}
+
+
+def _run_streaming_pipeline(
+	*, stages: list[Stage], concrete: Recon, run_scan: Scan,
+	initial_artifacts: dict[str, Any], backend: Backend, run_context,
+	window_plan: StreamingPlan, stage_observer: StageObserver | None,
+) -> dict[str, Any]:
+	"""Execute one whole-volume or multi-window run through the same driver."""
+
+	aggregated = dict(initial_artifacts)
+	aggregated["window_plan"] = window_plan.record()
+	window_records = []
+	output_files = []
+	reserve = getattr(run_context.storage, "reserve", None)
+	if reserve is not None:
+		largest = max(window_plan.windows, key=lambda item: item.source_rows)
+		reserve_recon = _window_recon(concrete, largest)
+		reserve_scan = _window_scan(run_scan, window_plan, largest)
+		reserve_stages = [create_stage(config) for config in reserve_recon.pipeline]
+		reserve_writer = next((
+			index for index, stage in enumerate(reserve_stages)
+			if stage.name.startswith("write.")
+		), len(reserve_stages))
+		reserve_pipeline = _planned_pipeline(
+			reserve_stages[:reserve_writer], reserve_scan, backend,
+			initial_artifacts, None, reserve_recon,
+		)
+		for event in reserve_pipeline.plan.allocation_schedule:
+			reserve(event.role, event.bytes)
+	for window in window_plan.windows:
+		window_recon = _window_recon(concrete, window)
+		window_scan = _window_scan(run_scan, window_plan, window)
+		window_stages = [create_stage(config) for config in window_recon.pipeline]
+		window_initial = dict(initial_artifacts)
+		center_artifacts = {}
+		auto_centers = [
+			index for index, stage in enumerate(window_stages)
+			if stage.name.startswith("center.") and stage.name != "center.manual"
+		]
+		if auto_centers:
+			last_center = max(auto_centers)
+			prepass_stages = window_stages[:last_center + 1]
+			prepass_state = PipelineState(
+				np.empty((0,), dtype=np.float32), window_scan, window_recon,
+				artifacts=dict(window_initial), backend=backend,
+				storage=run_context.storage, executor=run_context.executor,
+			)
+			prepass = _planned_pipeline(
+				prepass_stages, window_scan, backend, window_initial, stage_observer,
+				window_recon,
+			)
+			prepass_state = prepass.run(prepass_state)
+			center_artifacts = _center_artifacts(prepass_state)
+			_retire_window_state(prepass_state)
+			window_initial.update(center_artifacts)
+			window_stages = [
+				_ReplayCenterArtifactStage(stage)
+				if stage.name.startswith("center.") and stage.name != "center.manual"
+				else stage
+				for stage in window_stages
+			]
+		writer_start = next((
+			index for index, stage in enumerate(window_stages)
+			if stage.name.startswith("write.")
+		), len(window_stages))
+		compute_stages = window_stages[:writer_start]
+		writer_stages = window_stages[writer_start:]
+		state = PipelineState(
+			np.empty((0,), dtype=np.float32), window_scan, window_recon,
+			artifacts=dict(window_initial), backend=backend,
+			storage=run_context.storage, executor=run_context.executor,
+		)
+		compute = _planned_pipeline(
+			compute_stages, window_scan, backend, window_initial, stage_observer,
+			window_recon,
+		)
+		state = compute.run(state)
+		if state.domain is DataDomain.RECON:
+			state = crop_reconstruction_to_interior(state, window, window_plan)
+		elif writer_stages:
+			raise ValueError("windowed writers require a reconstruction-producing Stage")
+		if writer_stages:
+			state = Pipeline(
+				writer_stages, backend=backend, validate=False, observer=stage_observer,
+			).run(state)
+		window_artifacts = {
+			key: _detached_artifact(value) for key, value in state.artifacts.items()
+			if not isinstance(value, ManagedBuffer)
+		}
+		files = window_artifacts.get("output_files", [])
+		output_files.extend(path for path in files if path not in output_files)
+		window_records.append({
+			"window": window_plan.record()["windows"][window.index],
+			"center_artifacts": center_artifacts,
+			"artifacts": window_artifacts,
+		})
+		aggregated.update(window_artifacts)
+		_retire_window_state(state)
+	aggregated["window_results"] = window_records
+	if output_files:
+		aggregated["output_files"] = output_files
+	allocation_events = getattr(run_context.storage, "allocation_events", ())
+	aggregated["allocation_events"] = [dict(event) for event in allocation_events]
+	physical = {
+		event["name"]: int(event["bytes"])
+		for event in allocation_events if event["action"] == "allocate"
+	}
+	aggregated["measured_shared_memory_bytes"] = sum(physical.values())
+	return aggregated
+
+
 def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			output_path: str | Path | None = None, backend: Backend | None = None, *,
 			calibration_bundle: CalibrationBundleRef | None = None,
 			verify_calibration_hashes: bool = True,
 			state_executor: PipelineStateExecutor | None = None,
-			stage_observer: StageObserver | None = None) -> list[RunResult]:
+			stage_observer: StageObserver | None = None,
+			window_config: WindowConfig | None = None) -> list[RunResult]:
 	"""Load, expand, and execute every concrete run described by YAML files."""
 	recon, resolved_pipeline_path = load_recon(pipeline_path)
 	scan, resolved_scan_path = load_scan(scan_path)
@@ -468,38 +681,60 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		))
 	results = []
 	for run, concrete, resolved_document, run_scan, initial_artifacts, stages in prepared:
+		window_plan = resolve_streaming_plan(stages, run_scan, window_config)
+		resolved_document.setdefault("metadata", {})["resolved_window"] = window_plan.record()
 		with PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
 			max_workers=concrete.process_workers or min(4, os.cpu_count() or 1),
 			worker_timeout_seconds=concrete.worker_timeout_seconds,
 		) as run_context:
-			state = PipelineState(
-				working_array=np.empty((0,), dtype=np.float32),
-				scan=run_scan,
-				recon=concrete,
-				artifacts=dict(initial_artifacts),
-				backend=backend,
-				storage=run_context.storage,
-				executor=run_context.executor,
-			)
-			if state_executor is None:
-				state = Pipeline(
-					stages,
+			if state_executor is not None:
+				if not window_plan.whole_volume:
+					raise ValueError(
+						"custom state executors are whole-volume-only; windowed prefix-cache "
+						"semantics remain deferred",
+					)
+				state = PipelineState(
+					working_array=np.empty((0,), dtype=np.float32),
+					scan=run_scan,
+					recon=concrete,
+					artifacts={**initial_artifacts, "window_plan": window_plan.record()},
 					backend=backend,
-					validation_mode="complete",
-					observer=stage_observer,
-				).run(state)
-			else:
+					storage=run_context.storage,
+					executor=run_context.executor,
+				)
 				state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
+				artifacts = dict(state.artifacts)
+			else:
+				artifacts = _run_streaming_pipeline(
+					stages=stages, concrete=concrete, run_scan=run_scan,
+					initial_artifacts=initial_artifacts, backend=backend,
+					run_context=run_context, window_plan=window_plan,
+					stage_observer=stage_observer,
+				)
 			results.append(RunResult(
 				run.index,
 				run.parameters,
 				concrete.output_path,
-				dict(state.artifacts),
+				artifacts,
 				candidate_key=run.candidate_key,
 				resolved_recon=resolved_document,
 			))
+		if concrete.output_path is not None:
+			manifest_root = (
+				concrete.output_path.parent
+				if concrete.output_path.suffix.lower() in {".h5", ".hdf5"}
+				else concrete.output_path
+			)
+			manifest_root.mkdir(parents=True, exist_ok=True)
+			manifest_path = manifest_root / "recon_run.yaml"
+			with manifest_path.open("w", encoding="utf-8") as stream:
+				yaml.safe_dump({
+					"resolved_recon": resolved_document,
+					"window_plan": window_plan.record(),
+				}, stream, sort_keys=False)
+			artifacts["recon_run"] = manifest_path
 	return results
 
 
@@ -512,6 +747,8 @@ def _json_value(value: Any) -> Any:
 		return {str(key): _json_value(item) for key, item in value.items()}
 	if isinstance(value, (list, tuple)):
 		return [_json_value(item) for item in value]
+	if isinstance(value, np.ndarray):
+		return value.tolist()
 	if isinstance(value, np.generic):
 		return value.item()
 	return value
@@ -534,11 +771,18 @@ def _json_result(result: RunResult) -> dict[str, Any]:
 @click.option("--output", "output_path", type=click.Path(path_type=Path), help="Override Recon.output_path.")
 @click.option("--gpu", is_flag=True, help="Declare that the selected runtime provides CUDA support.")
 @click.option("--json-output", is_flag=True, help="Emit machine-readable run summaries.")
+@click.option("--window-rows", type=click.IntRange(min=1), help="Machine-selected core rows per window.")
+@click.option("--extra-pad-y", type=click.IntRange(min=0), default=0,
+	help="Optional runner-level detector-row padding.")
 def main(pipeline_path: Path, scan_path: Path, output_path: Path | None,
-			gpu: bool, json_output: bool) -> None:
+			gpu: bool, json_output: bool, window_rows: int | None,
+			extra_pad_y: int) -> None:
 	"""Execute PIPELINE_PATH (or a bundled template name) for SCAN_PATH."""
 	backend = Backend(name="numpy", supports_gpu=True) if gpu else NumpyBackend()
-	results = run_reconstruction(pipeline_path, scan_path, output_path, backend)
+	results = run_reconstruction(
+		pipeline_path, scan_path, output_path, backend,
+		window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=extra_pad_y)),
+	)
 	if json_output:
 		click.echo(json.dumps([_json_result(result) for result in results], indent=2))
 	else:

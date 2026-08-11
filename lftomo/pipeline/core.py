@@ -52,6 +52,55 @@ class Locality(Enum):
 
 
 @dataclass(frozen=True)
+class AxisPad:
+	"""Symmetric source halo required along tomography axes."""
+
+	theta: int = 0
+	y: int = 0
+	x: int = 0
+
+	def __post_init__(self):
+		if min(self.theta, self.y, self.x) < 0:
+			raise ValueError("axis padding cannot be negative")
+
+	def __add__(self, other: "AxisPad") -> "AxisPad":
+		return AxisPad(
+			self.theta + other.theta, self.y + other.y, self.x + other.x,
+		)
+
+	def maximum(self, other: "AxisPad") -> "AxisPad":
+		return AxisPad(
+			max(self.theta, other.theta), max(self.y, other.y), max(self.x, other.x),
+		)
+
+	def as_dict(self) -> dict[str, int]:
+		return {"theta": self.theta, "y": self.y, "x": self.x}
+
+
+@dataclass(frozen=True)
+class PadRequirement:
+	"""Serializable Stage pad rule resolved from scan and input shape."""
+
+	fixed: AxisPad = AxisPad()
+	phase_fft_y: bool = False
+
+	def resolve(self, scan: Any, input_shape: Any) -> AxisPad:
+		resolved = self.fixed
+		if self.phase_fft_y:
+			from lftomo.prep.phase import _phase_pad
+
+			dimension = int(getattr(input_shape, "Y"))
+			phase_y = int(_phase_pad(
+				dimension,
+				float(scan.pixel_size_um) * 1e-4,
+				float(scan.ssd_cm),
+				float(scan.energy_keV),
+			))
+			resolved = resolved + AxisPad(y=max(0, phase_y))
+		return resolved
+
+
+@dataclass(frozen=True)
 class StageContract:
 	"""Behavioral contract advertised by a Stage before it runs.
 
@@ -85,6 +134,8 @@ class StageContract:
 	produces_domain: DataDomain | ContractEffect | None = None
 	resamples_detector: bool = False
 	requires_row_identity: bool = False
+	required_pad: PadRequirement = PadRequirement()
+	requires_full_axes: tuple[str, ...] = ()
 	runtime_requirements: tuple[RuntimeRequirement, ...] = ()
 
 	@property

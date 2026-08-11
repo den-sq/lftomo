@@ -102,6 +102,11 @@ Layout conversion and reconstruction update `buffer_spec`; they do not rewrite
 source coordinates. Output slice numbering therefore uses the source window's
 global Y position plus the buffer-local row.
 
+Runner-level streaming is specified in [windowed-streaming.md](windowed-streaming.md).
+It resolves Stage pad contracts before allocation, rejects unsatisfied full-axis
+requirements, records retained/fresh transitions, and treats a full-volume run
+as the one-window case.
+
 ## Validation Rules
 
 `Pipeline` validates the ordered Stage list before execution. The validator

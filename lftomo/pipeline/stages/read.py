@@ -97,7 +97,7 @@ class HDF5DxchangeReadStage(Stage):
 				theta_stop: int | None = None, y_start: int = 0,
 				y_stop: int | None = None, calibration_policy: str = "optional",
 				theta_count: int | None = None, theta_start_degrees: float | None = None,
-				theta_stop_degrees: float | None = None, window_size: int | None = None,
+				theta_stop_degrees: float | None = None,
 				theta_stride: int = 1):
 		if calibration_policy not in ("ignore", "optional", "required"):
 			raise ValueError("calibration_policy must be 'ignore', 'optional', or 'required'")
@@ -112,7 +112,6 @@ class HDF5DxchangeReadStage(Stage):
 		self.calibration_policy = calibration_policy
 		self.theta_start_degrees = theta_start_degrees
 		self.theta_stop_degrees = theta_stop_degrees
-		self.window_size = window_size
 		self.contract = _output_contract(
 			order,
 			required_metadata=("projections.path", "projections.data_path"),
@@ -159,7 +158,10 @@ class HDF5DxchangeReadStage(Stage):
 				if layout is ProjOrder else
 				SinoOrder(Y=y_stop - self.y_start, Theta=selected_count, X=columns)
 			)
-			memory = _storage(state).allocate(shape, dtype, role="raw_staging")
+			memory = _storage(state).allocate(
+				shape, dtype, role="raw_staging",
+				reuse_from=("raw_staging", "reconstruction"),
+			)
 			target = memory.array()
 			selection = np.s_[
 				self.theta_start:theta_stop:self.theta_stride, self.y_start:y_stop, :,
@@ -324,7 +326,10 @@ class TIFFStackReadStage(Stage):
 			if layout is ProjOrder else
 			SinoOrder(Y=stop - self.y_start, Theta=selected_count, X=columns)
 		)
-		memory = _storage(state).allocate(shape, dtype, role="raw_staging")
+		memory = _storage(state).allocate(
+			shape, dtype, role="raw_staging",
+			reuse_from=("raw_staging", "reconstruction"),
+		)
 		kwargs = {} if self.threads is None else {"thread_max": self.threads}
 		if layout is ProjOrder:
 			distribute_tiff_read(

@@ -6,10 +6,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Self, Sequence, Iterator
 
-import h5py
-from natsort import natsorted
 import numpy as np
-import tifffile as tf
 
 from .shapes import DataShape, DataRange, IntIter, SliceIter, TFIter
 
@@ -250,6 +247,12 @@ class TomoDataSet(DataRef):
 			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
 			:retval: DataWindowSet for the files.
 			"""
+
+		# Dataset discovery is the only window operation that needs storage-format
+		# libraries.  Keep them out of pure planning/import paths.
+		import h5py
+		from natsort import natsorted
+		import tifffile as tf
 
 		source = Path(source)
 		if source.is_dir():

@@ -184,7 +184,7 @@ class GridrecStage(Stage):
 			shape,
 			np.float32,
 			role="reconstruction",
-			reuse_from=("raw_staging",),
+			reuse_from=("raw_staging", "reconstruction"),
 			alias_from_current=can_alias_input,
 			proof="tomopy_input_materialization" if can_alias_input else None,
 		)
