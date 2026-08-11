@@ -35,14 +35,18 @@ oracle's exact pre-subtraction applied (`pre_gain -= pre_dark`,
 `post_gain -= post_dark`). Pipeline runs use those resolved maps while the named
 oracle reads the original medians, so the normalization inputs are identical.
 
-The durable progress stream is `acceptance-progress.jsonl`. The final machine
-record is `acceptance-record.json`, and `acceptance-summary.md` is formatted for
-posting to issue #185.
+Human-readable progress is rendered by lftomo's shared logger and retained under
+`logs/`. The same events are recorded structurally in `acceptance-progress.jsonl`.
+The final machine record is `acceptance-record.json`, and `acceptance-summary.md`
+is formatted for posting to issue #185.
 
 ## Mode 1: windowed pipeline
 
 The mode selects global rows `[1068, 1092)` as two 12-row windows with zero user
-pad. It records:
+pad. The current-oracle script, current-oracle reproduction pipeline, and
+frozen-B10 reproduction pipeline are three independent reads of those rows; no
+run consumes another run's output. Progress messages identify both the run and
+the window interval. The mode records:
 
 - exact TIFF parity between `examples/b10_recon_current.py` and the equivalent
   split `bac_correction` plus `negative_log` pipeline;
@@ -50,15 +54,17 @@ pad. It records:
   `b10_recon` slices 1076–1085, whose producer used the same 12-row extent;
 - an explicit non-applicability record for `recon_minimal`, whose frozen output
   belongs to a different dataset and 64-row producer extent;
-- planned and measured shared-memory, private-scratch, and external-engine
-  components separately;
+- non-gating memory observations: run-level manager allocations plus sampled
+  private-memory deltas for every Stage invocation;
 - `/dev/shm` inspection after normal completion and after `SIGKILL` of an
   isolated owner process group during its first window.
 
-The shared-memory measurement comes from unique manager allocations. Private
-scratch and engine temporary measurements are the largest per-process private
-mapped-byte deltas during their respective Stage classes; `/dev/shm` mappings are excluded
-so shared storage is not counted twice.
+The shared-memory observation comes from unique manager allocations and remains
+run-level. Private memory is sampled for each Stage invocation and recorded with
+its window, Stage index, dispatch kind, process-tree peak, and per-process peaks;
+`/dev/shm` mappings are excluded so shared storage is not counted twice. These
+measurements are diagnostic telemetry only. The acceptance run makes no memory
+estimate, upper-bound promise, or pass/fail claim from them.
 
 ## Mode 2: whole-volume experiment
 

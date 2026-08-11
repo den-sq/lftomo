@@ -39,12 +39,11 @@ from lftomo.experiment import (
 )
 from lftomo.experiment.cli import PipelineTrialExecutor, build_experiment_inputs
 from lftomo.pipeline import AxisPad, WindowConfig
-from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.pipeline.stages import dispatch_for_stage
 from lftomo.prep.flat import FLAT
 from lftomo.reference import NumericalTolerance, checksum_manifest, compare_slice, sha256_file
 from lftomo.runner import load_recon, load_scan, run_reconstruction
-from lftomo.util.log import log as legacy_log
+from lftomo.util.log import LOG, Logger, log as shared_log
 from lftomo.util.mem import SharedNPManager
 
 
@@ -89,6 +88,8 @@ def _json_value(value: Any) -> Any:
 		return _json_value(value.model_dump(mode="json"))
 	if isinstance(value, Path):
 		return str(value)
+	if isinstance(value, datetime):
+		return value.isoformat()
 	if isinstance(value, dict):
 		return {str(key): _json_value(item) for key, item in value.items()}
 	if isinstance(value, (list, tuple)):
@@ -108,15 +109,17 @@ def _write_json(path: Path, value: Any) -> None:
 	os.replace(temporary, path)
 
 
-class AcceptanceLog:
-	"""Durable JSONL progress plus a concise terminal projection."""
+class AcceptanceProgressRecorder:
+	"""Persist structured events and render them through lftomo's shared logger."""
 
-	def __init__(self, path: Path):
+	def __init__(self, path: Path, logger: Logger = shared_log):
 		self.path = path
+		self.logger = logger
 		self.path.parent.mkdir(parents=True, exist_ok=True)
 		self._lock = threading.Lock()
 
-	def emit(self, event: str, message: str, **details: Any) -> None:
+	def emit(self, event: str, message: str, *, log_level: LOG = LOG.TIME,
+			**details: Any) -> None:
 		record = {
 			"at": _utcnow(), "event": event, "message": message,
 			"details": _json_value(details),
@@ -125,7 +128,7 @@ class AcceptanceLog:
 			stream.write(json.dumps(record, sort_keys=True) + "\n")
 			stream.flush()
 			os.fsync(stream.fileno())
-		click.echo(f"[{record['at']}] {message}", err=True)
+		self.logger.write("Acceptance", message, log_level=log_level)
 
 
 def _private_bytes(process: psutil.Process) -> int:
@@ -148,22 +151,30 @@ def _private_bytes(process: psutil.Process) -> int:
 
 
 class ProcessTreeMemorySampler(AbstractContextManager):
-	"""Measure transient private memory around scratch and engine Stages.
+	"""Record non-gating, per-Stage process-tree memory observations.
 
-	The sampler compares each process against the synchronous Stage-start map and
-	excludes ``/dev/shm`` mappings.  It therefore measures private scratch/engine
-	materialization without counting the run-owned shared buffers a second time.
+	Private mappings are sampled relative to each Stage's start. Managed
+	``/dev/shm`` mappings are excluded so the run-owned allocation ledger remains
+	the separate source for shared-memory observations. These are diagnostic
+	measurements, not estimates or upper-bound proofs.
 	"""
 
-	def __init__(self, interval_seconds: float = 0.05):
+	def __init__(self, *, y_start: int, y_stop: int, window_rows: int,
+			interval_seconds: float = 0.05,
+			on_record: Callable[[dict[str, Any]], None] | None = None):
+		if y_stop <= y_start or window_rows <= 0:
+			raise ValueError("memory sampling requires a non-empty selection and window")
 		self.interval_seconds = interval_seconds
 		self._root = psutil.Process()
-		self._active: str | None = None
-		self._baseline: dict[int, int] = {}
-		self._peaks = {
-			"per_worker_private_scratch_bytes": 0,
-			"external_engine_temporary_bytes": 0,
-		}
+		self._windows = tuple(
+			(start, min(start + window_rows, y_stop))
+			for start in range(y_start, y_stop, window_rows)
+		)
+		self._window_index = -1
+		self._sequence = 0
+		self._active: dict[str, Any] | None = None
+		self._records: list[dict[str, Any]] = []
+		self._on_record = on_record
 		self._lock = threading.Lock()
 		self._stop = threading.Event()
 		self._thread: threading.Thread | None = None
@@ -176,23 +187,48 @@ class ProcessTreeMemorySampler(AbstractContextManager):
 		return {process.pid: _private_bytes(process) for process in processes}
 
 	def _sample(self) -> None:
+		with self._lock:
+			active = self._active
+			if active is None:
+				return
+			sequence = active["sequence"]
+			baseline = dict(active["_baseline"])
 		values = self._snapshot()
-		with self._lock:
-			component = self._active
-			baseline = dict(self._baseline)
-		if component is None:
-			return
-		deltas = [
-			max(0, value - baseline.get(pid, value))
+		deltas = {
+			pid: max(0, value - baseline.get(pid, 0))
 			for pid, value in values.items()
-		]
-		# #177's private component is explicitly per-worker, not the sum of
-		# simultaneous workers. Engine work is parent-owned in the v1 dispatch
-		# hierarchy, so the largest process delta is the applicable boundary too.
-		delta = max(deltas, default=0)
+		}
 		with self._lock:
-			if self._active == component:
-				self._peaks[component] = max(self._peaks[component], delta)
+			active = self._active
+			if active is None or active["sequence"] != sequence:
+				return
+			active["sample_count"] += 1
+			active["peak_process_tree_private_delta_bytes"] = max(
+				active["peak_process_tree_private_delta_bytes"], sum(deltas.values()),
+			)
+			for pid, delta in deltas.items():
+				previous = active["_peak_by_pid"].get(pid, 0)
+				active["_peak_by_pid"][pid] = max(previous, delta)
+
+	def _finish_active(self, outcome: str) -> None:
+		self._sample()
+		with self._lock:
+			active = self._active
+			self._active = None
+		if active is None:
+			return
+		peaks = active.pop("_peak_by_pid")
+		active.pop("_baseline")
+		active["finished_at"] = _utcnow()
+		active["outcome"] = outcome
+		active["peak_process_private_delta_bytes"] = max(peaks.values(), default=0)
+		active["peak_private_delta_bytes_by_pid"] = {
+			str(pid): value for pid, value in sorted(peaks.items())
+		}
+		with self._lock:
+			self._records.append(active)
+		if self._on_record is not None:
+			self._on_record(dict(active))
 
 	def _loop(self) -> None:
 		while not self._stop.wait(self.interval_seconds):
@@ -204,67 +240,45 @@ class ProcessTreeMemorySampler(AbstractContextManager):
 		return self
 
 	def __exit__(self, *args):
-		self._sample()
+		self._finish_active("sampler_exit")
 		self._stop.set()
 		if self._thread is not None:
 			self._thread.join(timeout=2)
 		return False
 
-	def observer(self, phase, _index, stage, _error) -> None:
+	def observer(self, phase, index, stage, _error) -> None:
 		if phase == "started":
+			self._finish_active("superseded")
+			if stage.name.startswith("read."):
+				self._window_index += 1
+			window_index = max(self._window_index, 0)
+			window_index = min(window_index, len(self._windows) - 1)
+			start, stop = self._windows[window_index]
 			dispatch = dispatch_for_stage(stage)
-			if dispatch.kind is DispatchKind.ENGINE:
-				component = "external_engine_temporary_bytes"
-			elif stage.contract.resources.memory_multiplier > 1.0:
-				component = "per_worker_private_scratch_bytes"
-			else:
-				component = None
-			baseline = self._snapshot() if component is not None else {}
+			baseline = self._snapshot()
 			with self._lock:
-				self._active = component
-				self._baseline = baseline
+				self._sequence += 1
+				self._active = {
+					"sequence": self._sequence,
+					"stage": stage.name,
+					"stage_index": index,
+					"dispatch_kind": dispatch.kind.name.lower(),
+					"window_index": window_index,
+					"core_interval": [start, stop],
+					"started_at": _utcnow(),
+					"sample_interval_seconds": self.interval_seconds,
+					"sample_count": 0,
+					"peak_process_tree_private_delta_bytes": 0,
+					"_baseline": baseline,
+					"_peak_by_pid": {},
+				}
 		elif phase in ("completed", "failed"):
-			self._sample()
-			with self._lock:
-				self._active = None
-				self._baseline = {}
+			self._finish_active(phase)
 
 	@property
-	def peaks(self) -> dict[str, int]:
+	def records(self) -> list[dict[str, Any]]:
 		with self._lock:
-			return dict(self._peaks)
-
-
-def memory_proof(planned: dict[str, int], measured: dict[str, int]) -> dict[str, Any]:
-	"""Compare all three independent #177 memory components."""
-
-	components = {}
-	for name in (
-		"shared_memory_bytes",
-		"per_worker_private_scratch_bytes",
-		"external_engine_temporary_bytes",
-	):
-		estimate = int(planned.get(name, 0))
-		actual = int(measured.get(name, 0))
-		components[name] = {
-			"planned_bytes": estimate,
-			"measured_bytes": actual,
-			"within_bound": actual <= estimate,
-		}
-	return {
-		"passed": all(item["within_bound"] for item in components.values()),
-		"measurement": {
-			"shared_memory_bytes": "unique physical allocations in the manager ledger",
-			"per_worker_private_scratch_bytes": (
-				"largest per-process private mapped-byte delta during non-engine scratch Stages; "
-				"/dev/shm excluded"
-			),
-			"external_engine_temporary_bytes": (
-				"largest per-process private mapped-byte delta during engine Stages; /dev/shm excluded"
-			),
-		},
-		"components": components,
-	}
+			return [dict(record) for record in self._records]
 
 
 def audit_pin_events(events: list[dict[str, Any]]) -> dict[str, Any]:
@@ -403,7 +417,8 @@ def _discover_flat_root(dataset_root: Path, supplied: Path | None) -> Path:
 
 
 def _prepare_scan(dataset_root: Path, config_root: Path, flat_root: Path,
-		dataset_content_hash: str | None, log: AcceptanceLog) -> tuple[Path, Path, str]:
+		dataset_content_hash: str | None,
+		log: AcceptanceProgressRecorder) -> tuple[Path, Path, str]:
 	scan, _ = load_scan(dataset_root / "scan.yaml")
 	source = Path(scan.projections.path).resolve()
 	if not source.is_file():
@@ -456,7 +471,9 @@ def _prepare_scan(dataset_root: Path, config_root: Path, flat_root: Path,
 	return scan_path, source, content_hash.lower()
 
 
-def _current_pipeline(path: Path, *, y_start: int, y_stop: int, workers: int) -> Path:
+def _current_oracle_reproduction_pipeline(
+		path: Path, *, y_start: int, y_stop: int, workers: int,
+) -> Path:
 	document = {
 		"process_workers": workers,
 		"pipeline": [
@@ -488,7 +505,9 @@ def _current_pipeline(path: Path, *, y_start: int, y_stop: int, workers: int) ->
 	return path
 
 
-def _historical_pipeline(path: Path, *, y_start: int, y_stop: int, workers: int) -> Path:
+def _frozen_b10_reproduction_pipeline(
+		path: Path, *, y_start: int, y_stop: int, workers: int,
+) -> Path:
 	recon, _ = load_recon("b10-recon-canonical")
 	recon.process_workers = workers
 	for stage in recon.pipeline:
@@ -510,24 +529,74 @@ def _compose_observers(*observers: Callable | None) -> Callable:
 	return observe
 
 
-def _progress_observer(log: AcceptanceLog, mode: str) -> Callable:
+def _progress_observer(
+		log: AcceptanceProgressRecorder,
+		event_prefix: str,
+		run_label: str,
+		*,
+		y_start: int,
+		y_stop: int,
+		window_rows: int,
+) -> Callable:
+	windows = tuple(
+		(start, min(start + window_rows, y_stop))
+		for start in range(y_start, y_stop, window_rows)
+	)
+	window_index = -1
+
 	def observe(phase, index, stage, error):
+		nonlocal window_index
+		if phase == "started" and stage.name.startswith("read."):
+			window_index += 1
+		active_index = max(window_index, 0)
+		start, stop = windows[min(active_index, len(windows) - 1)]
+		window_message = (
+			f"{run_label}: window {active_index + 1}/{len(windows)} "
+			f"[{start}, {stop})"
+		)
+		details = {
+			"stage": stage.name,
+			"stage_index": index,
+			"window_index": active_index,
+			"window_count": len(windows),
+			"core_interval": [start, stop],
+		}
 		if phase == "started":
 			log.emit(
-				f"{mode}.stage.started", f"{mode}: starting {stage.name}",
-				stage=stage.name, stage_index=index,
+				f"{event_prefix}.window.stage.started",
+				f"{window_message}: starting {stage.name}",
+				**details,
 			)
 		elif phase == "completed":
 			log.emit(
-				f"{mode}.stage.completed", f"{mode}: completed {stage.name}",
-				stage=stage.name, stage_index=index,
+				f"{event_prefix}.window.stage.completed",
+				f"{window_message}: completed {stage.name}",
+				**details,
 			)
 		else:
 			log.emit(
-				f"{mode}.stage.failed", f"{mode}: {stage.name} failed: {error}",
-				stage=stage.name, stage_index=index,
+				f"{event_prefix}.window.stage.failed",
+				f"{window_message}: {stage.name} failed: {error}",
+				log_level=LOG.ERROR,
+				**details,
 			)
 	return observe
+
+
+def _memory_record_logger(
+		log: AcceptanceProgressRecorder, event_prefix: str, run_label: str,
+) -> Callable[[dict[str, Any]], None]:
+	def emit(record: dict[str, Any]) -> None:
+		start, stop = record["core_interval"]
+		peak = record["peak_process_tree_private_delta_bytes"]
+		log.emit(
+			f"{event_prefix}.window.stage.memory_observed",
+			f"{run_label}: window {record['window_index'] + 1} [{start}, {stop}) "
+			f"{record['stage']} observed {peak / 1024**2:.1f} MiB peak "
+			"process-tree private delta",
+			**record,
+		)
+	return emit
 
 
 def _interrupt_child(
@@ -624,7 +693,7 @@ def _run_interrupted_cleanup(
 
 def run_windowed_acceptance(
 		dataset_root: Path, result_root: Path, *, scan_path: Path, source: Path,
-		flat_root: Path, workers: int, log: AcceptanceLog,
+		flat_root: Path, workers: int, log: AcceptanceProgressRecorder,
 		y_start: int = _DEFAULT_SELECTION[0], y_stop: int = _DEFAULT_SELECTION[1],
 		window_rows: int = _DEFAULT_WINDOW_ROWS,
 ) -> dict[str, Any]:
@@ -634,26 +703,26 @@ def run_windowed_acceptance(
 	root = result_root / "windowed"
 	configs = root / "configs"
 	configs.mkdir(parents=True, exist_ok=True)
-	current_pipeline = _current_pipeline(
-		configs / "current-oracle-pipeline.yaml",
+	current_reproduction_pipeline = _current_oracle_reproduction_pipeline(
+		configs / "current-oracle-reproduction.yaml",
 		y_start=y_start, y_stop=y_stop, workers=workers,
 	)
-	historical_pipeline = _historical_pipeline(
-		configs / "historical-b10-pipeline.yaml",
+	frozen_reproduction_pipeline = _frozen_b10_reproduction_pipeline(
+		configs / "frozen-b10-reproduction.yaml",
 		y_start=y_start, y_stop=y_stop, workers=workers,
 	)
-	legacy_output = root / "outputs" / "b10-current-oracle"
-	current_output = root / "outputs" / "current-pipeline"
-	historical_output = root / "outputs" / "historical-b10"
+	oracle_output = root / "outputs" / "current-oracle-script"
+	current_reproduction_output = root / "outputs" / "current-oracle-reproduction"
+	frozen_reproduction_output = root / "outputs" / "frozen-b10-reproduction"
 	log.emit(
-		"windowed.oracle.started",
-		f"windowed: running b10_recon_current.py over rows [{y_start}, {y_stop})",
+		"windowed.current_oracle.started",
+		f"current-oracle script: running b10_recon_current.py over rows [{y_start}, {y_stop})",
 	)
 	oracle = _load_b10_current_module()
 	oracle.run(oracle.B10ReconConfig(
 		source=source,
 		flats=flat_root,
-		output=legacy_output,
+		output=oracle_output,
 		center=1282.75,
 		window_size=window_rows,
 		alpha=1.6,
@@ -663,46 +732,92 @@ def run_windowed_acceptance(
 		y_start=y_start,
 		y_stop=y_stop,
 	))
-	log.emit("windowed.oracle.completed", "windowed: named current oracle completed")
+	log.emit(
+		"windowed.current_oracle.completed",
+		"current-oracle script: completed independent reference run",
+	)
 	current_result = run_reconstruction(
-		current_pipeline,
+		current_reproduction_pipeline,
 		scan_path,
-		current_output,
+		current_reproduction_output,
 		window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=0)),
-		stage_observer=_progress_observer(log, "windowed.current"),
+		stage_observer=_progress_observer(
+			log,
+			"windowed.current_oracle_reproduction",
+			"current-oracle reproduction",
+			y_start=y_start,
+			y_stop=y_stop,
+			window_rows=window_rows,
+		),
 	)[0]
 	current_parity = _strict_tiff_parity(
-		legacy_output, current_output, range(y_start, y_stop),
+		oracle_output, current_reproduction_output, range(y_start, y_stop),
 	)
 	log.emit(
-		"windowed.current.parity",
-		f"windowed: current oracle parity {'passed' if current_parity['passed'] else 'failed'}",
+		"windowed.current_oracle_reproduction.parity",
+		f"current-oracle reproduction: parity "
+		f"{'passed' if current_parity['passed'] else 'failed'}",
+		log_level=LOG.TIME if current_parity["passed"] else LOG.ERROR,
 	)
 
-	log.emit("windowed.historical.started", "windowed: running historical B10 family pipeline")
-	with ProcessTreeMemorySampler() as sampler:
-		historical_result = run_reconstruction(
-			historical_pipeline,
+	log.emit(
+		"windowed.frozen_b10_reproduction.started",
+		"frozen-B10 reproduction: starting independent canonical lineage run",
+	)
+	with ProcessTreeMemorySampler(
+		y_start=y_start,
+		y_stop=y_stop,
+		window_rows=window_rows,
+		on_record=_memory_record_logger(
+			log,
+			"windowed.frozen_b10_reproduction",
+			"frozen-B10 reproduction",
+		),
+	) as sampler:
+		frozen_result = run_reconstruction(
+			frozen_reproduction_pipeline,
 			scan_path,
-			historical_output,
+			frozen_reproduction_output,
 			window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=0)),
 			stage_observer=_compose_observers(
-				sampler.observer, _progress_observer(log, "windowed.historical"),
+				sampler.observer,
+				_progress_observer(
+					log,
+					"windowed.frozen_b10_reproduction",
+					"frozen-B10 reproduction",
+					y_start=y_start,
+					y_stop=y_stop,
+					window_rows=window_rows,
+				),
 			),
 		)[0]
-	measured = {
-		"shared_memory_bytes": int(
-			historical_result.artifacts["measured_shared_memory_bytes"]
+	memory_observations = {
+		"gating": False,
+		"shared_memory_allocated_bytes": int(
+			frozen_result.artifacts["measured_shared_memory_bytes"]
 		),
-		**sampler.peaks,
+		"shared_memory_basis": "unique physical allocations in the manager ledger",
+		"private_memory_basis": (
+			"per-Stage sampled process-tree private mapped-byte delta from Stage start; "
+			"/dev/shm excluded"
+		),
+		"stages": sampler.records,
 	}
-	planned = {
-		key: int(value)
-		for key, value in historical_result.artifacts["planned_peak_memory"].items()
-	}
-	memory = memory_proof(planned, measured)
+	log.emit(
+		"windowed.frozen_b10_reproduction.memory_observed",
+		"frozen-B10 reproduction: recorded non-gating shared and per-Stage "
+		"private-memory observations",
+		shared_memory_allocated_bytes=memory_observations["shared_memory_allocated_bytes"],
+		stage_observation_count=len(memory_observations["stages"]),
+	)
 	archive = dataset_root / "reference" / "b10_recon"
-	frozen = _frozen_b10_parity(historical_output, archive)
+	frozen = _frozen_b10_parity(frozen_reproduction_output, archive)
+	log.emit(
+		"windowed.frozen_b10_reproduction.parity",
+		f"frozen-B10 reproduction: reference parity "
+		f"{'passed' if frozen['passed'] else 'failed'}",
+		log_level=LOG.TIME if frozen["passed"] else LOG.ERROR,
+	)
 	recon_minimal = {
 		"producer": "recon_minimal",
 		"status": "not_applicable",
@@ -715,20 +830,25 @@ def run_windowed_acceptance(
 	}
 	normal_names = [
 		*_allocation_names(current_result.artifacts),
-		*_allocation_names(historical_result.artifacts),
+		*_allocation_names(frozen_result.artifacts),
 	]
 	normal_cleanup = inspect_segments(normal_names)
-	log.emit("windowed.interruption.started", "windowed: starting isolated interrupted-run proof")
+	log.emit(
+		"windowed.frozen_b10_reproduction.interruption.started",
+		"frozen-B10 reproduction: starting isolated interrupted-run cleanup proof",
+	)
 	interrupted_cleanup = _run_interrupted_cleanup(
-		historical_pipeline,
+		frozen_reproduction_pipeline,
 		scan_path,
 		root / "outputs" / "interrupted",
 		root / "proofs",
 		window_rows,
 	)
 	log.emit(
-		"windowed.interruption.completed",
-		f"windowed: interrupted cleanup {'passed' if interrupted_cleanup['passed'] else 'failed'}",
+		"windowed.frozen_b10_reproduction.interruption.completed",
+		f"frozen-B10 reproduction: interrupted cleanup "
+		f"{'passed' if interrupted_cleanup['passed'] else 'failed'}",
+		log_level=LOG.TIME if interrupted_cleanup["passed"] else LOG.ERROR,
 	)
 	proofs = {
 		"current_oracle_parity": current_parity,
@@ -737,7 +857,6 @@ def run_windowed_acceptance(
 			"b10_recon": frozen,
 			"recon_minimal": recon_minimal,
 		},
-		"peak_memory": memory,
 		"normal_shared_memory_cleanup": normal_cleanup,
 		"interrupted_shared_memory_cleanup": interrupted_cleanup,
 	}
@@ -755,14 +874,15 @@ def run_windowed_acceptance(
 			"window_rows": window_rows,
 			"extra_pad": AxisPad(y=0).as_dict(),
 			"workers": workers,
-			"current_pipeline": str(current_pipeline),
-			"historical_pipeline": str(historical_pipeline),
+			"current_oracle_reproduction_pipeline": str(current_reproduction_pipeline),
+			"frozen_b10_reproduction_pipeline": str(frozen_reproduction_pipeline),
 		},
 		"outputs": {
-			"named_oracle": str(legacy_output),
-			"current_pipeline": str(current_output),
-			"historical_pipeline": str(historical_output),
+			"current_oracle_script": str(oracle_output),
+			"current_oracle_reproduction": str(current_reproduction_output),
+			"frozen_b10_reproduction": str(frozen_reproduction_output),
 		},
+		"measurements": {"memory": memory_observations},
 		"proofs": proofs,
 	}
 
@@ -913,7 +1033,7 @@ def _intervals_overlap(summary) -> bool:
 
 def run_experiment_acceptance(
 		result_root: Path, *, scan_path: Path, source: Path, workers: int,
-		log: AcceptanceLog,
+		log: AcceptanceProgressRecorder,
 		y_start: int = _DEFAULT_EXPERIMENT_SELECTION[0],
 		y_stop: int = _DEFAULT_EXPERIMENT_SELECTION[1],
 ) -> dict[str, Any]:
@@ -1110,8 +1230,9 @@ def run_acceptance(
 	if result_root.exists() and any(result_root.iterdir()):
 		raise ValueError("acceptance result root must be new or empty")
 	result_root.mkdir(parents=True, exist_ok=True)
-	legacy_log.set_logdir(result_root / "legacy-logs")
-	log = AcceptanceLog(result_root / "acceptance-progress.jsonl")
+	shared_log.set_logdir(result_root / "logs")
+	shared_log.header()
+	log = AcceptanceProgressRecorder(result_root / "acceptance-progress.jsonl")
 	started = _utcnow()
 	log.emit("acceptance.started", "#185 assembled acceptance started", modes=modes)
 	resolved_flats = _discover_flat_root(dataset_root, flat_root)
@@ -1169,7 +1290,11 @@ def run_acceptance(
 			"message": str(error),
 			"traceback": traceback.format_exc(),
 		}
-		log.emit("acceptance.failed", f"#185 assembled acceptance failed: {error}")
+		log.emit(
+			"acceptance.failed",
+			f"#185 assembled acceptance failed: {error}",
+			log_level=LOG.ERROR,
+		)
 	finally:
 		record["finished_at"] = _utcnow()
 		record["passed"] = (
@@ -1185,6 +1310,7 @@ def run_acceptance(
 			"acceptance.completed",
 			f"#185 assembled acceptance {'passed' if record['passed'] else 'failed'}; "
 			f"record: {record_path}",
+			log_level=LOG.STATUS if record["passed"] else LOG.ERROR,
 		)
 	return record
 

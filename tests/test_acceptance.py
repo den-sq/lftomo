@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import h5py
 import numpy as np
@@ -6,36 +7,116 @@ import tifffile as tf
 import yaml
 
 from lftomo.acceptance import (
-	AcceptanceLog,
+	AcceptanceProgressRecorder,
+	ProcessTreeMemorySampler,
 	_experiment_config,
+	_memory_record_logger,
 	_prepare_scan,
+	_progress_observer,
 	_run_interrupted_cleanup,
+	_write_json,
 	audit_pin_events,
-	memory_proof,
 	run_experiment_acceptance,
 )
 from lftomo.runner import load_scan
-from lftomo.util.log import log
+from lftomo.util.log import LOG, log
 
 
-def test_memory_proof_keeps_the_three_components_independent():
-	proof = memory_proof(
-		{
-			"shared_memory_bytes": 100,
-			"per_worker_private_scratch_bytes": 20,
-			"external_engine_temporary_bytes": 30,
-		},
-		{
-			"shared_memory_bytes": 90,
-			"per_worker_private_scratch_bytes": 21,
-			"external_engine_temporary_bytes": 10,
-		},
+class RecordingLogger:
+	def __init__(self):
+		self.calls = []
+
+	def write(self, step, statement, log_level=LOG.TIME):
+		self.calls.append((step, statement, log_level))
+
+
+def test_acceptance_progress_uses_shared_logger_and_persists_structured_event(tmp_path):
+	logger = RecordingLogger()
+	progress = AcceptanceProgressRecorder(tmp_path / "progress.jsonl", logger=logger)
+
+	progress.emit("acceptance.started", "acceptance started", mode="windowed")
+
+	record = json.loads(progress.path.read_text(encoding="utf-8"))
+	assert record["event"] == "acceptance.started"
+	assert record["details"] == {"mode": "windowed"}
+	assert logger.calls == [("Acceptance", "acceptance started", LOG.TIME)]
+
+
+def test_acceptance_stage_progress_names_the_independent_run_and_window(tmp_path):
+	progress = AcceptanceProgressRecorder(
+		tmp_path / "progress.jsonl", logger=RecordingLogger(),
+	)
+	observer = _progress_observer(
+		progress,
+		"windowed.current_oracle_reproduction",
+		"current-oracle reproduction",
+		y_start=1068,
+		y_stop=1092,
+		window_rows=12,
+	)
+	stage = type("Stage", (), {"name": "read.hdf5_dxchange"})()
+
+	observer("started", 0, stage, None)
+	observer("completed", 0, stage, None)
+	observer("started", 0, stage, None)
+
+	records = [json.loads(line) for line in progress.path.read_text().splitlines()]
+	assert records[0]["message"].startswith(
+		"current-oracle reproduction: window 1/2 [1068, 1080)"
+	)
+	assert records[0]["details"]["core_interval"] == [1068, 1080]
+	assert records[2]["message"].startswith(
+		"current-oracle reproduction: window 2/2 [1080, 1092)"
 	)
 
-	assert not proof["passed"]
-	assert proof["components"]["shared_memory_bytes"]["within_bound"]
-	assert not proof["components"]["per_worker_private_scratch_bytes"]["within_bound"]
-	assert proof["components"]["external_engine_temporary_bytes"]["within_bound"]
+
+def test_memory_sampler_records_each_stage_without_turning_it_into_a_proof():
+	recorded = []
+	sampler = ProcessTreeMemorySampler(
+		y_start=1068, y_stop=1092, window_rows=12, on_record=recorded.append,
+	)
+	snapshots = iter((
+		{1: 100},
+		{1: 140, 2: 25},
+		{1: 120, 2: 35},
+	))
+	sampler._snapshot = lambda: next(snapshots)
+	stage = type("Stage", (), {"name": "read.test"})()
+
+	sampler.observer("started", 0, stage, None)
+	sampler._sample()
+	sampler.observer("completed", 0, stage, None)
+
+	assert sampler.records == recorded
+	assert len(recorded) == 1
+	observation = recorded[0]
+	assert observation["stage"] == "read.test"
+	assert observation["window_index"] == 0
+	assert observation["core_interval"] == [1068, 1080]
+	assert observation["dispatch_kind"] == "exempt"
+	assert observation["outcome"] == "completed"
+	assert observation["peak_process_private_delta_bytes"] == 40
+	assert observation["peak_process_tree_private_delta_bytes"] == 65
+	assert observation["peak_private_delta_bytes_by_pid"] == {"1": 40, "2": 35}
+	assert "passed" not in observation
+
+
+def test_stage_memory_observation_uses_shared_logger(tmp_path):
+	logger = RecordingLogger()
+	progress = AcceptanceProgressRecorder(tmp_path / "progress.jsonl", logger=logger)
+	emit = _memory_record_logger(progress, "windowed.frozen", "frozen reproduction")
+
+	emit({
+		"window_index": 1,
+		"core_interval": [1080, 1092],
+		"stage": "recon.gridrec",
+		"peak_process_tree_private_delta_bytes": 3 * 1024**2,
+	})
+
+	record = json.loads(progress.path.read_text(encoding="utf-8"))
+	assert record["event"] == "windowed.frozen.window.stage.memory_observed"
+	assert record["details"]["stage"] == "recon.gridrec"
+	assert "3.0 MiB" in logger.calls[0][1]
 
 
 def test_pin_audit_requires_balanced_pins_and_rejects_alias_reuse():
@@ -92,7 +173,7 @@ def test_acceptance_scan_materializes_the_named_oracles_presubtracted_flats(tmp_
 		tmp_path / "invocation",
 		flat_root,
 		"2" * 64,
-		AcceptanceLog(tmp_path / "progress.jsonl"),
+		AcceptanceProgressRecorder(tmp_path / "progress.jsonl", logger=RecordingLogger()),
 	)
 	scan, _ = load_scan(scan_path)
 	fields = [tf.imread(path) for path in scan.metadata["flat_fields"]]
@@ -197,7 +278,7 @@ def test_whole_volume_acceptance_proves_cache_isolation_end_to_end(tmp_path, mon
 		scan_path=scan_path,
 		source=data_path,
 		workers=2,
-		log=AcceptanceLog(tmp_path / "acceptance" / "progress.jsonl"),
+		log=AcceptanceProgressRecorder(tmp_path / "acceptance" / "progress.jsonl"),
 		y_start=2,
 		y_stop=6,
 	)
@@ -206,3 +287,9 @@ def test_whole_volume_acceptance_proves_cache_isolation_end_to_end(tmp_path, mon
 	assert set(record["proofs"]["shared_prefix_cache"]["statuses"]) == {"miss", "hit"}
 	assert record["proofs"]["pins_honored"]["pin_events_present"]
 	assert record["proofs"]["stable_fingerprints_and_no_cross_trial_contamination"]["passed"]
+	record_path = tmp_path / "acceptance-record.json"
+	_write_json(record_path, record)
+	persisted = json.loads(record_path.read_text(encoding="utf-8"))
+	assert persisted["proofs"]["concurrent_trials"]["attempt_intervals"][0][
+		"finished_at"
+	].endswith("+00:00")
