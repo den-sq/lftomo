@@ -1,12 +1,24 @@
-from dataclasses import astuple, replace, asdict, fields
+from dataclasses import astuple, is_dataclass, replace, asdict, fields
 from functools import cached_property
 from multiprocessing.shared_memory import SharedMemory, ShareableList
 from multiprocessing.managers import SharedMemoryManager, BaseManager
+from multiprocessing import util as multiprocessing_util
+import os
+import signal
 from sys import stdout
+import threading
 from time import sleep
 from typing import TextIO
 
 import numpy as np
+
+from lftomo.storage import (
+	FileBackedNPArray,
+	ManagedBuffer,
+	StorageBackend,
+	buffer_view,
+	is_advanced_index,
+)
 
 from .shapes import DataShape
 from .log import log, LOG
@@ -14,21 +26,61 @@ from .log import log, LOG
 MEM_INTERVAL_TIMER = 1.0
 
 
-def is_advanced_index(index):
-	if isinstance(index, tuple):
-		return any(isinstance(i, (list, np.ndarray)) and not isinstance(i, slice) for i in index)
-	return isinstance(index, (list, np.ndarray)) and not isinstance(index, slice)
+def _shape_tuple(shape) -> tuple[int, ...]:
+	return tuple(astuple(shape)) if is_dataclass(shape) else tuple(shape)
 
 
-class SharedNPManager(SharedMemoryManager):
+class SharedNPManager(SharedMemoryManager, StorageBackend):
 	""" Manages shared memory numpy arrays. """
+
+	@classmethod
+	def _run_server(cls, registry, address, authkey, serializer, writer,
+					initializer=None, initargs=()):
+		"""Run the manager outside the client process group with a death watch.
+
+		Experiment timeouts kill the isolated trial's complete process group. The
+		manager must live just long enough to unlink its tracked segments after the
+		owning client dies, including when that client receives ``SIGKILL``.
+
+		``SharedMemoryManager`` exposes no public owner-death hook.  This override
+		therefore deliberately mirrors CPython's ``BaseManager._run_server`` and
+		uses its ``shared_memory_context`` cleanup object; the crash-cleanup tests
+		exercise that assumption across the supported Python versions.
+		"""
+
+		signal.signal(signal.SIGINT, signal.SIG_IGN)
+		owner_pid = os.getppid()
+		if hasattr(os, "setsid"):
+			try:
+				os.setsid()
+			except OSError:
+				pass
+		if initializer is not None:
+			initializer(*initargs)
+		server = cls._Server(registry, address, authkey, serializer)
+
+		def cleanup_after_owner_exit():
+			while os.getppid() == owner_pid:
+				sleep(0.1)
+			try:
+				# CPython-private counterpart to SharedMemoryManager.shutdown().
+				server.shared_memory_context.unlink()
+			finally:
+				os._exit(0)
+
+		threading.Thread(target=cleanup_after_owner_exit, daemon=True).start()
+		writer.send(server.address)
+		writer.close()
+		multiprocessing_util.info("manager serving at %r", server.address)
+		server.serve_forever()
+
 	def __init__(self, *args,
-					queue_mem: list[tuple[DataShape, np.dtype] | tuple[tuple[DataShape, np.dtype]]] = [],
+					queue_mem: list[tuple[DataShape, np.dtype] | tuple[tuple[DataShape, np.dtype]]] | None = None,
 					**kwargs):
 		SharedMemoryManager.__init__(self, *args, **kwargs)
 
 		self.__mem_queue = []
-		for mem in queue_mem:
+		for mem in queue_mem or ():
 			if isinstance(mem[0], tuple):
 				self.__mem_queue.append([mem[0][0], mem[0][1]] + list(mem[1:]))
 			else:
@@ -36,10 +88,23 @@ class SharedNPManager(SharedMemoryManager):
 
 	def SharedNPArray(self, shape: DataShape, dtype: np.dtype, *create_with: tuple[DataShape, np.dtype]):
 		full_set = [(shape, dtype)] + list(create_with)
-		size = max([np.prod(astuple(shape)) * np.dtype(dtype).itemsize for (shape, dtype) in full_set])
+		size = max([np.prod(_shape_tuple(shape)) * np.dtype(dtype).itemsize for (shape, dtype) in full_set])
 		mem = self.SharedMemory(size)
 		result = [SharedNPArray(mem.name, shape, dtype) for (shape, dtype) in full_set]
 		return result[0] if len(result) == 1 else result
+
+	def allocate(self, shape, dtype, *, aliases=()):
+		"""Allocate manager-owned storage, optionally with logical aliases."""
+
+		return self.SharedNPArray(shape, dtype, *tuple(aliases))
+
+	def fork(self, source, *, label: str):
+		"""Return a manager-owned copy of an existing buffer."""
+
+		source_view = buffer_view(source)
+		result = self.allocate(getattr(source, "shape", source_view.shape), source_view.dtype)
+		result.array()[...] = source_view
+		return result
 
 	def clear_queue(self):
 		ar_mem = []
@@ -56,20 +121,20 @@ class SharedNPManager(SharedMemoryManager):
 		super().__exit__(*args, **kwargs)
 
 
-class SharedNPArray:
+class SharedNPArray(ManagedBuffer):
 	def __init__(self, name: str, shape: DataShape, dtype: np.dtype,
 					views: list = None, *, allocate: bool = False):
 		self.__name = name
 		self.__shape = shape
 		self.__dtype = np.dtype(dtype)
 		self.__views = [] if views is None else views
+		self.__shutdown = False
+		self.__allocated = allocate
+		self.__sm = None
 		if allocate:
 			self.__sm = SharedMemory(name=name, create=True, size=self.size())
-			self.__allocated = True
 		else:
 			self.__sm = SharedMemory(name=name)
-			self.__allocated = False
-		self.__shutdown = False
 
 	def size(self, swap=None):
 		""" Size of array in memory.
@@ -77,13 +142,18 @@ class SharedNPArray:
 			:param swap: Tuple overriding shape parameters, for a custom size.
 			:retval: Size in bytes.
 		"""
-		calc_shape = self.shape if swap is None else replace(self.shape, **asdict(swap))
-		return int(np.prod(astuple(calc_shape), dtype=np.float64) * self.__dtype.itemsize)
+		if swap is None:
+			calc_shape = self.shape
+		elif is_dataclass(self.shape):
+			calc_shape = replace(self.shape, **asdict(swap))
+		else:
+			calc_shape = swap
+		return int(np.prod(_shape_tuple(calc_shape), dtype=np.float64) * self.__dtype.itemsize)
 
 	def __load(self) -> np.ndarray:
 		"""Allocates a numpy array in the shared memory."""
 		if self.__sm.buf is not None:
-			self.__ar = np.ndarray(shape=astuple(self.__shape), dtype=self.dtype, buffer=self.__sm.buf)
+			self.__ar = np.ndarray(shape=_shape_tuple(self.__shape), dtype=self.dtype, buffer=self.__sm.buf)
 			if self.has_views:
 				ar = self.__ar
 				for view in self.__views:
@@ -99,21 +169,52 @@ class SharedNPArray:
 	def array(self):
 		return self.__load()
 
+	def __array__(self, dtype=None, copy=None):
+		"""Compatibility conversion; Stage code uses ``working_view`` explicitly."""
+
+		result = self.array()
+		if dtype is not None:
+			result = result.astype(dtype, copy=False)
+		if copy:
+			result = result.copy()
+		return result
+
 	def __enter__(self):
 		return self.__load()
 
 	def shutdown(self):
-		self.__sm.close()
-		if self.__allocated:
-			self.__sm.unlink()
-		self.__shutdown = True
+		if self.__shutdown:
+			return
+		if self.__sm is None:
+			self.__shutdown = True
+			return
+		try:
+			self.__sm.close()
+		finally:
+			if self.__allocated:
+				try:
+					self.__sm.unlink()
+				except FileNotFoundError:
+					pass
+			self.__shutdown = True
+
+	close = shutdown
 
 	def __del__(self):
-		if not self.__shutdown:
-			self.shutdown()
+		if not getattr(self, "_SharedNPArray__shutdown", True):
+			try:
+				self.shutdown()
+			except (AttributeError, BufferError, FileNotFoundError):
+				pass
 
 	def __exit__(self, *args, **kwargs):
-		del self.__ar
+		if hasattr(self, "_SharedNPArray__ar"):
+			del self.__ar
+
+	def __reduce__(self):
+		"""Pickle as a non-owning attachment, never with unlink authority."""
+
+		return type(self), (self.__name, self.__shape, self.__dtype, self.__views)
 
 	def __getitem__(self, view):
 		# Test if it would create a copy. non-ideal but we shouldn't be calling this much anwyay!
@@ -134,6 +235,12 @@ class SharedNPArray:
 	def dtype(self):
 		return self.__dtype
 
+	@property
+	def owns_unlink(self) -> bool:
+		"""Whether this process-local handle has unlink authority."""
+
+		return self.__allocated
+
 	@cached_property
 	def shape(self):
 		if len(self.__views) == 0:
@@ -141,9 +248,9 @@ class SharedNPArray:
 		else:
 			# non-ideal but we shouldn't be calling this much anwyay!
 			shape = self.__load().shape
-			if len(shape) == len(fields(self.__shape)):
+			if is_dataclass(self.__shape) and len(shape) == len(fields(self.__shape)):
 				shape = type(self.__shape)(*shape)
-			else:
+			elif is_dataclass(self.__shape):
 				shape = self.__shape.gen(fields(self.__shape)[-len(shape):])(*shape)
 			return shape
 

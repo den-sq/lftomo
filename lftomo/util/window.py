@@ -142,7 +142,7 @@ class TomoWindowIter(TFIter):
 		self.shape = shape
 		self.pad = pad
 		self.dtype = dtype
-		self.work_dtype = dtype
+		self.work_dtype = work_dtype
 		self.stop = dr.stop
 		self.substep = substep if substep is not None else dr.step.make_with(1)
 		self.__step_class = type(dr.step)

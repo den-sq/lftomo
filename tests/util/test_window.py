@@ -48,6 +48,7 @@ def test_creation():
 	assert tw.pos == Y(0)
 	assert tw.step == Y(24)
 	assert tw.shape == ProjOrder(1501, 1048, 2048)
+	assert tw.internal.dtype == np.dtype(work_dtype)
 
 	# Missing angle steps
 	with pytest.raises(Exception):

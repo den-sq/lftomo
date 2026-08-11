@@ -13,6 +13,7 @@ from lftomo.pipeline.core import (
 	RuntimeRequirement,
 	Stage,
 	StageContract,
+	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import (
@@ -158,7 +159,7 @@ class PaganinFilterStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinFilterStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin_filter expects a three-dimensional tomography array")
@@ -219,7 +220,7 @@ class NegativeLogStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("NegativeLogStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.negative_log expects a three-dimensional tomography array")
@@ -266,7 +267,7 @@ class BetaScaleStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BetaScaleStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.beta_scale expects a three-dimensional tomography array")
@@ -332,7 +333,7 @@ class PaganinStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin expects a (Y, Theta, X) sinogram array")
@@ -403,7 +404,7 @@ class PaganinPhaseAbsorptionStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinPhaseAbsorptionStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin_phase_absorption expects a (Y, Theta, X) sinogram array")
@@ -486,7 +487,7 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 			raise TypeError(
 				"BronnikovAidedCorrectionFilterStage currently requires the NumPy backend"
 			)
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.bac_correction expects a three-dimensional tomography array")
@@ -593,7 +594,7 @@ class BronnikovAidedCorrectionStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BronnikovAidedCorrectionStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.bac expects a three-dimensional tomography array")

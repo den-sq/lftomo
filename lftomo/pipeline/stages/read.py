@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from pathlib import Path
-from uuid import uuid4
 
 from natsort import natsorted
 import h5py
@@ -13,8 +13,8 @@ import tifffile as tf
 from lftomo.config import HDF5DxchangeProjections, StageConfig, TIFFStackProjections
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
+from lftomo.storage import PipelineRunContext
 from lftomo.util.io import distribute_tiff_read
-from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -211,16 +211,19 @@ class TIFFStackReadStage(Stage):
 			)
 		selected_count = count if len(files) == 1 else len(selected_files)
 		shape = ProjOrder(Theta=selected_count, Y=stop - self.y_start, X=columns)
-		memory = SharedNPArray(f"tiff-read-{uuid4().hex}", shape, dtype, allocate=True)
-		try:
+		context = (
+			nullcontext(state.storage) if state.storage is not None else PipelineRunContext()
+		)
+		with context as owner:
+			storage = owner if state.storage is not None else owner.storage
+			memory = storage.allocate(shape, dtype)
 			kwargs = {} if self.threads is None else {"thread_max": self.threads}
 			distribute_tiff_read(
 				selected_files, memory, y_start=self.y_start, y_stop=stop, **kwargs
 			)
 			with memory as values:
 				working = values.copy()
-		finally:
-			memory.shutdown()
+			memory.close()
 
 		if self.order == "sinogram":
 			working = np.transpose(working, (1, 0, 2)).copy()

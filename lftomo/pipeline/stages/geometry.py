@@ -7,7 +7,7 @@ import numpy as np
 from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import (
 	configured_layout,
@@ -42,7 +42,7 @@ def _contract(order: str | None = None, *, resamples_detector: bool = False,
 def _array(state: PipelineState, name: str) -> np.ndarray:
 	if state.backend.name != "numpy":
 		raise TypeError(f"{name} currently requires the NumPy backend")
-	data = np.asarray(state.working_array)
+	data = working_view(state)
 	if data.ndim != 3:
 		raise ValueError(f"{name} expects a (Y, Theta, X) sinogram array")
 	return data
@@ -239,7 +239,7 @@ class AffineSkewMovementStage(Stage):
 			return self.skew.run(self.movement.run(state))
 		if state.backend.name != "numpy":
 			raise TypeError("geometry.affine_skew_movement currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		if data.ndim != 3:
 			raise ValueError("geometry.affine_skew_movement expects a three-dimensional array")
 		input_layout = state.layout

@@ -13,7 +13,9 @@ from lftomo.pipeline.core import (
 	Stage,
 	StageContract,
 	StageObserver,
+	working_view,
 )
+from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.pipeline.planning import (
 	ExecutionKind,
@@ -82,6 +84,10 @@ __all__ = [
 	"Stage",
 	"StageContract",
 	"StageObserver",
+	"ManagedBuffer",
+	"PipelineRunContext",
+	"StorageBackend",
+	"working_view",
 	"CandidateLimitError",
 	"CandidateSpaceError",
 	"ContinuousDomainError",

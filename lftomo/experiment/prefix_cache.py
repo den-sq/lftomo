@@ -23,7 +23,8 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from lftomo.config import ConfigModel, StageConfig
-from lftomo.pipeline import Pipeline, PipelineState, Stage, StageObserver
+from lftomo.pipeline import Pipeline, PipelineState, Stage, StageObserver, working_view
+from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 
 from .models import canonical_json
 
@@ -51,6 +52,8 @@ def _sha256_bytes(value: bytes) -> str:
 def _fingerprint(value: Any) -> Any:
 	"""Return a deterministic identity document or reject an unsafe value."""
 
+	if isinstance(value, ManagedBuffer):
+		return _fingerprint(value.array())
 	if hasattr(value, "model_dump"):
 		return _fingerprint(value.model_dump(mode="python"))
 	if is_dataclass(value) and not isinstance(value, type):
@@ -394,19 +397,26 @@ def _run_stages(
 
 
 def _clone_initial_state(state: PipelineState) -> PipelineState:
-	working = np.asarray(state.working_array)
+	working = working_view(state)
 	return PipelineState(
 		working_array=working.copy(),
 		scan=state.scan.model_copy(deep=True),
 		recon=state.recon.model_copy(deep=True),
 		artifacts=copy.deepcopy(state.artifacts),
 		backend=state.backend,
+		storage=state.storage,
 		layout=state.layout,
 		domain=state.domain,
 	)
 
 
 def _equivalent(left: Any, right: Any, *, rtol: float, atol: float) -> bool:
+	if isinstance(left, ManagedBuffer) or isinstance(right, ManagedBuffer):
+		try:
+			left = buffer_view(left)
+			right = buffer_view(right)
+		except (OSError, TypeError, ValueError):
+			return False
 	if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
 		try:
 			np.testing.assert_allclose(np.asarray(left), np.asarray(right), rtol=rtol, atol=atol)
@@ -541,7 +551,7 @@ class PrefixCacheStore:
 				f"cache memory bound {self.policy.max_memory_bytes}"
 			)
 		try:
-			working = np.load(entry / "working.npy", mmap_mode="r", allow_pickle=False)
+			mapped = FileBackedNPArray(entry / "working.npy")
 			with (entry / "state.pkl").open("rb") as stream:
 				payload = pickle.load(stream)
 		except Exception as error:
@@ -551,9 +561,10 @@ class PrefixCacheStore:
 		}.issubset(payload):
 			raise PrefixCacheIntegrityError("snapshot state payload is incomplete")
 		if requires_copy:
-			working = np.array(working, copy=True)
+			working = np.array(mapped.array(), copy=True)
+			mapped.close()
 		else:
-			working.flags.writeable = False
+			working = mapped
 		recon = current.recon.model_copy(deep=True)
 		recon.metadata = copy.deepcopy(payload["recon_metadata"])
 		state = PipelineState(
@@ -562,6 +573,7 @@ class PrefixCacheStore:
 			recon=recon,
 			artifacts=copy.deepcopy(payload["artifacts"]),
 			backend=current.backend,
+			storage=current.storage,
 			layout=payload["layout"],
 			domain=payload["domain"],
 		)
@@ -580,7 +592,7 @@ class PrefixCacheStore:
 		try:
 			array_path = build / "working.npy"
 			with array_path.open("xb") as stream:
-				np.save(stream, np.asarray(state.working_array), allow_pickle=False)
+				np.save(stream, working_view(state), allow_pickle=False)
 				stream.flush()
 				os.fsync(stream.fileno())
 			state_path = build / "state.pkl"
@@ -848,7 +860,7 @@ class PrefixCacheStore:
 			)
 			if not (
 				_equivalent(
-					np.asarray(check.working_array), np.asarray(fork.working_array),
+					working_view(check), working_view(fork),
 					rtol=self.policy.verify_rtol, atol=self.policy.verify_atol,
 				)
 				and _equivalent(

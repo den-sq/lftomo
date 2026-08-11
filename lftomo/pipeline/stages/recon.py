@@ -7,7 +7,7 @@ import os
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.runtime import ASTRA_RUNTIME_REQUIREMENT, tomopy_requirement
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
@@ -147,7 +147,7 @@ class GridrecStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("GridrecStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		if data.ndim != 3:
 			raise ValueError("recon.gridrec expects a three-dimensional tomography array")
 		sinogram_order = _state_sinogram_order(state, self.sinogram_order, self.name)
@@ -249,7 +249,7 @@ class AstraCudaStage(GridrecStage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if not state.backend.supports_gpu:
 			raise TypeError(f"{self.name} requires a GPU-capable backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		if data.ndim != 3:
 			raise ValueError(f"{self.name} expects a three-dimensional tomography array")
 		sinogram_order = _state_sinogram_order(state, self.sinogram_order, self.name)

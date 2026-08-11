@@ -16,9 +16,29 @@ Each Stage declares a `StageContract` before it runs:
   requirement
 
 `PipelineState` carries the working array, validated `Scan` and `Recon` config
-models, an artifact registry, and the selected backend. The initial backends are
+models, an artifact registry, the selected compute backend, and the run's
+storage allocator. The initial compute backends are
 `NumpyBackend` and `DaskStubBackend`. The Dask stub proves the ABC can carry a
 Dask-shaped array without introducing a scheduler dependency.
+
+## Managed working storage
+
+Production runs enter `PipelineRunContext`, which owns one `SharedNPManager`
+for the complete run. `SharedNPManager` implements `StorageBackend` directly,
+and the handles it returns are `SharedNPArray` objects implementing
+`ManagedBuffer` directly; there is no wrapper around the existing shared-memory
+objects. Pipeline Stages open the process-local NumPy view with
+`working_view(state)`. Plain NumPy arrays remain valid for hermetic Stage tests.
+
+All production Stage allocations go through the manager. A handle sent to a
+worker is a non-owning attachment and cannot unlink the segment. Normal and
+exceptional context exit unlink all tracked segments. The manager also runs
+outside an isolated trial's process group and watches its owner, allowing it to
+unlink tracked segments when a timed-out trial is terminated with `SIGKILL`.
+
+The prefix cache's immutable path uses a separate `FileBackedNPArray`, which is
+a first-class read-only `ManagedBuffer`. Workers reopen its `.npy` mapping by
+path; mutating suffixes continue to receive an independent writable copy.
 
 ## Validation Rules
 

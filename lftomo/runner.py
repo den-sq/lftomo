@@ -29,6 +29,7 @@ from lftomo.pipeline import (
 	CandidateLimitError,
 	NumpyBackend,
 	Pipeline,
+	PipelineRunContext,
 	PipelineState,
 	Stage,
 	StageObserver,
@@ -464,30 +465,32 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		))
 	results = []
 	for run, concrete, resolved_document, run_scan, initial_artifacts, stages in prepared:
-		state = PipelineState(
-			working_array=np.empty((0,), dtype=np.float32),
-			scan=run_scan,
-			recon=concrete,
-			artifacts=dict(initial_artifacts),
-			backend=backend,
-		)
-		if state_executor is None:
-			state = Pipeline(
-				stages,
+		with PipelineRunContext() as run_context:
+			state = PipelineState(
+				working_array=np.empty((0,), dtype=np.float32),
+				scan=run_scan,
+				recon=concrete,
+				artifacts=dict(initial_artifacts),
 				backend=backend,
-				validation_mode="complete",
-				observer=stage_observer,
-			).run(state)
-		else:
-			state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
-		results.append(RunResult(
-			run.index,
-			run.parameters,
-			concrete.output_path,
-			dict(state.artifacts),
-			candidate_key=run.candidate_key,
-			resolved_recon=resolved_document,
-		))
+				storage=run_context.storage,
+			)
+			if state_executor is None:
+				state = Pipeline(
+					stages,
+					backend=backend,
+					validation_mode="complete",
+					observer=stage_observer,
+				).run(state)
+			else:
+				state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
+			results.append(RunResult(
+				run.index,
+				run.parameters,
+				concrete.output_path,
+				dict(state.artifacts),
+				candidate_key=run.candidate_key,
+				resolved_recon=resolved_document,
+			))
 	return results
 
 

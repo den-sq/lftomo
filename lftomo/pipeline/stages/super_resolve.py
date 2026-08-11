@@ -23,6 +23,7 @@ from lftomo.pipeline.core import (
 	RuntimeRequirement,
 	Stage,
 	StageContract,
+	working_view,
 )
 from lftomo.util.shapes import SinoOrder
 
@@ -52,7 +53,7 @@ def _contract(
 def _dense_inputs(state: PipelineState) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 	if state.backend.name != "numpy":
 		raise TypeError("super-resolution Stages currently require the NumPy backend")
-	sinograms = np.asarray(state.working_array, dtype=np.float32)
+	sinograms = working_view(state).astype(np.float32, copy=False)
 	if sinograms.ndim != 3:
 		raise ValueError("super-resolution Stages expect a (Y, Theta, X) sinogram array")
 	volume = np.transpose(sinograms, (1, 0, 2))

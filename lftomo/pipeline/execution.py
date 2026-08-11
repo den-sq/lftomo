@@ -8,7 +8,7 @@ from typing import Callable, Sequence
 
 import numpy as np
 
-from lftomo.pipeline.core import PipelineState, Stage
+from lftomo.pipeline.core import PipelineState, Stage, working_view
 from lftomo.pipeline.stages._layout import n_rows, sinogram_scratch, sinogram_view
 from lftomo.util.shapes import ProjOrder
 
@@ -29,7 +29,7 @@ def run_bounded_sinogram_segment(
 		raise ValueError("bounded sinogram execution requires ProjOrder input")
 	if max_workers < 1:
 		raise ValueError("bounded sinogram workers must be positive")
-	data = np.asarray(state.working_array)
+	data = working_view(state)
 	if data.ndim != 3:
 		raise ValueError("bounded sinogram execution expects a three-dimensional array")
 	for stage in stages:

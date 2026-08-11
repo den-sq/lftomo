@@ -11,6 +11,7 @@ import numpy as np
 
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
+from lftomo.storage import StorageBackend, buffer_view
 
 
 @dataclass(frozen=True)
@@ -191,6 +192,7 @@ class PipelineState:
 	recon: Recon
 	artifacts: dict[str, Any] = field(default_factory=dict)
 	backend: Backend = field(default_factory=NumpyBackend)
+	storage: StorageBackend | None = None
 	# Fragment callers may omit axes for legacy compatibility. Complete pipelines
 	# always acquire both from their read Stage before data processing begins.
 	layout: type[Any] | None = None
@@ -211,9 +213,16 @@ class PipelineState:
 			recon=self.recon,
 			artifacts=dict(self.artifacts),
 			backend=self.backend,
+			storage=self.storage,
 			layout=self.layout if layout is None else layout,
 			domain=self.domain if domain is None else domain,
 		)
+
+
+def working_view(state: PipelineState) -> np.ndarray:
+	"""Return the process-local NumPy view of the current working buffer."""
+
+	return buffer_view(state.working_array)
 
 
 class Stage(ABC):

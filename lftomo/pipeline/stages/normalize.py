@@ -17,7 +17,7 @@ from lftomo.calibration import (
 	optimal_transport_interp,
 )
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import (
 	configured_layout,
@@ -65,7 +65,7 @@ class WeightedNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("WeightedNormalizeStage currently requires the NumPy backend")
 
-		working = np.asarray(state.working_array).astype(np.float32, copy=False)
+		working = working_view(state).astype(np.float32, copy=False)
 		flats = np.asarray(state.scan.metadata["flat_fields"])
 		layout = resolve_layout(state, self.order, self.name)
 		if working.ndim != 3:
@@ -136,7 +136,7 @@ def _tracking_fields(
 	if "flat_fields" not in state.scan.metadata:
 		raise ValueError("normalize.beam_tracking requires a calibration bundle or legacy flat_fields")
 	fields = np.asarray(state.scan.metadata["flat_fields"])
-	if fields.shape != (4, y_size, np.asarray(state.working_array).shape[2]):
+	if fields.shape != (4, y_size, working_view(state).shape[2]):
 		raise ValueError("legacy flat_fields must have shape (4, Y, X) for beam tracking")
 	return tuple(fields)
 
@@ -182,7 +182,7 @@ class BeamTrackingNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BeamTrackingNormalizeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array).astype(np.float32, copy=False)
+		data = working_view(state).astype(np.float32, copy=False)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_tracking expects a three-dimensional array")
@@ -265,7 +265,7 @@ class BeamKeyframesNormalizeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		data = np.asarray(state.working_array).astype(np.float32, copy=False)
+		data = working_view(state).astype(np.float32, copy=False)
 		layout = resolve_layout(state, self.order, self.name)
 		y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
 		start, stop = _calibration_y_window(state, y_size)
@@ -399,7 +399,7 @@ class BeamBasisFitNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BeamBasisFitNormalizeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array).astype(np.float32, copy=False)
+		data = working_view(state).astype(np.float32, copy=False)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_basis_fit expects a three-dimensional array")
@@ -546,7 +546,7 @@ class ThetaSwitchNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("ThetaSwitchNormalizeStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array).astype(np.float32, copy=False)
+		data = working_view(state).astype(np.float32, copy=False)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("normalize.theta_switch expects a three-dimensional tomography array")

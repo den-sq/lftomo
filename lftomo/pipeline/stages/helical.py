@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import configured_layout, n_projections, n_rows, resolve_layout
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -77,7 +77,7 @@ class HelicalIndexRemapStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("HelicalIndexRemapStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("helical_correct.index_remap expects a (Y, Theta, X) sinogram array")
