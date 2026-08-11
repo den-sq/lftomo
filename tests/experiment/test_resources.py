@@ -15,9 +15,9 @@ from lftomo.experiment import (
 from lftomo.experiment.runner import (
 	ExperimentInputs,
 	IndependentExperimentRunner,
-	TrialExecution,
 )
 from lftomo.experiment.store import PersistedExperimentRunner
+from tests.experiment.process_helpers import AlphaExecutor
 
 
 HASHES = [f"{index:064x}" for index in range(1, 5)]
@@ -179,7 +179,7 @@ def test_runner_rejects_unsafe_roots_before_store_claim_or_execution(tmp_path):
 		config(),
 		inputs(),
 		result,
-		lambda *_args: calls.append("execute") or TrialExecution(metrics={"quality": 1}),
+		AlphaExecutor(quality=1),
 		path_resources=PathResourceRequest(
 			result_root=result,
 			scratch_root=result,
@@ -195,11 +195,8 @@ def test_runner_rejects_unsafe_roots_before_store_claim_or_execution(tmp_path):
 
 def test_manifest_records_accepted_report_and_compatible_scratch_relocation(tmp_path):
 	result = tmp_path / "result"
-	calls = []
-
-	def execute(*_args):
-		calls.append("execute")
-		return TrialExecution(metrics={"quality": 1})
+	call_root = tmp_path / "calls"
+	execute = AlphaExecutor(quality=1, call_root=call_root)
 
 	first_runner = IndependentExperimentRunner(
 		config(), inputs(), result, execute,
@@ -219,7 +216,7 @@ def test_manifest_records_accepted_report_and_compatible_scratch_relocation(tmp_
 	second = PersistedExperimentRunner(second_runner).run()
 	manifest = json.loads((result / "manifest.json").read_text(encoding="utf-8"))
 
-	assert calls == ["execute"]
+	assert len(list(call_root.glob("*.json"))) == 1
 	assert second.attempts == first.attempts
 	assert second.preflight.path_resources.root("scratch").resolved_path == (
 		tmp_path / "scratch-b"

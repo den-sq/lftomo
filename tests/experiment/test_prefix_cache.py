@@ -758,9 +758,104 @@ def test_bounds_bypass_before_cache_creation(tmp_path):
 	assert not policy.scratch.exists()
 
 
-def test_full_runner_metrics_outputs_leaderboard_and_identity_are_equivalent(tmp_path):
-	from lftomo.pipeline.stages import create_stage
+class FullRunnerCachedExecutor:
+	def __init__(self, source, policy):
+		self.source = source
+		self.policy = policy
+		self.cache = PrefixCachingPipelineExecutor(policy)
+		self.decisions = {}
 
+	def __getstate__(self):
+		state = self.__dict__.copy()
+		state.pop("cache", None)
+		return state
+
+	def __setstate__(self, state):
+		self.__dict__.update(state)
+		self.cache = PrefixCachingPipelineExecutor(self.policy)
+
+	def plan_prefix_cache(self, trials):
+		from lftomo.pipeline.stages import create_stage
+
+		planned = []
+		for trial in trials:
+			stages = tuple(create_stage(item) for item in trial.identity.resolved_recon.pipeline)
+			planned.append(PrefixPlanningCandidate(
+				candidate_id=trial.identity.trial_id.value,
+				configs=tuple(trial.identity.resolved_recon.pipeline),
+				stages=stages,
+				share_identity={
+					"dataset": trial.identity.dataset,
+					"configuration": trial.identity.configuration,
+					"code": trial.identity.code,
+					"environment": trial.identity.environment,
+					"fidelity": trial.identity.fidelity,
+				},
+				estimated_snapshot_bytes=self.source.nbytes,
+			))
+		plan = plan_common_prefixes(planned, self.policy)
+		self.decisions = {item.candidate_id: item for item in plan.decisions}
+		return plan
+
+	def __call__(self, identity, output_root):
+		from lftomo.pipeline.stages import create_stage
+
+		configs = tuple(identity.resolved_recon.pipeline)
+		stages = tuple(create_stage(item) for item in configs)
+		initial = PipelineState(
+			working_array=self.source.copy(), scan=scan(), recon=identity.resolved_recon,
+			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+		)
+		result, event = self.cache.execute(
+			self.decisions[identity.trial_id.value], initial, stages, configs,
+			runtime_identity={
+				"dataset": identity.dataset,
+				"configuration": identity.configuration,
+				"code": identity.code,
+				"environment": identity.environment,
+				"fidelity": identity.fidelity,
+			},
+		)
+		path = output_root / "screen.npy"
+		path.parent.mkdir(parents=True, exist_ok=True)
+		np.save(path, np.asarray(result.working_array))
+		return TrialExecution(
+			metrics={"mean": float(np.asarray(result.working_array).mean())},
+			artifacts={"prefix_cache": event.model_dump(mode="json")},
+			outputs=(OutputRecord(
+				role="screening_output", path=path, bytes=path.stat().st_size,
+			),),
+		)
+
+
+class FullRunnerIndependentExecutor:
+	def __init__(self, source):
+		self.source = source
+
+	def plan_prefix_cache(self, _trials):
+		return {"enabled": False, "decisions": []}
+
+	def __call__(self, identity, output_root):
+		from lftomo.pipeline.stages import create_stage
+
+		configs = tuple(identity.resolved_recon.pipeline)
+		stages = tuple(create_stage(item) for item in configs)
+		result = Pipeline(list(stages)).run(PipelineState(
+			working_array=self.source.copy(), scan=scan(), recon=identity.resolved_recon,
+			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+		))
+		path = output_root / "screen.npy"
+		path.parent.mkdir(parents=True, exist_ok=True)
+		np.save(path, np.asarray(result.working_array))
+		return TrialExecution(
+			metrics={"mean": float(np.asarray(result.working_array).mean())},
+			outputs=(OutputRecord(
+				role="screening_output", path=path, bytes=path.stat().st_size,
+			),),
+		)
+
+
+def test_full_runner_metrics_outputs_leaderboard_and_identity_are_equivalent(tmp_path):
 	rng = np.random.default_rng(11)
 	source = rng.random((8, 3, 16), dtype=np.float32) * 0.4 + 0.6
 	config_model = ExperimentConfig.model_validate({
@@ -803,99 +898,22 @@ def test_full_runner_metrics_outputs_leaderboard_and_identity_are_equivalent(tmp
 		),
 	)
 
-	class CachedTrialExecutor:
-		def __init__(self, policy):
-			self.cache = PrefixCachingPipelineExecutor(policy)
-			self.policy = policy
-			self.decisions = {}
-			self.events = []
-			self.lock = threading.Lock()
-
-		def plan_prefix_cache(self, trials):
-			planned = []
-			for trial in trials:
-				stages = tuple(create_stage(item) for item in trial.identity.resolved_recon.pipeline)
-				planned.append(PrefixPlanningCandidate(
-					candidate_id=trial.identity.trial_id.value,
-					configs=tuple(trial.identity.resolved_recon.pipeline),
-					stages=stages,
-					share_identity={
-						"dataset": trial.identity.dataset,
-						"configuration": trial.identity.configuration,
-						"code": trial.identity.code,
-						"environment": trial.identity.environment,
-						"fidelity": trial.identity.fidelity,
-					},
-					estimated_snapshot_bytes=source.nbytes,
-				))
-			plan = plan_common_prefixes(planned, self.policy)
-			self.decisions = {item.candidate_id: item for item in plan.decisions}
-			return plan
-
-		def __call__(self, identity, output_root):
-			configs = tuple(identity.resolved_recon.pipeline)
-			stages = tuple(create_stage(item) for item in configs)
-			initial = PipelineState(
-				working_array=source.copy(), scan=scan(), recon=identity.resolved_recon,
-				layout=ProjOrder, domain=DataDomain.TRANSMISSION,
-			)
-			result, event = self.cache.execute(
-				self.decisions[identity.trial_id.value], initial, stages, configs,
-				runtime_identity={
-					"dataset": identity.dataset,
-					"configuration": identity.configuration,
-					"code": identity.code,
-					"environment": identity.environment,
-					"fidelity": identity.fidelity,
-				},
-			)
-			with self.lock:
-				self.events.append(event)
-			path = output_root / "screen.npy"
-			path.parent.mkdir(parents=True, exist_ok=True)
-			np.save(path, np.asarray(result.working_array))
-			return TrialExecution(
-				metrics={"mean": float(np.asarray(result.working_array).mean())},
-				artifacts={"prefix_cache": event.model_dump(mode="json")},
-				outputs=(OutputRecord(
-					role="screening_output", path=path, bytes=path.stat().st_size,
-				),),
-			)
-
-	class IndependentTrialExecutor(CachedTrialExecutor):
-		def __init__(self):
-			self.events = []
-
-		def plan_prefix_cache(self, trials):
-			return {"enabled": False, "decisions": []}
-
-		def __call__(self, identity, output_root):
-			configs = tuple(identity.resolved_recon.pipeline)
-			stages = tuple(create_stage(item) for item in configs)
-			result = Pipeline(list(stages)).run(PipelineState(
-				working_array=source.copy(), scan=scan(), recon=identity.resolved_recon,
-				layout=ProjOrder, domain=DataDomain.TRANSMISSION,
-			))
-			path = output_root / "screen.npy"
-			path.parent.mkdir(parents=True, exist_ok=True)
-			np.save(path, np.asarray(result.working_array))
-			return TrialExecution(
-				metrics={"mean": float(np.asarray(result.working_array).mean())},
-				outputs=(OutputRecord(
-					role="screening_output", path=path, bytes=path.stat().st_size,
-				),),
-			)
-
-	cached_executor = CachedTrialExecutor(enabled_policy(tmp_path / "shared"))
+	cached_executor = FullRunnerCachedExecutor(
+		source, enabled_policy(tmp_path / "shared"),
+	)
 	cached = IndependentExperimentRunner(
 		config_model, experiment_inputs, tmp_path / "cached", cached_executor,
 	).run()
 	independent = IndependentExperimentRunner(
-		config_model, experiment_inputs, tmp_path / "independent", IndependentTrialExecutor(),
+		config_model, experiment_inputs, tmp_path / "independent",
+		FullRunnerIndependentExecutor(source),
 	).run()
 
 	assert cached.preflight.prefix_cache["enabled"] is True
-	assert {event.status for event in cached_executor.events} == {"miss", "hit"}
+	assert {
+		attempt.observations["artifacts"]["prefix_cache"]["status"]
+		for attempt in cached.attempts
+	} == {"miss", "hit"}
 	assert [item.trial_id for item in cached.leaderboard] == [
 		item.trial_id for item in independent.leaderboard
 	]

@@ -7,9 +7,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
+import pickle
 import resource
+import signal
+import threading
 import time
 import traceback
 from typing import Any, Callable, Literal
@@ -63,6 +67,7 @@ from .events import (
 	CancellationDetails,
 	CancellationToken,
 	ExecutionContext,
+	ExperimentCancelled,
 	FailureContext,
 	ProgressInfrastructureError,
 	ProgressEventWriter,
@@ -163,6 +168,7 @@ class ExperimentPreflight(ConfigModel):
 	unique_candidates: int
 	deduplicated_coordinates: int
 	max_concurrency: int
+	parallelism: dict[str, JsonValue]
 	estimated_output_bytes: int | None
 	trial_output_roots: tuple[Path, ...]
 	candidates: tuple[dict[str, JsonValue], ...]
@@ -184,9 +190,121 @@ class TrialExecution(ConfigModel):
 		ge=0,
 		description=(
 			"Executor-measured per-trial peak memory. When omitted, the runner records "
-			"the process-wide RUSAGE_SELF high-water mark instead."
+			"the isolated trial process RUSAGE_SELF high-water mark instead."
 		),
 	)
+
+
+class _ProcessCancellationToken:
+	"""Child-side projection of the coordinator cancellation event."""
+
+	def __init__(self, event):
+		self._event = event
+
+	@property
+	def requested(self) -> bool:
+		return self._event.is_set()
+
+	@property
+	def reason(self) -> str | None:
+		return "trial cancellation requested" if self.requested else None
+
+	def raise_if_requested(self) -> None:
+		if self.requested:
+			raise ExperimentCancelled(self.reason)
+
+
+class _ProcessMessageChannel:
+	"""Serialize child progress and results over one ordered pipe."""
+
+	def __init__(self, connection):
+		self.connection = connection
+		self._lock = threading.Lock()
+
+	def send(self, kind: str, payload: Any) -> None:
+		with self._lock:
+			self.connection.send((kind, payload))
+
+
+class _ProcessProgressSink:
+	def __init__(self, channel: _ProcessMessageChannel):
+		self.channel = channel
+
+	def __call__(self, progress: AttemptProgress) -> None:
+		self.channel.send("progress", progress.model_dump(mode="json"))
+
+
+class _ProcessEventWriter:
+	"""Child-side event publisher; ordering and persistence stay in the coordinator."""
+
+	def __init__(self, channel: _ProcessMessageChannel):
+		self.channel = channel
+		self.secrets = active_secret_values()
+
+	def emit(self, kind: str, message: str, **fields: Any) -> None:
+		self.channel.send("event", {
+			"kind": kind,
+			"message": message,
+			"fields": fields,
+		})
+
+
+class TrialProcessError(RuntimeError):
+	"""Serializable child failure re-raised at the coordinator boundary."""
+
+	def __init__(self, failure_type: str, message: str, traceback_text: str | None,
+			peak_memory_bytes: int | None = None):
+		super().__init__(message)
+		self.failure_type = failure_type
+		self.traceback_text = traceback_text
+		self.peak_memory_bytes = peak_memory_bytes
+
+
+def _trial_process_main(
+		executor: "TrialExecutor",
+		identity: TrialIdentity,
+		output_root: Path,
+		progress: AttemptProgress,
+		connection,
+		cancellation_event,
+) -> None:
+	"""Execute exactly one candidate in a fresh, killable process session."""
+
+	if hasattr(os, "setsid"):
+		try:
+			os.setsid()
+		except OSError:
+			pass
+	channel = _ProcessMessageChannel(connection)
+	context = ExecutionContext(
+		writer=_ProcessEventWriter(channel),
+		progress_sink=_ProcessProgressSink(channel),
+		cancellation=_ProcessCancellationToken(cancellation_event),
+		progress=progress,
+	)
+	memory_before = _peak_memory_bytes()
+	try:
+		with bind_execution_context(context):
+			execution = executor(identity, output_root)
+		if not isinstance(execution, TrialExecution):
+			execution = TrialExecution.model_validate(execution)
+		if execution.peak_memory_bytes is None:
+			execution = execution.model_copy(update={
+				"peak_memory_bytes": max(memory_before, _peak_memory_bytes()),
+			})
+		channel.send("result", execution.model_dump(mode="json"))
+	except BaseException as error:
+		secrets = active_secret_values()
+		channel.send("failure", {
+			"type": type(error).__name__,
+			"message": str(redact_secrets(
+				str(error) or type(error).__name__, secrets=secrets,
+			)),
+			"traceback": str(redact_secrets(traceback.format_exc(), secrets=secrets)),
+			"peak_memory_bytes": max(memory_before, _peak_memory_bytes()),
+		})
+	finally:
+		connection.close()
 
 
 class LeaderboardEntry(ConfigModel):
@@ -233,8 +351,58 @@ def _peak_memory_bytes() -> int:
 	return int(usage if os.uname().sysname == "Darwin" else usage * 1024)
 
 
+def _terminate_trial_process(process: multiprocessing.Process) -> None:
+	"""Terminate one trial and every descendant it created, then reap it."""
+
+	# Runtime installations declare psutil, but importing it only on this failure
+	# path keeps lightweight configuration/model tooling dependency-minimal.
+	import psutil
+
+	if process.pid is None:
+		return
+	try:
+		root = psutil.Process(process.pid)
+		descendants = root.children(recursive=True)
+	except (psutil.NoSuchProcess, ProcessLookupError):
+		descendants = []
+	for child in reversed(descendants):
+		try:
+			child.terminate()
+		except (psutil.NoSuchProcess, ProcessLookupError):
+			pass
+	try:
+		if hasattr(os, "killpg") and os.getpgid(process.pid) == process.pid:
+			os.killpg(process.pid, signal.SIGTERM)
+		else:
+			process.terminate()
+	except (ProcessLookupError, psutil.NoSuchProcess):
+		pass
+	process.join(timeout=2)
+	alive = []
+	for child in descendants:
+		try:
+			if child.is_running():
+				alive.append(child)
+		except psutil.NoSuchProcess:
+			pass
+	for child in alive:
+		try:
+			child.kill()
+		except (psutil.NoSuchProcess, ProcessLookupError):
+			pass
+	if process.is_alive():
+		try:
+			if hasattr(os, "killpg") and os.getpgid(process.pid) == process.pid:
+				os.killpg(process.pid, signal.SIGKILL)
+			else:
+				process.kill()
+		except ProcessLookupError:
+			pass
+		process.join(timeout=2)
+
+
 class IndependentExperimentRunner:
-	"""Execute every selected trial with independent state and atomic records."""
+	"""Execute selected trials in isolated spawned processes with atomic records."""
 
 	def __init__(
 		self,
@@ -337,6 +505,32 @@ class IndependentExperimentRunner:
 			workers = min(workers, max(1, budget // memory))
 		return max(1, workers)
 
+	@staticmethod
+	def _parallelism_plan(
+			prepared: tuple[PreparedTrial, ...] | list[PreparedTrial],
+			candidate_process_limit: int,
+	) -> dict[str, JsonValue]:
+		"""Declare the independent candidate and per-candidate Stage budgets."""
+
+		default_stage_workers = min(4, os.cpu_count() or 1)
+		by_candidate = {
+			item.selected.candidate_key: (
+				item.identity.resolved_recon.process_workers or default_stage_workers
+			)
+			for item in prepared
+		}
+		active_limit = min(candidate_process_limit, len(prepared))
+		stage_worker_upper_bound = sum(
+			sorted(by_candidate.values(), reverse=True)[:active_limit]
+		)
+		return {
+			"candidate_process_limit": candidate_process_limit,
+			"pipeline_process_workers_scope": "per_candidate",
+			"pipeline_process_workers_by_candidate": by_candidate,
+			"pipeline_process_worker_upper_bound": stage_worker_upper_bound,
+			"coordinator_divides_pipeline_workers": False,
+		}
+
 	def prepare(self) -> tuple[ExperimentPreflight, tuple[PreparedTrial, ...]]:
 		"""Select, validate, identify, and guard trials without reading dataset payloads."""
 
@@ -422,6 +616,12 @@ class IndependentExperimentRunner:
 		path_request = path_request.model_copy(update=path_updates)
 		self.path_resources = path_request
 		path_report = require_path_resources(path_request)
+		try:
+			pickle.dumps(self.executor)
+		except Exception as error:
+			raise TypeError(
+				"trial executors must be pickleable for spawned process isolation"
+			) from error
 		preflight = ExperimentPreflight(
 			experiment_id=self.config.experiment_id,
 			fidelity_id=self.fidelity_id,
@@ -431,6 +631,7 @@ class IndependentExperimentRunner:
 			unique_candidates=len(selected),
 			deduplicated_coordinates=sum(item.duplicate_coordinates for item in selected),
 			max_concurrency=workers,
+			parallelism=self._parallelism_plan(prepared, workers),
 			estimated_output_bytes=total_output,
 			trial_output_roots=tuple(item.output_root for item in prepared),
 			candidates=tuple({
@@ -512,6 +713,128 @@ class IndependentExperimentRunner:
 				**fields,
 			)
 
+	def _consume_trial_message(
+			self, kind: str, payload: Any, context: ExecutionContext,
+	) -> TrialExecution | TrialProcessError | None:
+		if kind == "progress":
+			progress = AttemptProgress.model_validate(payload)
+			context.progress = progress
+			self.progress_sink(progress)
+			return None
+		if kind == "event":
+			if self.event_writer is not None:
+				self.event_writer.emit(
+					payload["kind"], payload["message"], **payload["fields"],
+				)
+			return None
+		if kind == "result":
+			return TrialExecution.model_validate(payload)
+		if kind == "failure":
+			return TrialProcessError(
+				payload["type"], payload["message"], payload.get("traceback"),
+				payload.get("peak_memory_bytes"),
+			)
+		raise ProgressInfrastructureError(f"unknown trial-process message {kind!r}")
+
+	def _execute_in_process(
+			self, identity: TrialIdentity, output_root: Path,
+			context: ExecutionContext,
+	) -> TrialExecution:
+		"""Execute candidate code in a spawned process; keep records in this process."""
+
+		mp_context = multiprocessing.get_context("spawn")
+		parent_connection, child_connection = mp_context.Pipe(duplex=False)
+		cancellation_event = mp_context.Event()
+		process = mp_context.Process(
+			target=_trial_process_main,
+			args=(
+				self.executor,
+				identity,
+				output_root,
+				context.progress,
+				child_connection,
+				cancellation_event,
+			),
+			name=f"lftomo-trial-{identity.trial_id.value[:12]}",
+		)
+		result: TrialExecution | None = None
+		failure: TrialProcessError | None = None
+		started = time.monotonic()
+		try:
+			process.start()
+			child_connection.close()
+			while process.is_alive():
+				if self.cancellation.requested:
+					cancellation_event.set()
+					_terminate_trial_process(process)
+					raise ExperimentCancelled(
+						self.cancellation.reason or "experiment cancellation requested"
+					)
+				timeout = identity.fidelity.timeout_seconds
+				if timeout is not None and time.monotonic() - started > timeout:
+					cancellation_event.set()
+					_terminate_trial_process(process)
+					raise TrialProcessError(
+						"TrialTimeoutError",
+						f"trial exceeded its {timeout:g}-second fidelity timeout",
+						None,
+					)
+				if not parent_connection.poll(0.05):
+					continue
+				try:
+					kind, payload = parent_connection.recv()
+				except EOFError:
+					break
+				message = self._consume_trial_message(kind, payload, context)
+				if isinstance(message, TrialExecution):
+					result = message
+				elif isinstance(message, TrialProcessError):
+					failure = message
+			while parent_connection.poll():
+				try:
+					kind, payload = parent_connection.recv()
+				except EOFError:
+					break
+				message = self._consume_trial_message(kind, payload, context)
+				if isinstance(message, TrialExecution):
+					result = message
+				elif isinstance(message, TrialProcessError):
+					failure = message
+			process.join(timeout=2)
+			if failure is not None:
+				if failure.failure_type == "ProgressInfrastructureError":
+					infrastructure_error = ProgressInfrastructureError(str(failure))
+					if failure.traceback_text:
+						infrastructure_error.add_note(
+							"trial-process traceback:\n" + failure.traceback_text
+						)
+					raise infrastructure_error
+				raise failure
+			if result is None:
+				raise TrialProcessError(
+					"TrialProcessExitError",
+					f"trial process exited with code {process.exitcode} without a result",
+					None,
+				)
+			if process.exitcode != 0:
+				raise TrialProcessError(
+					"TrialProcessExitError",
+					f"trial process exited with code {process.exitcode}",
+					None,
+					result.peak_memory_bytes,
+				)
+			return result
+		except BaseException:
+			if process.is_alive():
+				cancellation_event.set()
+				_terminate_trial_process(process)
+			raise
+		finally:
+			child_connection.close()
+			parent_connection.close()
+			if process.pid is not None:
+				process.close()
+
 	def _execute(self, trial: PreparedTrial) -> TrialAttemptRecord:
 		created = _utcnow()
 		base = {
@@ -535,7 +858,6 @@ class IndependentExperimentRunner:
 		})
 		self._emit_attempt("trial.started", "trial attempt started", progress)
 		clock = time.perf_counter()
-		memory_before = _peak_memory_bytes()
 		context = ExecutionContext(
 			writer=self.event_writer,
 			progress_sink=self.progress_sink,
@@ -548,11 +870,11 @@ class IndependentExperimentRunner:
 			# The deep copy is deliberate: executor mutation can never leak into
 			# another logical candidate or the recorded identity.
 			execution_identity = trial.identity.model_copy(deep=True)
-			with bind_execution_context(context):
-				execution = self.executor(execution_identity, trial.output_root)
+			execution = self._execute_in_process(
+				execution_identity, trial.output_root, context,
+			)
 			finished = _finish_timestamp(started)
 			elapsed = time.perf_counter() - clock
-			peak = execution.peak_memory_bytes or max(memory_before, _peak_memory_bytes())
 			result = FinalResult(
 				trial_id=trial.identity.trial_id,
 				attempt_id=trial.attempt_id,
@@ -568,7 +890,7 @@ class IndependentExperimentRunner:
 				started_at=started,
 				finished_at=finished,
 				elapsed_seconds=elapsed,
-				peak_memory_bytes=peak,
+				peak_memory_bytes=execution.peak_memory_bytes,
 				observations={
 					"metrics": json_value(execution.metrics),
 					"artifacts": json_value(execution.artifacts),
@@ -596,7 +918,7 @@ class IndependentExperimentRunner:
 				started_at=started,
 				finished_at=finished,
 				elapsed_seconds=time.perf_counter() - clock,
-				peak_memory_bytes=max(memory_before, _peak_memory_bytes()),
+				peak_memory_bytes=None,
 				failure=FailureRecord(
 					type=type(error).__name__,
 					message=clean_message,
@@ -634,7 +956,15 @@ class IndependentExperimentRunner:
 			raise
 		except BaseException as error:
 			finished = _finish_timestamp(started)
-			traceback_text = traceback.format_exc()
+			failure_type = (
+				error.failure_type if isinstance(error, TrialProcessError)
+				else type(error).__name__
+			)
+			traceback_text = (
+				error.traceback_text
+				if isinstance(error, TrialProcessError) and error.traceback_text is not None
+				else traceback.format_exc()
+			)
 			secrets = (
 				active_secret_values() if self.event_writer is None else self.event_writer.secrets
 			)
@@ -642,16 +972,23 @@ class IndependentExperimentRunner:
 				str(error) or type(error).__name__, secrets=secrets,
 			))
 			clean_traceback = str(redact_secrets(traceback_text, secrets=secrets))
-			interrupted = isinstance(error, (KeyboardInterrupt, InterruptedError))
+			interrupted = (
+				isinstance(error, (KeyboardInterrupt, InterruptedError))
+				or failure_type in {
+					"KeyboardInterrupt", "InterruptedError", "ExperimentCancelled",
+				}
+			)
 			attempt = TrialAttemptRecord(
 				**base,
 				status="interrupted" if interrupted else "failed",
 				started_at=started,
 				finished_at=finished,
 				elapsed_seconds=time.perf_counter() - clock,
-				peak_memory_bytes=max(memory_before, _peak_memory_bytes()),
+				peak_memory_bytes=(
+					error.peak_memory_bytes if isinstance(error, TrialProcessError) else None
+				),
 				failure=FailureRecord(
-					type=type(error).__name__,
+					type=failure_type,
 					message=clean_message,
 					stage_id=context.progress.stage_occurrence_id,
 					stage_algorithm=context.progress.stage_algorithm,
@@ -782,28 +1119,34 @@ class IndependentExperimentRunner:
 		with ThreadPoolExecutor(max_workers=workers) as pool:
 			remaining = iter(trials)
 			future_to_trial: dict[Future, PreparedTrial] = {}
-			for _ in range(min(workers, len(trials))):
-				trial = next(remaining)
-				future_to_trial[pool.submit(self._execute, trial)] = trial
-			stop = False
-			while future_to_trial:
-				done, _ = wait(future_to_trial, return_when=FIRST_COMPLETED)
-				for future in done:
-					future_to_trial.pop(future)
-					attempt = future.result()
-					attempts.append(attempt)
-					if self.policy.failure == "fail_fast" and attempt.status != "succeeded":
-						stop = True
-				if self.cancellation.requested:
-					stop = True
-				while not stop and len(future_to_trial) < workers:
-					try:
-						trial = next(remaining)
-					except StopIteration:
-						break
+			try:
+				for _ in range(min(workers, len(trials))):
+					trial = next(remaining)
 					future_to_trial[pool.submit(self._execute, trial)] = trial
-			if stop:
-				unstarted = sum(1 for _ in remaining)
+				stop = False
+				while future_to_trial:
+					done, _ = wait(future_to_trial, return_when=FIRST_COMPLETED)
+					for future in done:
+						future_to_trial.pop(future)
+						attempt = future.result()
+						attempts.append(attempt)
+						if self.policy.failure == "fail_fast" and attempt.status != "succeeded":
+							stop = True
+					if self.cancellation.requested:
+						stop = True
+					while not stop and len(future_to_trial) < workers:
+						try:
+							trial = next(remaining)
+						except StopIteration:
+							break
+						future_to_trial[pool.submit(self._execute, trial)] = trial
+				if stop:
+					unstarted = sum(1 for _ in remaining)
+			except KeyboardInterrupt:
+				self.cancellation.request("keyboard interrupt")
+				for future in future_to_trial:
+					future.cancel()
+				raise
 		attempts.sort(key=lambda item: item.trial_id.value)
 		attempts, leaderboard = self._rank(trials, attempts)
 		manifest = ExperimentManifest(

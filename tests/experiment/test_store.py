@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import json
 import os
-import threading
 
 import pytest
 
@@ -17,7 +16,6 @@ from lftomo.experiment import (
 from lftomo.experiment.runner import (
 	ExperimentInputs,
 	IndependentExperimentRunner,
-	TrialExecution,
 	atomic_write_model,
 )
 from lftomo.experiment.store import (
@@ -26,6 +24,7 @@ from lftomo.experiment.store import (
 	PersistedExperimentStore,
 	ResumePolicy,
 )
+from tests.experiment.process_helpers import AlphaExecutor
 
 
 HASHES = [f"{index:064x}" for index in range(1, 10)]
@@ -70,20 +69,13 @@ def runner(root, executor, *, experiment_inputs=None, values=(0.01, 0.02)):
 	)
 
 
-def value(identity):
-	return identity.resolved_recon.pipeline[0].params["alpha"]
-
-
 def test_clean_resume_reuses_successes_and_force_rerun_appends_history(tmp_path):
-	calls = []
-
-	def execute(identity, _root):
-		calls.append(identity.trial_id.value)
-		return TrialExecution(metrics={"quality": value(identity)})
+	call_root = tmp_path / "calls"
+	execute = AlphaExecutor(call_root=call_root)
 
 	first = PersistedExperimentRunner(runner(tmp_path, execute)).run()
 	second = PersistedExperimentRunner(runner(tmp_path, execute)).run()
-	assert len(calls) == 2
+	assert len(list(call_root.glob("*.json"))) == 2
 	assert [item.attempt_id for item in second.attempts] == [
 		item.attempt_id for item in first.attempts
 	]
@@ -92,7 +84,7 @@ def test_clean_resume_reuses_successes_and_force_rerun_appends_history(tmp_path)
 	forced = PersistedExperimentRunner(
 		runner(tmp_path, execute), policy=ResumePolicy(force=True),
 	).run()
-	assert len(calls) == 4
+	assert len(list(call_root.glob("*.json"))) == 4
 	assert all(item.sequence == 1 for item in forced.attempts)
 	inspection = PersistedExperimentStore(tmp_path).inspect()
 	assert all([item.sequence for item in history.attempts] == [0, 1]
@@ -102,18 +94,13 @@ def test_clean_resume_reuses_successes_and_force_rerun_appends_history(tmp_path)
 
 
 def test_failed_and_interrupted_attempts_require_explicit_retry(tmp_path):
-	state = {"fail": True}
-
-	def execute(identity, _root):
-		if state["fail"]:
-			raise RuntimeError("boom")
-		return TrialExecution(metrics={"quality": value(identity)})
+	execute = AlphaExecutor(fail_on=0.01)
 
 	failed = PersistedExperimentRunner(
 		runner(tmp_path, execute, values=(0.01,)),
 	).run().attempts[0]
 	assert failed.status == "failed"
-	state["fail"] = False
+	execute.fail_on = None
 	skipped = PersistedExperimentRunner(
 		runner(tmp_path, execute, values=(0.01,)),
 	).run().attempts[0]
@@ -129,14 +116,14 @@ def test_failed_and_interrupted_attempts_require_explicit_retry(tmp_path):
 	interrupted_root = tmp_path / "interrupted"
 	interrupted = PersistedExperimentRunner(runner(
 		interrupted_root,
-		lambda *_args: (_ for _ in ()).throw(InterruptedError("stop")),
+		AlphaExecutor(interrupt=True),
 		values=(0.01,),
 	)).run().attempts[0]
 	assert interrupted.status == "interrupted"
 	resumed = PersistedExperimentRunner(
 		runner(
 			interrupted_root,
-			lambda identity, _root: TrialExecution(metrics={"quality": value(identity)}),
+			AlphaExecutor(),
 			values=(0.01,),
 		),
 		policy=ResumePolicy(retry_interrupted=True),
@@ -145,7 +132,7 @@ def test_failed_and_interrupted_attempts_require_explicit_retry(tmp_path):
 
 
 def test_identity_mismatch_has_fail_skip_and_rerun_policies(tmp_path):
-	execute = lambda identity, _root: TrialExecution(metrics={"quality": value(identity)})
+	execute = AlphaExecutor()
 	PersistedExperimentRunner(runner(
 		tmp_path, execute, experiment_inputs=inputs(HASHES[0]), values=(0.01,),
 	)).run()
@@ -168,7 +155,7 @@ def test_identity_mismatch_has_fail_skip_and_rerun_policies(tmp_path):
 
 def test_claims_exclude_concurrent_processes_and_stale_recovery_is_explicit(tmp_path):
 	base = runner(
-		tmp_path, lambda identity, _root: TrialExecution(metrics={"quality": value(identity)}),
+		tmp_path, AlphaExecutor(),
 		values=(0.01,),
 	)
 	store = PersistedExperimentStore(tmp_path)
@@ -219,7 +206,7 @@ def test_claims_exclude_concurrent_processes_and_stale_recovery_is_explicit(tmp_
 
 def test_partial_and_invalid_attempt_files_are_quarantined(tmp_path):
 	base = runner(
-		tmp_path, lambda identity, _root: TrialExecution(metrics={"quality": value(identity)}),
+		tmp_path, AlphaExecutor(),
 		values=(0.01,),
 	)
 	store = PersistedExperimentStore(tmp_path)
@@ -244,7 +231,7 @@ def test_partial_and_invalid_attempt_files_are_quarantined(tmp_path):
 
 def test_store_rejects_unknown_schema_and_identity_is_directly_reconstructable(tmp_path):
 	base = runner(
-		tmp_path, lambda identity, _root: TrialExecution(metrics={"quality": value(identity)}),
+		tmp_path, AlphaExecutor(),
 		values=(0.01,),
 	)
 	store = PersistedExperimentStore(tmp_path)

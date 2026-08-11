@@ -839,36 +839,42 @@ class PersistedExperimentRunner:
 		with ThreadPoolExecutor(max_workers=preflight.max_concurrency) as pool:
 			remaining = iter(trials)
 			futures: dict[Future[_CoordinatedAttempt], PreparedTrial] = {}
-			for _ in range(min(preflight.max_concurrency, len(trials))):
-				trial = next(remaining)
-				futures[pool.submit(self._one, trial)] = trial
-			stop = False
-			while futures:
-				done, _ = wait(futures, return_when=FIRST_COMPLETED)
-				for future in done:
-					trial = futures.pop(future)
-					outcome = future.result()
-					attempts.append(outcome.attempt)
-					counts[outcome.outcome] += 1
-					if self.runner.policy.failure == "fail_fast" and outcome.outcome not in (
-						"succeeded", "skipped", "reused",
-					):
-						stop = True
-					if self.cancellation.requested:
-						stop = True
-					if not stop:
-						try:
-							next_trial = next(remaining)
-						except StopIteration:
-							pass
-						else:
-							futures[pool.submit(self._one, next_trial)] = next_trial
-					self._emit_aggregate(
-						"fidelity.progress", counts, total=total, active=len(futures),
-						trial=trial, outcome=outcome,
-					)
-			if stop:
-				unstarted = sum(1 for _ in remaining)
+			try:
+				for _ in range(min(preflight.max_concurrency, len(trials))):
+					trial = next(remaining)
+					futures[pool.submit(self._one, trial)] = trial
+				stop = False
+				while futures:
+					done, _ = wait(futures, return_when=FIRST_COMPLETED)
+					for future in done:
+						trial = futures.pop(future)
+						outcome = future.result()
+						attempts.append(outcome.attempt)
+						counts[outcome.outcome] += 1
+						if self.runner.policy.failure == "fail_fast" and outcome.outcome not in (
+							"succeeded", "skipped", "reused",
+						):
+							stop = True
+						if self.cancellation.requested:
+							stop = True
+						if not stop:
+							try:
+								next_trial = next(remaining)
+							except StopIteration:
+								pass
+							else:
+								futures[pool.submit(self._one, next_trial)] = next_trial
+						self._emit_aggregate(
+							"fidelity.progress", counts, total=total, active=len(futures),
+							trial=trial, outcome=outcome,
+						)
+				if stop:
+					unstarted = sum(1 for _ in remaining)
+			except KeyboardInterrupt:
+				self.cancellation.request("keyboard interrupt")
+				for future in futures:
+					future.cancel()
+				raise
 		attempts.sort(key=lambda item: item.trial_id.value)
 		attempts, leaderboard = self.runner._rank(trials, attempts)
 		self.store.refresh_manifest(

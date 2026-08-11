@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,8 +34,8 @@ from lftomo.experiment.runner import (
 	ExperimentInputs,
 	ExperimentRunPolicy,
 	IndependentExperimentRunner,
-	TrialExecution,
 )
+from tests.experiment.process_helpers import AlphaExecutor, WindowedAlphaExecutor
 
 
 HASHES = [f"{index:064x}" for index in range(1, 20)]
@@ -232,27 +233,22 @@ def test_blinded_previews_share_scale_crop_and_have_reversible_private_mapping(t
 
 def test_full_fidelity_workflow_promotes_only_winners_and_resumes_boundary(tmp_path):
 	config = experiment()
-	calls = []
 	writer = ProgressEventWriter(tmp_path, config.experiment_id)
-
-	def execute(identity, _root):
-		value = alpha(identity)
-		calls.append((identity.fidelity.id, value))
-		return TrialExecution(
-			metrics={"quality": value},
-			window_metrics={
-				"tune-a": {"quality": [value]},
-				"tune-b": {"quality": [value]},
-				"hold": {"quality": [100 - value]},
-			},
-		)
+	call_root = tmp_path / "calls"
+	executor = WindowedAlphaExecutor(call_root)
 
 	first = FidelityExperimentRunner(
-		config, inputs(), tmp_path, execute, event_writer=writer,
+		config, inputs(), tmp_path, executor, event_writer=writer,
 	).run()
 	assert [len(level.attempts) for level in first.levels] == [4, 2]
+	calls = [
+		json.loads(path.read_text(encoding="utf-8"))
+		for path in call_root.glob("*.json")
+	]
 	assert len(calls) == 6
-	assert sorted(value for fidelity, value in calls if fidelity == "final") == [0.01, 0.02]
+	assert sorted(item["alpha"] for item in calls if item["fidelity"] == "final") == [
+		0.01, 0.02,
+	]
 	assert all(
 		attempt.result.promotion.from_fidelity == "screen"
 		for attempt in first.levels[1].attempts
@@ -267,9 +263,9 @@ def test_full_fidelity_workflow_promotes_only_winners_and_resumes_boundary(tmp_p
 
 	prior_sequence = events[-1].sequence
 	resumed = FidelityExperimentRunner(
-		config, inputs(), tmp_path, execute, event_writer=writer,
+		config, inputs(), tmp_path, executor, event_writer=writer,
 	).run()
-	assert len(calls) == 6
+	assert len(list(call_root.glob("*.json"))) == 6
 	assert resumed.promotions[0].decision_id == first.promotions[0].decision_id
 	resume_events = [
 		event for event in read_progress_events(tmp_path / "progress.jsonl")
@@ -286,7 +282,7 @@ def test_level_specific_memory_and_output_guards_apply_during_preflight(tmp_path
 		config,
 		inputs(),
 		tmp_path,
-		lambda identity, _root: TrialExecution(metrics={"quality": alpha(identity)}),
+		AlphaExecutor(),
 		fidelity_id="screen",
 		policy=ExperimentRunPolicy(
 			estimated_memory_bytes_per_trial=1500 * 1024**2,
@@ -299,7 +295,7 @@ def test_level_specific_memory_and_output_guards_apply_during_preflight(tmp_path
 		config,
 		inputs(),
 		tmp_path,
-		lambda identity, _root: TrialExecution(metrics={"quality": alpha(identity)}),
+		AlphaExecutor(),
 		fidelity_id="screen",
 		policy=ExperimentRunPolicy(
 			estimated_memory_bytes_per_trial=1500 * 1024**2,
