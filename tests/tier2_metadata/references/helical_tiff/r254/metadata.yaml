@@ -1,0 +1,82 @@
+schema_version: 1
+producer: r254
+dataset: helical_tiff
+status: frozen_producer_rerun
+immutable: true
+source:
+  repository: unversioned B10Scripts working tree
+  path: B10/PCRBox_Octo0/20kev/voi2.1/R2.54_Berkeley8_hpc_v1.81_alt.py
+  git_sha: unavailable
+  source_sha256: 7ef0c00b8020ce327bb850cb8a49d4338c6e8159521e046c3bb44e5943abf1ab
+  executed_copy: reference/r254/R2.54_Berkeley8_hpc_v1.81_alt_helical.py
+  executed_sha256: 6999b090d794df5af8d78bb2f168901a141827f6ede5d0c4a9be2f0ea8e7c61e
+  lftomo_schema_commit: 77c8f8507a873327c519b9bc26ae2c5ee8ee8c68
+  adaptation:
+    - selected TIFF input and a ten-slice reference chunk
+    - selected raw projection window 8350 through 16349
+    - set 8000 projections per 360 degrees and 2792 detector rows of vertical travel
+    - selected upward helical remap, zero skew, no movement, no BAC, and no stripe pass
+    - converted historical cropped center 3749 to full-detector center 3849
+    - initialized the TIFF projection-directory variable omitted by the HDF5-default script
+    - kept detector height separate from the number of available helical window starts
+    - corrected the upward slope endpoints to reproduce the Berkeley source row equation exactly
+input:
+  path: projections
+  shape: [32000, 3056, 7968]
+  dtype: uint16
+  angular_range_degrees: 1440.0
+  projection_window: [8350, 16349]
+  projection_window_count: 8000
+  detector_rows_per_rotation: 2792
+calibration:
+  method: saved pre/post gains; median of five original pre/post dark frames
+  gain_sha256: 4d0fd831f6ebb43a389b7dd634416ecfb5f0e34d1a242deb1fb5c223114e9e37
+  gain_post_sha256: 9b9e43a5646f83a7d2f36549dc7d8187d7c39c0c7fb29baef972e3581d70bd78
+  dark_sha256: fd12c61ef6623b245fa496b151718e73d064343e9f8455c8ba603cbc32fc3b26
+  dark_post_sha256: 30523c96d60d5b45943e4bf3b62e92da82ac68e3531d325d775c71d52f5bfbec
+historical_evidence:
+  path: allinwonderful_v1.5_A1_Helical.py
+  mounted_copy_sha256: f675ee71f8d5de581d8ffea35c7f5238f2d9696ec578278422aa037e451779a4
+  center_sweep_path: reconstructed/projections_s8350_akew_0.0_noclip
+  selected_center_cropped_px: 3749.0
+  note: historical output was used only to recover geometry and center; reference output is a new raw R2.54 run
+run:
+  host: PSH1VS12J3
+  operator: dnorthover
+  date: "2026-07-28T20:28:09-04:00"
+  runtime: "0:10:09.884149"
+  timings:
+    sinogram_generation: "0:09:02.269588"
+    minus_log: "0:00:01.261895"
+    reconstruction_and_write: "0:00:42.984583"
+    chunk_loop: "0:09:46.556749"
+  slurm_nodelist: null
+  slurm_ntasks: null
+  environment:
+    conda_env: /home/dnorthover/miniconda3/envs/recon
+    python: 3.10.13
+    numpy: 1.26.3
+    scipy: 1.11.4
+    tifffile: 2023.12.9
+    tomopy: 1.12.1
+    opencv: 4.7.0
+    h5py: 3.7.0
+    dxchange: 0.1.7
+    hotopy: not used
+reference_selection:
+  slices: [8350, 8351, 8352, 8353, 8354, 8355, 8356, 8357, 8358, 8359]
+  rationale: contiguous chunk at the surviving historical center-search projection window
+  shape: [7968, 7968]
+  dtype: float32
+  validation:
+    file_count: 10
+    finite: true
+    contiguous: true
+    preview: preview.png
+freeze:
+  path: reference/r254
+  host: PSH1VS12J3
+  operator: dnorthover
+  date: "2026-07-28"
+  method: exact R2.54 producer rerun from raw TIFF projections with documented helical repairs
+  rule: do not rerun or refresh this reference

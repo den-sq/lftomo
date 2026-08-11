@@ -24,7 +24,7 @@ metadata:
   tier: 2
   dataset: striping_tiff
   source: AAA592 Berkeley B7 center section 6
-  recovered_projection_variant: thresholded
-  recovered_projection_count: 3935
+  recovered_projection_variant: thresholded_with_restored_raw_endpoints
+  recovered_projection_count: 3937
   historical_projection_count: 3937
   historical_dropped_frames: 0

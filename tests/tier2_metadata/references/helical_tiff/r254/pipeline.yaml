@@ -1,0 +1,59 @@
+schema_version: 1
+resolved_from: r254-canonical@helical-tiff
+output_path: reference/r254/recon
+metadata:
+  producer: r254
+  dataset: helical_tiff
+  source_variant: R2.54_Berkeley8_hpc_v1.81_alt.py
+pipeline:
+  - kind: read
+    algorithm: tiff_stack
+    params:
+      path: projections
+      pattern: "proj_*.tif"
+      order: projection
+      source_projection_count: 32000
+      window_start: 8350
+      window_count: 8000
+      theta_start_degrees: 0.0
+      theta_stop_degrees: 360.0
+      theta_endpoint: true
+  - kind: normalize
+    algorithm: helical_pre_gain_dark
+    params:
+      pre_gain: reference/r254/gains/gain.tif
+      post_gain: reference/r254/gains/gain_post.tif
+      pre_dark: reference/r254/gains/dark.tif
+      post_dark: reference/r254/gains/dark_post.tif
+      active_calibration: pre
+      pre_subtracted: false
+  - kind: helical_correct
+    algorithm: index_remap
+    params:
+      going_up: true
+      projection_start: 0
+      detector_rows: 3056
+      detector_rows_per_rotation: 2792
+      projections_per_rotation: 8000
+      detector_height_traversal_projections: 8756
+      source_equation: "row = 3056 - round(3057 * theta_index / 8756) - 1"
+  - kind: geometry
+    algorithm: affine_skew_movement
+    params:
+      skew_degrees: 0.0
+      movement_enabled: false
+      movement_y: 0.26351930523856
+      movement_x: -1.707958799447738
+  - kind: center
+    algorithm: manual
+    params: {value_px: 3849.0, find_center: false}
+  - kind: recon
+    algorithm: gridrec
+    params:
+      ncore: 32
+      sinogram_order: false
+      circle_mask: false
+      angular_range_degrees: 360.0
+  - kind: write
+    algorithm: tiff_slices
+    params: {dtype: float32, naming_template: "rec_{slice:05d}.tif", start: 8350}
