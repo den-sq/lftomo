@@ -20,6 +20,7 @@ from lftomo.experiment.runner import (
 	IndependentExperimentRunner,
 	TrialExecution,
 )
+from tests.experiment.process_helpers import AlphaExecutor
 from lftomo.experiment.store import PersistedExperimentRunner
 from lftomo.pipeline import RuntimeRequirement, Stage, StageContract
 from lftomo.pipeline.stages import STAGE_REGISTRY
@@ -324,7 +325,7 @@ def test_accepted_runtime_report_is_in_preflight_and_manifest(tmp_path):
 		config(),
 		inputs(report.environment),
 		tmp_path,
-		lambda *_args: TrialExecution(metrics={"quality": 1}),
+		AlphaExecutor(quality=1),
 		runtime_report=report,
 	)
 

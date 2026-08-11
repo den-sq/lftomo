@@ -73,10 +73,15 @@ requires an explicit `--override-limits`. GPU experiments also require declared 
 through the library policy; this first runner deliberately does not share mutable stage
 state or partial pipeline prefixes between candidates.
 
-`peak_memory_bytes` is a true per-trial measurement only when the executor supplies it
-in `TrialExecution`. Otherwise the runner records the process-wide `RUSAGE_SELF`
-high-water mark. Concurrent thread-based trials therefore share the fallback value; use
-an executor-supplied measurement when isolated per-trial memory accounting matters.
+Every candidate executes in a spawned process session. The coordinator owns claims,
+progress ordering, attempt records, and leaderboards; candidate code and native engines
+never execute in its scheduling threads. A failed, timed-out, or cancelled trial process
+and its descendants can therefore be terminated without trapping the coordinator.
+Custom trial executors must be pickleable so the runner can validate the process boundary
+during preflight.
+
+`peak_memory_bytes` is a true per-trial measurement when the executor supplies it.
+Otherwise the runner records the isolated trial process `RUSAGE_SELF` high-water mark.
 
 ## Progress events
 

@@ -1,11 +1,12 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
-from pathlib import Path
+import os
 import threading
 import time
 
 from click.testing import CliRunner
+import psutil
 import pytest
 import yaml
 
@@ -22,11 +23,16 @@ from lftomo.experiment.runner import (
 	ExperimentInputs,
 	ExperimentRunPolicy,
 	IndependentExperimentRunner,
-	TrialExecution,
 )
 import lftomo.experiment.runner as runner_module
 from lftomo.experiment.selection import select_candidates
 from lftomo.experiment.cli import main
+from tests.experiment.process_helpers import (
+	AlphaExecutor,
+	CrashOneExecutor,
+	DisabledCacheExecutor,
+	HangingProcessTreeExecutor,
+)
 
 
 HASHES = [f"{index:064x}" for index in range(1, 8)]
@@ -126,29 +132,18 @@ def test_exhaustive_budget_is_a_guard_not_silent_truncation():
 
 def test_independent_concurrent_execution_has_deterministic_identity_and_leaderboard(tmp_path):
 	config = experiment_config()
-	lock = threading.Lock()
-	active = 0
-	maximum_active = 0
-	identity_objects = []
-
-	def execute(identity, output_root):
-		nonlocal active, maximum_active
-		identity_objects.append(id(identity.resolved_recon))
-		value = alpha(identity)
-		identity.resolved_recon.pipeline[0].params["alpha"] = 999
-		with lock:
-			active += 1
-			maximum_active = max(maximum_active, active)
-		time.sleep(0.03 if value == 0.01 else 0.01)
-		with lock:
-			active -= 1
-		return TrialExecution(metrics={"quality": value})
-
-	runner = IndependentExperimentRunner(config, inputs(), tmp_path, execute)
+	runner = IndependentExperimentRunner(
+		config, inputs(), tmp_path,
+		AlphaExecutor(delay=0.1, mutate_identity=True),
+	)
 	summary = runner.run()
 
-	assert maximum_active == 2
-	assert len(set(identity_objects)) == 2
+	artifacts = [attempt.observations["artifacts"] for attempt in summary.attempts]
+	assert {item["pid"] for item in artifacts}.isdisjoint({os.getpid()})
+	assert len({item["pid"] for item in artifacts}) == 2
+	assert max(item["started_monotonic"] for item in artifacts) < min(
+		item["finished_monotonic"] for item in artifacts
+	)
 	assert [entry.metrics["quality"] for entry in summary.leaderboard] == [0.01, 0.02]
 	assert [entry.pareto.rank for entry in summary.leaderboard] == [0, 1]
 	assert all(entry.output_root.name == entry.trial_id for entry in summary.leaderboard)
@@ -164,13 +159,8 @@ def test_independent_concurrent_execution_has_deterministic_identity_and_leaderb
 
 
 def test_failure_isolation_and_interruption_never_publish_success(tmp_path):
-	def execute(identity, _output_root):
-		if alpha(identity) == 0.01:
-			raise RuntimeError("candidate exploded")
-		return TrialExecution(metrics={"quality": 0.02})
-
 	summary = IndependentExperimentRunner(
-		experiment_config(), inputs(), tmp_path, execute,
+		experiment_config(), inputs(), tmp_path, AlphaExecutor(fail_on=0.01),
 	).run()
 	by_status = {attempt.status: attempt for attempt in summary.attempts}
 
@@ -186,8 +176,7 @@ def test_failure_isolation_and_interruption_never_publish_success(tmp_path):
 	interrupted_root = tmp_path / "interrupted"
 	interrupted = IndependentExperimentRunner(
 		experiment_config(candidate=candidate_space((0.01,))),
-		inputs(), interrupted_root,
-		lambda *_args: (_ for _ in ()).throw(InterruptedError("stopped")),
+		inputs(), interrupted_root, AlphaExecutor(interrupt=True),
 	).run().attempts[0]
 	assert interrupted.status == "interrupted"
 	assert interrupted.result is None
@@ -205,8 +194,7 @@ def test_attempt_finish_is_clamped_when_wall_clock_moves_backwards(monkeypatch, 
 
 	summary = IndependentExperimentRunner(
 		experiment_config(candidate=candidate_space((0.01,)), concurrency=1),
-		inputs(), tmp_path,
-		lambda *_args: TrialExecution(metrics={"quality": 0.01}),
+		inputs(), tmp_path, AlphaExecutor(),
 	).run()
 	attempt = summary.attempts[0]
 
@@ -219,8 +207,7 @@ def test_preflight_reports_validation_failures_and_enforces_resource_guards(tmp_
 	invalid = candidate_space((0.01,))
 	config = experiment_config(candidate=invalid, output_limit=100)
 	runner = IndependentExperimentRunner(
-		config, inputs(), tmp_path,
-		lambda *_args: TrialExecution(metrics={"quality": 1}),
+		config, inputs(), tmp_path, AlphaExecutor(quality=1),
 		validator=lambda _recon: (_ for _ in ()).throw(ValueError("invalid complete pipeline")),
 		policy=ExperimentRunPolicy(estimated_output_bytes_per_trial=50),
 	)
@@ -232,7 +219,7 @@ def test_preflight_reports_validation_failures_and_enforces_resource_guards(tmp_
 
 	guarded = IndependentExperimentRunner(
 		experiment_config(output_limit=50), inputs(), tmp_path / "guarded",
-		lambda *_args: TrialExecution(metrics={"quality": 1}),
+		AlphaExecutor(quality=1),
 		policy=ExperimentRunPolicy(estimated_output_bytes_per_trial=30),
 	)
 	with pytest.raises(PathResourceError, match="override the configured guard") as raised:
@@ -240,7 +227,7 @@ def test_preflight_reports_validation_failures_and_enforces_resource_guards(tmp_
 	assert raised.value.report.diagnostics[0].code == "guard_exceeded"
 	overridden = IndependentExperimentRunner(
 		experiment_config(output_limit=50), inputs(), tmp_path / "override",
-		lambda *_args: TrialExecution(metrics={"quality": 1}),
+		AlphaExecutor(quality=1),
 		policy=ExperimentRunPolicy(
 			estimated_output_bytes_per_trial=30, override_limits=True,
 		),
@@ -249,23 +236,11 @@ def test_preflight_reports_validation_failures_and_enforces_resource_guards(tmp_
 
 
 def test_disabled_prefix_plan_adds_no_phantom_cache_resource_request(tmp_path):
-	class DisabledCacheExecutor:
-		def plan_prefix_cache(self, _trials):
-			return {
-				"enabled": False,
-				"scratch": str(tmp_path / "unused-cache"),
-				"estimated_unique_snapshot_bytes": 10**18,
-				"decisions": [],
-			}
-
-		def __call__(self, *_args):
-			return TrialExecution(metrics={"quality": 1})
-
 	runner = IndependentExperimentRunner(
 		experiment_config(candidate=candidate_space((0.01,))),
 		inputs(),
 		tmp_path / "results",
-		DisabledCacheExecutor(),
+		DisabledCacheExecutor(tmp_path / "unused-cache"),
 	)
 	preflight, prepared = runner.prepare()
 
@@ -282,7 +257,7 @@ def test_gpu_and_memory_capabilities_bound_concurrency(tmp_path):
 	config = ExperimentConfig.model_validate(document)
 	base = dict(
 		config=config, inputs=inputs(), root=tmp_path,
-		executor=lambda *_args: TrialExecution(metrics={"quality": 1}),
+		executor=AlphaExecutor(quality=1),
 	)
 	with pytest.raises(ValueError, match="gpu_slots=0"):
 		IndependentExperimentRunner(**base).prepare()
@@ -293,6 +268,44 @@ def test_gpu_and_memory_capabilities_bound_concurrency(tmp_path):
 		),
 	)
 	assert runner.prepare()[0].max_concurrency == 1
+
+
+def test_native_process_crash_is_isolated_to_its_candidate(tmp_path):
+	summary = IndependentExperimentRunner(
+		experiment_config(), inputs(), tmp_path, CrashOneExecutor(),
+	).run()
+	by_status = {attempt.status: attempt for attempt in summary.attempts}
+
+	assert set(by_status) == {"failed", "succeeded"}
+	assert by_status["failed"].failure.type == "TrialProcessExitError"
+	assert "code 17" in by_status["failed"].failure.message
+	assert by_status["succeeded"].result.metrics == {"quality": 0.02}
+
+
+def test_cancellation_terminates_noncooperative_trial_process_tree(tmp_path):
+	token = runner_module.CancellationToken()
+	runner = IndependentExperimentRunner(
+		experiment_config(candidate=candidate_space((0.01,)), concurrency=1),
+		inputs(), tmp_path, HangingProcessTreeExecutor(), cancellation=token,
+	)
+	result = []
+	thread = threading.Thread(target=lambda: result.append(runner.run()))
+	thread.start()
+	process_file = None
+	deadline = time.monotonic() + 10
+	while process_file is None and time.monotonic() < deadline:
+		process_file = next(tmp_path.glob("trials/*/process-tree.json"), None)
+		time.sleep(0.01)
+	assert process_file is not None
+	pids = json.loads(process_file.read_text(encoding="utf-8"))
+	assert token.request("operator stop")
+	thread.join(timeout=10)
+	assert not thread.is_alive()
+	assert result[0].attempts[0].status == "interrupted"
+	deadline = time.monotonic() + 5
+	while any(psutil.pid_exists(pid) for pid in pids.values()) and time.monotonic() < deadline:
+		time.sleep(0.05)
+	assert not any(psutil.pid_exists(pid) for pid in pids.values())
 
 
 def test_experiment_cli_exposes_validate_dry_run_and_run(tmp_path):
