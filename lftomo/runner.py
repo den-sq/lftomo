@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 from typing import Any, Callable
 
@@ -470,6 +471,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		with PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
+			max_workers=concrete.process_workers or min(4, os.cpu_count() or 1),
+			worker_timeout_seconds=concrete.worker_timeout_seconds,
 		) as run_context:
 			state = PipelineState(
 				working_array=np.empty((0,), dtype=np.float32),
@@ -478,6 +481,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 				artifacts=dict(initial_artifacts),
 				backend=backend,
 				storage=run_context.storage,
+				executor=run_context.executor,
 			)
 			if state_executor is None:
 				state = Pipeline(

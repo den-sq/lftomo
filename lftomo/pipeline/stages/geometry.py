@@ -12,7 +12,7 @@ from lftomo.pipeline.core import (
 	allocate_output, commit_output, working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.stages._layout import (
+from lftomo.pipeline.layout import (
 	configured_layout,
 	n_projections,
 	n_rows,
@@ -56,6 +56,45 @@ _INTERPOLATION = {
 	"cubic": cv2.INTER_CUBIC,
 	"lanczos": cv2.INTER_LANCZOS4,
 }
+
+
+def transform_affine_projection(
+	stage: "AffineSkewMovementStage",
+	image: np.ndarray,
+	projection: int,
+	projection_count: int,
+	row_count: int,
+) -> np.ndarray:
+	"""Return one fused affine projection for serial or process dispatch."""
+
+	if stage.movement_enabled and (stage.movement_y != 0 or stage.movement_x != 0):
+		fraction = projection / projection_count
+		image = shift(
+			image,
+			(stage.movement_y * fraction, stage.movement_x * fraction),
+			order=3, mode="constant", cval=0.0,
+		)
+	padded = np.pad(
+		image, ((0, 0), (stage.pad_x, stage.pad_x)), mode=stage.pad_mode,
+	)
+	if stage.skew_degrees != 0:
+		width = image.shape[1] + 2 * stage.pad_x
+		center = (
+			(image.shape[1] / 2 if stage.center_px is None else stage.center_px)
+			+ stage.pad_x,
+			row_count / 2 if stage.center_y_px is None else stage.center_y_px,
+		)
+		matrix = cv2.getRotationMatrix2D(center, stage.skew_degrees, 1.0)
+		try:
+			interpolation = _INTERPOLATION[stage.interpolation_name]
+		except KeyError as error:
+			raise ValueError(
+				f"unknown skew interpolation {stage.interpolation_name!r}"
+			) from error
+		padded = cv2.warpAffine(
+			padded, matrix, (width, row_count), flags=interpolation,
+		)
+	return padded
 
 
 class SkewCorrectStage(Stage):
@@ -152,8 +191,10 @@ class MovementCorrectStage(Stage):
 		if not self.enabled or (self.y == 0 and self.x == 0):
 			return state
 		count = n_projections(data, layout)
+		projection_start = int(state.artifacts.get("projection_start", 0))
+		projection_count = int(state.artifacts.get("projection_count", count))
 		for projection in range(count):
-			fraction = projection / count
+			fraction = (projection_start + projection) / projection_count
 			image = projection_view(data, layout, projection)
 			image[:] = shift(
 				image,
@@ -259,32 +300,13 @@ class AffineSkewMovementStage(Stage):
 		output_buffer, output = allocate_output(
 			state, self.target_layout(*shape), data.dtype, role="fused_geometry",
 		)
-		try:
-			interpolation = _INTERPOLATION[self.interpolation_name]
-		except KeyError as error:
-			raise ValueError(f"unknown skew interpolation {self.interpolation_name!r}") from error
 		for projection in range(projection_count):
 			image = projection_view(data, input_layout, projection)
-			if self.movement_enabled and (self.movement_y != 0 or self.movement_x != 0):
-				fraction = projection / projection_count
-				image = shift(
-					image,
-					(self.movement_y * fraction, self.movement_x * fraction),
-					order=3, mode="constant", cval=0.0,
+			projection_view(output, self.target_layout, projection)[:] = (
+				transform_affine_projection(
+					self, image, projection, projection_count, row_count,
 				)
-			padded = np.pad(
-				image, ((0, 0), (self.pad_x, self.pad_x)), mode=self.pad_mode,
 			)
-			if self.skew_degrees != 0:
-				center = (
-					(data.shape[2] / 2 if self.center_px is None else self.center_px) + self.pad_x,
-					row_count / 2 if self.center_y_px is None else self.center_y_px,
-				)
-				matrix = cv2.getRotationMatrix2D(center, self.skew_degrees, 1.0)
-				padded = cv2.warpAffine(
-					padded, matrix, (width, row_count), flags=interpolation,
-				)
-			projection_view(output, self.target_layout, projection)[:] = padded
 		result = commit_output(
 			state, output_buffer, retire_as=None, layout=self.target_layout,
 		)

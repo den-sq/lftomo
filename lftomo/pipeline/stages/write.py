@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +17,7 @@ from lftomo.pipeline.core import (
 	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.storage import ManagedBuffer
 from lftomo.util.io import np_convert
 from lftomo.util.shapes import ReconOrder
 
@@ -107,13 +107,23 @@ class TIFFSlicesWriteStage(Stage):
 			name = self.naming_template.format(sample_id=sample_id, slice=slice_index)
 			paths.append(output / (name if name.lower().endswith((".tif", ".tiff")) else f"{name}.tif"))
 
-		calls = [(working[index], path, self.dtype) for index, path in enumerate(paths)]
-		if self.processes == 1:
-			for call in calls:
-				_write_array_slice(*call)
+		executor = state.executor or getattr(state.storage, "pipeline_executor", None)
+		if isinstance(state.working_array, ManagedBuffer):
+			from lftomo.pipeline.execution import write_tiff_slice_kernel
+
+			calls = [
+				(state.working_array, index, path, self.dtype)
+				for index, path in enumerate(paths)
+			]
+			if self.processes > 1 and executor is not None:
+				executor.submit_all(write_tiff_slice_kernel, calls)
+			else:
+				for call in calls:
+					write_tiff_slice_kernel(*call)
 		else:
-			with Pool(self.processes) as pool:
-				pool.starmap(_write_array_slice, calls)
+			# ndarray-only hermetic tests remain serial; slices are never pickled.
+			for index, path in enumerate(paths):
+				_write_array_slice(working[index], path, self.dtype)
 		state.artifacts["output_files"] = paths
 		return state
 

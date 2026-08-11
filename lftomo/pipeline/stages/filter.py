@@ -8,7 +8,7 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import Locality, PipelineState, Stage, StageContract, working_view
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.stages._layout import configured_layout, n_projections, projection_view, resolve_layout
+from lftomo.pipeline.layout import configured_layout, n_projections, projection_view, resolve_layout
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 

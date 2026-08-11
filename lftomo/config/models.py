@@ -270,6 +270,13 @@ class Recon(ConfigModel):
 		default=True,
 		description="Allow the TomoPy input/output alias when its runtime boundary proves it safe.",
 	)
+	process_workers: int | None = Field(
+		default=None, gt=0,
+		description="Persistent process workers; defaults to a bounded machine-derived count.",
+	)
+	worker_timeout_seconds: float | None = Field(
+		default=None, gt=0, description="Optional timeout for each dispatched worker task.",
+	)
 	metadata: dict[str, Any] = Field(default_factory=dict, description="Additional run metadata.")
 	variants: list[PipelineVariant] = Field(
 		default_factory=list,

@@ -166,11 +166,17 @@ class PipelineRunContext:
 	"""
 
 	def __init__(self, storage: StorageBackend | None = None, *,
-			enable_aliasing: bool = True, enable_engine_aliasing: bool = True):
+			enable_aliasing: bool = True, enable_engine_aliasing: bool = True,
+			max_workers: int = 2, worker_timeout_seconds: float | None = None,
+			multiprocessing_context: str = "spawn"):
 		self.storage = storage
 		self._owns_storage = storage is None
 		self.enable_aliasing = enable_aliasing
 		self.enable_engine_aliasing = enable_engine_aliasing
+		self.max_workers = max_workers
+		self.worker_timeout_seconds = worker_timeout_seconds
+		self.multiprocessing_context = multiprocessing_context
+		self.executor = None
 		self._entered = False
 		self._spent = False
 
@@ -190,6 +196,16 @@ class PipelineRunContext:
 			)
 			manager.start()
 			self.storage = manager
+		from lftomo.pipeline.execution import PipelineExecutor
+
+		self.executor = PipelineExecutor(
+			self.max_workers, timeout_seconds=self.worker_timeout_seconds,
+			context=self.multiprocessing_context,
+		)
+		# ``state.executor`` is the explicit Pipeline path.  The storage link also
+		# lets directly invoked Stages (and states created before context entry)
+		# discover the same run-owned executor without a second pool.
+		setattr(self.storage, "pipeline_executor", self.executor)
 		return self
 
 	def __exit__(
@@ -199,11 +215,14 @@ class PipelineRunContext:
 		traceback: TracebackType | None,
 	) -> None:
 		try:
+			if self.executor is not None:
+				self.executor.close()
 			if self._owns_storage and self.storage is not None:
 				shutdown = getattr(self.storage, "shutdown", None)
 				if shutdown is not None:
 					shutdown()
 		finally:
+			self.executor = None
 			self._entered = False
 			self._spent = True
 

@@ -172,7 +172,7 @@ def test_full_array_stripe_stage_is_a_predictable_segment_barrier(monkeypatch):
 	assert np.isfinite(projection).all()
 
 
-def test_real_chain_worker_limit_bounds_simultaneously_live_scratch():
+def test_ndarray_real_chain_uses_one_live_scratch():
 	activity = {"lock": threading.Lock(), "current": 0, "peak": 0}
 	stage = VoDeadStripeStage(snr=2, size=5, norm=False)
 	original = stage.run_sinogram
@@ -194,7 +194,7 @@ def test_real_chain_worker_limit_bounds_simultaneously_live_scratch():
 		_state(projection, ProjOrder)
 	)
 
-	assert 1 < activity["peak"] <= 2
+	assert activity["peak"] == 1
 	row_scratch_bytes = projection.shape[0] * projection.shape[2] * projection.dtype.itemsize
 	assert activity["peak"] * row_scratch_bytes < projection.nbytes
 

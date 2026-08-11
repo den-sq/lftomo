@@ -18,7 +18,7 @@ from lftomo.pipeline import (
 	validate_pipeline,
 )
 from lftomo.pipeline.stages import LayoutConvertStage, create_stage
-from lftomo.pipeline.stages._layout import (
+from lftomo.pipeline.layout import (
 	n_projections,
 	n_rows,
 	projection_view,

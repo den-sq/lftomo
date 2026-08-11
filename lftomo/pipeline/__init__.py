@@ -19,6 +19,8 @@ from lftomo.pipeline.core import (
 	working_view,
 )
 from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
+from lftomo.pipeline.dispatch import DispatchKind, DispatchSpec
+from lftomo.pipeline.execution import PipelineExecutor, WorkerTimeoutError
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.pipeline.planning import (
 	BufferAction,
@@ -62,9 +64,12 @@ __all__ = [
 	"BufferSpec",
 	"DaskArrayStub",
 	"DaskStubBackend",
+	"DispatchKind",
+	"DispatchSpec",
 	"Locality",
 	"NumpyBackend",
 	"Pipeline",
+	"PipelineExecutor",
 	"PipelineState",
 	"ResourceHints",
 	"RuntimeRequirement",
@@ -97,6 +102,7 @@ __all__ = [
 	"ManagedBuffer",
 	"PipelineRunContext",
 	"StorageBackend",
+	"WorkerTimeoutError",
 	"working_view",
 	"CandidateLimitError",
 	"CandidateSpaceError",

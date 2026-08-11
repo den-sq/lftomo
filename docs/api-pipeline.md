@@ -1,8 +1,8 @@
 # Pipeline API
 
 The pipeline layer composes tomography reconstruction work as an ordered list
-of `Stage` objects. Execution is intentionally sequential at the pipeline
-level; parallelism stays inside individual Stages.
+of `Stage` objects. Stage ordering remains sequential; a run-scoped executor
+dispatches each Stage's independent locality units without changing that order.
 
 Each Stage declares a `StageContract` before it runs:
 
@@ -58,6 +58,34 @@ allocation/alias/retirement schedule, and separate peak estimates for shared
 memory, per-worker private scratch, and external-engine temporary storage.
 Flat/dark calibration arrays and detector-sized phase filters are also
 manager-issued artifacts declared by their producer contracts.
+
+## Run-scoped dispatch
+
+`PipelineRunContext` owns one persistent process pool as well as the storage
+manager. `STAGE_DISPATCH` classifies every `STAGE_REGISTRY` entry, and the
+registry-completeness test makes a new Stage fail until it is assigned process,
+thread, serial, or engine dispatch (or a documented exemption). Module-level
+worker kernels receive reopenable `ManagedBuffer` handles rather than volume or
+slice arrays. Projection kernels mutate disjoint views; bounded sinogram chains
+gather projection-order row scratch inside the worker and scatter once; and
+layout, fused-affine, helical, and super-resolution fills write manager-owned
+prospective outputs before the parent commits the handoff.
+
+I/O remains on I/O-oriented paths. TIFF output submits `(handle, index, path,
+dtype)` tasks, while single-file HDF5 and Neuroglancer writers retain their
+bounded chunk behavior. TomoPy, ASTRA, torch, and GPU Stages remain serial at
+the orchestration level and receive an internal-core budget capped by the run's
+worker count. Plain ndarray-only execution is deliberately serial so hermetic
+tests never depend on process scheduling.
+
+`Recon.process_workers` selects the pool size; the production default is at
+most four workers. `Recon.worker_timeout_seconds` applies a per-task deadline.
+A shared/canonical reconstruction YAML should normally leave both unset so it
+stays portable across machines; the fields are per-run overrides until a
+runner-level machine-profile interface is added.
+A timeout kills the worker process tree, waits for mutation to stop, discards
+the broken pool, and lazily creates a fresh pool for later work. Context exit
+closes the executor before the manager unlinks its buffers.
 
 The prefix cache's immutable path uses a separate `FileBackedNPArray`, which is
 a first-class read-only `ManagedBuffer`. Workers reopen its `.npy` mapping by

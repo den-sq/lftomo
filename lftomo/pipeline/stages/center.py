@@ -17,7 +17,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.runtime import tomopy_requirement
-from lftomo.pipeline.stages._layout import (
+from lftomo.pipeline.layout import (
 	configured_layout,
 	n_projections,
 	n_rows,

@@ -10,7 +10,7 @@ from lftomo.pipeline.core import (
 	allocate_output, commit_output, working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.stages._layout import configured_layout, n_projections, n_rows, resolve_layout
+from lftomo.pipeline.layout import configured_layout, n_projections, n_rows, resolve_layout
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 

@@ -26,7 +26,8 @@ from lftomo.pipeline.core import (
 	commit_output,
 	working_view,
 )
-from lftomo.util.shapes import SinoOrder
+from lftomo.storage import ManagedBuffer
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 _TORCH_RUNTIME_REQUIREMENT = RuntimeRequirement(
@@ -102,7 +103,26 @@ def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> P
 	values = np.asarray(volume, dtype=np.float32)
 	shape = SinoOrder(Y=values.shape[1], Theta=values.shape[0], X=values.shape[2])
 	output, target = allocate_output(state, shape, np.float32, role="super_resolution")
-	target[...] = np.transpose(values, (1, 0, 2))
+	if (
+		isinstance(output, ManagedBuffer)
+		and state.storage is not None
+		and state.executor is not None
+	):
+		from lftomo.pipeline.execution import run_layout_fill_kernel
+
+		source = state.storage.allocate(
+			ProjOrder(*values.shape), np.float32, role="super_resolution_assembly",
+		)
+		try:
+			source.array()[...] = values
+			state.executor.submit_all(run_layout_fill_kernel, (
+				(source, output, ProjOrder, SinoOrder, index)
+				for index in range(values.shape[0])
+			))
+		finally:
+			state.storage.retire(source, role=None)
+	else:
+		target[...] = np.transpose(values, (1, 0, 2))
 	result = commit_output(state, output, retire_as=None)
 	result.artifacts["super_resolution"] = metadata
 	return result

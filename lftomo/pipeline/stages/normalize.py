@@ -27,13 +27,14 @@ from lftomo.pipeline.core import (
 	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.stages._layout import (
+from lftomo.pipeline.layout import (
 	configured_layout,
 	n_projections,
 	projection_view,
 	resolve_layout,
 )
 from lftomo.prep.flat import _weighted_normalize_projection
+from lftomo.storage import buffer_view
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -122,14 +123,18 @@ class WeightedNormalizeStage(Stage):
 			)
 
 		sinogram_view = working if layout is SinoOrder else np.transpose(working, (1, 0, 2))
-		for projection in range(n_projections(working, layout)):
+		batch_count = n_projections(working, layout)
+		projection_start = int(state.artifacts.get("projection_start", 0))
+		projection_count = int(state.artifacts.get("projection_count", batch_count))
+		for projection in range(batch_count):
 			_weighted_normalize_projection(
 				sinogram_view,
 				sinogram_view,
 				flats,
 				projection,
-				n_projections(working, layout),
+				projection_count,
 				self.pre_sub,
+				projection_index=projection_start + projection,
 			)
 		return _finish_normalization(state, output)
 
@@ -178,9 +183,12 @@ def _tracking_fields(
 			bundle.read_component(component_names[name], y_start=start, y_stop=stop).astype(np.float32)
 			for name in ("pre_gain", "post_gain", "pre_dark", "post_dark")
 		)
-	if "flat_fields" not in state.scan.metadata:
+	if "flat_fields" in state.artifacts:
+		fields = np.asarray(buffer_view(state.artifacts["flat_fields"]))
+	elif "flat_fields" in state.scan.metadata:
+		fields = np.asarray(state.scan.metadata["flat_fields"])
+	else:
 		raise ValueError("normalize.beam_tracking requires a calibration bundle or legacy flat_fields")
-	fields = np.asarray(state.scan.metadata["flat_fields"])
 	if fields.shape != (4, y_size, working_view(state).shape[2]):
 		raise ValueError("legacy flat_fields must have shape (4, Y, X) for beam tracking")
 	return tuple(fields)
@@ -246,7 +254,11 @@ class BeamTrackingNormalizeStage(Stage):
 			)
 		schedule = self.schedule
 		fit = None
-		if self.fit_schedule:
+		prepared = getattr(self, "_dispatch_schedule_fit", None)
+		if prepared is not None:
+			fit = prepared
+			schedule = fit.schedule
+		elif self.fit_schedule:
 			indices = np.unique(np.linspace(0, batch_count - 1, self.schedule_sample_count).astype(int))
 			fractions = (projection_start + indices) / max(projection_count - 1, 1)
 			fit = calibrate_schedule(
@@ -428,7 +440,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		value = state.artifacts.get(self.air_mask_artifact)
 		if value is None:
 			return None
-		value = np.asarray(value, dtype=bool)
+		value = np.asarray(buffer_view(value), dtype=bool)
 		if value.ndim == 2:
 			mask = value
 		elif value.ndim == 3:
@@ -531,6 +543,8 @@ class BeamBasisFitNormalizeStage(Stage):
 				"fit and coefficient QC guard gross contamination"
 			),
 		}
+		state.artifacts["_beam_basis_coefficients"] = coefficient_array
+		state.artifacts["_beam_basis_violations"] = violations
 		return _finish_normalization(state, output)
 
 
@@ -648,3 +662,77 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "TaperBlendedNormalizeStage":
 		return cls(**config.params)
+
+
+def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
+	"""Perform normalization work that requires the complete projection window."""
+
+	if not isinstance(stage, BeamTrackingNormalizeStage) or not stage.fit_schedule:
+		return
+	data = working_view(state)
+	layout = resolve_layout(state, stage.order, stage.name)
+	y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
+	pre_gain, post_gain, _pre_dark, _post_dark = _tracking_fields(
+		state, y_size, stage.component_names,
+	)
+	batch_count = n_projections(data, layout)
+	projection_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
+	projection_start = int(state.artifacts.get("projection_start", 0))
+	indices = np.unique(
+		np.linspace(0, batch_count - 1, stage.schedule_sample_count).astype(int),
+	)
+	fractions = (projection_start + indices) / max(projection_count - 1, 1)
+	stage._dispatch_schedule_fit = calibrate_schedule(
+		np.stack([projection_view(data, layout, int(index)) for index in indices]),
+		fractions, pre_gain, post_gain,
+	)
+
+
+def merge_normalization_dispatch(
+	stage: Stage, state: PipelineState, results: list[dict],
+) -> None:
+	"""Merge ordered per-projection artifacts into the serial Stage contract."""
+
+	if isinstance(stage, BeamBasisFitNormalizeStage) and results:
+		qcs = [item["beam_basis_qc"] for item in results]
+		coefficients = np.concatenate([
+			np.asarray(item["_beam_basis_coefficients"]) for item in results
+		], axis=0)
+		violations = [
+			value for item in results
+			for value in item["_beam_basis_violations"]
+		]
+		merged = dict(qcs[0])
+		merged["projections"] = [
+			projection for qc in qcs for projection in qc["projections"]
+		]
+		merged["coefficient_std"] = coefficients.std(axis=0).tolist()
+		merged["maximum_coefficient_step"] = (
+			float(np.max(np.linalg.norm(np.diff(coefficients, axis=0), axis=1)))
+			if len(coefficients) > 1 else 0.0
+		)
+		merged["violating_projection_count"] = sum(bool(value) for value in violations)
+		state.artifacts["beam_basis_qc"] = merged
+		return
+	if isinstance(stage, BeamKeyframesNormalizeStage) and results:
+		qcs = [item["beam_keyframe_qc"] for item in results]
+		merged = dict(qcs[0])
+		merged["maximum_gap_seen"] = max(item["maximum_gap_seen"] for item in qcs)
+		merged["projection_start"] = int(state.artifacts.get("projection_start", 0))
+		merged["projection_count"] = int(
+			state.artifacts.get("projection_count", state.scan.n_projections),
+		)
+		state.artifacts["beam_keyframe_qc"] = merged
+		return
+	if isinstance(stage, BeamTrackingNormalizeStage) and results:
+		merged = dict(results[0]["beam_tracking_qc"])
+		merged["projection_start"] = int(state.artifacts.get("projection_start", 0))
+		merged["projection_count"] = int(
+			state.artifacts.get("projection_count", state.scan.n_projections),
+		)
+		state.artifacts["beam_tracking_qc"] = merged
+		if hasattr(stage, "_dispatch_schedule_fit"):
+			del stage._dispatch_schedule_fit
+		return
+	for artifacts in results:
+		state.artifacts.update(artifacts)

@@ -19,12 +19,15 @@ a measurably different result on the non-commuting synthetic fixture. A
 full-array implementation such as `stripe.all_of_the_stripe` is a planner
 barrier and therefore splits adjacent bounded segments.
 
-For a float32 volume shaped `(Theta, Y, X)`, one worker owns at most
-`Theta * X * 4` scratch bytes. With `W` bounded workers, simultaneously live
-row scratch is bounded by `min(W, Y) * Theta * X * 4`; it must not approach a
-second `Theta * Y * X * 4` volume. The regression suite records actual scratch
-shapes, asserts gather/scatter counts, caps live workers, and rejects layout
-materializations in a compatible chain's plan. The isolated three-arm
+For a float32 volume shaped `(Theta, Y, X)`, one process owns at most
+`Theta * X * 4` private scratch bytes. With `W` process workers, simultaneously
+live row scratch is bounded by `min(W, Y) * Theta * X * 4`; it must not approach
+a second `Theta * Y * X * 4` shared volume. Projection-order gather and scatter
+happen inside each worker through a managed handle; sinogram-order rows are
+direct contiguous views. ndarray-only hermetic execution is serial and owns one
+scratch row. The regression suite records scratch shapes, asserts
+gather/scatter counts, and rejects layout materializations in a compatible
+chain's plan. The isolated three-arm
 `benchmarks/order_layout.py` benchmark remains available for representative
 RSS and runtime measurements.
 

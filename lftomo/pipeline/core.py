@@ -14,6 +14,7 @@ from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer, StorageBackend, buffer_view
 
 if TYPE_CHECKING:
+	from lftomo.pipeline.execution import PipelineExecutor
 	from lftomo.util.window import TomoDataSet, TomoWindow
 
 
@@ -223,6 +224,7 @@ class PipelineState:
 	artifacts: dict[str, Any] = field(default_factory=dict)
 	backend: Backend = field(default_factory=NumpyBackend)
 	storage: StorageBackend | None = None
+	executor: PipelineExecutor | None = None
 	dataset: TomoDataSet | None = None
 	source_window: TomoWindow | None = None
 	buffer_spec: BufferSpec | None = None
@@ -252,6 +254,7 @@ class PipelineState:
 			artifacts=dict(self.artifacts),
 			backend=self.backend,
 			storage=self.storage,
+			executor=self.executor,
 			dataset=self.dataset,
 			source_window=self.source_window,
 			buffer_spec=_buffer_spec(working_array, resolved_layout),
@@ -384,6 +387,7 @@ class Pipeline:
 			)
 			self._validated = True
 		segments = () if self.plan is None else self.plan.segments
+		executor = state.executor or getattr(state.storage, "pipeline_executor", None)
 		if not segments:
 			from lftomo.pipeline.planning import ExecutionKind, PlanSegment
 
@@ -417,6 +421,7 @@ class Pipeline:
 							)
 						),
 						checkpoint=self.checkpoint,
+						executor=executor,
 					)
 				except BaseException:
 					raise
@@ -436,7 +441,10 @@ class Pipeline:
 				if self.observer is not None:
 					self.observer("started", index, stage, None)
 				try:
-					state = stage.run(state)
+					state = (
+						executor.run_stage(state, stage)
+						if executor is not None else stage.run(state)
+					)
 				except BaseException as error:
 					if self.observer is not None:
 						self.observer("failed", index, stage, error)

@@ -49,9 +49,11 @@ def _axis_slice(window: TomoWindow, axis: str) -> slice:
 
 
 def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats: np.ndarray,
-									projection: int, projection_count: int, pre_sub: bool = False) -> None:
+									projection: int, projection_count: int, pre_sub: bool = False,
+									projection_index: int | None = None) -> None:
 	"""Normalize one projection in array views shared by the function and Stage APIs."""
-	weights = [projection_count - projection, projection]
+	global_projection = projection if projection_index is None else projection_index
+	weights = [projection_count - global_projection, global_projection]
 	dark_map = np.average(
 		flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1], axis=0, weights=weights
 	)

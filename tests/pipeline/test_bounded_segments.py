@@ -114,13 +114,13 @@ def test_segment_gathers_once_per_row_for_whole_chain(monkeypatch):
 	np.testing.assert_array_equal(result.working_array, 3)
 
 
-def test_bounded_worker_limit_caps_live_row_scratch():
+def test_ndarray_only_bounded_execution_is_serial_and_hermetic():
 	activity = {"lock": threading.Lock(), "current": 0, "peak": 0}
 	array = np.zeros((12, 6, 8), dtype=np.float32)
 
 	pipeline([AddSinogramStage("add", 1, activity)], workers=2).run(state(array, ProjOrder))
 
-	assert 1 < activity["peak"] <= 2
+	assert activity["peak"] == 1
 
 
 def test_real_vo_chain_matches_contiguous_sinogram_execution():
