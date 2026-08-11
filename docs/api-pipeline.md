@@ -40,6 +40,17 @@ The prefix cache's immutable path uses a separate `FileBackedNPArray`, which is
 a first-class read-only `ManagedBuffer`. Workers reopen its `.npy` mapping by
 path; mutating suffixes continue to receive an independent writable copy.
 
+Read Stages also establish three distinct coordinate records on `PipelineState`:
+
+- `dataset`: the full source `TomoDataSet`, including the complete angle vector;
+- `source_window`: the immutable global source selection, position, stride, and
+  padding; and
+- `buffer_spec`: the current allocation's shape, dtype, and layout.
+
+Layout conversion and reconstruction update `buffer_spec`; they do not rewrite
+source coordinates. Output slice numbering therefore uses the source window's
+global Y position plus the buffer-local row.
+
 ## Validation Rules
 
 `Pipeline` validates the ordered Stage list before execution. The validator

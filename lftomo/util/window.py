@@ -168,7 +168,8 @@ class TomoDataSet(DataRef):
 	"""
 
 	def __init__(self, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
-					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32):
+					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32,
+					*, angles: np.ndarray = None):
 		""" Initializes DataWindowSet.
 
 			:param ds_shape: Shape of the overall dataset.
@@ -195,7 +196,13 @@ class TomoDataSet(DataRef):
 
 		self.__fov = fov
 
-		if angle_steps is None:
+		if angles is not None:
+			if angle_steps is not None:
+				raise ValueError("angles and angle_steps are mutually exclusive")
+			if len(angles) != shape.Theta:
+				raise ValueError("one source angle is required for every projection")
+			self.__angles = np.asarray(angles, dtype=np.float32)
+		elif angle_steps is None:
 			if shape.Theta == fov.Theta * fov.Count:
 				self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
 			else:

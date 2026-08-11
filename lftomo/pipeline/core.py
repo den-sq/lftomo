@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import astuple, dataclass, field, is_dataclass, replace
 from enum import Enum, auto
-from typing import Any, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 import numpy as np
 
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.storage import StorageBackend, buffer_view
+
+if TYPE_CHECKING:
+	from lftomo.util.window import TomoDataSet, TomoWindow
 
 
 @dataclass(frozen=True)
@@ -183,6 +186,34 @@ class WorkingArray(Protocol):
 		"""Array shape in backend-native form."""
 
 
+@dataclass(frozen=True)
+class BufferSpec:
+	"""Shape, dtype, and layout of the current working allocation."""
+
+	shape: Any
+	dtype: np.dtype
+	layout: type[Any] | None
+
+	def with_layout(self, layout: type[Any] | None) -> "BufferSpec":
+		return replace(self, layout=layout)
+
+
+def _buffer_spec(buffer: Any, layout: type[Any] | None) -> BufferSpec | None:
+	shape = getattr(buffer, "shape", None)
+	if shape is None:
+		return None
+	try:
+		values = astuple(shape) if is_dataclass(shape) else tuple(shape)
+		if not all(int(value) > 0 for value in values):
+			return None
+	except TypeError:
+		return None
+	dtype = getattr(buffer, "dtype", None)
+	if dtype is None and hasattr(buffer, "array"):
+		dtype = getattr(buffer.array, "dtype", None)
+	return None if dtype is None else BufferSpec(shape, np.dtype(dtype), layout)
+
+
 @dataclass
 class PipelineState:
 	"""Mutable state object passed from Stage to Stage."""
@@ -193,10 +224,17 @@ class PipelineState:
 	artifacts: dict[str, Any] = field(default_factory=dict)
 	backend: Backend = field(default_factory=NumpyBackend)
 	storage: StorageBackend | None = None
+	dataset: TomoDataSet | None = None
+	source_window: TomoWindow | None = None
+	buffer_spec: BufferSpec | None = None
 	# Fragment callers may omit axes for legacy compatibility. Complete pipelines
 	# always acquire both from their read Stage before data processing begins.
 	layout: type[Any] | None = None
 	domain: DataDomain | None = None
+
+	def __post_init__(self):
+		if self.buffer_spec is None:
+			self.buffer_spec = _buffer_spec(self.working_array, self.layout)
 
 	def with_array(
 		self,
@@ -207,6 +245,7 @@ class PipelineState:
 	) -> "PipelineState":
 		"""Return a shallow-copy state with a different working array."""
 
+		resolved_layout = self.layout if layout is None else layout
 		return PipelineState(
 			working_array=working_array,
 			scan=self.scan,
@@ -214,9 +253,18 @@ class PipelineState:
 			artifacts=dict(self.artifacts),
 			backend=self.backend,
 			storage=self.storage,
-			layout=self.layout if layout is None else layout,
+			dataset=self.dataset,
+			source_window=self.source_window,
+			buffer_spec=_buffer_spec(working_array, resolved_layout),
+			layout=resolved_layout,
 			domain=self.domain if domain is None else domain,
 		)
+
+	def sync_buffer_spec(self) -> None:
+		"""Synchronize layout metadata after a preserving in-place Stage."""
+
+		if self.buffer_spec is not None and self.buffer_spec.layout is not self.layout:
+			self.buffer_spec = self.buffer_spec.with_layout(self.layout)
 
 
 def working_view(state: PipelineState) -> np.ndarray:
@@ -334,6 +382,7 @@ class Pipeline:
 				for stage in segment_stages:
 					state.layout = stage.contract.output_layout(state.layout)
 					state.domain = stage.contract.output_domain(state.domain)
+				state.sync_buffer_spec()
 				continue
 			for index, stage in enumerate(segment_stages, start=segment.start):
 				if self.checkpoint is not None:
@@ -356,4 +405,5 @@ class Pipeline:
 					state.layout = output_layout
 				if output_domain is not None:
 					state.domain = output_domain
+				state.sync_buffer_spec()
 		return state

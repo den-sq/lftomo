@@ -102,9 +102,10 @@ class TIFFSlicesWriteStage(Stage):
 		output = Path(state.recon.output_path)
 		output.mkdir(parents=True, exist_ok=True)
 		sample_id = self._sample_id(state)
+		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
 		paths = []
 		for local_index in range(working.shape[0]):
-			slice_index = self.slice_start + local_index
+			slice_index = self.slice_start + source_y + local_index
 			name = self.naming_template.format(sample_id=sample_id, slice=slice_index)
 			paths.append(output / (name if name.lower().endswith((".tif", ".tiff")) else f"{name}.tif"))
 

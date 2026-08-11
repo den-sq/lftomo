@@ -86,7 +86,7 @@ class WeightedNormalizeStage(Stage):
 				n_projections(working, layout),
 				self.pre_sub,
 			)
-		return state if working is state.working_array else state.with_array(working)
+		return state if np.shares_memory(working, working_view(state)) else state.with_array(working)
 
 
 def _flat_fields(state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
@@ -235,7 +235,7 @@ class BeamTrackingNormalizeStage(Stage):
 			},
 			"projection_start": projection_start, "projection_count": projection_count,
 		}
-		return state if data is state.working_array else state.with_array(data)
+		return state if np.shares_memory(data, working_view(state)) else state.with_array(data)
 
 
 class BeamKeyframesNormalizeStage(Stage):
@@ -315,7 +315,7 @@ class BeamKeyframesNormalizeStage(Stage):
 			"projection_start": projection_start, "projection_count": projection_count,
 			"observability": "events wholly inside a keyframe gap cannot be recovered",
 		}
-		return state if data is state.working_array else state.with_array(data)
+		return state if np.shares_memory(data, working_view(state)) else state.with_array(data)
 
 
 class BeamBasisFitNormalizeStage(Stage):
@@ -488,7 +488,7 @@ class BeamBasisFitNormalizeStage(Stage):
 				"fit and coefficient QC guard gross contamination"
 			),
 		}
-		return state if data is state.working_array else state.with_array(data)
+		return state if np.shares_memory(data, working_view(state)) else state.with_array(data)
 
 
 class ThetaSwitchNormalizeStage(Stage):
@@ -570,7 +570,7 @@ class ThetaSwitchNormalizeStage(Stage):
 				image, gain, dark, self.pre_subtracted,
 				self.floor_nonpositive, self.floor_value,
 			)
-		return state if data is state.working_array else state.with_array(data)
+		return state if np.shares_memory(data, working_view(state)) else state.with_array(data)
 
 
 class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):

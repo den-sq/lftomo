@@ -405,6 +405,9 @@ def _clone_initial_state(state: PipelineState) -> PipelineState:
 		artifacts=copy.deepcopy(state.artifacts),
 		backend=state.backend,
 		storage=state.storage,
+		dataset=copy.deepcopy(state.dataset),
+		source_window=copy.deepcopy(state.source_window),
+		buffer_spec=copy.deepcopy(state.buffer_spec),
 		layout=state.layout,
 		domain=state.domain,
 	)
@@ -574,6 +577,9 @@ class PrefixCacheStore:
 			artifacts=copy.deepcopy(payload["artifacts"]),
 			backend=current.backend,
 			storage=current.storage,
+			dataset=copy.deepcopy(payload.get("dataset")),
+			source_window=copy.deepcopy(payload.get("source_window")),
+			buffer_spec=copy.deepcopy(payload.get("buffer_spec")),
 			layout=payload["layout"],
 			domain=payload["domain"],
 		)
@@ -600,6 +606,9 @@ class PrefixCacheStore:
 				"artifacts": copy.deepcopy(state.artifacts),
 				"scan": state.scan.model_copy(deep=True),
 				"recon_metadata": copy.deepcopy(state.recon.metadata),
+				"dataset": copy.deepcopy(state.dataset),
+				"source_window": copy.deepcopy(state.source_window),
+				"buffer_spec": copy.deepcopy(state.buffer_spec),
 				"layout": state.layout,
 				"domain": state.domain,
 			}, protocol=pickle.HIGHEST_PROTOCOL))

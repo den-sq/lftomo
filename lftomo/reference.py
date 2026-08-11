@@ -14,7 +14,14 @@ import numpy as np
 import tifffile as tf
 import yaml
 
-from lftomo.pipeline import DataDomain, NumpyBackend, PipelineState, validate_pipeline, working_view
+from lftomo.pipeline import (
+	DataDomain,
+	NumpyBackend,
+	PipelineRunContext,
+	PipelineState,
+	validate_pipeline,
+	working_view,
+)
 from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
@@ -262,15 +269,16 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 			theta_stop = min(theta_start + theta_batch_size, projection_count)
 			batch_read = read_config.model_copy(deep=True)
 			batch_read.params.update({"theta_start": theta_start, "theta_stop": theta_stop})
-			state = PipelineState(
-				working_array=np.empty((0,), dtype=np.float32), scan=scan, recon=recon,
-				artifacts={"projection_start": theta_start, "projection_count": projection_count},
-				backend=NumpyBackend(),
-			)
-			state = create_stage(batch_read).run(state)
-			for config in pre_configs:
-				state = create_stage(config).run(state)
-			batch = working_view(state).astype(np.float32, copy=True)
+			with PipelineRunContext() as run_context:
+				state = PipelineState(
+					working_array=np.empty((0,), dtype=np.float32), scan=scan, recon=recon,
+					artifacts={"projection_start": theta_start, "projection_count": projection_count},
+					backend=NumpyBackend(), storage=run_context.storage,
+				)
+				state = create_stage(batch_read).run(state)
+				for config in pre_configs:
+					state = create_stage(config).run(state)
+				batch = working_view(state).astype(np.float32, copy=True)
 			if volume is None:
 				shape = (projection_count, batch.shape[1], batch.shape[2])
 				volume = np.memmap(
@@ -368,23 +376,25 @@ def run_reference_archive(root: str | Path, producer: str,
 		configs = [config for config in recon.pipeline if config.kind != "write"]
 		stages = [create_stage(config) for config in configs]
 		validate_pipeline(stages, scan, NumpyBackend())
-		state = PipelineState(
-			working_array=np.empty((0,), dtype=np.float32),
-			scan=scan,
-			recon=recon,
-			backend=NumpyBackend(),
-		)
-		cropped = False
-		for config, stage in zip(configs, stages, strict=True):
-			if not cropped and config.kind in {"center", "recon"}:
-				start = min(selected) - window_start
-				stop = max(selected) - window_start + 1
-				state = state.with_array(working_view(state)[start:stop].copy())
-				cropped = True
-			state = stage.run(state)
-		if not cropped:
-			raise ValueError("canonical pipeline has no reconstruction boundary")
-		generated = working_view(state).copy()
+		with PipelineRunContext() as run_context:
+			state = PipelineState(
+				working_array=np.empty((0,), dtype=np.float32),
+				scan=scan,
+				recon=recon,
+				backend=NumpyBackend(),
+				storage=run_context.storage,
+			)
+			cropped = False
+			for config, stage in zip(configs, stages, strict=True):
+				if not cropped and config.kind in {"center", "recon"}:
+					start = min(selected) - window_start
+					stop = max(selected) - window_start + 1
+					state = state.with_array(working_view(state)[start:stop].copy())
+					cropped = True
+				state = stage.run(state)
+			if not cropped:
+				raise ValueError("canonical pipeline has no reconstruction boundary")
+			generated = working_view(state).copy()
 		layout = "sinogram"
 		batch_size = None
 	if generated.shape[0] != len(selected):

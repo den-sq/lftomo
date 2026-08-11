@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from pathlib import Path
 
 from natsort import natsorted
@@ -13,9 +12,9 @@ import tifffile as tf
 from lftomo.config import HDF5DxchangeProjections, StageConfig, TIFFStackProjections
 from lftomo.pipeline.core import PipelineState, ResourceHints, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
-from lftomo.storage import PipelineRunContext
-from lftomo.util.io import distribute_tiff_read
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
 def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_multiplier: float) -> StageContract:
@@ -29,6 +28,63 @@ def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_m
 		required_metadata=required_metadata,
 		resources=ResourceHints(memory_multiplier=memory_multiplier),
 	)
+
+
+def _storage(state: PipelineState):
+	if state.storage is None:
+		raise RuntimeError("read stages require an active PipelineRunContext")
+	return state.storage
+
+
+def _source_angles(state: PipelineState, count: int) -> np.ndarray:
+	return np.linspace(
+		np.deg2rad(state.scan.acquisition.rotation_start_deg),
+		np.deg2rad(state.scan.acquisition.rotation_end_deg),
+		count,
+		endpoint=False,
+		dtype=np.float32,
+	)
+
+
+def _bind_source_state(
+	state: PipelineState,
+	working,
+	*,
+	full_shape: ProjOrder,
+	dtype,
+	layout,
+	theta_start: int,
+	theta_stop: int,
+	theta_stride: int,
+	y_start: int,
+	y_stop: int,
+) -> PipelineState:
+	angles = _source_angles(state, full_shape.Theta)
+	dataset = TomoDataSet(
+		CTFov(full_shape.Theta, state.scan.degrees_per_fov, 1),
+		full_shape,
+		Y(1),
+		dtype=dtype,
+		work_dtype=np.float32,
+		angles=angles,
+	)
+	zero = ProjOrder(Theta=0, Y=0, X=0)
+	# A TomoWindow describes the covered source-coordinate span.  With a
+	# strided Theta selection its shape is therefore ``stop - start`` while the
+	# working buffer contains ``len(range(start, stop, stride))`` samples; step
+	# carries the mapping between those two extents.
+	source_window = TomoWindow(
+		ProjOrder(Theta=theta_stop - theta_start, Y=y_stop - y_start, X=full_shape.X),
+		zero,
+		ProjOrder(Theta=theta_start, Y=y_start, X=0),
+		ProjOrder(Theta=theta_stride, Y=1, X=1),
+		dtype,
+		np.float32,
+	)
+	result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
+	result.dataset = dataset
+	result.source_window = source_window
+	return result
 
 
 class HDF5DxchangeReadStage(Stage):
@@ -81,7 +137,8 @@ class HDF5DxchangeReadStage(Stage):
 			data = handle[source.data_path]
 			if data.ndim != 3:
 				raise ValueError(f"{source.data_path!r} must have (Theta, Y, X) dimensions")
-			theta_count, rows, _columns = data.shape
+			theta_count, rows, columns = data.shape
+			dtype = data.dtype
 			if theta_count != state.scan.n_projections:
 				raise ValueError(
 					f"scan declares {state.scan.n_projections} projections but HDF5 contains {theta_count}"
@@ -92,11 +149,40 @@ class HDF5DxchangeReadStage(Stage):
 				raise ValueError("invalid HDF5 Theta window")
 			if not 0 <= self.y_start < y_stop <= rows:
 				raise ValueError("invalid HDF5 Y window")
-			working = data[
+			selected_count = len(range(self.theta_start, theta_stop, self.theta_stride))
+			layout = ProjOrder if self.order == "projection" else SinoOrder
+			shape = (
+				ProjOrder(Theta=selected_count, Y=y_stop - self.y_start, X=columns)
+				if layout is ProjOrder else
+				SinoOrder(Y=y_stop - self.y_start, Theta=selected_count, X=columns)
+			)
+			memory = _storage(state).allocate(shape, dtype)
+			target = memory.array()
+			selection = np.s_[
 				self.theta_start:theta_stop:self.theta_stride, self.y_start:y_stop, :,
 			]
+			if layout is ProjOrder and data.chunks is None and data.compression is None:
+				data.read_direct(target, source_sel=selection)
+				read_strategy = "direct"
+			else:
+				read_strategy = "bounded_scratch"
+				chunk = min(32, selected_count)
+				for offset in range(0, selected_count, chunk):
+					count = min(chunk, selected_count - offset)
+					start = self.theta_start + offset * self.theta_stride
+					stop = start + count * self.theta_stride
+					scratch = np.empty((count, y_stop - self.y_start, columns), dtype=dtype)
+					data.read_direct(
+						scratch,
+						source_sel=np.s_[start:stop:self.theta_stride, self.y_start:y_stop, :],
+					)
+					if layout is ProjOrder:
+						target[offset:offset + count] = scratch
+					else:
+						target[:, offset:offset + count, :] = np.transpose(scratch, (1, 0, 2))
 
 			artifacts = dict(state.artifacts)
+			artifacts["hdf5_read_strategy"] = read_strategy
 			if self.calibration_policy != "ignore":
 				missing = [
 					path for path in (source.white_path, source.dark_path) if path not in handle
@@ -120,11 +206,18 @@ class HDF5DxchangeReadStage(Stage):
 					self.theta_start:theta_stop:self.theta_stride
 				]
 
-		working = np.asarray(working)
-		if self.order == "sinogram":
-			working = np.transpose(working, (1, 0, 2)).copy()
-		layout = ProjOrder if self.order == "projection" else SinoOrder
-		result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
+		result = _bind_source_state(
+			state,
+			memory,
+			full_shape=ProjOrder(Theta=theta_count, Y=rows, X=columns),
+			dtype=dtype,
+			layout=layout,
+			theta_start=self.theta_start,
+			theta_stop=theta_stop,
+			theta_stride=self.theta_stride,
+			y_start=self.y_start,
+			y_stop=y_stop,
+		)
 		result.artifacts = artifacts
 		return result
 
@@ -138,7 +231,6 @@ class TIFFStackReadStage(Stage):
 				y_start: int = 0, y_stop: int | None = None,
 				theta_start: int = 0, theta_stop: int | None = None,
 				pattern: str | None = None, projection_count: int | None = None,
-				sinogram_chunk_size: int | None = None, chunk_overlap: int = 0,
 				theta_stride: int = 1):
 		if order not in ("projection", "sinogram"):
 			raise ValueError("TIFF read order must be 'projection' or 'sinogram'")
@@ -153,8 +245,6 @@ class TIFFStackReadStage(Stage):
 		self.theta_stride = theta_stride
 		self.pattern = pattern
 		self.projection_count = projection_count
-		self.sinogram_chunk_size = sinogram_chunk_size
-		self.chunk_overlap = chunk_overlap
 		self.contract = _output_contract(
 			order,
 			required_metadata=("projections.path", "projections.pattern"),
@@ -163,7 +253,10 @@ class TIFFStackReadStage(Stage):
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "TIFFStackReadStage":
-		return cls(**config.params)
+		params = dict(config.params)
+		params.pop("sinogram_chunk_size", None)
+		params.pop("chunk_overlap", None)
+		return cls(**params)
 
 	def _source_files(self, source: TIFFStackProjections) -> list[Path]:
 		path = Path(source.path)
@@ -210,25 +303,41 @@ class TIFFStackReadStage(Stage):
 				"Theta-windowed or strided TIFF reads currently require one file per projection"
 			)
 		selected_count = count if len(files) == 1 else len(selected_files)
-		shape = ProjOrder(Theta=selected_count, Y=stop - self.y_start, X=columns)
-		context = (
-			nullcontext(state.storage) if state.storage is not None else PipelineRunContext()
+		layout = ProjOrder if self.order == "projection" else SinoOrder
+		shape = (
+			ProjOrder(Theta=selected_count, Y=stop - self.y_start, X=columns)
+			if layout is ProjOrder else
+			SinoOrder(Y=stop - self.y_start, Theta=selected_count, X=columns)
 		)
-		with context as owner:
-			storage = owner if state.storage is not None else owner.storage
-			memory = storage.allocate(shape, dtype)
-			kwargs = {} if self.threads is None else {"thread_max": self.threads}
+		memory = _storage(state).allocate(shape, dtype)
+		kwargs = {} if self.threads is None else {"thread_max": self.threads}
+		if layout is ProjOrder:
 			distribute_tiff_read(
 				selected_files, memory, y_start=self.y_start, y_stop=stop, **kwargs
 			)
-			with memory as values:
-				working = values.copy()
-			memory.close()
-
-		if self.order == "sinogram":
-			working = np.transpose(working, (1, 0, 2)).copy()
-		layout = ProjOrder if self.order == "projection" else SinoOrder
-		result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
+		else:
+			distribute_tiff_sinogram_read(
+				files,
+				memory,
+				y_start=self.y_start,
+				y_stop=stop,
+				theta_start=self.theta_start,
+				theta_stop=theta_stop,
+				theta_stride=self.theta_stride,
+				**kwargs,
+			)
+		result = _bind_source_state(
+			state,
+			memory,
+			full_shape=ProjOrder(Theta=count, Y=rows, X=columns),
+			dtype=dtype,
+			layout=layout,
+			theta_start=self.theta_start,
+			theta_stop=theta_stop,
+			theta_stride=self.theta_stride,
+			y_start=self.y_start,
+			y_stop=stop,
+		)
 		if self.theta_start != 0 or theta_stop != count or self.theta_stride != 1:
 			all_angles = np.linspace(
 				np.deg2rad(state.scan.acquisition.rotation_start_deg),

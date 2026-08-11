@@ -2,6 +2,7 @@
 
 from lftomo.pipeline.core import (
 	Backend,
+	BufferSpec,
 	DaskArrayStub,
 	DaskStubBackend,
 	Locality,
@@ -54,6 +55,7 @@ from lftomo.pipeline.sweep import (
 
 __all__ = [
 	"Backend",
+	"BufferSpec",
 	"DaskArrayStub",
 	"DaskStubBackend",
 	"Locality",
