@@ -205,21 +205,23 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		})
 
 	def pin(self, buffer, *, owner: str):
-		record = self._physical.get(buffer.name)
+		name = getattr(buffer, "name", None)
+		record = self._physical.get(name)
 		if record is not None:
 			record["pins"].add(owner)
 			self._events.append({
 				"action": "pin", "role": getattr(buffer, "role", None),
-				"name": buffer.name, "bytes": record["capacity"], "alias": owner,
+				"name": name, "bytes": record["capacity"], "alias": owner,
 			})
 
 	def unpin(self, buffer, *, owner: str):
-		record = self._physical.get(buffer.name)
+		name = getattr(buffer, "name", None)
+		record = self._physical.get(name)
 		if record is not None:
 			record["pins"].discard(owner)
 			self._events.append({
 				"action": "unpin", "role": getattr(buffer, "role", None),
-				"name": buffer.name, "bytes": record["capacity"], "alias": owner,
+				"name": name, "bytes": record["capacity"], "alias": owner,
 			})
 
 	@property

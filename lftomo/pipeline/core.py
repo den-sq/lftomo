@@ -122,6 +122,10 @@ class StageContract:
 	required_metadata: tuple[str, ...] = ()
 	consumes_artifacts: tuple[str, ...] = ()
 	produces_artifacts: tuple[str, ...] = ()
+	# Large arrays that an experiment prefix snapshot must retain as reopenable
+	# process-shared buffers. This is producer-declared; small/QC artifacts stay
+	# ordinary Python values regardless of size.
+	managed_artifacts: tuple[str, ...] = ()
 	forks_pipeline: bool = False
 	resources: ResourceHints = field(default_factory=ResourceHints)
 	accepts: tuple[type[Any], ...] | None = None
@@ -137,6 +141,14 @@ class StageContract:
 	required_pad: PadRequirement = PadRequirement()
 	requires_full_axes: tuple[str, ...] = ()
 	runtime_requirements: tuple[RuntimeRequirement, ...] = ()
+
+	def __post_init__(self):
+		undeclared = set(self.managed_artifacts) - set(self.produces_artifacts)
+		if undeclared:
+			raise ValueError(
+				"managed_artifacts must also be declared in produces_artifacts: "
+				+ ", ".join(sorted(undeclared))
+			)
 
 	@property
 	def accepted_layouts(self) -> tuple[type[Any], ...] | None:

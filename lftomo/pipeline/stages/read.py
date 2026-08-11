@@ -28,6 +28,7 @@ def _output_contract(order: str, *, required_metadata: tuple[str, ...],
 		window_axes=("Theta", "Y"),
 		required_metadata=required_metadata,
 		produces_artifacts=produces_artifacts,
+		managed_artifacts=produces_artifacts,
 	)
 
 

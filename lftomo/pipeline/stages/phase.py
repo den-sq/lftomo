@@ -200,6 +200,7 @@ class PaganinFilterStage(Stage):
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
 			produces_artifacts=("phase_filter",) if enabled else (),
+			managed_artifacts=("phase_filter",) if enabled else (),
 			required_pad=PadRequirement(phase_fft_y=enabled),
 		)
 
@@ -342,6 +343,7 @@ class PaganinStage(Stage):
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
 		produces_artifacts=("phase_filter",),
+		managed_artifacts=("phase_filter",),
 	)
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
@@ -371,6 +373,7 @@ class PaganinStage(Stage):
 			produces_domain=DataDomain.ATTENUATION if enabled else PRESERVE,
 			locality=Locality.PROJECTION,
 			produces_artifacts=("phase_filter",) if enabled else (),
+			managed_artifacts=("phase_filter",) if enabled else (),
 			required_pad=PadRequirement(phase_fft_y=enabled),
 		)
 
@@ -415,6 +418,7 @@ class PaganinPhaseAbsorptionStage(Stage):
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
 		produces_artifacts=("phase_filter",),
+		managed_artifacts=("phase_filter",),
 	)
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
@@ -439,6 +443,7 @@ class PaganinPhaseAbsorptionStage(Stage):
 			produces_domain=DataDomain.ATTENUATION,
 			locality=Locality.PROJECTION,
 			produces_artifacts=("phase_filter",),
+			managed_artifacts=("phase_filter",),
 			required_pad=PadRequirement(phase_fft_y=True),
 		)
 

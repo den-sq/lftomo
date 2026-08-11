@@ -248,6 +248,34 @@ def test_preflight_reports_validation_failures_and_enforces_resource_guards(tmp_
 	assert overridden.prepare()[0].estimated_output_bytes == 60
 
 
+def test_disabled_prefix_plan_adds_no_phantom_cache_resource_request(tmp_path):
+	class DisabledCacheExecutor:
+		def plan_prefix_cache(self, _trials):
+			return {
+				"enabled": False,
+				"scratch": str(tmp_path / "unused-cache"),
+				"estimated_unique_snapshot_bytes": 10**18,
+				"decisions": [],
+			}
+
+		def __call__(self, *_args):
+			return TrialExecution(metrics={"quality": 1})
+
+	runner = IndependentExperimentRunner(
+		experiment_config(candidate=candidate_space((0.01,))),
+		inputs(),
+		tmp_path / "results",
+		DisabledCacheExecutor(),
+	)
+	preflight, prepared = runner.prepare()
+
+	assert prepared
+	assert preflight.prefix_cache["enabled"] is False
+	assert runner.path_resources.cache_root is None
+	assert runner.path_resources.estimated_cache_bytes is None
+	assert not (tmp_path / "unused-cache").exists()
+
+
 def test_gpu_and_memory_capabilities_bound_concurrency(tmp_path):
 	document = experiment_config(concurrency=4).model_dump(mode="json")
 	document["resources"].update({"requires_gpu": True, "memory_gb": 1})

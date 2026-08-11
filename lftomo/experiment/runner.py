@@ -412,7 +412,7 @@ class IndependentExperimentRunner:
 			and not self.policy.override_limits
 		):
 			path_updates["result_guard_bytes"] = min(limits)
-		if prefix_cache is not None:
+		if prefix_cache is not None and prefix_cache.get("enabled"):
 			if path_request.cache_root is None and prefix_cache.get("scratch") is not None:
 				path_updates["cache_root"] = Path(prefix_cache["scratch"])
 			if path_request.estimated_cache_bytes is None:

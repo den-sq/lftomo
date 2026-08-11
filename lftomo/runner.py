@@ -705,7 +705,14 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					executor=run_context.executor,
 				)
 				state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
-				artifacts = dict(state.artifacts)
+				# Experiment-managed arrays belong to the run context. Do not return
+				# handles after its manager has shut down; only durable/ordinary
+				# artifacts cross the trial boundary.
+				artifacts = {
+					key: _detached_artifact(value)
+					for key, value in state.artifacts.items()
+					if not isinstance(value, ManagedBuffer)
+				}
 			else:
 				artifacts = _run_streaming_pipeline(
 					stages=stages, concrete=concrete, run_scan=run_scan,

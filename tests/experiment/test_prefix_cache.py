@@ -1,6 +1,10 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
+import multiprocessing
+import os
+import signal
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -21,14 +25,16 @@ from lftomo.experiment import (
 	ExperimentConfig,
 	IndependentExperimentRunner,
 	OutputRecord,
+	PrefixCacheDecision,
 	PrefixCachePolicy,
 	PrefixCachingPipelineExecutor,
 	PrefixPlanningCandidate,
 	plan_common_prefixes,
 )
 from lftomo.experiment.runner import ExperimentInputs, TrialExecution
-from lftomo.pipeline import Pipeline, PipelineState, Stage, StageContract
+from lftomo.pipeline import Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 from lftomo.util.shapes import ProjOrder
 
 
@@ -128,6 +134,70 @@ class InputScaleStage(Stage):
 		return state
 
 
+class ManagedArtifactSourceStage(Stage):
+	name = "test.managed_artifact_source"
+	contract = StageContract(
+		produced_output=ProjOrder,
+		produces_domain=DataDomain.TRANSMISSION,
+		produces_artifacts=("large_mask", "center", "qc"),
+		managed_artifacts=("large_mask",),
+		cacheable_prefix=True,
+	)
+
+	def __init__(self, values):
+		self.values = np.asarray(values, dtype=np.float32)
+
+	def run(self, state):
+		state.working_array = self.values.copy()
+		state.artifacts.update({
+			"large_mask": self.values > self.values.mean(),
+			"center": 7.5,
+			"qc": {"valid": True},
+		})
+		return state
+
+
+class ArtifactTailStage(Stage):
+	name = "test.artifact_tail"
+
+	def __init__(self, *, mutates):
+		self.mutates = mutates
+		self.contract = StageContract(
+			accepts=(ProjOrder,), produces=PRESERVE,
+			accepts_domain=(DataDomain.TRANSMISSION,), produces_domain=PRESERVE,
+			mutates_input=mutates, cacheable_prefix=True,
+			consumes_artifacts=("large_mask", "center", "qc"),
+		)
+
+	def run(self, state):
+		mask = state.artifacts["large_mask"]
+		assert isinstance(mask, ManagedBuffer)
+		assert buffer_view(mask).flags.writeable is self.mutates
+		assert state.artifacts["center"] == 7.5
+		assert state.artifacts["qc"] == {"valid": True}
+		if self.mutates:
+			buffer_view(state.working_array)[:] += 1
+		return state
+
+
+class BlockingPrefixStage(Stage):
+	name = "test.blocking_prefix"
+	contract = StageContract(
+		accepts=(ProjOrder,), produces=PRESERVE,
+		accepts_domain=(DataDomain.TRANSMISSION,), produces_domain=PRESERVE,
+		cacheable_prefix=True,
+	)
+
+	def __init__(self, entered, release):
+		self.entered = entered
+		self.release = release
+
+	def run(self, state):
+		self.entered.set()
+		assert self.release.wait(timeout=10)
+		return state
+
+
 def scan():
 	return Scan(
 		energy_keV=24,
@@ -191,6 +261,46 @@ def planned_pair(tmp_path, values=None, *, policy=None):
 	)
 	plan = plan_common_prefixes(candidates, policy)
 	return policy, candidates, plan
+
+
+def _segment_exists(name):
+	from multiprocessing.shared_memory import SharedMemory
+
+	try:
+		segment = SharedMemory(name, track=False)
+	except FileNotFoundError:
+		return False
+	segment.close()
+	return True
+
+
+def _crashing_cached_trial(connection, scratch):
+	if hasattr(os, "setsid"):
+		os.setsid()
+	values = np.arange(24, dtype=np.float32).reshape(2, 3, 4) + 1
+	policy, candidates, plan = planned_pair(scratch, values=values)
+	executor = PrefixCachingPipelineExecutor(policy)
+	with PipelineRunContext(max_workers=1) as context:
+		initial = state(candidates[0].configs)
+		initial.storage = context.storage
+		initial.executor = context.executor
+		initial.working_array = context.storage.allocate(
+			values.shape, values.dtype, role="trial-input",
+		)
+		initial.working_array.array()[...] = values
+		executor.execute(
+			plan.decisions[0], initial,
+			(SourceStage(values), MutatingTailStage(2)), candidates[0].configs,
+			runtime_identity={"dataset": "killed-trial"},
+		)
+		names = tuple(dict.fromkeys(
+			event["name"] for event in context.storage.allocation_events
+			if event["action"] == "allocate"
+		))
+		connection.send(names)
+		connection.close()
+		while True:
+			time.sleep(1)
 
 
 def test_prefix_planning_is_deterministic_visible_and_fail_closed(tmp_path):
@@ -309,6 +419,171 @@ def test_nonmutating_suffix_uses_read_only_map_and_unknown_identity_bypasses(tmp
 	assert event.status == "bypass"
 	assert "lacks a cache identity contract" in event.reason
 	np.testing.assert_array_equal(result.working_array, values * 2)
+
+
+def test_cache_fork_is_manager_issued_and_identity_ignores_buffer_name(tmp_path):
+	policy, candidates, plan = planned_pair(tmp_path)
+	executor = PrefixCachingPipelineExecutor(policy)
+	decision = plan.decisions[0]
+	values = np.arange(24, dtype=np.float32).reshape(2, 3, 4) + 1
+	configs = candidates[0].configs
+
+	with PipelineRunContext(max_workers=1) as context:
+		def execute(role):
+			initial = state(configs)
+			initial.storage = context.storage
+			initial.executor = context.executor
+			initial.working_array = context.storage.allocate(
+				values.shape, values.dtype, role=role,
+			)
+			initial.working_array.array()[...] = values
+			return executor.execute(
+				decision, initial,
+				(SourceStage(values), MutatingTailStage(2)), configs,
+				runtime_identity={"dataset": "manager-fork"},
+			)
+
+		first, first_event = execute("trial-input:a")
+		second, second_event = execute("trial-input:b")
+		assert isinstance(first.working_array, ManagedBuffer)
+		assert isinstance(second.working_array, ManagedBuffer)
+		assert first.working_array.name != second.working_array.name
+		assert [first_event.status, second_event.status] == ["miss", "hit"]
+		assert any(
+			event["action"] == "allocate" and event["role"] == "experiment.cache-fork"
+			for event in context.storage.allocation_events
+		)
+		np.testing.assert_array_equal(buffer_view(first.working_array), values * 2)
+		np.testing.assert_array_equal(buffer_view(second.working_array), values * 2)
+
+
+def test_declared_large_artifact_uses_mutability_aware_managed_handles(tmp_path):
+	values = np.arange(24, dtype=np.float32).reshape(2, 3, 4) + 1
+	shared = config("source", "managed-artifacts")
+	configs = (
+		(shared, config("tail", "mutating")),
+		(shared, config("tail", "read-only")),
+	)
+	stages = (
+		(ManagedArtifactSourceStage(values), ArtifactTailStage(mutates=True)),
+		(ManagedArtifactSourceStage(values), ArtifactTailStage(mutates=False)),
+	)
+	policy = enabled_policy(tmp_path)
+	candidates = tuple(PrefixPlanningCandidate(
+		candidate_id=name, configs=candidate_configs, stages=candidate_stages,
+		share_identity={"dataset": "managed-artifact"},
+		estimated_snapshot_bytes=values.nbytes * 2,
+	) for name, candidate_configs, candidate_stages in zip(
+		("mutating", "read-only"), configs, stages, strict=True,
+	))
+	plan = plan_common_prefixes(candidates, policy)
+	executor = PrefixCachingPipelineExecutor(policy)
+
+	with PipelineRunContext(max_workers=1) as context:
+		results = []
+		for candidate, decision in zip(candidates, plan.decisions, strict=True):
+			initial = state(candidate.configs)
+			initial.storage = context.storage
+			initial.executor = context.executor
+			result, event = executor.execute(
+				decision, initial, candidate.stages, candidate.configs,
+				runtime_identity=candidate.share_identity,
+			)
+			results.append((result, event))
+
+		writable, writable_event = results[0]
+		read_only, read_only_event = results[1]
+		assert isinstance(writable.artifacts["large_mask"], ManagedBuffer)
+		assert not isinstance(writable.artifacts["large_mask"], FileBackedNPArray)
+		assert isinstance(read_only.artifacts["large_mask"], FileBackedNPArray)
+		assert writable.artifacts["center"] == read_only.artifacts["center"] == 7.5
+		assert writable.artifacts["qc"] == read_only.artifacts["qc"] == {"valid": True}
+		assert writable_event.fork_strategy == "explicit_copy"
+		assert read_only_event.fork_strategy == "read_only"
+
+	manifest = json.loads(next((policy.scratch / "entries").glob("*/*/manifest.json")).read_text())
+	assert set(manifest["artifact_files"]) == {"large_mask"}
+	assert (next((policy.scratch / "entries").glob("*/*")) /
+		manifest["artifact_files"]["large_mask"]).is_file()
+
+
+def test_cache_pin_blocks_alias_while_prefix_operation_retains_source(tmp_path):
+	values = np.arange(128, dtype=np.uint16)
+	entered = threading.Event()
+	release = threading.Event()
+	shared = config("prefix", "blocking")
+	left = config("tail", "left")
+	right = config("tail", "right")
+	policy = enabled_policy(tmp_path)
+	candidates = tuple(PrefixPlanningCandidate(
+		candidate_id=name, configs=(shared, tail),
+		stages=(BlockingPrefixStage(entered, release), InputScaleStage(2)),
+		share_identity={"dataset": "pin"}, estimated_snapshot_bytes=values.nbytes,
+	) for name, tail in (("left", left), ("right", right)))
+	decision = plan_common_prefixes(candidates, policy).decisions[0]
+	executor = PrefixCachingPipelineExecutor(policy)
+
+	with PipelineRunContext(max_workers=1) as context:
+		raw = context.storage.allocate(values.shape, values.dtype, role="raw_staging")
+		raw.array()[...] = values
+		initial = state(candidates[0].configs)
+		initial.storage = context.storage
+		initial.executor = context.executor
+		initial.working_array = raw
+		initial.layout = ProjOrder
+		initial.domain = DataDomain.TRANSMISSION
+		with ThreadPoolExecutor(max_workers=1) as pool:
+			future = pool.submit(
+				executor.execute, decision, initial, candidates[0].stages,
+				candidates[0].configs, runtime_identity=candidates[0].share_identity,
+			)
+			assert entered.wait(timeout=10)
+			context.storage.retire(raw, role="raw_staging")
+			refused = context.storage.allocate(
+				(32,), np.float32, role="reconstruction", reuse_from=("raw_staging",),
+			)
+			assert refused.name != raw.name
+			release.set()
+			future.result(timeout=20)
+
+		reused = context.storage.allocate(
+			(32,), np.float32, role="reconstruction:retry", reuse_from=("raw_staging",),
+		)
+		assert reused.name == raw.name
+		pin_events = [
+			event for event in context.storage.allocation_events
+			if event["name"] == raw.name and event["action"] in {"pin", "unpin"}
+		]
+		assert [event["action"] for event in pin_events] == ["pin", "unpin"]
+
+
+def test_killed_cached_trial_leaves_no_manager_segments(tmp_path):
+	if not hasattr(os, "killpg"):
+		pytest.skip("process-group crash cleanup requires POSIX")
+	spawn = multiprocessing.get_context("spawn")
+	parent, child = spawn.Pipe(duplex=False)
+	process = spawn.Process(
+		target=_crashing_cached_trial, args=(child, tmp_path / "killed-cache"),
+	)
+	process.start()
+	child.close()
+	try:
+		assert parent.poll(20), "cached trial did not publish its managed segments"
+		names = parent.recv()
+		assert len(names) >= 3
+		assert all(_segment_exists(name) for name in names)
+		os.killpg(process.pid, signal.SIGKILL)
+		process.join(timeout=10)
+		assert not process.is_alive()
+		deadline = time.monotonic() + 10
+		while any(_segment_exists(name) for name in names) and time.monotonic() < deadline:
+			time.sleep(0.1)
+		assert not any(_segment_exists(name) for name in names)
+	finally:
+		parent.close()
+		if process.is_alive():
+			os.killpg(process.pid, signal.SIGKILL)
+			process.join(timeout=5)
 
 
 def test_initial_working_array_content_is_part_of_cache_identity(tmp_path):

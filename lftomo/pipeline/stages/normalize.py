@@ -101,6 +101,7 @@ class WeightedNormalizeStage(Stage):
 		window_axes=("Y",),
 		required_metadata=("metadata.flat_fields",),
 		produces_artifacts=("flat_fields",),
+		managed_artifacts=("flat_fields",),
 	)
 
 	def __init__(self, pre_sub: bool = False, pre_subtracted: bool | None = None,
@@ -585,6 +586,7 @@ class ThetaSwitchNormalizeStage(Stage):
 			window_axes=("Y", "Theta"),
 			required_metadata=("metadata.flat_fields",),
 			produces_artifacts=("flat_fields",),
+			managed_artifacts=("flat_fields",),
 		)
 		self.order = order
 		self.floor_nonpositive = floor_nonpositive
