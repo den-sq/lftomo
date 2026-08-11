@@ -56,6 +56,35 @@ def test_current_b10_driver_runs_end_to_end_without_touching_snapshot(tmp_path):
 	assert tf.imread(written[0]).shape == (size, size)
 
 
+def test_current_b10_driver_runs_a_global_row_selection(tmp_path):
+	size = 8
+	projections = np.broadcast_to(
+		np.arange(size, dtype=np.float32)[None, :, None], (6, size, size),
+	).copy()
+	source = tmp_path / "scan.h5"
+	flats = tmp_path / "gains"
+	output = tmp_path / "recon"
+	_write_source(source, projections)
+	_write_flats(flats, size)
+
+	def reconstruct(data, _angles, _center, _processes):
+		return np.repeat(data.mean(axis=0)[:, None, :], data.shape[2], axis=1)
+
+	written = run(B10ReconConfig(
+		source=source,
+		flats=flats,
+		output=output,
+		center=size / 2,
+		window_size=2,
+		y_start=2,
+		y_stop=6,
+		apply_bac=False,
+	), reconstructor=reconstruct)
+
+	assert [path.name for path in written] == ["00002.tif", "00003.tif", "00004.tif", "00005.tif"]
+	assert [float(tf.imread(path)[0, 0]) for path in written] == [1.0, 1.5, 2.0, 2.5]
+
+
 def test_streaming_bac_matches_current_driver_at_fixed_window_extent(tmp_path, monkeypatch):
 	"""The FFT oracle is the legacy driver at the same window and zero pad."""
 

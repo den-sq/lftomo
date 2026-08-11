@@ -713,6 +713,16 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					for key, value in state.artifacts.items()
 					if not isinstance(value, ManagedBuffer)
 				}
+				# Prefix-cache acceptance needs the same run-owned lifecycle ledger
+				# returned by the ordinary driver. Capture it before the manager exits;
+				# managed handles themselves remain deliberately excluded above.
+				allocation_events = getattr(run_context.storage, "allocation_events", ())
+				artifacts["allocation_events"] = [dict(event) for event in allocation_events]
+				physical = {
+					event["name"]: int(event["bytes"])
+					for event in allocation_events if event["action"] == "allocate"
+				}
+				artifacts["measured_shared_memory_bytes"] = sum(physical.values())
 			else:
 				artifacts = _run_streaming_pipeline(
 					stages=stages, concrete=concrete, run_scan=run_scan,

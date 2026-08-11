@@ -22,3 +22,7 @@ $$DSC = 2\frac{|X \cap Y|}{|X| + |Y|}$$
 ## Notebook Examples
 
 - [Reconstruction notebook](https://github.com/den-sq/lftomo/blob/master/notebook/recon.ipynb)
+
+## Operations
+
+- [Pipeline-core epic acceptance](epic-acceptance.md)
