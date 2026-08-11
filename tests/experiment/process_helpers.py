@@ -10,7 +10,10 @@ import subprocess
 import time
 from uuid import uuid4
 
+import numpy as np
+
 from lftomo.experiment.runner import TrialExecution
+from lftomo.pipeline import PipelineRunContext
 
 
 def candidate_alpha(identity) -> float:
@@ -25,6 +28,7 @@ class AlphaExecutor:
 	delay: float = 0
 	mutate_identity: bool = False
 	call_root: Path | None = None
+	rendezvous_participants: int | None = None
 
 	def __call__(self, identity, _output_root):
 		value = candidate_alpha(identity)
@@ -36,6 +40,17 @@ class AlphaExecutor:
 				"fidelity": identity.fidelity.id,
 				"alpha": value,
 			}), encoding="utf-8")
+		if self.rendezvous_participants is not None:
+			if self.call_root is None:
+				raise ValueError("rendezvous_participants requires call_root")
+			deadline = time.monotonic() + 15
+			while (
+				len(tuple(self.call_root.glob("*.json"))) < self.rendezvous_participants
+				and time.monotonic() < deadline
+			):
+				time.sleep(0.01)
+			if len(tuple(self.call_root.glob("*.json"))) < self.rendezvous_participants:
+				raise TimeoutError("candidate rendezvous did not reach all participants")
 		if self.fail_on == value:
 			raise RuntimeError("candidate exploded")
 		if self.interrupt:
@@ -100,13 +115,32 @@ class CrashOneExecutor:
 		return TrialExecution(metrics={"quality": value})
 
 
+@dataclass
 class HangingProcessTreeExecutor:
+	detached_descendant: bool = False
+
 	def __call__(self, _identity, output_root):
 		output_root.mkdir(parents=True, exist_ok=True)
-		descendant = subprocess.Popen(["sleep", "60"])
+		descendant = subprocess.Popen(
+			["sleep", "60"], start_new_session=self.detached_descendant,
+		)
 		(output_root / "process-tree.json").write_text(json.dumps({
 			"trial_pid": os.getpid(),
 			"descendant_pid": descendant.pid,
 		}), encoding="utf-8")
 		while True:
 			time.sleep(1)
+
+
+class HangingManagedExecutor:
+	def __call__(self, _identity, output_root):
+		output_root.mkdir(parents=True, exist_ok=True)
+		with PipelineRunContext(max_workers=1) as context:
+			buffer = context.storage.allocate((8, 8), np.float32, role="test")
+			buffer.array()[...] = 1
+			(output_root / "managed-process-tree.json").write_text(json.dumps({
+				"trial_pid": os.getpid(),
+				"segment_name": buffer.name,
+			}), encoding="utf-8")
+			while True:
+				time.sleep(1)

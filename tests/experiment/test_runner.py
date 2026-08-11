@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
 import os
+from pathlib import Path
 import threading
 import time
 
@@ -31,6 +32,7 @@ from tests.experiment.process_helpers import (
 	AlphaExecutor,
 	CrashOneExecutor,
 	DisabledCacheExecutor,
+	HangingManagedExecutor,
 	HangingProcessTreeExecutor,
 )
 
@@ -134,7 +136,11 @@ def test_independent_concurrent_execution_has_deterministic_identity_and_leaderb
 	config = experiment_config()
 	runner = IndependentExperimentRunner(
 		config, inputs(), tmp_path,
-		AlphaExecutor(delay=0.1, mutate_identity=True),
+		AlphaExecutor(
+			mutate_identity=True,
+			call_root=tmp_path / "rendezvous",
+			rendezvous_participants=2,
+		),
 	)
 	summary = runner.run()
 
@@ -282,11 +288,16 @@ def test_native_process_crash_is_isolated_to_its_candidate(tmp_path):
 	assert by_status["succeeded"].result.metrics == {"quality": 0.02}
 
 
-def test_cancellation_terminates_noncooperative_trial_process_tree(tmp_path):
+@pytest.mark.parametrize("detached_descendant", [False, True])
+def test_cancellation_terminates_noncooperative_trial_process_tree(
+		tmp_path, detached_descendant,
+):
 	token = runner_module.CancellationToken()
 	runner = IndependentExperimentRunner(
 		experiment_config(candidate=candidate_space((0.01,)), concurrency=1),
-		inputs(), tmp_path, HangingProcessTreeExecutor(), cancellation=token,
+		inputs(), tmp_path,
+		HangingProcessTreeExecutor(detached_descendant=detached_descendant),
+		cancellation=token,
 	)
 	result = []
 	thread = threading.Thread(target=lambda: result.append(runner.run()))
@@ -306,6 +317,40 @@ def test_cancellation_terminates_noncooperative_trial_process_tree(tmp_path):
 	while any(psutil.pid_exists(pid) for pid in pids.values()) and time.monotonic() < deadline:
 		time.sleep(0.05)
 	assert not any(psutil.pid_exists(pid) for pid in pids.values())
+
+
+def _segment_exists(name: str) -> bool:
+	shared_memory_path = Path("/dev/shm") / name.lstrip("/")
+	if not shared_memory_path.parent.is_dir():
+		pytest.skip("safe shared-memory inspection requires /dev/shm")
+	return shared_memory_path.exists()
+
+
+def test_cancellation_allows_managed_trial_to_unlink_shared_segments(tmp_path):
+	token = runner_module.CancellationToken()
+	runner = IndependentExperimentRunner(
+		experiment_config(candidate=candidate_space((0.01,)), concurrency=1),
+		inputs(), tmp_path, HangingManagedExecutor(), cancellation=token,
+	)
+	result = []
+	thread = threading.Thread(target=lambda: result.append(runner.run()))
+	thread.start()
+	process_file = None
+	deadline = time.monotonic() + 10
+	while process_file is None and time.monotonic() < deadline:
+		process_file = next(tmp_path.glob("trials/*/managed-process-tree.json"), None)
+		time.sleep(0.01)
+	assert process_file is not None
+	segment_name = json.loads(process_file.read_text(encoding="utf-8"))["segment_name"]
+	assert _segment_exists(segment_name)
+	assert token.request("operator stop")
+	thread.join(timeout=10)
+	assert not thread.is_alive()
+	assert result[0].attempts[0].status == "interrupted"
+	deadline = time.monotonic() + 10
+	while _segment_exists(segment_name) and time.monotonic() < deadline:
+		time.sleep(0.05)
+	assert not _segment_exists(segment_name)
 
 
 def test_experiment_cli_exposes_validate_dry_run_and_run(tmp_path):

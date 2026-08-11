@@ -35,6 +35,10 @@ worker is a non-owning attachment and cannot unlink the segment. Normal and
 exceptional context exit unlink all tracked segments. The manager also runs
 outside an isolated trial's process group and watches its owner, allowing it to
 unlink tracked segments when a timed-out trial is terminated with `SIGKILL`.
+Because a process-tree reaper may target the detached manager directly, its
+`SIGTERM` handler synchronously unlinks every tracked segment before exiting;
+the owner-death watch and explicit termination therefore share the same cleanup
+operation.
 
 Out-of-place Stages use a two-phase handoff: allocate a prospective managed
 output, fill it while the input remains live, publish it as the next

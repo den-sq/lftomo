@@ -58,13 +58,36 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		if initializer is not None:
 			initializer(*initargs)
 		server = cls._Server(registry, address, authkey, serializer)
+		cleanup_lock = threading.Lock()
+		cleanup_started = False
+
+		def unlink_once():
+			"""Unlink tracked segments before any abnormal manager exit."""
+
+			nonlocal cleanup_started
+			with cleanup_lock:
+				if cleanup_started:
+					return
+				cleanup_started = True
+				# CPython-private counterpart to SharedMemoryManager.shutdown().
+				server.shared_memory_context.unlink()
+
+		def cleanup_after_sigterm(_signum, _frame):
+			# A process-tree reaper may target this detached server explicitly.
+			# Ignore repeated delivery while its synchronous cleanup completes.
+			signal.signal(signal.SIGTERM, signal.SIG_IGN)
+			try:
+				unlink_once()
+			finally:
+				os._exit(0)
+
+		signal.signal(signal.SIGTERM, cleanup_after_sigterm)
 
 		def cleanup_after_owner_exit():
 			while os.getppid() == owner_pid:
 				sleep(0.1)
 			try:
-				# CPython-private counterpart to SharedMemoryManager.shutdown().
-				server.shared_memory_context.unlink()
+				unlink_once()
 			finally:
 				os._exit(0)
 

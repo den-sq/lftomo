@@ -80,6 +80,15 @@ and its descendants can therefore be terminated without trapping the coordinator
 Custom trial executors must be pickleable so the runner can validate the process boundary
 during preflight.
 
+`resources.max_concurrency` limits simultaneously active candidate processes.
+`Recon.process_workers` remains a per-candidate Stage-process budget; the coordinator does
+not divide it by candidate concurrency. Consequently, up to `max_concurrency ×
+process_workers` Stage workers may be live when concurrent candidates all reach
+process-dispatched Stages. The dry-run/preflight record and `preflight.completed` event log
+the resolved per-candidate budgets and their upper bound so operators can size both values
+deliberately. External engines may additionally manage their own threads within that
+per-candidate budget.
+
 `peak_memory_bytes` is a true per-trial measurement when the executor supplies it.
 Otherwise the runner records the isolated trial process `RUSAGE_SELF` high-water mark.
 

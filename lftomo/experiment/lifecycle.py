@@ -245,6 +245,7 @@ class ExperimentLifecycle:
 			details={
 				"runtime": preflight.runtime.model_dump(mode="json"),
 				"path_resources": preflight.path_resources.model_dump(mode="json"),
+				"parallelism": preflight.parallelism,
 			},
 		)
 		if preflight.prefix_cache is not None:

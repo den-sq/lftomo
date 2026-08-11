@@ -310,6 +310,11 @@ def test_public_lifecycle_persists_ordered_events_and_store_only_status(tmp_path
 	assert {"preflight.started", "preflight.completed", "trial.claim", "trial.started",
 		"window.started", "stage.started", "stage.completed", "window.completed",
 		"trial.finalized", "experiment.completed"} <= {event.kind for event in events}
+	preflight_event = next(event for event in events if event.kind == "preflight.completed")
+	parallelism = preflight_event.details["parallelism"]
+	assert parallelism["candidate_process_limit"] == 2
+	assert parallelism["pipeline_process_workers_scope"] == "per_candidate"
+	assert parallelism["coordinator_divides_pipeline_workers"] is False
 
 	# JSONL is derived: losing it, or ending it with a torn record, cannot alter status.
 	(api.root / "progress.jsonl").write_text('{"truncated":', encoding="utf-8")

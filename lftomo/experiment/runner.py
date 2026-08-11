@@ -20,7 +20,6 @@ from typing import Any, Callable, Literal
 from uuid import uuid4
 
 import numpy as np
-import psutil
 from pydantic import Field, JsonValue
 import yaml
 
@@ -169,6 +168,7 @@ class ExperimentPreflight(ConfigModel):
 	unique_candidates: int
 	deduplicated_coordinates: int
 	max_concurrency: int
+	parallelism: dict[str, JsonValue]
 	estimated_output_bytes: int | None
 	trial_output_roots: tuple[Path, ...]
 	candidates: tuple[dict[str, JsonValue], ...]
@@ -354,6 +354,10 @@ def _peak_memory_bytes() -> int:
 def _terminate_trial_process(process: multiprocessing.Process) -> None:
 	"""Terminate one trial and every descendant it created, then reap it."""
 
+	# Runtime installations declare psutil, but importing it only on this failure
+	# path keeps lightweight configuration/model tooling dependency-minimal.
+	import psutil
+
 	if process.pid is None:
 		return
 	try:
@@ -501,6 +505,32 @@ class IndependentExperimentRunner:
 			workers = min(workers, max(1, budget // memory))
 		return max(1, workers)
 
+	@staticmethod
+	def _parallelism_plan(
+			prepared: tuple[PreparedTrial, ...] | list[PreparedTrial],
+			candidate_process_limit: int,
+	) -> dict[str, JsonValue]:
+		"""Declare the independent candidate and per-candidate Stage budgets."""
+
+		default_stage_workers = min(4, os.cpu_count() or 1)
+		by_candidate = {
+			item.selected.candidate_key: (
+				item.identity.resolved_recon.process_workers or default_stage_workers
+			)
+			for item in prepared
+		}
+		active_limit = min(candidate_process_limit, len(prepared))
+		stage_worker_upper_bound = sum(
+			sorted(by_candidate.values(), reverse=True)[:active_limit]
+		)
+		return {
+			"candidate_process_limit": candidate_process_limit,
+			"pipeline_process_workers_scope": "per_candidate",
+			"pipeline_process_workers_by_candidate": by_candidate,
+			"pipeline_process_worker_upper_bound": stage_worker_upper_bound,
+			"coordinator_divides_pipeline_workers": False,
+		}
+
 	def prepare(self) -> tuple[ExperimentPreflight, tuple[PreparedTrial, ...]]:
 		"""Select, validate, identify, and guard trials without reading dataset payloads."""
 
@@ -601,6 +631,7 @@ class IndependentExperimentRunner:
 			unique_candidates=len(selected),
 			deduplicated_coordinates=sum(item.duplicate_coordinates for item in selected),
 			max_concurrency=workers,
+			parallelism=self._parallelism_plan(prepared, workers),
 			estimated_output_bytes=total_output,
 			trial_output_roots=tuple(item.output_root for item in prepared),
 			candidates=tuple({
