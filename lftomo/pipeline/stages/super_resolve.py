@@ -23,6 +23,8 @@ from lftomo.pipeline.core import (
 	RuntimeRequirement,
 	Stage,
 	StageContract,
+	allocate_output,
+	commit_output,
 	working_view,
 )
 from lftomo.util.shapes import SinoOrder
@@ -99,7 +101,11 @@ def interpolate_missing_angles(volume: np.ndarray, mask: np.ndarray, theta: np.n
 
 
 def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> PipelineState:
-	result = state.with_array(np.transpose(np.asarray(volume, dtype=np.float32), (1, 0, 2)))
+	values = np.asarray(volume, dtype=np.float32)
+	shape = SinoOrder(Y=values.shape[1], Theta=values.shape[0], X=values.shape[2])
+	output, target = allocate_output(state, shape, np.float32, role="super_resolution")
+	target[...] = np.transpose(values, (1, 0, 2))
+	result = commit_output(state, output, retire_as=None)
 	result.artifacts["super_resolution"] = metadata
 	return result
 

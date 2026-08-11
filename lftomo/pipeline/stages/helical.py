@@ -5,7 +5,10 @@ from __future__ import annotations
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
+from lftomo.pipeline.core import (
+	Locality, PipelineState, ResourceHints, Stage, StageContract,
+	allocate_output, commit_output, working_view,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import configured_layout, n_projections, n_rows, resolve_layout
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -97,14 +100,19 @@ class HelicalIndexRemapStage(Stage):
 				raise ValueError("helical pitch leaves no detector rows valid across all projections")
 			output_rows = np.arange(start, stop)
 			shape = (count, len(output_rows), data.shape[2]) if layout is ProjOrder else (len(output_rows), count, data.shape[2])
-			remapped = np.empty(shape, dtype=data.dtype)
+			output, remapped = allocate_output(
+				state, layout(*shape), data.dtype, role="helical_remap",
+			)
 			for projection, shift_px in enumerate(shifts):
 				if layout is ProjOrder:
 					remapped[projection, :, :] = data[projection, output_rows + shift_px, :]
 				else:
 					remapped[:, projection, :] = data[output_rows + shift_px, projection, :]
 		else:
-			remapped = np.full_like(data, self.fill_value)
+			output, remapped = allocate_output(
+				state, layout(*data.shape), data.dtype, role="helical_remap",
+			)
+			remapped.fill(self.fill_value)
 			rows = np.arange(y_size)
 			for projection, shift_px in enumerate(shifts):
 				source = rows + shift_px
@@ -113,6 +121,6 @@ class HelicalIndexRemapStage(Stage):
 					remapped[projection, valid, :] = data[projection, source[valid], :]
 				else:
 					remapped[valid, projection, :] = data[source[valid], projection, :]
-		result = state.with_array(remapped)
+		result = commit_output(state, output, retire_as=None)
 		result.artifacts["helical_row_shifts"] = shifts
 		return result

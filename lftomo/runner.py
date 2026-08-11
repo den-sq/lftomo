@@ -459,13 +459,18 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			backend,
 			available_artifacts=initial_artifacts,
 			mode="complete",
+			enable_aliasing=concrete.buffer_aliasing,
+			enable_engine_aliasing=concrete.tomopy_input_aliasing,
 		)
 		prepared.append((
 			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
 		))
 	results = []
 	for run, concrete, resolved_document, run_scan, initial_artifacts, stages in prepared:
-		with PipelineRunContext() as run_context:
+		with PipelineRunContext(
+			enable_aliasing=concrete.buffer_aliasing,
+			enable_engine_aliasing=concrete.tomopy_input_aliasing,
+		) as run_context:
 			state = PipelineState(
 				working_array=np.empty((0,), dtype=np.float32),
 				scan=run_scan,

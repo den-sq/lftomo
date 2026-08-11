@@ -59,6 +59,8 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	np.testing.assert_array_equal(result.working_array, np.transpose(data[1:3, 2:5, :], (1, 0, 2)))
 	assert result.artifacts["white_fields"].shape == (2, 3, size)
 	assert result.artifacts["dark_fields"].shape == (2, 3, size)
+	assert isinstance(result.artifacts["white_fields"], SharedNPArray)
+	assert isinstance(result.artifacts["dark_fields"], SharedNPArray)
 	assert result.artifacts["hdf5_read_strategy"] == "bounded_scratch"
 	assert result.dataset.shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=1, Y=2, X=0)

@@ -132,12 +132,28 @@ class StorageBackend(ABC):
 		dtype: np.dtype,
 		*,
 		aliases: tuple[tuple[Any, np.dtype], ...] = (),
+		role: str | None = None,
+		reuse_from: tuple[str, ...] = (),
+		alias_from: ManagedBuffer | None = None,
+		proof: str | None = None,
 	) -> ManagedBuffer | list[ManagedBuffer]:
-		"""Allocate one physical buffer with one or more logical aliases."""
+		"""Allocate storage, optionally using an explicitly proved named alias."""
 
 	@abstractmethod
 	def fork(self, source: Any, *, label: str) -> ManagedBuffer:
 		"""Allocate an owned copy of ``source``."""
+
+	@abstractmethod
+	def retire(self, buffer: ManagedBuffer, *, role: str | None = None) -> None:
+		"""Mark a successfully replaced logical buffer as no longer live."""
+
+	@abstractmethod
+	def pin(self, buffer: ManagedBuffer, *, owner: str) -> None:
+		"""Prevent a buffer from participating in alias reuse for ``owner``."""
+
+	@abstractmethod
+	def unpin(self, buffer: ManagedBuffer, *, owner: str) -> None:
+		"""Release one external liveness pin."""
 
 
 class PipelineRunContext:
@@ -149,9 +165,12 @@ class PipelineRunContext:
 	responsibility for its lifetime.
 	"""
 
-	def __init__(self, storage: StorageBackend | None = None):
+	def __init__(self, storage: StorageBackend | None = None, *,
+			enable_aliasing: bool = True, enable_engine_aliasing: bool = True):
 		self.storage = storage
 		self._owns_storage = storage is None
+		self.enable_aliasing = enable_aliasing
+		self.enable_engine_aliasing = enable_engine_aliasing
 		self._entered = False
 		self._spent = False
 
@@ -165,7 +184,10 @@ class PipelineRunContext:
 			# Local import avoids a cycle between the contracts and concrete backend.
 			from lftomo.util.mem import SharedNPManager
 
-			manager = SharedNPManager()
+			manager = SharedNPManager(
+				enable_aliasing=self.enable_aliasing,
+				enable_engine_aliasing=self.enable_engine_aliasing,
+			)
 			manager.start()
 			self.storage = manager
 		return self

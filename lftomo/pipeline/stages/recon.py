@@ -7,7 +7,16 @@ import os
 import numpy as np
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
+from lftomo.pipeline.core import (
+	Locality,
+	PipelineState,
+	ResourceHints,
+	Stage,
+	StageContract,
+	allocate_output,
+	commit_output,
+	working_view,
+)
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.runtime import ASTRA_RUNTIME_REQUIREMENT, tomopy_requirement
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
@@ -144,6 +153,60 @@ class GridrecStage(Stage):
 			reconstruction = reconstruction[:, :, start:start + self.output_width]
 		return reconstruction
 
+	def _crop_buffer(self, reconstruction):
+		"""Return a basic managed view matching ``_crop`` without copying."""
+
+		width = getattr(reconstruction.shape, "X", None)
+		if width is None:
+			width = reconstruction.shape[2]
+		left = 0 if self.edge_buffer_input else self.edge_buffer_left
+		right = width if self.edge_buffer_input else width - self.edge_buffer_right
+		if left >= right:
+			raise ValueError("gridrec edge buffers remove the entire reconstruction width")
+		if self.output_width is not None:
+			if self.output_width > right - left:
+				raise ValueError("gridrec output_width exceeds the reconstructed width")
+			extra = (right - left) - self.output_width
+			left += extra // 2
+			right = left + self.output_width
+		return reconstruction[:, :, left:right]
+
+	def _allocate_reconstruction(
+		self, state: PipelineState, data: np.ndarray, *, sinogram_order: bool,
+	):
+		slice_count = data.shape[0 if sinogram_order else 1]
+		width = data.shape[2]
+		shape = ReconOrder(Y=slice_count, Z=width, X=width)
+		current_role = getattr(state.working_array, "role", None)
+		can_alias_input = state.layout is ProjOrder and current_role == "normalized"
+		return allocate_output(
+			state,
+			shape,
+			np.float32,
+			role="reconstruction",
+			reuse_from=("raw_staging",),
+			alias_from_current=can_alias_input,
+			proof="tomopy_input_materialization" if can_alias_input else None,
+		)
+
+	def _finish_reconstruction(self, state: PipelineState, output, target: np.ndarray,
+			reconstruction, tomopy, *, ncore: int | None) -> PipelineState:
+		values = np.asarray(reconstruction, dtype=np.float32)
+		if not np.shares_memory(values, target):
+			target[...] = values
+		if self.circle_mask:
+			masked = np.asarray(tomopy.circ_mask(
+				target,
+				axis=0,
+				ratio=self.circle_mask_ratio,
+				val=self.circle_mask_value,
+				ncore=ncore,
+			), dtype=np.float32)
+			if not np.shares_memory(masked, target):
+				target[...] = masked
+		cropped = self._crop_buffer(output)
+		return commit_output(state, cropped, retire_as=None)
+
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("GridrecStage currently requires the NumPy backend")
@@ -162,6 +225,9 @@ class GridrecStage(Stage):
 		kwargs = {"filter_name": self.filter_name}
 		if self.filter_parameters is not None:
 			kwargs["filter_par"] = self.filter_parameters
+		output, target = self._allocate_reconstruction(
+			state, data, sinogram_order=sinogram_order,
+		)
 		reconstruction = tomopy.recon(
 			data,
 			angles,
@@ -169,18 +235,12 @@ class GridrecStage(Stage):
 			sinogram_order=sinogram_order,
 			algorithm="gridrec",
 			ncore=self.ncore,
+			init_recon=target,
 			**kwargs,
 		)
-		reconstruction = np.asarray(reconstruction, dtype=np.float32)
-		if self.circle_mask:
-			reconstruction = tomopy.circ_mask(
-				reconstruction,
-				axis=0,
-				ratio=self.circle_mask_ratio,
-				val=self.circle_mask_value,
-				ncore=self.ncore,
-			)
-		return state.with_array(self._crop(np.asarray(reconstruction, dtype=np.float32)))
+		return self._finish_reconstruction(
+			state, output, target, reconstruction, tomopy, ncore=self.ncore,
+		)
 
 
 class AstraCudaStage(GridrecStage):
@@ -257,6 +317,7 @@ class AstraCudaStage(GridrecStage):
 		slice_axis = 0 if sinogram_order else 1
 		angles = self._angles(state, data.shape[theta_axis])
 		center = self._center(state, data.shape[slice_axis])
+		data, center = self._prepare_input(data, center)
 
 		import tomopy
 
@@ -270,6 +331,9 @@ class AstraCudaStage(GridrecStage):
 		kwargs = {"filter_name": self.filter_name}
 		if self.filter_parameters is not None:
 			kwargs["filter_par"] = self.filter_parameters
+		output, target = self._allocate_reconstruction(
+			state, data, sinogram_order=sinogram_order,
+		)
 		reconstruction = tomopy.recon(
 			data,
 			angles,
@@ -277,19 +341,13 @@ class AstraCudaStage(GridrecStage):
 			sinogram_order=sinogram_order,
 			algorithm=tomopy.astra,
 			ncore=1,
+			init_recon=target,
 			options=options,
 			**kwargs,
 		)
-		reconstruction = np.asarray(reconstruction, dtype=np.float32)
-		if self.circle_mask:
-			reconstruction = tomopy.circ_mask(
-				reconstruction,
-				axis=0,
-				ratio=self.circle_mask_ratio,
-				val=self.circle_mask_value,
-				ncore=1,
-			)
-		return state.with_array(self._crop(np.asarray(reconstruction, dtype=np.float32)))
+		return self._finish_reconstruction(
+			state, output, target, reconstruction, tomopy, ncore=1,
+		)
 
 
 class FPCudaStage(AstraCudaStage):

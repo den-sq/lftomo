@@ -11,7 +11,7 @@ import numpy as np
 
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
-from lftomo.storage import StorageBackend, buffer_view
+from lftomo.storage import ManagedBuffer, StorageBackend, buffer_view
 
 if TYPE_CHECKING:
 	from lftomo.util.window import TomoDataSet, TomoWindow
@@ -273,6 +273,49 @@ def working_view(state: PipelineState) -> np.ndarray:
 	return buffer_view(state.working_array)
 
 
+def allocate_output(
+	state: PipelineState,
+	shape: Any,
+	dtype: np.dtype,
+	*,
+	role: str,
+	reuse_from: tuple[str, ...] = (),
+	alias_from_current: bool = False,
+	proof: str | None = None,
+) -> tuple[Any, np.ndarray]:
+	"""Allocate a prospective output without changing or retiring current state."""
+
+	if state.storage is None:
+		array = np.empty(tuple(shape) if not is_dataclass(shape) else astuple(shape), dtype=dtype)
+		return array, array
+	alias_from = state.working_array if alias_from_current and hasattr(state.working_array, "name") else None
+	buffer = state.storage.allocate(
+		shape, np.dtype(dtype), role=role, reuse_from=reuse_from,
+		alias_from=alias_from, proof=proof,
+	)
+	return buffer, buffer_view(buffer)
+
+
+def commit_output(
+	state: PipelineState,
+	output: Any,
+	*,
+	retire_as: str | None,
+	layout: type[Any] | None = None,
+	domain: DataDomain | None = None,
+) -> PipelineState:
+	"""Publish a filled output, then retire its predecessor after the handoff."""
+
+	result = state.with_array(output, layout=layout, domain=domain)
+	if (
+		state.storage is not None
+		and output is not state.working_array
+		and isinstance(state.working_array, ManagedBuffer)
+	):
+		state.storage.retire(state.working_array, role=retire_as)
+	return result
+
+
 class Stage(ABC):
 	"""Base class for sequential reconstruction pipeline Stages."""
 
@@ -337,6 +380,8 @@ class Pipeline:
 				mode=self.validation_mode,
 				initial_layout=self.initial_layout,
 				initial_domain=self.initial_domain,
+				enable_aliasing=state.recon.buffer_aliasing,
+				enable_engine_aliasing=state.recon.tomopy_input_aliasing,
 			)
 			self._validated = True
 		segments = () if self.plan is None else self.plan.segments

@@ -7,7 +7,10 @@ import numpy as np
 from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
+from lftomo.pipeline.core import (
+	Locality, PipelineState, ResourceHints, Stage, StageContract,
+	allocate_output, commit_output, working_view,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import (
 	configured_layout,
@@ -255,7 +258,9 @@ class AffineSkewMovementStage(Stage):
 			if self.target_layout is ProjOrder
 			else (row_count, projection_count, width)
 		)
-		output = np.empty(shape, dtype=data.dtype)
+		output_buffer, output = allocate_output(
+			state, self.target_layout(*shape), data.dtype, role="fused_geometry",
+		)
 		try:
 			interpolation = _INTERPOLATION[self.interpolation_name]
 		except KeyError as error:
@@ -282,7 +287,9 @@ class AffineSkewMovementStage(Stage):
 					padded, matrix, (width, row_count), flags=interpolation,
 				)
 			projection_view(output, self.target_layout, projection)[:] = padded
-		result = state.with_array(output, layout=self.target_layout)
+		result = commit_output(
+			state, output_buffer, retire_as=None, layout=self.target_layout,
+		)
 		result.artifacts["fused_layout_transition"] = {
 			"from": input_layout.__name__, "to": self.target_layout.__name__,
 			"pad_x": self.pad_x, "skew_degrees": self.skew_degrees,

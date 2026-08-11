@@ -36,6 +36,29 @@ exceptional context exit unlink all tracked segments. The manager also runs
 outside an isolated trial's process group and watches its owner, allowing it to
 unlink tracked segments when a timed-out trial is terminated with `SIGKILL`.
 
+Out-of-place Stages use a two-phase handoff: allocate a prospective managed
+output, fill it while the input remains live, publish it as the next
+`PipelineState`, and only then retire the old logical role. A failed Stage
+therefore leaves the input current. Retirement never unlinks storage; it makes
+the physical segment eligible for an explicitly named alias later in the same
+run.
+
+Two aliases are recognized rather than inferred generically. Raw staging may
+back reconstruction output after normalization has retired it, proved by the
+planner's liveness schedule. Projection-order normalized input may back TomoPy
+output because the supported TomoPy boundary materializes that input before it
+writes `init_recon`; the installed runtime is exercised by the test suite and
+the hidden copy remains in the external-engine memory estimate. External
+prefix/cache/trial pins prevent either reuse while they are live. Set
+`Recon.buffer_aliasing: false` to disable all aliases, or
+`Recon.tomopy_input_aliasing: false` to disable only the engine-dependent pair.
+
+The validated `PipelinePlan` exposes each Stage's input/output `BufferSpec`, an
+allocation/alias/retirement schedule, and separate peak estimates for shared
+memory, per-worker private scratch, and external-engine temporary storage.
+Flat/dark calibration arrays and detector-sized phase filters are also
+manager-issued artifacts declared by their producer contracts.
+
 The prefix cache's immutable path uses a separate `FileBackedNPArray`, which is
 a first-class read-only `ManagedBuffer`. Workers reopen its `.npy` mapping by
 path; mutating suffixes continue to receive an independent writable copy.

@@ -263,6 +263,13 @@ class Recon(ConfigModel):
 	pipeline: list[StageConfig] = Field(description="Ordered reconstruction pipeline stages.")
 	pipeline_template: str | None = Field(default=None, description="Optional named pipeline template.")
 	output_path: Path | None = Field(default=None, description="Optional output directory for the run.")
+	buffer_aliasing: bool = Field(
+		default=True, description="Allow planner-proved named shared-buffer aliases.",
+	)
+	tomopy_input_aliasing: bool = Field(
+		default=True,
+		description="Allow the TomoPy input/output alias when its runtime boundary proves it safe.",
+	)
 	metadata: dict[str, Any] = Field(default_factory=dict, description="Additional run metadata.")
 	variants: list[PipelineVariant] = Field(
 		default_factory=list,

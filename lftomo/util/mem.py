@@ -76,8 +76,15 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 
 	def __init__(self, *args,
 					queue_mem: list[tuple[DataShape, np.dtype] | tuple[tuple[DataShape, np.dtype]]] | None = None,
+					enable_aliasing: bool = True,
+					enable_engine_aliasing: bool = True,
 					**kwargs):
 		SharedMemoryManager.__init__(self, *args, **kwargs)
+		self.enable_aliasing = enable_aliasing
+		self.enable_engine_aliasing = enable_engine_aliasing
+		self._physical: dict[str, dict] = {}
+		self._retired: dict[str, list[str]] = {}
+		self._events: list[dict] = []
 
 		self.__mem_queue = []
 		for mem in queue_mem or ():
@@ -90,21 +97,111 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		full_set = [(shape, dtype)] + list(create_with)
 		size = max([np.prod(_shape_tuple(shape)) * np.dtype(dtype).itemsize for (shape, dtype) in full_set])
 		mem = self.SharedMemory(size)
+		self._physical[mem.name] = {
+			"capacity": int(size), "active_roles": set(), "pins": set(),
+		}
 		result = [SharedNPArray(mem.name, shape, dtype) for (shape, dtype) in full_set]
 		return result[0] if len(result) == 1 else result
 
-	def allocate(self, shape, dtype, *, aliases=()):
-		"""Allocate manager-owned storage, optionally with logical aliases."""
+	def allocate(self, shape, dtype, *, aliases=(), role=None, reuse_from=(),
+			alias_from=None, proof=None):
+		"""Allocate manager-owned storage using only named, proved alias paths."""
 
-		return self.SharedNPArray(shape, dtype, *tuple(aliases))
+		dtype = np.dtype(dtype)
+		required = int(np.prod(_shape_tuple(shape), dtype=np.float64) * dtype.itemsize)
+		name = None
+		alias_kind = None
+		if self.enable_aliasing:
+			for retired_role in reuse_from:
+				for candidate_name in tuple(self._retired.get(retired_role, ())):
+					candidate = self._physical[candidate_name]
+					if not candidate["pins"] and candidate["capacity"] >= required:
+						name = candidate_name
+						alias_kind = f"retired:{retired_role}"
+						break
+				if name is not None:
+					break
+		if self.enable_aliasing and name is None and alias_from is not None:
+			candidate = self._physical.get(alias_from.name)
+			engine_ok = proof != "tomopy_input_materialization" or self.enable_engine_aliasing
+			if candidate is not None and engine_ok and not candidate["pins"] and candidate["capacity"] >= required:
+				name = alias_from.name
+				alias_kind = proof
+		if name is None:
+			result = self.SharedNPArray(shape, dtype, *tuple(aliases))
+			buffers = result if isinstance(result, list) else [result]
+			for index, buffer in enumerate(buffers):
+				buffer._role = role if index == 0 else None
+			if role is not None:
+				self._physical[buffers[0].name]["active_roles"].add(role)
+			self._events.append({
+				"action": "allocate", "role": role, "name": buffers[0].name,
+				"bytes": required, "alias": None,
+			})
+			return result
+
+		for values in self._retired.values():
+			while name in values:
+				values.remove(name)
+		buffer = SharedNPArray(name, shape, dtype, role=role)
+		if role is not None:
+			self._physical[name]["active_roles"].add(role)
+		self._events.append({
+			"action": "alias", "role": role, "name": name,
+			"bytes": required, "alias": alias_kind,
+		})
+		return buffer
 
 	def fork(self, source, *, label: str):
 		"""Return a manager-owned copy of an existing buffer."""
 
 		source_view = buffer_view(source)
-		result = self.allocate(getattr(source, "shape", source_view.shape), source_view.dtype)
+		result = self.allocate(
+			getattr(source, "shape", source_view.shape), source_view.dtype, role=label,
+		)
 		result.array()[...] = source_view
 		return result
+
+	def retire(self, buffer, *, role=None):
+		"""Record retirement without closing or unlinking the run-owned segment."""
+
+		name = buffer.name
+		record = self._physical.get(name)
+		if record is None:
+			return
+		resolved = role or getattr(buffer, "role", None)
+		if resolved is not None:
+			record["active_roles"].discard(resolved)
+		if not record["active_roles"]:
+			retired_role = resolved or "working"
+			if name not in self._retired.setdefault(retired_role, []):
+				self._retired[retired_role].append(name)
+		self._events.append({
+			"action": "retire", "role": resolved, "name": name,
+			"bytes": record["capacity"], "alias": None,
+		})
+
+	def pin(self, buffer, *, owner: str):
+		record = self._physical.get(buffer.name)
+		if record is not None:
+			record["pins"].add(owner)
+			self._events.append({
+				"action": "pin", "role": getattr(buffer, "role", None),
+				"name": buffer.name, "bytes": record["capacity"], "alias": owner,
+			})
+
+	def unpin(self, buffer, *, owner: str):
+		record = self._physical.get(buffer.name)
+		if record is not None:
+			record["pins"].discard(owner)
+			self._events.append({
+				"action": "unpin", "role": getattr(buffer, "role", None),
+				"name": buffer.name, "bytes": record["capacity"], "alias": owner,
+			})
+
+	@property
+	def allocation_events(self) -> tuple[dict, ...]:
+		return tuple(dict(event) for event in self._events)
 
 	def clear_queue(self):
 		ar_mem = []
@@ -123,13 +220,15 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 
 class SharedNPArray(ManagedBuffer):
 	def __init__(self, name: str, shape: DataShape, dtype: np.dtype,
-					views: list = None, *, allocate: bool = False):
+					views: list = None, *, allocate: bool = False,
+					role: str | None = None):
 		self.__name = name
 		self.__shape = shape
 		self.__dtype = np.dtype(dtype)
 		self.__views = [] if views is None else views
 		self.__shutdown = False
 		self.__allocated = allocate
+		self._role = role
 		self.__sm = None
 		if allocate:
 			self.__sm = SharedMemory(name=name, create=True, size=self.size())
@@ -214,14 +313,16 @@ class SharedNPArray(ManagedBuffer):
 	def __reduce__(self):
 		"""Pickle as a non-owning attachment, never with unlink authority."""
 
-		return type(self), (self.__name, self.__shape, self.__dtype, self.__views)
+		return type(self), (self.__name, self.__shape, self.__dtype, self.__views), {"_role": self._role}
 
 	def __getitem__(self, view):
 		# Test if it would create a copy. non-ideal but we shouldn't be calling this much anwyay!
 		if is_advanced_index(view):
 			raise IndexError("This would be an advanced index and create copies, so should not be used here.")
 		else:
-			return SharedNPArray(self.__name, self.__shape, self.__dtype, self.__views + [view])
+			return SharedNPArray(
+				self.__name, self.__shape, self.__dtype, self.__views + [view], role=self._role,
+			)
 
 	@cached_property
 	def has_views(self):
@@ -230,6 +331,10 @@ class SharedNPArray(ManagedBuffer):
 	@property
 	def name(self):
 		return self.__name
+
+	@property
+	def role(self):
+		return self._role
 
 	@property
 	def dtype(self):

@@ -26,6 +26,21 @@ from lftomo.pipeline.stages._layout import (
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
+def _managed_phase_filter(state: PipelineState, values: np.ndarray) -> np.ndarray:
+	"""Publish the detector-sized Fourier filter as a shared run artifact."""
+
+	if state.storage is None:
+		state.artifacts["phase_filter"] = values
+		return values
+	previous = state.artifacts.get("phase_filter")
+	artifact = state.storage.allocate(values.shape, values.dtype, role="phase_filter")
+	artifact.array()[...] = values
+	state.artifacts["phase_filter"] = artifact
+	if hasattr(previous, "name"):
+		state.storage.retire(previous, role="phase_filter")
+	return artifact.array()
+
+
 _BAC_RUNTIME_REQUIREMENT = RuntimeRequirement(
 	capability="bac",
 	package="hotopy",
@@ -150,6 +165,7 @@ class PaganinFilterStage(Stage):
 			),
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
+			produces_artifacts=("phase_filter",) if enabled else (),
 		)
 
 	@classmethod
@@ -165,13 +181,13 @@ class PaganinFilterStage(Stage):
 			raise ValueError("phase.paganin_filter expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		transfer = _paganin_transfer(
+		transfer = _managed_phase_filter(state, _paganin_transfer(
 			(n_rows(data, layout), data.shape[2]),
 			alpha=self.alpha,
 			energy_kev=state.scan.energy_keV,
 			pixel_size_um=state.scan.pixel_size_um,
 			ssd_cm=state.scan.ssd_cm,
-		)
+		))
 		for projection in range(n_projections(data, layout)):
 			image = projection_view(data, layout, projection)
 			image[:] = _paganin_filter(image, transfer)
@@ -294,6 +310,7 @@ class PaganinStage(Stage):
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
+		produces_artifacts=("phase_filter",),
 		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
@@ -324,6 +341,7 @@ class PaganinStage(Stage):
 			),
 			produces_domain=DataDomain.ATTENUATION if enabled else PRESERVE,
 			locality=Locality.PROJECTION,
+			produces_artifacts=("phase_filter",) if enabled else (),
 		)
 
 	@classmethod
@@ -339,13 +357,13 @@ class PaganinStage(Stage):
 			raise ValueError("phase.paganin expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
-		transfer = _paganin_transfer(
+		transfer = _managed_phase_filter(state, _paganin_transfer(
 			(n_rows(data, layout), data.shape[2]),
 			alpha=self.alpha,
 			energy_kev=state.scan.energy_keV,
 			pixel_size_um=state.scan.pixel_size_um,
 			ssd_cm=state.scan.ssd_cm,
-		)
+		))
 		for projection in range(n_projections(data, layout)):
 			image = projection_view(data, layout, projection)
 			filtered = _paganin_filter(image, transfer)
@@ -370,6 +388,7 @@ class PaganinPhaseAbsorptionStage(Stage):
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
+		produces_artifacts=("phase_filter",),
 		resources=ResourceHints(memory_multiplier=2.0),
 	)
 
@@ -395,6 +414,7 @@ class PaganinPhaseAbsorptionStage(Stage):
 			accepts_domain=(DataDomain.TRANSMISSION,),
 			produces_domain=DataDomain.ATTENUATION,
 			locality=Locality.PROJECTION,
+			produces_artifacts=("phase_filter",),
 		)
 
 	@classmethod
@@ -410,13 +430,13 @@ class PaganinPhaseAbsorptionStage(Stage):
 			raise ValueError("phase.paganin_phase_absorption expects a (Y, Theta, X) sinogram array")
 		wavelength = _wavelength_cm(state.scan.energy_keV)
 		beta_scale = 4 * np.pi / wavelength
-		transfer = _paganin_transfer(
+		transfer = _managed_phase_filter(state, _paganin_transfer(
 			(n_rows(data, layout), data.shape[2]),
 			alpha=self.alpha,
 			energy_kev=state.scan.energy_keV,
 			pixel_size_um=state.scan.pixel_size_um,
 			ssd_cm=state.scan.ssd_cm,
-		)
+		))
 		for projection in range(n_projections(data, layout)):
 			image = projection_view(data, layout, projection)
 			# Corrected-paper branch from dan_scripts/prep/phase.py:22-144.

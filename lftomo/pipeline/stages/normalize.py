@@ -17,7 +17,16 @@ from lftomo.calibration import (
 	optimal_transport_interp,
 )
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
+from lftomo.pipeline.core import (
+	Locality,
+	PipelineState,
+	ResourceHints,
+	Stage,
+	StageContract,
+	allocate_output,
+	commit_output,
+	working_view,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages._layout import (
 	configured_layout,
@@ -29,8 +38,45 @@ from lftomo.prep.flat import _weighted_normalize_projection
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
+def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
+	"""Return a float32 prospective output while the raw input remains live."""
+
+	source = working_view(state)
+	# Plain arrays remain a lightweight hermetic-test compatibility path. Real
+	# runs always provide storage and therefore take the managed replacement path.
+	if state.storage is None and source.dtype == np.dtype(np.float32):
+		return state.working_array, source
+	output, data = allocate_output(
+		state, source.shape, np.float32, role="normalized",
+	)
+	data[...] = source
+	return output, data
+
+
+def _finish_normalization(state: PipelineState, output: object) -> PipelineState:
+	return commit_output(state, output, retire_as="raw_staging")
+
+
+def _managed_flat_fields(state: PipelineState) -> np.ndarray:
+	"""Publish legacy detector maps as one run-managed shared artifact."""
+
+	existing = state.artifacts.get("flat_fields")
+	if existing is not None:
+		from lftomo.storage import buffer_view
+
+		return buffer_view(existing)
+	fields = np.asarray(state.scan.metadata["flat_fields"])
+	if state.storage is None:
+		state.artifacts["flat_fields"] = fields
+		return fields
+	artifact = state.storage.allocate(fields.shape, fields.dtype, role="flat_fields")
+	artifact.array()[...] = fields
+	state.artifacts["flat_fields"] = artifact
+	return artifact.array()
+
+
 class WeightedNormalizeStage(Stage):
-	"""Blend pre/post flat fields and normalize a sinogram array in place.
+	"""Blend pre/post flat fields into a float32 managed output.
 
 	The working array is in ``(Y, Theta, X)`` order. The four flat fields are
 	provided through ``Scan.metadata["flat_fields"]`` in pre-gain, post-gain,
@@ -47,11 +93,12 @@ class WeightedNormalizeStage(Stage):
 		locality=Locality.PROJECTION,
 		accepts=(ProjOrder, SinoOrder),
 		prefers=ProjOrder,
-		mutates_input=True,
+		mutates_input=False,
 		cacheable_prefix=True,
 		window_axes=("Y",),
 		required_metadata=("metadata.flat_fields",),
 		resources=ResourceHints(memory_multiplier=1.0),
+		produces_artifacts=("flat_fields",),
 	)
 
 	def __init__(self, pre_sub: bool = False, pre_subtracted: bool | None = None,
@@ -65,8 +112,8 @@ class WeightedNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("WeightedNormalizeStage currently requires the NumPy backend")
 
-		working = working_view(state).astype(np.float32, copy=False)
-		flats = np.asarray(state.scan.metadata["flat_fields"])
+		output, working = _normalization_output(state)
+		flats = _managed_flat_fields(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if working.ndim != 3:
 			raise ValueError("weighted-normalize expects a (Y, Theta, X) working array")
@@ -86,11 +133,11 @@ class WeightedNormalizeStage(Stage):
 				n_projections(working, layout),
 				self.pre_sub,
 			)
-		return state if np.shares_memory(working, working_view(state)) else state.with_array(working)
+		return _finish_normalization(state, output)
 
 
 def _flat_fields(state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
-	flats = np.asarray(state.scan.metadata["flat_fields"])
+	flats = _managed_flat_fields(state)
 	y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
 	if flats.shape != (4, y_size, data.shape[2]):
 		raise ValueError("flat_fields must have shape (4, Y, X) matching the working array")
@@ -148,7 +195,7 @@ class BeamTrackingNormalizeStage(Stage):
 	contract = StageContract(
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
-		locality=Locality.PROJECTION, mutates_input=True, window_axes=("Y", "Theta"),
+		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
 		produces_artifacts=("beam_tracking_qc",),
 		resources=ResourceHints(memory_multiplier=2.0),
@@ -182,7 +229,7 @@ class BeamTrackingNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BeamTrackingNormalizeStage currently requires the NumPy backend")
-		data = working_view(state).astype(np.float32, copy=False)
+		output, data = _normalization_output(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_tracking expects a three-dimensional array")
@@ -235,7 +282,7 @@ class BeamTrackingNormalizeStage(Stage):
 			},
 			"projection_start": projection_start, "projection_count": projection_count,
 		}
-		return state if np.shares_memory(data, working_view(state)) else state.with_array(data)
+		return _finish_normalization(state, output)
 
 
 class BeamKeyframesNormalizeStage(Stage):
@@ -245,7 +292,7 @@ class BeamKeyframesNormalizeStage(Stage):
 	contract = StageContract(
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
-		locality=Locality.PROJECTION, mutates_input=True, window_axes=("Y", "Theta"),
+		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
 		produces_artifacts=("beam_keyframe_qc",), resources=ResourceHints(memory_multiplier=2.0),
 	)
@@ -265,7 +312,7 @@ class BeamKeyframesNormalizeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		data = working_view(state).astype(np.float32, copy=False)
+		output, data = _normalization_output(state)
 		layout = resolve_layout(state, self.order, self.name)
 		y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
 		start, stop = _calibration_y_window(state, y_size)
@@ -315,7 +362,7 @@ class BeamKeyframesNormalizeStage(Stage):
 			"projection_start": projection_start, "projection_count": projection_count,
 			"observability": "events wholly inside a keyframe gap cannot be recovered",
 		}
-		return state if np.shares_memory(data, working_view(state)) else state.with_array(data)
+		return _finish_normalization(state, output)
 
 
 class BeamBasisFitNormalizeStage(Stage):
@@ -325,7 +372,7 @@ class BeamBasisFitNormalizeStage(Stage):
 	contract = StageContract(
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
-		locality=Locality.PROJECTION, mutates_input=True, window_axes=("Y", "Theta"),
+		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
 		consumes_artifacts=("calibration_bundle",), produces_artifacts=("beam_basis_qc",),
 		resources=ResourceHints(memory_multiplier=2.0),
@@ -399,7 +446,7 @@ class BeamBasisFitNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BeamBasisFitNormalizeStage currently requires the NumPy backend")
-		data = working_view(state).astype(np.float32, copy=False)
+		output, data = _normalization_output(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_basis_fit expects a three-dimensional array")
@@ -488,7 +535,7 @@ class BeamBasisFitNormalizeStage(Stage):
 				"fit and coefficient QC guard gross contamination"
 			),
 		}
-		return state if np.shares_memory(data, working_view(state)) else state.with_array(data)
+		return _finish_normalization(state, output)
 
 
 class ThetaSwitchNormalizeStage(Stage):
@@ -498,7 +545,7 @@ class ThetaSwitchNormalizeStage(Stage):
 	contract = StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
-		mutates_input=True,
+		mutates_input=False,
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("metadata.flat_fields",),
@@ -521,10 +568,11 @@ class ThetaSwitchNormalizeStage(Stage):
 			accepts_domain=(DataDomain.RAW,),
 			produces_domain=DataDomain.TRANSMISSION,
 			locality=Locality.PROJECTION,
-			mutates_input=True,
+			mutates_input=False,
 			cacheable_prefix=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("metadata.flat_fields",),
+			produces_artifacts=("flat_fields",),
 			resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.order = order
@@ -546,7 +594,7 @@ class ThetaSwitchNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("ThetaSwitchNormalizeStage currently requires the NumPy backend")
-		data = working_view(state).astype(np.float32, copy=False)
+		output, data = _normalization_output(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("normalize.theta_switch expects a three-dimensional tomography array")
@@ -570,7 +618,7 @@ class ThetaSwitchNormalizeStage(Stage):
 				image, gain, dark, self.pre_subtracted,
 				self.floor_nonpositive, self.floor_value,
 			)
-		return state if np.shares_memory(data, working_view(state)) else state.with_array(data)
+		return _finish_normalization(state, output)
 
 
 class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):

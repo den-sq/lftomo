@@ -98,6 +98,20 @@ def _hash_document(value: Any) -> str:
 	return _sha256_bytes(canonical_json(_fingerprint(value)).encode("utf-8"))
 
 
+def _snapshot_value(value: Any) -> Any:
+	"""Detach run-scoped managed artifacts before persisting a prefix."""
+
+	if isinstance(value, ManagedBuffer):
+		return np.array(buffer_view(value), copy=True)
+	if isinstance(value, dict):
+		return {key: _snapshot_value(item) for key, item in value.items()}
+	if isinstance(value, list):
+		return [_snapshot_value(item) for item in value]
+	if isinstance(value, tuple):
+		return tuple(_snapshot_value(item) for item in value)
+	return copy.deepcopy(value)
+
+
 def _identity_differences(expected: Any, actual: Any, prefix: str = "") -> list[str]:
 	if isinstance(expected, dict) and isinstance(actual, dict):
 		fields = []
@@ -603,7 +617,7 @@ class PrefixCacheStore:
 				os.fsync(stream.fileno())
 			state_path = build / "state.pkl"
 			_write_bytes(state_path, pickle.dumps({
-				"artifacts": copy.deepcopy(state.artifacts),
+				"artifacts": _snapshot_value(state.artifacts),
 				"scan": state.scan.model_copy(deep=True),
 				"recon_metadata": copy.deepcopy(state.recon.metadata),
 				"dataset": copy.deepcopy(state.dataset),

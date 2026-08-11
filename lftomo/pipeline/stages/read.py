@@ -17,7 +17,8 @@ from lftomo.util.shapes import ProjOrder, SinoOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
-def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_multiplier: float) -> StageContract:
+def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_multiplier: float,
+		produces_artifacts: tuple[str, ...] = ()) -> StageContract:
 	if order not in ("projection", "sinogram"):
 		raise ValueError("read order must be 'projection' or 'sinogram'")
 	return StageContract(
@@ -26,6 +27,7 @@ def _output_contract(order: str, *, required_metadata: tuple[str, ...], memory_m
 		produces_domain=DataDomain.RAW,
 		window_axes=("Theta", "Y"),
 		required_metadata=required_metadata,
+		produces_artifacts=produces_artifacts,
 		resources=ResourceHints(memory_multiplier=memory_multiplier),
 	)
 
@@ -116,6 +118,9 @@ class HDF5DxchangeReadStage(Stage):
 			order,
 			required_metadata=("projections.path", "projections.data_path"),
 			memory_multiplier=1.0,
+			produces_artifacts=(
+				("white_fields", "dark_fields") if calibration_policy == "required" else ()
+			),
 		)
 
 	@classmethod
@@ -156,7 +161,7 @@ class HDF5DxchangeReadStage(Stage):
 				if layout is ProjOrder else
 				SinoOrder(Y=y_stop - self.y_start, Theta=selected_count, X=columns)
 			)
-			memory = _storage(state).allocate(shape, dtype)
+			memory = _storage(state).allocate(shape, dtype, role="raw_staging")
 			target = memory.array()
 			selection = np.s_[
 				self.theta_start:theta_stop:self.theta_stride, self.y_start:y_stop, :,
@@ -192,8 +197,21 @@ class HDF5DxchangeReadStage(Stage):
 						"dxchange calibration dataset(s) missing: " + ", ".join(missing)
 					)
 				if not missing:
-					artifacts["white_fields"] = handle[source.white_path][:, self.y_start:y_stop, :]
-					artifacts["dark_fields"] = handle[source.dark_path][:, self.y_start:y_stop, :]
+					for artifact_name, path in (
+						("white_fields", source.white_path), ("dark_fields", source.dark_path),
+					):
+						dataset = handle[path]
+						artifact_shape = (
+							dataset.shape[0], y_stop - self.y_start, dataset.shape[2],
+						)
+						artifact = _storage(state).allocate(
+							artifact_shape, dataset.dtype, role=artifact_name,
+						)
+						dataset.read_direct(
+							artifact.array(),
+							source_sel=np.s_[:, self.y_start:y_stop, :],
+						)
+						artifacts[artifact_name] = artifact
 			if self.theta_start != 0 or theta_stop != theta_count or self.theta_stride != 1:
 				all_angles = np.linspace(
 					np.deg2rad(state.scan.acquisition.rotation_start_deg),
@@ -309,7 +327,7 @@ class TIFFStackReadStage(Stage):
 			if layout is ProjOrder else
 			SinoOrder(Y=stop - self.y_start, Theta=selected_count, X=columns)
 		)
-		memory = _storage(state).allocate(shape, dtype)
+		memory = _storage(state).allocate(shape, dtype, role="raw_staging")
 		kwargs = {} if self.threads is None else {"thread_max": self.threads}
 		if layout is ProjOrder:
 			distribute_tiff_read(
