@@ -24,3 +24,12 @@ Example:
 python examples/b10_recon_current.py scan.h5 gains/ output/ \
   --center 1279.25 --window-size 16
 ```
+
+For producer-aligned bounded comparisons, pass global half-open detector rows:
+
+```bash
+python examples/b10_recon_current.py scan.h5 gains/ output/ \
+  --center 1282.75 --window-size 12 --y-start 1068 --y-stop 1092
+```
+
+Output filenames retain global row coordinates.

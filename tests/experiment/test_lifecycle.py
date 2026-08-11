@@ -189,6 +189,35 @@ class VariantProgressExecutor(ReplayableExecutor):
 		return TrialExecution(metrics={"quality": float(len(stages))})
 
 
+class MixedCancellationExecutor(ReplayableExecutor):
+	def __init__(self, call_root):
+		super().__init__()
+		self.call_root = call_root
+
+	def __call__(self, identity, _root):
+		alpha = float(identity.resolved_recon.pipeline[0].params["alpha"])
+		self.call_root.mkdir(parents=True, exist_ok=True)
+		(self.call_root / f"{identity.trial_id.value}.json").write_text(
+			json.dumps({"alpha": alpha}), encoding="utf-8",
+		)
+		context = current_execution_context()
+		context.window_started("screen")
+		context.stage_started("phase", "paganin")
+		if alpha != 0.01:
+			deadline = time.monotonic() + 0.5
+			while time.monotonic() < deadline:
+				time.sleep(0.005)
+				context.checkpoint()
+		context.stage_completed("phase", "paganin")
+		context.window_completed("screen")
+		return TrialExecution(metrics={"quality": alpha})
+
+
+class MustNotExecute:
+	def __call__(self, *_args):
+		raise AssertionError("must reuse success")
+
+
 def test_progress_reports_aggregate_counts_human_context_and_resume_dispositions(tmp_path):
 	executor = VariantProgressExecutor()
 	runner = IndependentExperimentRunner(
@@ -281,6 +310,11 @@ def test_public_lifecycle_persists_ordered_events_and_store_only_status(tmp_path
 	assert {"preflight.started", "preflight.completed", "trial.claim", "trial.started",
 		"window.started", "stage.started", "stage.completed", "window.completed",
 		"trial.finalized", "experiment.completed"} <= {event.kind for event in events}
+	preflight_event = next(event for event in events if event.kind == "preflight.completed")
+	parallelism = preflight_event.details["parallelism"]
+	assert parallelism["candidate_process_limit"] == 2
+	assert parallelism["pipeline_process_workers_scope"] == "per_candidate"
+	assert parallelism["coordinator_divides_pipeline_workers"] is False
 
 	# JSONL is derived: losing it, or ending it with a torn record, cannot alter status.
 	(api.root / "progress.jsonl").write_text('{"truncated":', encoding="utf-8")
@@ -352,25 +386,8 @@ def test_cancellation_stops_new_claims_and_finalizes_inflight_attempts(tmp_path)
 
 
 def test_cancellation_preserves_compatible_success_for_later_resume(tmp_path):
-	calls = []
-
-	class MixedExecutor(ReplayableExecutor):
-		def __call__(self, identity, _root):
-			alpha = float(identity.resolved_recon.pipeline[0].params["alpha"])
-			calls.append(alpha)
-			context = current_execution_context()
-			context.window_started("screen")
-			context.stage_started("phase", "paganin")
-			if alpha != 0.01:
-				deadline = time.monotonic() + 0.5
-				while time.monotonic() < deadline:
-					time.sleep(0.005)
-					context.checkpoint()
-			context.stage_completed("phase", "paganin")
-			context.window_completed("screen")
-			return TrialExecution(metrics={"quality": alpha})
-
-	executor = MixedExecutor()
+	call_root = tmp_path / "calls"
+	executor = MixedCancellationExecutor(call_root)
 	api = None
 
 	def observe(event):
@@ -391,6 +408,10 @@ def test_cancellation_preserves_compatible_success_for_later_resume(tmp_path):
 	resumed = ExperimentLifecycle(second_runner).resume(ResumePolicy())
 	matching = next(item for item in resumed.attempts if item.trial_id == success.trial_id)
 	assert matching.attempt_id == success.attempt_id
+	calls = [
+		json.loads(path.read_text(encoding="utf-8"))["alpha"]
+		for path in call_root.glob("*.json")
+	]
 	assert calls.count(0.01) == 1
 	assert ExperimentLifecycle.status_root(api.root).cancellation is None
 
@@ -442,7 +463,7 @@ def test_replay_bundle_rebuilds_controller_without_original_config_files(tmp_pat
 	api.run()
 
 	def factory(_config, _scan_path, _document):
-		return lambda *_args: (_ for _ in ()).throw(AssertionError("must reuse success"))
+		return MustNotExecute()
 
 	replayed = ExperimentLifecycle.from_replay(api.root, executor_factory=factory)
 

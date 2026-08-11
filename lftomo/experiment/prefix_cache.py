@@ -23,7 +23,8 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from lftomo.config import ConfigModel, StageConfig
-from lftomo.pipeline import Pipeline, PipelineState, Stage, StageObserver
+from lftomo.pipeline import Pipeline, PipelineState, Stage, StageObserver, working_view
+from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 
 from .models import canonical_json
 
@@ -48,9 +49,19 @@ def _sha256_bytes(value: bytes) -> str:
 	return hashlib.sha256(value).hexdigest()
 
 
+def _sha256_file(path: Path, chunk_bytes: int = 1024 * 1024) -> str:
+	digest = hashlib.sha256()
+	with path.open("rb") as stream:
+		for chunk in iter(lambda: stream.read(chunk_bytes), b""):
+			digest.update(chunk)
+	return digest.hexdigest()
+
+
 def _fingerprint(value: Any) -> Any:
 	"""Return a deterministic identity document or reject an unsafe value."""
 
+	if isinstance(value, ManagedBuffer):
+		return _fingerprint(value.array())
 	if hasattr(value, "model_dump"):
 		return _fingerprint(value.model_dump(mode="python"))
 	if is_dataclass(value) and not isinstance(value, type):
@@ -93,6 +104,73 @@ def _fingerprint(value: Any) -> Any:
 
 def _hash_document(value: Any) -> str:
 	return _sha256_bytes(canonical_json(_fingerprint(value)).encode("utf-8"))
+
+
+def _snapshot_value(value: Any) -> Any:
+	"""Detach run-scoped managed artifacts before persisting a prefix."""
+
+	if isinstance(value, ManagedBuffer):
+		return np.array(buffer_view(value), copy=True)
+	if isinstance(value, dict):
+		return {key: _snapshot_value(item) for key, item in value.items()}
+	if isinstance(value, list):
+		return [_snapshot_value(item) for item in value]
+	if isinstance(value, tuple):
+		return tuple(_snapshot_value(item) for item in value)
+	return copy.deepcopy(value)
+
+
+def _clone_state_value(value: Any) -> Any:
+	"""Clone ordinary state while preserving run-owned managed handles."""
+
+	if isinstance(value, ManagedBuffer):
+		return value
+	if isinstance(value, dict):
+		return {key: _clone_state_value(item) for key, item in value.items()}
+	if isinstance(value, list):
+		return [_clone_state_value(item) for item in value]
+	if isinstance(value, tuple):
+		return tuple(_clone_state_value(item) for item in value)
+	return copy.deepcopy(value)
+
+
+def _managed_buffers(value: Any) -> tuple[ManagedBuffer, ...]:
+	result = []
+	seen = set()
+
+	def collect(item):
+		if isinstance(item, ManagedBuffer):
+			identity = getattr(item, "name", id(item))
+			if identity not in seen:
+				seen.add(identity)
+				result.append(item)
+		elif isinstance(item, dict):
+			for nested in item.values():
+				collect(nested)
+		elif isinstance(item, (list, tuple)):
+			for nested in item:
+				collect(nested)
+
+	collect(value)
+	return tuple(result)
+
+
+@contextmanager
+def _pinned_state(state: PipelineState, *, owner: str):
+	"""Keep shared inputs live while a cache/fork operation retains them."""
+
+	storage = state.storage
+	buffers = _managed_buffers((state.working_array, state.artifacts))
+	if storage is None:
+		yield
+		return
+	for buffer in buffers:
+		storage.pin(buffer, owner=owner)
+	try:
+		yield
+	finally:
+		for buffer in reversed(buffers):
+			storage.unpin(buffer, owner=owner)
 
 
 def _identity_differences(expected: Any, actual: Any, prefix: str = "") -> list[str]:
@@ -351,6 +429,9 @@ class PrefixSnapshotManifest(ConfigModel):
 	state_sha256: str
 	array_bytes: int = Field(ge=0)
 	state_bytes: int = Field(ge=0)
+	artifact_files: dict[str, str] = Field(default_factory=dict)
+	artifact_sha256: dict[str, str] = Field(default_factory=dict)
+	artifact_bytes: dict[str, int] = Field(default_factory=dict)
 	snapshot_bytes: int = Field(ge=0)
 	created_at: datetime
 
@@ -394,19 +475,33 @@ def _run_stages(
 
 
 def _clone_initial_state(state: PipelineState) -> PipelineState:
-	working = np.asarray(state.working_array)
+	working = working_view(state)
+	working_copy = (
+		working.copy() if state.storage is None or working.size == 0 else
+		state.storage.fork(state.working_array, label="experiment.prefix-fork")
+	)
 	return PipelineState(
-		working_array=working.copy(),
+		working_array=working_copy,
 		scan=state.scan.model_copy(deep=True),
 		recon=state.recon.model_copy(deep=True),
-		artifacts=copy.deepcopy(state.artifacts),
+		artifacts=_clone_state_value(state.artifacts),
 		backend=state.backend,
+		storage=state.storage,
+		dataset=copy.deepcopy(state.dataset),
+		source_window=copy.deepcopy(state.source_window),
+		buffer_spec=copy.deepcopy(state.buffer_spec),
 		layout=state.layout,
 		domain=state.domain,
 	)
 
 
 def _equivalent(left: Any, right: Any, *, rtol: float, atol: float) -> bool:
+	if isinstance(left, ManagedBuffer) or isinstance(right, ManagedBuffer):
+		try:
+			left = buffer_view(left)
+			right = buffer_view(right)
+		except (OSError, TypeError, ValueError):
+			return False
 	if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
 		try:
 			np.testing.assert_allclose(np.asarray(left), np.asarray(right), rtol=rtol, atol=atol)
@@ -512,16 +607,35 @@ class PrefixCacheStore:
 		array_path = entry / "working.npy"
 		state_path = entry / "state.pkl"
 		try:
-			array_payload = array_path.read_bytes()
-			state_payload = state_path.read_bytes()
+			array_bytes = array_path.stat().st_size
+			state_bytes = state_path.stat().st_size
 		except OSError as error:
 			raise PrefixCacheIntegrityError(f"snapshot payload is missing: {error}") from error
-		if _sha256_bytes(array_payload) != manifest.array_sha256:
+		if _sha256_file(array_path) != manifest.array_sha256:
 			raise PrefixCacheIntegrityError("working-array integrity hash mismatch")
-		if _sha256_bytes(state_payload) != manifest.state_sha256:
+		if _sha256_file(state_path) != manifest.state_sha256:
 			raise PrefixCacheIntegrityError("snapshot-state integrity hash mismatch")
-		if len(array_payload) != manifest.array_bytes or len(state_payload) != manifest.state_bytes:
+		if array_bytes != manifest.array_bytes or state_bytes != manifest.state_bytes:
 			raise PrefixCacheIntegrityError("snapshot byte count mismatch")
+		if set(manifest.artifact_files) != set(manifest.artifact_sha256) \
+				or set(manifest.artifact_files) != set(manifest.artifact_bytes):
+			raise PrefixCacheIntegrityError("managed-artifact manifest is incomplete")
+		for name, relative in manifest.artifact_files.items():
+			path = entry / relative
+			try:
+				artifact_bytes = path.stat().st_size
+			except OSError as error:
+				raise PrefixCacheIntegrityError(
+					f"managed artifact {name!r} is missing: {error}"
+				) from error
+			if artifact_bytes != manifest.artifact_bytes[name]:
+				raise PrefixCacheIntegrityError(
+					f"managed artifact {name!r} byte count mismatch"
+				)
+			if _sha256_file(path) != manifest.artifact_sha256[name]:
+				raise PrefixCacheIntegrityError(
+					f"managed artifact {name!r} integrity hash mismatch"
+				)
 		if _directory_bytes(entry) != manifest.snapshot_bytes:
 			raise PrefixCacheIntegrityError("snapshot directory byte count mismatch")
 		return manifest
@@ -541,7 +655,7 @@ class PrefixCacheStore:
 				f"cache memory bound {self.policy.max_memory_bytes}"
 			)
 		try:
-			working = np.load(entry / "working.npy", mmap_mode="r", allow_pickle=False)
+			mapped = FileBackedNPArray(entry / "working.npy")
 			with (entry / "state.pkl").open("rb") as stream:
 				payload = pickle.load(stream)
 		except Exception as error:
@@ -551,17 +665,38 @@ class PrefixCacheStore:
 		}.issubset(payload):
 			raise PrefixCacheIntegrityError("snapshot state payload is incomplete")
 		if requires_copy:
-			working = np.array(working, copy=True)
+			working = (
+				np.array(mapped.array(), copy=True) if current.storage is None else
+				current.storage.fork(mapped, label="experiment.cache-fork")
+			)
+			mapped.close()
 		else:
-			working.flags.writeable = False
+			working = mapped
+		artifacts = copy.deepcopy(payload["artifacts"])
+		for name, relative in manifest.artifact_files.items():
+			artifact_map = FileBackedNPArray(entry / relative)
+			if requires_copy:
+				artifacts[name] = (
+					np.array(artifact_map.array(), copy=True) if current.storage is None else
+					current.storage.fork(
+						artifact_map, label=f"experiment.cache-artifact:{name}",
+					)
+				)
+				artifact_map.close()
+			else:
+				artifacts[name] = artifact_map
 		recon = current.recon.model_copy(deep=True)
 		recon.metadata = copy.deepcopy(payload["recon_metadata"])
 		state = PipelineState(
 			working_array=working,
 			scan=copy.deepcopy(payload["scan"]),
 			recon=recon,
-			artifacts=copy.deepcopy(payload["artifacts"]),
+			artifacts=artifacts,
 			backend=current.backend,
+			storage=current.storage,
+			dataset=copy.deepcopy(payload.get("dataset")),
+			source_window=copy.deepcopy(payload.get("source_window")),
+			buffer_spec=copy.deepcopy(payload.get("buffer_spec")),
 			layout=payload["layout"],
 			domain=payload["domain"],
 		)
@@ -574,35 +709,78 @@ class PrefixCacheStore:
 		identity: dict[str, Any],
 		stage_count: int,
 		state: PipelineState,
+		managed_artifacts: tuple[str, ...] = (),
 	) -> tuple[PrefixSnapshotManifest, tuple[str, ...]]:
 		build = self.root / "builds" / f"{cache_key}-{uuid4().hex}"
 		build.mkdir(parents=True)
 		try:
 			array_path = build / "working.npy"
 			with array_path.open("xb") as stream:
-				np.save(stream, np.asarray(state.working_array), allow_pickle=False)
+				np.save(stream, working_view(state), allow_pickle=False)
 				stream.flush()
 				os.fsync(stream.fileno())
+			artifact_files = {}
+			artifact_sha256 = {}
+			artifact_bytes = {}
+			for index, name in enumerate(managed_artifacts):
+				if name not in state.artifacts:
+					raise PrefixCacheError(
+						f"Stage contract declares managed artifact {name!r}, but it was not produced"
+					)
+				value = buffer_view(state.artifacts[name])
+				if value.dtype.hasobject:
+					raise PrefixCacheError(
+						f"managed artifact {name!r} cannot have object dtype"
+					)
+				relative = f"artifacts/{index:04d}-{hashlib.sha256(name.encode()).hexdigest()[:16]}.npy"
+				path = build / relative
+				path.parent.mkdir(parents=True, exist_ok=True)
+				with path.open("xb") as stream:
+					np.save(stream, value, allow_pickle=False)
+					stream.flush()
+					os.fsync(stream.fileno())
+				artifact_files[name] = relative
+				artifact_sha256[name] = _sha256_file(path)
+				artifact_bytes[name] = path.stat().st_size
+			ordinary_artifacts = {
+				key: value for key, value in state.artifacts.items()
+				if key not in artifact_files
+			}
+			uncontracted = _managed_buffers(ordinary_artifacts)
+			if uncontracted:
+				raise PrefixCacheError(
+					"managed cache artifacts require an explicit producer contract: "
+					+ ", ".join(sorted({
+						str(getattr(value, "role", None) or getattr(value, "name", "unknown"))
+						for value in uncontracted
+					})),
+				)
 			state_path = build / "state.pkl"
 			_write_bytes(state_path, pickle.dumps({
-				"artifacts": copy.deepcopy(state.artifacts),
+				"artifacts": _snapshot_value(ordinary_artifacts),
 				"scan": state.scan.model_copy(deep=True),
 				"recon_metadata": copy.deepcopy(state.recon.metadata),
+				"dataset": copy.deepcopy(state.dataset),
+				"source_window": copy.deepcopy(state.source_window),
+				"buffer_spec": copy.deepcopy(state.buffer_spec),
 				"layout": state.layout,
 				"domain": state.domain,
 			}, protocol=pickle.HIGHEST_PROTOCOL))
-			array_payload = array_path.read_bytes()
-			state_payload = state_path.read_bytes()
+			array_bytes = array_path.stat().st_size
+			state_bytes = state_path.stat().st_size
 			manifest = PrefixSnapshotManifest(
 				prefix_id=prefix_id,
 				cache_key=cache_key,
 				stage_count=stage_count,
 				identity=identity,
-				array_sha256=_sha256_bytes(array_payload),
-				state_sha256=_sha256_bytes(state_payload),
-				array_bytes=len(array_payload),
-				state_bytes=len(state_payload),
-				snapshot_bytes=len(array_payload) + len(state_payload),
+				array_sha256=_sha256_file(array_path),
+				state_sha256=_sha256_file(state_path),
+				array_bytes=array_bytes,
+				state_bytes=state_bytes,
+				artifact_files=artifact_files,
+				artifact_sha256=artifact_sha256,
+				artifact_bytes=artifact_bytes,
+				snapshot_bytes=array_bytes + state_bytes + sum(artifact_bytes.values()),
 				created_at=_utcnow(),
 			)
 			manifest_payload = b""
@@ -612,7 +790,10 @@ class PrefixCacheStore:
 						manifest.model_dump(mode="json"), sort_keys=True, indent=2,
 					) + "\n"
 				).encode("utf-8")
-				snapshot_bytes = len(array_payload) + len(state_payload) + len(manifest_payload)
+				snapshot_bytes = (
+					array_bytes + state_bytes + sum(artifact_bytes.values())
+					+ len(manifest_payload)
+				)
 				if snapshot_bytes == manifest.snapshot_bytes:
 					break
 				manifest = manifest.model_copy(update={"snapshot_bytes": snapshot_bytes})
@@ -741,6 +922,9 @@ class PrefixCacheStore:
 		prefix_stages = tuple(stages[:decision.stage_count])
 		suffix_stages = tuple(stages[decision.stage_count:])
 		prefix_configs = tuple(configs[:decision.stage_count])
+		managed_artifacts = tuple(dict.fromkeys(
+			name for stage in prefix_stages for name in stage.contract.managed_artifacts
+		))
 		if len(prefix_stages) != decision.stage_count or any(
 			not _cacheable(stage) for stage in prefix_stages
 		):
@@ -816,13 +1000,20 @@ class PrefixCacheStore:
 				if not cache_hit:
 					invalidation = self._invalidation_fields(prefix_id, identity)
 					started = time.perf_counter()
-					built = _run_stages(
-						_clone_initial_state(state), prefix_stages, observer, checkpoint,
-					)
-					build_seconds = time.perf_counter() - started
-					manifest, evicted = self._publish(
-						prefix_id, cache_key, identity, decision.stage_count, built,
-					)
+					with _pinned_state(
+						state, owner=f"cache-build:{prefix_id}:{uuid4().hex}",
+					):
+						built = _run_stages(
+							_clone_initial_state(state), prefix_stages, observer, checkpoint,
+						)
+						build_seconds = time.perf_counter() - started
+						with _pinned_state(
+							built, owner=f"cache-publish:{prefix_id}:{uuid4().hex}",
+						):
+							manifest, evicted = self._publish(
+								prefix_id, cache_key, identity, decision.stage_count, built,
+								managed_artifacts,
+							)
 					fork, manifest, load_seconds = self._load(
 						self._entry(prefix_id, cache_key), state, requires_copy=requires_copy,
 					)
@@ -843,12 +1034,15 @@ class PrefixCacheStore:
 				reason=str(error),
 			)
 		if cache_hit and self._sampled(decision.candidate_id):
-			check = _run_stages(
-				_clone_initial_state(state), prefix_stages, observer, checkpoint,
-			)
+			with _pinned_state(
+				state, owner=f"cache-verify:{prefix_id}:{uuid4().hex}",
+			):
+				check = _run_stages(
+					_clone_initial_state(state), prefix_stages, observer, checkpoint,
+				)
 			if not (
 				_equivalent(
-					np.asarray(check.working_array), np.asarray(fork.working_array),
+					working_view(check), working_view(fork),
 					rtol=self.policy.verify_rtol, atol=self.policy.verify_atol,
 				)
 				and _equivalent(

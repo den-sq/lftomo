@@ -3,7 +3,15 @@ from uuid import uuid4
 import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import NumpyBackend, Pipeline, PipelineState, Stage, StageContract
+from lftomo.pipeline import (
+	NumpyBackend,
+	Pipeline,
+	PipelineRunContext,
+	PipelineState,
+	Stage,
+	StageContract,
+	working_view,
+)
 from lftomo.pipeline.stages.normalize import TaperBlendedNormalizeStage, WeightedNormalizeStage
 from lftomo.prep.flat import weighted_normalize
 from lftomo.util.mem import SharedNPArray
@@ -80,10 +88,10 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 	], backend=NumpyBackend()).run(state)
 
 	assert result.working_array is working
-	assert WeightedNormalizeStage.contract.mutates_input is True
+	assert WeightedNormalizeStage.contract.mutates_input is False
 	assert WeightedNormalizeStage.contract.window_axes == ("Y",)
 	assert WeightedNormalizeStage.contract.consumes_artifacts == ()
-	assert WeightedNormalizeStage.contract.produces_artifacts == ()
+	assert WeightedNormalizeStage.contract.produces_artifacts == ("flat_fields",)
 	np.testing.assert_allclose(result.working_array, expected, rtol=1e-6)
 
 
@@ -103,6 +111,34 @@ def test_weighted_normalize_promotes_integer_projections_to_float32():
 
 	assert result.working_array.dtype == np.float32
 	np.testing.assert_allclose(result.working_array, 0.5)
+
+
+def test_float32_normalization_replaces_raw_handle_after_successful_handoff():
+	flats = np.stack([
+		np.full((2, 2), 20), np.full((2, 2), 20),
+		np.zeros((2, 2)), np.zeros((2, 2)),
+	]).astype(np.float32)
+	with PipelineRunContext() as context:
+		buffer = context.storage.allocate(SinoOrder(Y=2, Theta=3, X=2), np.float32)
+		buffer.array()[...] = 10
+		state = PipelineState(
+			working_array=buffer,
+			scan=_scan(flats),
+			recon=Recon(pipeline=[StageConfig(kind="normalize")]),
+			storage=context.storage,
+			layout=SinoOrder,
+		)
+
+		result = WeightedNormalizeStage().run(state)
+
+		assert isinstance(result.working_array, SharedNPArray)
+		assert result.working_array is not buffer
+		assert result.working_array.name != buffer.name
+		np.testing.assert_allclose(working_view(result), 0.5)
+		assert any(
+			event["action"] == "retire" and event["name"] == buffer.name
+			for event in context.storage.allocation_events
+		)
 
 
 def test_taper_normalize_projection_batch_uses_global_theta_weights():

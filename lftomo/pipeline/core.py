@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import astuple, dataclass, field, is_dataclass, replace
 from enum import Enum, auto
-from typing import Any, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
 import numpy as np
 
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
+from lftomo.storage import ManagedBuffer, StorageBackend, buffer_view
+
+if TYPE_CHECKING:
+	from lftomo.pipeline.execution import PipelineExecutor
+	from lftomo.util.window import TomoDataSet, TomoWindow
 
 
 @dataclass(frozen=True)
 class ResourceHints:
 	"""Cooperative resource hints declared by a Stage."""
 
-	memory_multiplier: float = 1.0
 	preferred_cpus: int | None = None
 	requires_gpu: bool = False
 
@@ -48,6 +52,55 @@ class Locality(Enum):
 
 
 @dataclass(frozen=True)
+class AxisPad:
+	"""Symmetric source halo required along tomography axes."""
+
+	theta: int = 0
+	y: int = 0
+	x: int = 0
+
+	def __post_init__(self):
+		if min(self.theta, self.y, self.x) < 0:
+			raise ValueError("axis padding cannot be negative")
+
+	def __add__(self, other: "AxisPad") -> "AxisPad":
+		return AxisPad(
+			self.theta + other.theta, self.y + other.y, self.x + other.x,
+		)
+
+	def maximum(self, other: "AxisPad") -> "AxisPad":
+		return AxisPad(
+			max(self.theta, other.theta), max(self.y, other.y), max(self.x, other.x),
+		)
+
+	def as_dict(self) -> dict[str, int]:
+		return {"theta": self.theta, "y": self.y, "x": self.x}
+
+
+@dataclass(frozen=True)
+class PadRequirement:
+	"""Serializable Stage pad rule resolved from scan and input shape."""
+
+	fixed: AxisPad = AxisPad()
+	phase_fft_y: bool = False
+
+	def resolve(self, scan: Any, input_shape: Any) -> AxisPad:
+		resolved = self.fixed
+		if self.phase_fft_y:
+			from lftomo.prep.phase import _phase_pad
+
+			dimension = int(getattr(input_shape, "Y"))
+			phase_y = int(_phase_pad(
+				dimension,
+				float(scan.pixel_size_um) * 1e-4,
+				float(scan.ssd_cm),
+				float(scan.energy_keV),
+			))
+			resolved = resolved + AxisPad(y=max(0, phase_y))
+		return resolved
+
+
+@dataclass(frozen=True)
 class StageContract:
 	"""Behavioral contract advertised by a Stage before it runs.
 
@@ -69,6 +122,10 @@ class StageContract:
 	required_metadata: tuple[str, ...] = ()
 	consumes_artifacts: tuple[str, ...] = ()
 	produces_artifacts: tuple[str, ...] = ()
+	# Large arrays that an experiment prefix snapshot must retain as reopenable
+	# process-shared buffers. This is producer-declared; small/QC artifacts stay
+	# ordinary Python values regardless of size.
+	managed_artifacts: tuple[str, ...] = ()
 	forks_pipeline: bool = False
 	resources: ResourceHints = field(default_factory=ResourceHints)
 	accepts: tuple[type[Any], ...] | None = None
@@ -81,7 +138,17 @@ class StageContract:
 	produces_domain: DataDomain | ContractEffect | None = None
 	resamples_detector: bool = False
 	requires_row_identity: bool = False
+	required_pad: PadRequirement = PadRequirement()
+	requires_full_axes: tuple[str, ...] = ()
 	runtime_requirements: tuple[RuntimeRequirement, ...] = ()
+
+	def __post_init__(self):
+		undeclared = set(self.managed_artifacts) - set(self.produces_artifacts)
+		if undeclared:
+			raise ValueError(
+				"managed_artifacts must also be declared in produces_artifacts: "
+				+ ", ".join(sorted(undeclared))
+			)
 
 	@property
 	def accepted_layouts(self) -> tuple[type[Any], ...] | None:
@@ -182,6 +249,34 @@ class WorkingArray(Protocol):
 		"""Array shape in backend-native form."""
 
 
+@dataclass(frozen=True)
+class BufferSpec:
+	"""Shape, dtype, and layout of the current working allocation."""
+
+	shape: Any
+	dtype: np.dtype
+	layout: type[Any] | None
+
+	def with_layout(self, layout: type[Any] | None) -> "BufferSpec":
+		return replace(self, layout=layout)
+
+
+def _buffer_spec(buffer: Any, layout: type[Any] | None) -> BufferSpec | None:
+	shape = getattr(buffer, "shape", None)
+	if shape is None:
+		return None
+	try:
+		values = astuple(shape) if is_dataclass(shape) else tuple(shape)
+		if not all(int(value) > 0 for value in values):
+			return None
+	except TypeError:
+		return None
+	dtype = getattr(buffer, "dtype", None)
+	if dtype is None and hasattr(buffer, "array"):
+		dtype = getattr(buffer.array, "dtype", None)
+	return None if dtype is None else BufferSpec(shape, np.dtype(dtype), layout)
+
+
 @dataclass
 class PipelineState:
 	"""Mutable state object passed from Stage to Stage."""
@@ -191,10 +286,19 @@ class PipelineState:
 	recon: Recon
 	artifacts: dict[str, Any] = field(default_factory=dict)
 	backend: Backend = field(default_factory=NumpyBackend)
+	storage: StorageBackend | None = None
+	executor: PipelineExecutor | None = None
+	dataset: TomoDataSet | None = None
+	source_window: TomoWindow | None = None
+	buffer_spec: BufferSpec | None = None
 	# Fragment callers may omit axes for legacy compatibility. Complete pipelines
 	# always acquire both from their read Stage before data processing begins.
 	layout: type[Any] | None = None
 	domain: DataDomain | None = None
+
+	def __post_init__(self):
+		if self.buffer_spec is None:
+			self.buffer_spec = _buffer_spec(self.working_array, self.layout)
 
 	def with_array(
 		self,
@@ -205,15 +309,76 @@ class PipelineState:
 	) -> "PipelineState":
 		"""Return a shallow-copy state with a different working array."""
 
+		resolved_layout = self.layout if layout is None else layout
 		return PipelineState(
 			working_array=working_array,
 			scan=self.scan,
 			recon=self.recon,
 			artifacts=dict(self.artifacts),
 			backend=self.backend,
-			layout=self.layout if layout is None else layout,
+			storage=self.storage,
+			executor=self.executor,
+			dataset=self.dataset,
+			source_window=self.source_window,
+			buffer_spec=_buffer_spec(working_array, resolved_layout),
+			layout=resolved_layout,
 			domain=self.domain if domain is None else domain,
 		)
+
+	def sync_buffer_spec(self) -> None:
+		"""Synchronize layout metadata after a preserving in-place Stage."""
+
+		if self.buffer_spec is not None and self.buffer_spec.layout is not self.layout:
+			self.buffer_spec = self.buffer_spec.with_layout(self.layout)
+
+
+def working_view(state: PipelineState) -> np.ndarray:
+	"""Return the process-local NumPy view of the current working buffer."""
+
+	return buffer_view(state.working_array)
+
+
+def allocate_output(
+	state: PipelineState,
+	shape: Any,
+	dtype: np.dtype,
+	*,
+	role: str,
+	reuse_from: tuple[str, ...] = (),
+	alias_from_current: bool = False,
+	proof: str | None = None,
+) -> tuple[Any, np.ndarray]:
+	"""Allocate a prospective output without changing or retiring current state."""
+
+	if state.storage is None:
+		array = np.empty(tuple(shape) if not is_dataclass(shape) else astuple(shape), dtype=dtype)
+		return array, array
+	alias_from = state.working_array if alias_from_current and hasattr(state.working_array, "name") else None
+	buffer = state.storage.allocate(
+		shape, np.dtype(dtype), role=role, reuse_from=reuse_from,
+		alias_from=alias_from, proof=proof,
+	)
+	return buffer, buffer_view(buffer)
+
+
+def commit_output(
+	state: PipelineState,
+	output: Any,
+	*,
+	retire_as: str | None,
+	layout: type[Any] | None = None,
+	domain: DataDomain | None = None,
+) -> PipelineState:
+	"""Publish a filled output, then retire its predecessor after the handoff."""
+
+	result = state.with_array(output, layout=layout, domain=domain)
+	if (
+		state.storage is not None
+		and output is not state.working_array
+		and isinstance(state.working_array, ManagedBuffer)
+	):
+		state.storage.retire(state.working_array, role=retire_as)
+	return result
 
 
 class Stage(ABC):
@@ -280,9 +445,12 @@ class Pipeline:
 				mode=self.validation_mode,
 				initial_layout=self.initial_layout,
 				initial_domain=self.initial_domain,
+				enable_aliasing=state.recon.buffer_aliasing,
+				enable_engine_aliasing=state.recon.tomopy_input_aliasing,
 			)
 			self._validated = True
 		segments = () if self.plan is None else self.plan.segments
+		executor = state.executor or getattr(state.storage, "pipeline_executor", None)
 		if not segments:
 			from lftomo.pipeline.planning import ExecutionKind, PlanSegment
 
@@ -316,6 +484,7 @@ class Pipeline:
 							)
 						),
 						checkpoint=self.checkpoint,
+						executor=executor,
 					)
 				except BaseException:
 					raise
@@ -325,6 +494,7 @@ class Pipeline:
 				for stage in segment_stages:
 					state.layout = stage.contract.output_layout(state.layout)
 					state.domain = stage.contract.output_domain(state.domain)
+				state.sync_buffer_spec()
 				continue
 			for index, stage in enumerate(segment_stages, start=segment.start):
 				if self.checkpoint is not None:
@@ -334,7 +504,10 @@ class Pipeline:
 				if self.observer is not None:
 					self.observer("started", index, stage, None)
 				try:
-					state = stage.run(state)
+					state = (
+						executor.run_stage(state, stage)
+						if executor is not None else stage.run(state)
+					)
 				except BaseException as error:
 					if self.observer is not None:
 						self.observer("failed", index, stage, error)
@@ -347,4 +520,5 @@ class Pipeline:
 					state.layout = output_layout
 				if output_domain is not None:
 					state.domain = output_domain
+				state.sync_buffer_spec()
 		return state

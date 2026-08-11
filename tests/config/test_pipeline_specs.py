@@ -39,3 +39,5 @@ def test_snapshot_b10_spec_remains_distinct_from_current_api_driver():
 
 	assert recon.metadata["lftomo_snapshot"].startswith("ddfcdf6")
 	assert all("b10_recon_current" not in str(value) for stage in recon.pipeline for value in stage.params.values())
+	gridrec = next(stage for stage in recon.pipeline if stage.kind == "recon")
+	assert gridrec.params["circle_mask"] is False

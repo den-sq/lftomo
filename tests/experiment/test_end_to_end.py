@@ -148,6 +148,42 @@ def run_fragment(recon, source):
 	).run(state).working_array
 
 
+class HermeticWorkflowExecutor:
+	def __init__(self, source, reference):
+		self.source = source
+		self.reference = reference
+
+	def __call__(self, identity, output_root):
+		result = run_fragment(identity.resolved_recon, self.source)
+		window_metrics = {}
+		for window in identity.fidelity.windows:
+			actual = result[:, window.y_start:window.y_stop]
+			expected = self.reference[:, window.y_start:window.y_stop]
+			dynamic_range = float(np.ptp(expected)) or 1.0
+			nrmse = float(np.sqrt(np.mean((actual - expected) ** 2)) / dynamic_range)
+			window_metrics[window.id] = {"nrmse": [nrmse]}
+		artifacts = {}
+		outputs = ()
+		if identity.fidelity.id == "screen":
+			path = output_root / "preview.npy"
+			path.parent.mkdir(parents=True, exist_ok=True)
+			np.save(path, result[0])
+			artifacts["preview"] = str(path)
+		if identity.fidelity.id == "final":
+			path = output_root / "finalist.npy"
+			path.parent.mkdir(parents=True, exist_ok=True)
+			np.save(path, result)
+			outputs = (OutputRecord(
+				role="finalist_output", path=path, bytes=path.stat().st_size,
+			),)
+		return TrialExecution(
+			metrics={"nrmse": window_metrics["top"]["nrmse"][0]},
+			window_metrics=window_metrics,
+			artifacts=artifacts,
+			outputs=outputs,
+		)
+
+
 def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_path):
 	config = experiment_config()
 	rng = np.random.default_rng(20260804)
@@ -162,37 +198,8 @@ def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_
 	target_recon.pipeline[2].sweep = None
 	reference = run_fragment(target_recon, source)
 
-	calls = []
-	preview_images = {}
-
-	def execute(identity, output_root):
-		result = run_fragment(identity.resolved_recon, source)
-		calls.append((identity.fidelity.id, identity.candidate.value))
-		window_metrics = {}
-		for window in identity.fidelity.windows:
-			actual = result[:, window.y_start:window.y_stop]
-			expected = reference[:, window.y_start:window.y_stop]
-			dynamic_range = float(np.ptp(expected)) or 1.0
-			nrmse = float(np.sqrt(np.mean((actual - expected) ** 2)) / dynamic_range)
-			window_metrics[window.id] = {"nrmse": [nrmse]}
-		if identity.fidelity.id == "screen":
-			preview_images[identity.candidate.value] = result[0]
-		outputs = ()
-		if identity.fidelity.id == "final":
-			path = output_root / "finalist.npy"
-			path.parent.mkdir(parents=True, exist_ok=True)
-			with path.open("wb") as stream:
-				np.save(stream, result)
-			outputs = (OutputRecord(
-				role="finalist_output", path=path, bytes=path.stat().st_size,
-			),)
-		return TrialExecution(
-			metrics={"nrmse": window_metrics["top"]["nrmse"][0]},
-			window_metrics=window_metrics,
-			outputs=outputs,
-		)
-
-	summary = FidelityExperimentRunner(config, inputs(), tmp_path, execute).run()
+	executor = HermeticWorkflowExecutor(source, reference)
+	summary = FidelityExperimentRunner(config, inputs(), tmp_path, executor).run()
 	assert [len(level.attempts) for level in summary.levels] == [3, 1]
 	winner = summary.levels[-1].attempts[0]
 	assert winner.identity.resolved_recon.pipeline[2].params["alpha"] == 0.05
@@ -204,6 +211,12 @@ def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_
 		scale_min=float(reference.min()), scale_max=float(reference.max()),
 		blinded=True, format="png",
 	)
+	preview_images = {
+		attempt.identity.candidate.value: np.load(
+			attempt.observations["artifacts"]["preview"],
+		)
+		for attempt in summary.levels[0].attempts
+	}
 	previews = export_blinded_previews(
 		preview_images,
 		tmp_path,
@@ -234,9 +247,7 @@ def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_
 		write_tier2_plan(tmp_path / "tampered-plan.json", tampered)
 	assert audit_tier2_results(plan, summary, previews).passed
 
-	call_count = len(calls)
-	resumed = FidelityExperimentRunner(config, inputs(), tmp_path, execute).run()
-	assert len(calls) == call_count
+	resumed = FidelityExperimentRunner(config, inputs(), tmp_path, executor).run()
 	assert resumed.promotions == summary.promotions
 	for resumed_level, original_level in zip(resumed.levels, summary.levels):
 		assert resumed_level.attempts == original_level.attempts

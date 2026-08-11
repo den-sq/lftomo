@@ -6,6 +6,8 @@ from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFS
 from lftomo.pipeline import NumpyBackend, Pipeline, PipelineState
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.util.io import np_convert
+from lftomo.util.shapes import ProjOrder
+from lftomo.util.window import TomoWindow
 
 
 def _state(array, output, config, sample_id="sample-a"):
@@ -59,3 +61,23 @@ def test_tiff_write_stage_supports_integer_template_and_multiprocessing(tmp_path
 		written = tf.imread(path)
 		assert written.dtype == np.dtype(dtype)
 		np.testing.assert_array_equal(written, np_convert(np.dtype(dtype), array[index]))
+
+
+def test_tiff_writer_uses_global_source_window_y_position(tmp_path):
+	array = np.ones((2, 4, 5), dtype=np.float32)
+	config = StageConfig(kind="write", algorithm="tiff_slices")
+	state = _state(array, tmp_path, config)
+	state.source_window = TomoWindow(
+		ProjOrder(Theta=3, Y=2, X=5),
+		ProjOrder(Theta=0, Y=0, X=0),
+		ProjOrder(Theta=0, Y=11, X=0),
+		ProjOrder(Theta=1, Y=1, X=1),
+		np.uint16,
+		np.float32,
+	)
+
+	result = Pipeline([create_stage(config)]).run(state)
+
+	assert [path.name for path in result.artifacts["output_files"]] == [
+		"sample-a_00011.tif", "sample-a_00012.tif"
+	]

@@ -3,26 +3,77 @@
 from __future__ import annotations
 
 import numpy as np
-from multiprocessing.pool import ThreadPool
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	Locality,
+	PadRequirement,
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
+	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.stages._layout import (
+from lftomo.pipeline.layout import (
 	configured_layout,
 	n_projections,
 	n_rows,
 	projection_view,
 	resolve_layout,
 )
+from lftomo.storage import buffer_view
 from lftomo.util.shapes import ProjOrder, SinoOrder
+
+
+def _managed_phase_filter(
+	state: PipelineState, values: np.ndarray, signature: tuple,
+) -> np.ndarray:
+	"""Publish the detector-sized Fourier filter as a shared run artifact."""
+
+	if state.storage is None:
+		state.artifacts["phase_filter"] = values
+		state.artifacts["phase_filter_signature"] = signature
+		return values
+	previous = state.artifacts.get("phase_filter")
+	artifact = state.storage.allocate(
+		values.shape, values.dtype, role="phase_filter", reuse_from=("phase_filter",),
+	)
+	artifact.array()[...] = values
+	state.artifacts["phase_filter"] = artifact
+	state.artifacts["phase_filter_signature"] = signature
+	if hasattr(previous, "name"):
+		state.storage.retire(previous, role="phase_filter")
+	return artifact.array()
+
+
+def _resolved_phase_filter(
+	state: PipelineState, shape: tuple[int, int], alpha: float,
+) -> np.ndarray:
+	signature = (
+		"paganin", shape, float(alpha), float(state.scan.energy_keV),
+		float(state.scan.pixel_size_um), float(state.scan.ssd_cm),
+	)
+	if state.artifacts.get("phase_filter_signature") == signature:
+		return buffer_view(state.artifacts["phase_filter"])
+	values = _paganin_transfer(
+		shape,
+		alpha=alpha,
+		energy_kev=state.scan.energy_keV,
+		pixel_size_um=state.scan.pixel_size_um,
+		ssd_cm=state.scan.ssd_cm,
+	)
+	return _managed_phase_filter(state, values, signature)
+
+
+def prepare_phase_filter(stage: Stage, state: PipelineState) -> None:
+	"""Create one shared filter before projection workers are dispatched."""
+
+	data = working_view(state)
+	layout = resolve_layout(state, getattr(stage, "order", None), stage.name)
+	_resolved_phase_filter(
+		state, (n_rows(data, layout), data.shape[2]), stage.alpha,
+	)
 
 
 _BAC_RUNTIME_REQUIREMENT = RuntimeRequirement(
@@ -143,12 +194,14 @@ class PaganinFilterStage(Stage):
 			cacheable_prefix=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm") if enabled else (),
-			resources=ResourceHints(memory_multiplier=2.0),
 			accepts_domain=(DataDomain.TRANSMISSION,) if enabled else (
 				DataDomain.TRANSMISSION, DataDomain.ATTENUATION,
 			),
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
+			produces_artifacts=("phase_filter",) if enabled else (),
+			managed_artifacts=("phase_filter",) if enabled else (),
+			required_pad=PadRequirement(phase_fft_y=enabled),
 		)
 
 	@classmethod
@@ -158,18 +211,14 @@ class PaganinFilterStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinFilterStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin_filter expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		transfer = _paganin_transfer(
-			(n_rows(data, layout), data.shape[2]),
-			alpha=self.alpha,
-			energy_kev=state.scan.energy_keV,
-			pixel_size_um=state.scan.pixel_size_um,
-			ssd_cm=state.scan.ssd_cm,
+		transfer = _resolved_phase_filter(
+			state, (n_rows(data, layout), data.shape[2]), self.alpha,
 		)
 		for projection in range(n_projections(data, layout)):
 			image = projection_view(data, layout, projection)
@@ -219,7 +268,7 @@ class NegativeLogStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("NegativeLogStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.negative_log expects a three-dimensional tomography array")
@@ -266,7 +315,7 @@ class BetaScaleStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BetaScaleStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.beta_scale expects a three-dimensional tomography array")
@@ -293,7 +342,8 @@ class PaganinStage(Stage):
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
-		resources=ResourceHints(memory_multiplier=2.0),
+		produces_artifacts=("phase_filter",),
+		managed_artifacts=("phase_filter",),
 	)
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
@@ -317,12 +367,14 @@ class PaganinStage(Stage):
 			cacheable_prefix=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm") if enabled else (),
-			resources=ResourceHints(memory_multiplier=2.0),
 			accepts_domain=(DataDomain.TRANSMISSION,) if enabled else (
 				DataDomain.TRANSMISSION, DataDomain.ATTENUATION,
 			),
 			produces_domain=DataDomain.ATTENUATION if enabled else PRESERVE,
 			locality=Locality.PROJECTION,
+			produces_artifacts=("phase_filter",) if enabled else (),
+			managed_artifacts=("phase_filter",) if enabled else (),
+			required_pad=PadRequirement(phase_fft_y=enabled),
 		)
 
 	@classmethod
@@ -332,18 +384,14 @@ class PaganinStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
-		transfer = _paganin_transfer(
-			(n_rows(data, layout), data.shape[2]),
-			alpha=self.alpha,
-			energy_kev=state.scan.energy_keV,
-			pixel_size_um=state.scan.pixel_size_um,
-			ssd_cm=state.scan.ssd_cm,
+		transfer = _resolved_phase_filter(
+			state, (n_rows(data, layout), data.shape[2]), self.alpha,
 		)
 		for projection in range(n_projections(data, layout)):
 			image = projection_view(data, layout, projection)
@@ -369,7 +417,8 @@ class PaganinPhaseAbsorptionStage(Stage):
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
-		resources=ResourceHints(memory_multiplier=2.0),
+		produces_artifacts=("phase_filter",),
+		managed_artifacts=("phase_filter",),
 	)
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
@@ -390,10 +439,12 @@ class PaganinPhaseAbsorptionStage(Stage):
 			cacheable_prefix=True,
 			window_axes=("Y", "Theta"),
 			required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
-			resources=ResourceHints(memory_multiplier=2.0),
 			accepts_domain=(DataDomain.TRANSMISSION,),
 			produces_domain=DataDomain.ATTENUATION,
 			locality=Locality.PROJECTION,
+			produces_artifacts=("phase_filter",),
+			managed_artifacts=("phase_filter",),
+			required_pad=PadRequirement(phase_fft_y=True),
 		)
 
 	@classmethod
@@ -403,18 +454,14 @@ class PaganinPhaseAbsorptionStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinPhaseAbsorptionStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin_phase_absorption expects a (Y, Theta, X) sinogram array")
 		wavelength = _wavelength_cm(state.scan.energy_keV)
 		beta_scale = 4 * np.pi / wavelength
-		transfer = _paganin_transfer(
-			(n_rows(data, layout), data.shape[2]),
-			alpha=self.alpha,
-			energy_kev=state.scan.energy_keV,
-			pixel_size_um=state.scan.pixel_size_um,
-			ssd_cm=state.scan.ssd_cm,
+		transfer = _resolved_phase_filter(
+			state, (n_rows(data, layout), data.shape[2]), self.alpha,
 		)
 		for projection in range(n_projections(data, layout)):
 			image = projection_view(data, layout, projection)
@@ -456,7 +503,6 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 			produces_domain=PRESERVE,
 			locality=Locality.PROJECTION,
 			window_axes=("Y", "Theta"),
-			resources=ResourceHints(memory_multiplier=2.0),
 		)
 		self.alpha = alpha
 		self.gamma = gamma
@@ -486,7 +532,7 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 			raise TypeError(
 				"BronnikovAidedCorrectionFilterStage currently requires the NumPy backend"
 			)
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.bac_correction expects a three-dimensional tomography array")
@@ -497,14 +543,7 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 		def image(index: int) -> np.ndarray:
 			return projection_view(data, layout, index).copy()
 
-		if self.processes == 1:
-			corrected = (self._correct(image(index)) for index in range(count))
-		else:
-			with ThreadPool(self.processes) as pool:
-				corrected = pool.imap(self._correct, (image(index) for index in range(count)))
-				for projection, result in enumerate(corrected):
-					projection_view(data, layout, projection)[:] = result
-			return state
+		corrected = (self._correct(image(index)) for index in range(count))
 		for projection, result in enumerate(corrected):
 			projection_view(data, layout, projection)[:] = result
 		return state
@@ -520,7 +559,6 @@ class BronnikovAidedCorrectionStage(Stage):
 		mutates_input=True,
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
-		resources=ResourceHints(memory_multiplier=2.0),
 		runtime_requirements=(_BAC_RUNTIME_REQUIREMENT,),
 	)
 
@@ -549,7 +587,6 @@ class BronnikovAidedCorrectionStage(Stage):
 			produces_domain=DataDomain.ATTENUATION if enabled else PRESERVE,
 			locality=Locality.PROJECTION,
 			window_axes=("Y", "Theta"),
-			resources=ResourceHints(memory_multiplier=2.0),
 			runtime_requirements=type(self).contract.runtime_requirements,
 		)
 		self.alpha = alpha
@@ -593,7 +630,7 @@ class BronnikovAidedCorrectionStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BronnikovAidedCorrectionStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.bac expects a three-dimensional tomography array")
@@ -602,14 +639,7 @@ class BronnikovAidedCorrectionStage(Stage):
 		count = n_projections(data, layout)
 		def image(index: int) -> np.ndarray:
 			return projection_view(data, layout, index).copy()
-		if self.processes == 1:
-			corrected = (self._correct(image(index)) for index in range(count))
-		else:
-			with ThreadPool(self.processes) as pool:
-				corrected = pool.imap(self._correct, (image(index) for index in range(count)))
-				for projection, result in enumerate(corrected):
-					projection_view(data, layout, projection)[:] = result
-			return state
+		corrected = (self._correct(image(index)) for index in range(count))
 		for projection, result in enumerate(corrected):
 			projection_view(data, layout, projection)[:] = result
 		return state

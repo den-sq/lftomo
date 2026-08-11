@@ -15,6 +15,10 @@ from lftomo.pipeline.planning import (
 	PipelinePlan,
 	PlanSegment,
 	PlanStep,
+	_transition_role,
+	build_allocation_schedule,
+	stage_allocation_spec,
+	stage_output_spec,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -117,6 +121,9 @@ def validate_pipeline(
 	mode: ValidationMode | str = ValidationMode.FRAGMENT,
 	initial_layout: type[Any] | None = None,
 	initial_domain: DataDomain | None = None,
+	enable_aliasing: bool = True,
+	enable_engine_aliasing: bool = True,
+	external_pins: tuple[str, ...] = (),
 ) -> PipelinePlan:
 	"""Validate a Stage sequence and return its resolved execution plan."""
 
@@ -140,6 +147,7 @@ def validate_pipeline(
 	attenuation_transitions = 0
 	steps: list[PlanStep] = []
 	warnings: list[str] = []
+	current_buffer = None
 
 	for index, stage in enumerate(stages):
 		occurrence = getattr(stage, "occurrence_id", None)
@@ -147,6 +155,7 @@ def validate_pipeline(
 		contract = stage.contract
 		input_layout = current_layout
 		input_domain = current_domain
+		input_buffer = current_buffer
 
 		accepted = contract.accepted_layouts
 		if (
@@ -263,17 +272,24 @@ def validate_pipeline(
 				hidden=True,
 			))
 
+		output_buffer = stage_output_spec(stage, input_buffer, scan)
+		allocation_buffer = stage_allocation_spec(stage, input_buffer, output_buffer)
+		output_role, retires_role = _transition_role(stage)
 		steps.append(PlanStep(
 			index=index, stage_name=stage.name,
 			input_layout=input_layout, output_layout=output_layout,
 			input_domain=input_domain, output_domain=output_domain,
 			materializations=tuple(materializations), warnings=tuple(step_warnings),
+			input_buffer=input_buffer, output_buffer=output_buffer,
+			allocation_buffer=allocation_buffer,
+			output_role=output_role, retires_role=retires_role,
 		))
 		upstream_mutated = upstream_mutated or contract.mutates_input
 		row_identity_available = row_identity_available and not contract.resamples_detector
 		produced_artifacts.update(contract.produces_artifacts)
 		current_layout = output_layout
 		current_domain = output_domain
+		current_buffer = output_buffer
 
 	if mode is ValidationMode.COMPLETE:
 		if normalize_transitions != 1:
@@ -335,6 +351,14 @@ def validate_pipeline(
 		))
 		index = stop
 
+	resolved_steps = tuple(steps)
+	schedule = build_allocation_schedule(
+		resolved_steps, stages, scan,
+		enable_aliasing=enable_aliasing,
+		enable_engine_aliasing=enable_engine_aliasing,
+		external_pins=external_pins,
+	)
 	return PipelinePlan(
-		steps=tuple(steps), segments=tuple(segments), warnings=tuple(warnings),
+		steps=resolved_steps, segments=tuple(segments), warnings=tuple(warnings),
+		allocation_schedule=schedule,
 	)

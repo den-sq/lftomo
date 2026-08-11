@@ -60,12 +60,27 @@ under `entries/<prefix-id>/<cache-key>/`. `manifest.json` is written last in the
 directory. Published snapshot files are never updated; last-access records live
 separately so LRU accounting does not mutate scientific evidence.
 
-The working array is stored as NumPy `.npy` and restored with a read-only memory map.
-When any suffix Stage declares `mutates_input=True`, the executor first makes an explicit
-bounded array copy. Otherwise the mapping remains read-only, so an incorrect mutation
-contract fails instead of changing the snapshot. Artifacts are restored as a deep fork,
-including nested dictionaries, lists, arrays, and metadata. Downstream failure,
-interruption, or cancellation therefore cannot alter another trial or the cache.
+The working array is stored as NumPy `.npy` and restored with a read-only
+`FileBackedNPArray`. When any suffix Stage declares `mutates_input=True`, the active
+`SharedNPManager` creates a writable `fork(source, label=...)`; otherwise workers reopen
+the immutable file-backed handle directly. An incorrect mutation contract therefore
+fails instead of changing the snapshot.
+
+Large process-shared artifact arrays use the same policy only when their producing
+`StageContract` names them in `managed_artifacts` (which must be a subset of
+`produces_artifacts`). Each is streamed from its buffer view to an integrity-hashed
+`.npy` payload, then restored as a manager-issued writable fork or a read-only
+file-backed handle. Flat/dark fields and shared phase filters declare this contract.
+Angles, centers, paths, QC dictionaries, metric records, and other ordinary artifacts
+remain ordinary deep-copied state; no size threshold changes their representation.
+
+Cache build, independent verification, and publication pin every managed source buffer
+they retain. The allocation planner therefore cannot reuse a retired physical segment
+for another branch until the cache operation releases its pin. The run context owns all
+writable forks and tears them down at trial completion; returned trial records exclude
+managed handles that would otherwise outlive that context. Downstream failure,
+interruption, cancellation, or killed-trial cleanup cannot alter another trial or leave
+the cache's shared-memory segments behind.
 
 Artifact state uses integrity-checked Python serialization because Stage artifacts may
 retain typed calibration references. Treat the scratch directory as trusted local

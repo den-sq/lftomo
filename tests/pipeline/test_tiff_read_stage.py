@@ -2,9 +2,18 @@ import numpy as np
 import tifffile as tf
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import NumpyBackend, Pipeline, PipelineState, Stage, StageContract
+from lftomo.pipeline import (
+	NumpyBackend,
+	Pipeline,
+	PipelineRunContext,
+	PipelineState,
+	Stage,
+	StageContract,
+	working_view,
+)
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.mem import SharedNPArray
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 class NoopStage(Stage):
@@ -33,6 +42,14 @@ def _state(projection_dir, count, size, config):
 	)
 
 
+def _run(state, *stages):
+	with PipelineRunContext() as context:
+		state.storage = context.storage
+		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
+		assert isinstance(result.working_array, SharedNPArray)
+		return result.with_array(working_view(result).copy())
+
+
 def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path):
 	count, size = 4, 5
 	projection_dir = tmp_path / "projections"
@@ -45,13 +62,14 @@ def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path)
 	)
 
 	stage = create_stage(config)
-	result = Pipeline([stage, NoopStage()], backend=NumpyBackend()).run(
-		_state(projection_dir, count, size, config)
-	)
+	result = _run(_state(projection_dir, count, size, config), stage, NoopStage())
 
 	assert "read.tiff_stack" in STAGE_REGISTRY
 	assert stage.contract.produced_output is SinoOrder
 	np.testing.assert_array_equal(result.working_array, np.transpose(stack, (1, 0, 2)))
+	assert result.dataset.shape == ProjOrder(Theta=count, Y=size, X=size)
+	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=0)
+	assert result.buffer_spec.layout is SinoOrder
 
 
 def test_tiff_stack_stage_reads_multi_page_tiff(tmp_path):
@@ -61,9 +79,7 @@ def test_tiff_stack_stage_reads_multi_page_tiff(tmp_path):
 	tf.imwrite(path, stack, photometric="minisblack")
 	config = StageConfig(kind="read", algorithm="tiff_stack")
 
-	result = Pipeline([create_stage(config)], backend=NumpyBackend()).run(
-		_state(path, count, size, config)
-	)
+	result = _run(_state(path, count, size, config), create_stage(config))
 
 	np.testing.assert_array_equal(result.working_array, stack)
 
@@ -79,9 +95,7 @@ def test_tiff_stack_stage_reads_bounded_y_window(tmp_path):
 		kind="read", algorithm="tiff_stack", params={"y_start": 2, "y_stop": 4}
 	)
 
-	result = Pipeline([create_stage(config)], backend=NumpyBackend()).run(
-		_state(projection_dir, count, size, config)
-	)
+	result = _run(_state(projection_dir, count, size, config), create_stage(config))
 
 	np.testing.assert_array_equal(result.working_array, stack[:, 2:4, :])
 
@@ -98,7 +112,7 @@ def test_tiff_stack_stage_reads_bounded_theta_and_y_window(tmp_path):
 		params={"theta_start": 1, "theta_stop": 4, "y_start": 2, "y_stop": 5},
 	)
 
-	result = create_stage(config).run(_state(projection_dir, count, size, config))
+	result = _run(_state(projection_dir, count, size, config), create_stage(config))
 
 	np.testing.assert_array_equal(result.working_array, stack[1:4, 2:5, :])
 
@@ -115,7 +129,20 @@ def test_tiff_stack_stage_reads_strided_theta_window_with_matching_angles(tmp_pa
 		params={"theta_start": 1, "theta_stop": 6, "theta_stride": 2},
 	)
 
-	result = create_stage(config).run(_state(projection_dir, count, size, config))
+	result = _run(_state(projection_dir, count, size, config), create_stage(config))
 
 	np.testing.assert_array_equal(result.working_array, stack[1:6:2])
 	np.testing.assert_allclose(result.artifacts["angles"], np.deg2rad([30, 90, 150]))
+	assert result.source_window.shape.Theta == 5
+	assert result.working_array.shape[0] == 3
+	assert result.source_window.step == ProjOrder(Theta=2, Y=1, X=1)
+
+
+def test_legacy_tiff_chunk_parameters_are_not_runtime_stage_state():
+	config = StageConfig(kind="read", algorithm="tiff_stack", params={
+		"sinogram_chunk_size": 140,
+		"chunk_overlap": 30,
+	})
+	stage = create_stage(config)
+	assert not hasattr(stage, "sinogram_chunk_size")
+	assert not hasattr(stage, "chunk_overlap")

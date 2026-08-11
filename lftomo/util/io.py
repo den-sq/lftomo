@@ -17,7 +17,7 @@ import tifffile as tf
 
 from .log import log, LOG
 from .mem import SharedNPArray, SharedNPManager
-from .shapes import ReconOrder, ContigMemIter, DataRange, DataShape, ProjOrder
+from .shapes import ReconOrder, ContigMemIter, DataRange, DataShape, ProjOrder, SinoOrder
 from .window import TomoWindow
 
 
@@ -111,6 +111,70 @@ def distribute_tiff_read(source_files: Sequence[PathLike], target_mem: SharedNPA
 			for index, path in enumerate(files)
 		]
 	with ThreadPool(min(thread_max, count)) as pool:
+		pool.starmap(byteread_helper, calls)
+
+
+def distribute_tiff_sinogram_read(
+	source_files: Sequence[PathLike],
+	target_mem: SharedNPArray,
+	*,
+	y_start: int = 0,
+	y_stop: int | None = None,
+	theta_start: int = 0,
+	theta_stop: int | None = None,
+	theta_stride: int = 1,
+	thread_max: int = cpu_count() * 2,
+) -> None:
+	"""Read projection TIFF rows directly into a sinogram-order buffer."""
+
+	files = [Path(path) for path in source_files]
+	if not files:
+		raise ValueError("TIFF source list is empty")
+	with tf.TiffFile(files[0]) as tif:
+		page = tif.pages[0]
+		if page.compression != 1 or not page.is_contiguous:
+			raise ValueError("direct TIFF reading requires uncompressed contiguous pages")
+		rows, columns = page.shape
+		dtype = np.dtype(page.dtype)
+		first_offsets = [entry.dataoffsets[0] for entry in tif.pages]
+	count = len(files) if len(files) > 1 else len(first_offsets)
+	stop = rows if y_stop is None else y_stop
+	theta_stop = count if theta_stop is None else theta_stop
+	if not 0 <= y_start < stop <= rows:
+		raise ValueError(f"invalid TIFF Y window [{y_start}, {stop}) for {rows} rows")
+	if not 0 <= theta_start < theta_stop <= count or theta_stride < 1:
+		raise ValueError("invalid TIFF Theta window")
+	indices = list(range(theta_start, theta_stop, theta_stride))
+	expected = SinoOrder(Y=stop - y_start, Theta=len(indices), X=columns)
+	if target_mem.shape != expected or target_mem.dtype != dtype:
+		raise ValueError(
+			f"target must have shape {expected} and dtype {dtype}, "
+			f"got {target_mem.shape} and {target_mem.dtype}"
+		)
+	row_bytes = columns * dtype.itemsize
+	if len(files) == 1:
+		sources = [(files[0], first_offsets[index]) for index in indices]
+	else:
+		sources = []
+		for index in indices:
+			with tf.TiffFile(files[index]) as tif:
+				page = tif.pages[0]
+				if page.compression != 1 or not page.is_contiguous:
+					raise ValueError("direct TIFF reading requires uncompressed contiguous pages")
+				sources.append((files[index], page.dataoffsets[0]))
+	calls = []
+	for target_theta, (path, source_offset) in enumerate(sources):
+		target_offsets = [
+			(row * len(indices) + target_theta) * row_bytes for row in range(stop - y_start)
+		]
+		calls.append((
+			target_mem.name,
+			path,
+			source_offset + y_start * row_bytes,
+			target_offsets,
+			row_bytes,
+		))
+	with ThreadPool(min(thread_max, len(calls))) as pool:
 		pool.starmap(byteread_helper, calls)
 
 

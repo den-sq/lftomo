@@ -19,7 +19,7 @@ from lftomo.evaluation.models import (
 	PreviewContract,
 	ReferenceMetricRequest,
 )
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract, working_view
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.shapes import ReconOrder
 
@@ -43,7 +43,7 @@ class EvaluationStage(Stage):
 		mutates_input=False,
 		window_axes=("Y",),
 		produces_artifacts=("metrics",),
-		resources=ResourceHints(memory_multiplier=4.0, preferred_cpus=1),
+		resources=ResourceHints(preferred_cpus=1),
 	)
 
 	def __init__(
@@ -91,7 +91,7 @@ class EvaluationStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("evaluate.metrics currently requires the NumPy backend")
-		working = np.asarray(state.working_array)
+		working = working_view(state)
 		if working.ndim != 3:
 			raise ValueError(
 				"evaluate.metrics expects a three-dimensional (Y, Z, X) reconstruction"

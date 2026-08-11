@@ -18,6 +18,7 @@ nav:
    - Experiment operations: experiment-operations.md
    - Common-prefix cache: prefix-cache.md
    - Reconstruction evaluation: evaluation.md
+   - Pipeline-core epic acceptance: epic-acceptance.md
  - API reference:
    - Configuration models: api/config.md
    - Pipeline: api-pipeline.md

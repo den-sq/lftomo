@@ -1,6 +1,7 @@
 """Full-environment regression for prefix-cache/lifecycle adapter integration."""
 
-import threading
+import json
+import time
 
 import h5py
 import numpy as np
@@ -27,8 +28,58 @@ from lftomo.experiment import (
 	read_progress_events,
 )
 from lftomo.experiment.cli import PipelineTrialExecutor
-from lftomo.experiment.prefix_cache import PrefixCacheEvent
 from lftomo.experiment.runner import ExperimentInputs
+from lftomo.experiment.events import current_execution_context
+
+
+class HistoricalCollisionExecutor:
+	def __init__(self, working_executor):
+		self.working_executor = working_executor
+
+	def plan_prefix_cache(self, trials):
+		return self.working_executor.plan_prefix_cache(trials)
+
+	def replay_document(self):
+		return self.working_executor.replay_document()
+
+	def __call__(self, _identity, _root):
+		raise TypeError(
+			"ExecutionContext.cache_event() got multiple values for argument 'status'"
+		)
+
+
+class CacheProgressFailureExecutor(HistoricalCollisionExecutor):
+	def __call__(self, _identity, _root):
+		raise ProgressInfrastructureError(
+			"failed to publish prefix cache progress: invalid cache progress projection"
+		)
+
+
+class ConcurrentCacheProgressFailureExecutor(HistoricalCollisionExecutor):
+	def __init__(self, working_executor, rendezvous):
+		super().__init__(working_executor)
+		self.rendezvous = rendezvous
+
+	def __call__(self, identity, _root):
+		value = float(identity.resolved_recon.pipeline[2].params["epsilon"])
+		self.rendezvous.mkdir(parents=True, exist_ok=True)
+		(self.rendezvous / f"{identity.trial_id.value}.json").write_text(
+			json.dumps({"epsilon": value}), encoding="utf-8",
+		)
+		deadline = time.monotonic() + 5
+		while len(list(self.rendezvous.glob("*.json"))) < 2:
+			if time.monotonic() >= deadline:
+				raise TimeoutError("concurrent trial rendezvous timed out")
+			time.sleep(0.01)
+		if value == 0.0001:
+			raise ProgressInfrastructureError(
+				"failed to publish prefix cache progress: "
+				"invalid concurrent cache progress projection"
+			)
+		context = current_execution_context()
+		while True:
+			time.sleep(0.01)
+			context.checkpoint()
 
 
 def _lifecycle(
@@ -183,16 +234,7 @@ def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failure
 	retry_root.mkdir()
 	broken, working_executor = _lifecycle(retry_root, monkeypatch)
 
-	class HistoricalCollisionExecutor:
-		def __getattr__(self, name):
-			return getattr(working_executor, name)
-
-		def __call__(self, _identity, _root):
-			raise TypeError(
-				"ExecutionContext.cache_event() got multiple values for argument 'status'"
-			)
-
-	broken.runner.executor = HistoricalCollisionExecutor()
+	broken.runner.executor = HistoricalCollisionExecutor(working_executor)
 	failed = broken.run()
 	assert all(attempt.status == "failed" for attempt in failed.attempts)
 	assert all(
@@ -212,19 +254,12 @@ def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failure
 def test_cache_progress_programming_error_aborts_experiment_not_candidate(
 	tmp_path, monkeypatch,
 ):
-	api, _executor = _lifecycle(tmp_path, monkeypatch)
-	with monkeypatch.context() as collision:
-		collision.setattr(
-			PrefixCacheEvent,
-			"progress_projection",
-			lambda _self: (_ for _ in ()).throw(TypeError(
-				"invalid cache progress projection"
-			)),
-		)
-		with pytest.raises(
-			ProgressInfrastructureError, match="failed to publish prefix cache progress",
-		):
-			api.run()
+	api, working_executor = _lifecycle(tmp_path, monkeypatch)
+	api.runner.executor = CacheProgressFailureExecutor(working_executor)
+	with pytest.raises(
+		ProgressInfrastructureError, match="failed to publish prefix cache progress",
+	):
+		api.run()
 	status = api.status()
 	assert status.counts.get("failed", 0) == 0
 	assert status.counts.get("interrupted", 0) == 1
@@ -238,39 +273,17 @@ def test_cache_progress_infrastructure_abort_stops_other_worker_without_false_fa
 	api, _executor = _lifecycle(
 		tmp_path, monkeypatch, max_concurrency=2, window_count=2,
 	)
-	original_projection = PrefixCacheEvent.progress_projection
-	workers_at_cache_event = threading.Barrier(2)
-	cancellation_requested = threading.Event()
-	statuses = []
-	statuses_lock = threading.Lock()
-	original_request = api.cancellation.request
-
-	def record_request(reason):
-		requested = original_request(reason)
-		cancellation_requested.set()
-		return requested
-
-	def one_worker_fails(event):
-		with statuses_lock:
-			statuses.append(event.status)
-		workers_at_cache_event.wait(timeout=5)
-		if event.status == "miss":
-			raise TypeError("invalid concurrent cache progress projection")
-		assert event.status == "hit"
-		assert cancellation_requested.wait(timeout=5)
-		return original_projection(event)
-
-	with monkeypatch.context() as collision:
-		collision.setattr(api.cancellation, "request", record_request)
-		collision.setattr(PrefixCacheEvent, "progress_projection", one_worker_fails)
-		with pytest.raises(
-			ProgressInfrastructureError,
-			match="failed to publish prefix cache progress",
-		):
-			api.run()
+	api.runner.executor = ConcurrentCacheProgressFailureExecutor(
+		_executor, tmp_path / "rendezvous",
+	)
+	with pytest.raises(
+		ProgressInfrastructureError,
+		match="failed to publish prefix cache progress",
+	):
+		api.run()
 
 	status = api.status()
-	assert sorted(statuses[:2]) == ["hit", "miss"]
+	assert len(list((tmp_path / "rendezvous").glob("*.json"))) == 2
 	assert status.counts.get("failed", 0) == 0
 	assert status.counts.get("interrupted", 0) == 2
 	assert {attempt.failure.type for attempt in status.attempts} == {

@@ -140,6 +140,19 @@ class PipelineTrialExecutor:
 		self.prefix_executor = PrefixCachingPipelineExecutor(self.prefix_cache_policy)
 		self._prefix_decisions: dict[str, PrefixCacheDecision] = {}
 
+	def __getstate__(self) -> dict[str, Any]:
+		"""Exclude process-local cache locks from the spawned trial payload."""
+
+		state = self.__dict__.copy()
+		state.pop("prefix_executor", None)
+		return state
+
+	def __setstate__(self, state: dict[str, Any]) -> None:
+		"""Rebuild process-local cache coordination after spawning a trial."""
+
+		self.__dict__.update(state)
+		self.prefix_executor = PrefixCachingPipelineExecutor(self.prefix_cache_policy)
+
 	def replay_document(self) -> dict[str, Any]:
 		"""Return the normalized non-secret adapter inputs needed for replay."""
 

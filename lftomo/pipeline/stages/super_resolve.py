@@ -19,12 +19,15 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
+	allocate_output,
+	commit_output,
+	working_view,
 )
-from lftomo.util.shapes import SinoOrder
+from lftomo.storage import ManagedBuffer
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 _TORCH_RUNTIME_REQUIREMENT = RuntimeRequirement(
@@ -44,7 +47,6 @@ def _contract(
 		produced_output=SinoOrder,
 		window_axes=("Y", "Theta"),
 		produces_artifacts=("super_resolution",),
-		resources=ResourceHints(memory_multiplier=5.0),
 		runtime_requirements=runtime_requirements,
 	)
 
@@ -52,7 +54,7 @@ def _contract(
 def _dense_inputs(state: PipelineState) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 	if state.backend.name != "numpy":
 		raise TypeError("super-resolution Stages currently require the NumPy backend")
-	sinograms = np.asarray(state.working_array, dtype=np.float32)
+	sinograms = working_view(state).astype(np.float32, copy=False)
 	if sinograms.ndim != 3:
 		raise ValueError("super-resolution Stages expect a (Y, Theta, X) sinogram array")
 	volume = np.transpose(sinograms, (1, 0, 2))
@@ -98,7 +100,30 @@ def interpolate_missing_angles(volume: np.ndarray, mask: np.ndarray, theta: np.n
 
 
 def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> PipelineState:
-	result = state.with_array(np.transpose(np.asarray(volume, dtype=np.float32), (1, 0, 2)))
+	values = np.asarray(volume, dtype=np.float32)
+	shape = SinoOrder(Y=values.shape[1], Theta=values.shape[0], X=values.shape[2])
+	output, target = allocate_output(state, shape, np.float32, role="super_resolution")
+	if (
+		isinstance(output, ManagedBuffer)
+		and state.storage is not None
+		and state.executor is not None
+	):
+		from lftomo.pipeline.execution import run_layout_fill_kernel
+
+		source = state.storage.allocate(
+			ProjOrder(*values.shape), np.float32, role="super_resolution_assembly",
+		)
+		try:
+			source.array()[...] = values
+			state.executor.submit_all(run_layout_fill_kernel, (
+				(source, output, ProjOrder, SinoOrder, index)
+				for index in range(values.shape[0])
+			))
+		finally:
+			state.storage.retire(source, role=None)
+	else:
+		target[...] = np.transpose(values, (1, 0, 2))
+	result = commit_output(state, output, retire_as=None)
 	result.artifacts["super_resolution"] = metadata
 	return result
 

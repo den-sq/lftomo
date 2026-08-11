@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
@@ -12,12 +11,13 @@ import h5py
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
+	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.storage import ManagedBuffer
 from lftomo.util.io import np_convert
 from lftomo.util.shapes import ReconOrder
 
@@ -56,7 +56,6 @@ class TIFFSlicesWriteStage(Stage):
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files",),
-		resources=ResourceHints(memory_multiplier=1.0),
 	)
 
 	def __init__(self, dtype: str = "float32",
@@ -94,26 +93,37 @@ class TIFFSlicesWriteStage(Stage):
 			raise TypeError("TIFFSlicesWriteStage currently requires the NumPy backend")
 		if state.recon.output_path is None:
 			raise ValueError("write.tiff_slices requires Recon.output_path")
-		working = np.asarray(state.working_array)
+		working = working_view(state)
 		if working.ndim != 3:
 			raise ValueError("write.tiff_slices expects a (Y, Z, X) reconstruction array")
 
 		output = Path(state.recon.output_path)
 		output.mkdir(parents=True, exist_ok=True)
 		sample_id = self._sample_id(state)
+		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
 		paths = []
 		for local_index in range(working.shape[0]):
-			slice_index = self.slice_start + local_index
+			slice_index = self.slice_start + source_y + local_index
 			name = self.naming_template.format(sample_id=sample_id, slice=slice_index)
 			paths.append(output / (name if name.lower().endswith((".tif", ".tiff")) else f"{name}.tif"))
 
-		calls = [(working[index], path, self.dtype) for index, path in enumerate(paths)]
-		if self.processes == 1:
-			for call in calls:
-				_write_array_slice(*call)
+		executor = state.executor or getattr(state.storage, "pipeline_executor", None)
+		if isinstance(state.working_array, ManagedBuffer):
+			from lftomo.pipeline.execution import write_tiff_slice_kernel
+
+			calls = [
+				(state.working_array, index, path, self.dtype)
+				for index, path in enumerate(paths)
+			]
+			if self.processes > 1 and executor is not None:
+				executor.submit_all(write_tiff_slice_kernel, calls)
+			else:
+				for call in calls:
+					write_tiff_slice_kernel(*call)
 		else:
-			with Pool(self.processes) as pool:
-				pool.starmap(_write_array_slice, calls)
+			# ndarray-only hermetic tests remain serial; slices are never pickled.
+			for index, path in enumerate(paths):
+				_write_array_slice(working[index], path, self.dtype)
 		state.artifacts["output_files"] = paths
 		return state
 
@@ -130,7 +140,6 @@ class HDF5VolumeWriteStage(Stage):
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files",),
-		resources=ResourceHints(memory_multiplier=1.0),
 	)
 
 	def __init__(self, path: str | Path | None = None, dataset: str = "reconstruction",
@@ -157,21 +166,41 @@ class HDF5VolumeWriteStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("HDF5VolumeWriteStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		if data.ndim != 3:
 			raise ValueError("write.hdf5_volume expects a (Y, Z, X) reconstruction array")
 		path = self._path(state)
 		path.parent.mkdir(parents=True, exist_ok=True)
-		if path.exists() and not self.overwrite:
-			raise FileExistsError(f"HDF5 output already exists: {path}")
-		with h5py.File(path, "w") as handle:
-			handle.create_dataset(
-				self.dataset,
-				data=data,
-				compression=self.compression,
-				compression_opts=self.compression_opts if self.compression else None,
-				chunks=self.chunks,
-			)
+		streaming = state.artifacts.get("streaming_window")
+		if streaming is None:
+			if path.exists() and not self.overwrite:
+				raise FileExistsError(f"HDF5 output already exists: {path}")
+			with h5py.File(path, "w") as handle:
+				handle.create_dataset(
+					self.dataset,
+					data=data,
+					compression=self.compression,
+					compression_opts=self.compression_opts if self.compression else None,
+					chunks=self.chunks,
+				)
+		else:
+			first = bool(streaming["first"])
+			if first and path.exists() and not self.overwrite:
+				raise FileExistsError(f"HDF5 output already exists: {path}")
+			mode = "w" if first else "r+"
+			with h5py.File(path, mode) as handle:
+				if first:
+					handle.create_dataset(
+						self.dataset,
+						shape=(int(streaming["total_rows"]), data.shape[1], data.shape[2]),
+						dtype=data.dtype,
+						compression=self.compression,
+						compression_opts=self.compression_opts if self.compression else None,
+						chunks=self.chunks,
+					)
+				handle[self.dataset][
+					int(streaming["output_start"]):int(streaming["output_stop"])
+				] = data
 		state.artifacts["output_files"] = [path]
 		return state
 
@@ -193,7 +222,6 @@ class NeuroglancerWriteStage(Stage):
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("output_files", "neuroglancer_source"),
-		resources=ResourceHints(memory_multiplier=2.0),
 		runtime_requirements=(_CLOUDVOLUME_RUNTIME_REQUIREMENT,),
 	)
 
@@ -219,46 +247,59 @@ class NeuroglancerWriteStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("NeuroglancerWriteStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		if data.ndim != 3:
 			raise ValueError("write.neuroglancer expects a (Y, Z, X) reconstruction array")
 		root = self.path or state.recon.output_path
 		if root is None:
 			raise ValueError("write.neuroglancer requires a path or Recon.output_path")
 		layer = Path(root) / self.layer_name
-		if layer.exists():
+		streaming = state.artifacts.get("streaming_window")
+		first = streaming is None or bool(streaming["first"])
+		if first and layer.exists():
 			if not self.overwrite:
 				raise FileExistsError(f"Neuroglancer layer already exists: {layer}")
 			import shutil
 
 			shutil.rmtree(layer)
-		layer.mkdir(parents=True)
+		if first:
+			layer.mkdir(parents=True, exist_ok=True)
 
 		try:
 			from cloudvolume import CloudVolume
 		except ImportError as error:
 			raise RuntimeError("write.neuroglancer requires the neuroglancer optional dependencies") from error
 		resolution = self.resolution_nm_xyz or (int(state.scan.pixel_size_um * 1000),) * 3
-		volume_size = (data.shape[2], data.shape[1], data.shape[0])
-		info = CloudVolume.create_new_info(
-			num_channels=1,
-			layer_type="image",
-			data_type=self.data_type or data.dtype.name,
-			encoding="raw",
-			resolution=list(resolution),
-			voxel_offset=[0, 0, 0],
-			chunk_size=list(self.chunk_xyz),
-			volume_size=list(volume_size),
-		)
 		cloudpath = f"precomputed://file://{layer.as_posix()}"
-		volume = CloudVolume(
-			cloudpath, info=info, mip=0, compress=False, progress=False,
-			parallel=1, cache=False, fill_missing=False, bounded=True,
-		)
-		volume.commit_info()
+		if first:
+			total_rows = data.shape[0] if streaming is None else int(streaming["total_rows"])
+			volume_size = (data.shape[2], data.shape[1], total_rows)
+			info = CloudVolume.create_new_info(
+				num_channels=1,
+				layer_type="image",
+				data_type=self.data_type or data.dtype.name,
+				encoding="raw",
+				resolution=list(resolution),
+				voxel_offset=[0, 0, 0],
+				chunk_size=list(self.chunk_xyz),
+				volume_size=list(volume_size),
+			)
+			volume = CloudVolume(
+				cloudpath, info=info, mip=0, compress=False, progress=False,
+				parallel=1, cache=False, fill_missing=False, bounded=True,
+			)
+			volume.commit_info()
+		else:
+			volume = CloudVolume(
+				cloudpath, mip=0, compress=False, progress=False,
+				parallel=1, cache=False, fill_missing=False, bounded=True,
+			)
+		output_start = 0 if streaming is None else int(streaming["output_start"])
 		for start in range(0, data.shape[0], self.block_slices):
 			stop = min(data.shape[0], start + self.block_slices)
-			volume[:, :, start:stop] = np.transpose(data[start:stop], (2, 1, 0))
+			volume[:, :, output_start + start:output_start + stop] = np.transpose(
+				data[start:stop], (2, 1, 0),
+			)
 		state.artifacts["output_files"] = [layer / "info"]
 		state.artifacts["neuroglancer_source"] = cloudpath
 		return state

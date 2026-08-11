@@ -6,10 +6,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Self, Sequence, Iterator
 
-import h5py
-from natsort import natsorted
 import numpy as np
-import tifffile as tf
 
 from .shapes import DataShape, DataRange, IntIter, SliceIter, TFIter
 
@@ -142,7 +139,7 @@ class TomoWindowIter(TFIter):
 		self.shape = shape
 		self.pad = pad
 		self.dtype = dtype
-		self.work_dtype = dtype
+		self.work_dtype = work_dtype
 		self.stop = dr.stop
 		self.substep = substep if substep is not None else dr.step.make_with(1)
 		self.__step_class = type(dr.step)
@@ -168,7 +165,8 @@ class TomoDataSet(DataRef):
 	"""
 
 	def __init__(self, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
-					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32):
+					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32,
+					*, angles: np.ndarray = None):
 		""" Initializes DataWindowSet.
 
 			:param ds_shape: Shape of the overall dataset.
@@ -195,7 +193,13 @@ class TomoDataSet(DataRef):
 
 		self.__fov = fov
 
-		if angle_steps is None:
+		if angles is not None:
+			if angle_steps is not None:
+				raise ValueError("angles and angle_steps are mutually exclusive")
+			if len(angles) != shape.Theta:
+				raise ValueError("one source angle is required for every projection")
+			self.__angles = np.asarray(angles, dtype=np.float32)
+		elif angle_steps is None:
 			if shape.Theta == fov.Theta * fov.Count:
 				self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
 			else:
@@ -243,6 +247,12 @@ class TomoDataSet(DataRef):
 			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
 			:retval: DataWindowSet for the files.
 			"""
+
+		# Dataset discovery is the only window operation that needs storage-format
+		# libraries.  Keep them out of pure planning/import paths.
+		import h5py
+		from natsort import natsorted
+		import tifffile as tf
 
 		source = Path(source)
 		if source.is_dir():

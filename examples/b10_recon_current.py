@@ -18,7 +18,7 @@ import tifffile as tf
 from lftomo.prep.flat import FLAT, weighted_normalize
 from lftomo.util.io import read_window, write_slice
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import GenericOrder, ProjOrder, ReconOrder, SinoOrder, Y
+from lftomo.util.shapes import DataRange, GenericOrder, ProjOrder, ReconOrder, SinoOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
@@ -37,6 +37,8 @@ class B10ReconConfig:
 	gamma: float = 1.2
 	apply_bac: bool = True
 	processes: int = 1
+	y_start: int = 0
+	y_stop: int | None = None
 
 
 def _tomopy_gridrec(data: np.ndarray, angles: np.ndarray, center: float, processes: int) -> np.ndarray:
@@ -59,10 +61,15 @@ def _flat_path(root: Path, flat: FLAT) -> Path:
 	return matches[0]
 
 
-def _load_flats(root: Path, detector_y: int, detector_x: int) -> np.ndarray:
-	flats = np.empty((len(FLAT), detector_y, detector_x), dtype=np.float32)
-	for flat in FLAT:
-		flats[flat.index] = tf.imread(_flat_path(root, flat)).astype(np.float32)
+def _load_flats(root: Path, detector_x: int) -> np.ndarray:
+	values = [tf.imread(_flat_path(root, flat)) for flat in FLAT]
+	shapes = {value.shape for value in values}
+	if len(shapes) != 1 or values[0].ndim != 2 or values[0].shape[1] != detector_x:
+		raise ValueError(
+			f"B10 flats must share a two-dimensional detector shape with X={detector_x}; "
+			f"found {sorted(shapes)}"
+		)
+	flats = np.stack(values).astype(np.float32)
 	flats[FLAT.PREGAIN.index] -= flats[FLAT.PREDARK.index]
 	flats[FLAT.POSTGAIN.index] -= flats[FLAT.POSTDARK.index]
 	return flats
@@ -82,14 +89,26 @@ def run(config: B10ReconConfig, reconstructor: Reconstructor = _tomopy_gridrec) 
 	config.output.mkdir(parents=True, exist_ok=True)
 	source = Path(config.source)
 	source_files = [source] if source.is_file() else sorted(source.glob("**/*.tif*"))
+	if config.window_size < 1:
+		raise ValueError("B10 window size must be positive")
+	if config.y_start < 0:
+		raise ValueError("B10 y_start cannot be negative")
+	if config.y_start and config.y_stop is None:
+		raise ValueError("B10 y_stop is required when y_start is nonzero")
+	if config.y_stop is not None and config.y_stop <= config.y_start:
+		raise ValueError("B10 y_stop must be greater than y_start")
+	over = (
+		Y(config.window_size) if config.y_start == 0 and config.y_stop is None else
+		DataRange(Y(config.y_start), Y(config.y_stop), Y(config.window_size))
+	)
 	dataset = TomoDataSet.from_disk(
 		source,
 		CTFov(Theta=None, Degrees=config.degrees, Count=1),
 		ProjOrder,
-		Y(config.window_size),
+		over,
 		work_dtype=np.float32,
 	)
-	flat_values = _load_flats(config.flats, dataset.shape.Y, dataset.shape.X)
+	flat_values = _load_flats(config.flats, dataset.shape.X)
 	flat_memory = SharedNPArray(
 		f"b10-flats-{uuid4().hex}", GenericOrder(*flat_values.shape), np.float32, allocate=True
 	)
@@ -166,6 +185,8 @@ def main() -> None:
 	parser.add_argument("--gamma", type=float, default=1.2)
 	parser.add_argument("--no-bac", action="store_true")
 	parser.add_argument("--processes", type=int, default=1)
+	parser.add_argument("--y-start", type=int, default=0)
+	parser.add_argument("--y-stop", type=int)
 	args = parser.parse_args()
 	run(B10ReconConfig(
 		source=args.source,
@@ -177,6 +198,8 @@ def main() -> None:
 		gamma=args.gamma,
 		apply_bac=not args.no_bac,
 		processes=args.processes,
+		y_start=args.y_start,
+		y_stop=args.y_stop,
 	))
 
 

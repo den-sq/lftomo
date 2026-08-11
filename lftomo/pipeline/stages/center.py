@@ -10,14 +10,14 @@ from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	Locality,
 	PipelineState,
-	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
+	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.runtime import tomopy_requirement
-from lftomo.pipeline.stages._layout import (
+from lftomo.pipeline.layout import (
 	configured_layout,
 	n_projections,
 	n_rows,
@@ -31,10 +31,7 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 LOGGER = logging.getLogger(__name__)
 
 
-def _contract(
-	memory_multiplier: float = 1.0,
-	runtime_requirements: tuple[RuntimeRequirement, ...] = (),
-) -> StageContract:
+def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
 		produced_output=SinoOrder,
@@ -45,7 +42,6 @@ def _contract(
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
 		produces_artifacts=("center",),
-		resources=ResourceHints(memory_multiplier=memory_multiplier),
 		runtime_requirements=runtime_requirements,
 	)
 
@@ -53,7 +49,7 @@ def _contract(
 def _sinograms(state: PipelineState) -> tuple[np.ndarray, type]:
 	if state.backend.name != "numpy":
 		raise TypeError("center Stages currently require the NumPy backend")
-	data = np.asarray(state.working_array)
+	data = working_view(state)
 	if data.ndim != 3:
 		raise ValueError("center Stages expect a (Y, Theta, X) sinogram array")
 	return data, resolve_layout(state, None, "center")
@@ -115,7 +111,7 @@ class ManualCenterStage(Stage):
 			accepts=(ProjOrder, SinoOrder),
 			accepts_domain=(DataDomain.ATTENUATION,),
 			produces_domain=PRESERVE,
-			produces_artifacts=("center",), resources=ResourceHints(),
+			produces_artifacts=("center",),
 		)
 		self.value_px = value_px
 		self.slope = np.tan(tilt_radians) if tilt_radians is not None else tilt
@@ -130,14 +126,15 @@ class ManualCenterStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("center.manual currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("center.manual expects a three-dimensional tomography array")
 		if self.slope == 0:
 			return _store_center(state, self.value_px)
 		y_size = n_rows(data, layout)
-		rows = np.arange(y_size, dtype=np.float32)
+		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
+		rows = source_y + np.arange(y_size, dtype=np.float32)
 		return _store_center(state, self.value_px + (rows - self.reference_y) * self.slope)
 
 
@@ -146,7 +143,6 @@ class EntropyLocalCenterStage(Stage):
 
 	name = "center.entropy_local"
 	contract = _contract(
-		memory_multiplier=2.0,
 		runtime_requirements=(tomopy_requirement("circ_mask", "recon"),),
 	)
 
@@ -233,7 +229,6 @@ class VoCenterStage(Stage):
 
 	name = "center.vo"
 	contract = _contract(
-		memory_multiplier=2.0,
 		runtime_requirements=(
 			tomopy_requirement("circ_mask", "find_center_vo", "recon"),
 		),

@@ -7,9 +7,12 @@ import numpy as np
 from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
-from lftomo.pipeline.core import Locality, PipelineState, ResourceHints, Stage, StageContract
+from lftomo.pipeline.core import (
+	AxisPad, Locality, PadRequirement, PipelineState, Stage, StageContract,
+	allocate_output, commit_output, working_view,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.stages._layout import (
+from lftomo.pipeline.layout import (
 	configured_layout,
 	n_projections,
 	n_rows,
@@ -20,7 +23,8 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
 def _contract(order: str | None = None, *, resamples_detector: bool = False,
-		mutates_input: bool = True) -> StageContract:
+		mutates_input: bool = True,
+		required_pad: PadRequirement = PadRequirement()) -> StageContract:
 	compatibility = configured_layout(order)
 	shape = compatibility or SinoOrder
 	return StageContract(
@@ -35,14 +39,14 @@ def _contract(order: str | None = None, *, resamples_detector: bool = False,
 		resamples_detector=resamples_detector,
 		mutates_input=mutates_input,
 		window_axes=("Y", "Theta"),
-		resources=ResourceHints(memory_multiplier=2.0),
+		required_pad=required_pad,
 	)
 
 
 def _array(state: PipelineState, name: str) -> np.ndarray:
 	if state.backend.name != "numpy":
 		raise TypeError(f"{name} currently requires the NumPy backend")
-	data = np.asarray(state.working_array)
+	data = working_view(state)
 	if data.ndim != 3:
 		raise ValueError(f"{name} expects a (Y, Theta, X) sinogram array")
 	return data
@@ -54,6 +58,45 @@ _INTERPOLATION = {
 	"cubic": cv2.INTER_CUBIC,
 	"lanczos": cv2.INTER_LANCZOS4,
 }
+
+
+def transform_affine_projection(
+	stage: "AffineSkewMovementStage",
+	image: np.ndarray,
+	projection: int,
+	projection_count: int,
+	row_count: int,
+) -> np.ndarray:
+	"""Return one fused affine projection for serial or process dispatch."""
+
+	if stage.movement_enabled and (stage.movement_y != 0 or stage.movement_x != 0):
+		fraction = projection / projection_count
+		image = shift(
+			image,
+			(stage.movement_y * fraction, stage.movement_x * fraction),
+			order=3, mode="constant", cval=0.0,
+		)
+	padded = np.pad(
+		image, ((0, 0), (stage.pad_x, stage.pad_x)), mode=stage.pad_mode,
+	)
+	if stage.skew_degrees != 0:
+		width = image.shape[1] + 2 * stage.pad_x
+		center = (
+			(image.shape[1] / 2 if stage.center_px is None else stage.center_px)
+			+ stage.pad_x,
+			row_count / 2 if stage.center_y_px is None else stage.center_y_px,
+		)
+		matrix = cv2.getRotationMatrix2D(center, stage.skew_degrees, 1.0)
+		try:
+			interpolation = _INTERPOLATION[stage.interpolation_name]
+		except KeyError as error:
+			raise ValueError(
+				f"unknown skew interpolation {stage.interpolation_name!r}"
+			) from error
+		padded = cv2.warpAffine(
+			padded, matrix, (width, row_count), flags=interpolation,
+		)
+	return padded
 
 
 class SkewCorrectStage(Stage):
@@ -138,6 +181,10 @@ class MovementCorrectStage(Stage):
 		active = enabled and (y != 0 or x != 0)
 		self.contract = _contract(
 			array_order, resamples_detector=active, mutates_input=active,
+			required_pad=PadRequirement(fixed=AxisPad(
+				y=int(np.ceil(abs(y))) if active else 0,
+				x=int(np.ceil(abs(x))) if active else 0,
+			)),
 		)
 
 	@classmethod
@@ -150,8 +197,10 @@ class MovementCorrectStage(Stage):
 		if not self.enabled or (self.y == 0 and self.x == 0):
 			return state
 		count = n_projections(data, layout)
+		projection_start = int(state.artifacts.get("projection_start", 0))
+		projection_count = int(state.artifacts.get("projection_count", count))
 		for projection in range(count):
-			fraction = projection / count
+			fraction = (projection_start + projection) / projection_count
 			image = projection_view(data, layout, projection)
 			image[:] = shift(
 				image,
@@ -217,6 +266,10 @@ class AffineSkewMovementStage(Stage):
 			self.contract = _contract(
 				resamples_detector=active_resample,
 				mutates_input=active_resample,
+				required_pad=PadRequirement(fixed=AxisPad(
+					y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
+					x=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
+				)),
 			)
 		else:
 			source = SinoOrder if target is ProjOrder else ProjOrder
@@ -227,7 +280,10 @@ class AffineSkewMovementStage(Stage):
 				produces_domain=PRESERVE, locality=Locality.VOLUME,
 				fused_transition=True, resamples_detector=active_resample,
 				mutates_input=False,
-				resources=ResourceHints(memory_multiplier=2.0),
+				required_pad=PadRequirement(fixed=AxisPad(
+					y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
+					x=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
+				)),
 			)
 
 	@classmethod
@@ -239,7 +295,7 @@ class AffineSkewMovementStage(Stage):
 			return self.skew.run(self.movement.run(state))
 		if state.backend.name != "numpy":
 			raise TypeError("geometry.affine_skew_movement currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
+		data = working_view(state)
 		if data.ndim != 3:
 			raise ValueError("geometry.affine_skew_movement expects a three-dimensional array")
 		input_layout = state.layout
@@ -255,34 +311,19 @@ class AffineSkewMovementStage(Stage):
 			if self.target_layout is ProjOrder
 			else (row_count, projection_count, width)
 		)
-		output = np.empty(shape, dtype=data.dtype)
-		try:
-			interpolation = _INTERPOLATION[self.interpolation_name]
-		except KeyError as error:
-			raise ValueError(f"unknown skew interpolation {self.interpolation_name!r}") from error
+		output_buffer, output = allocate_output(
+			state, self.target_layout(*shape), data.dtype, role="fused_geometry",
+		)
 		for projection in range(projection_count):
 			image = projection_view(data, input_layout, projection)
-			if self.movement_enabled and (self.movement_y != 0 or self.movement_x != 0):
-				fraction = projection / projection_count
-				image = shift(
-					image,
-					(self.movement_y * fraction, self.movement_x * fraction),
-					order=3, mode="constant", cval=0.0,
+			projection_view(output, self.target_layout, projection)[:] = (
+				transform_affine_projection(
+					self, image, projection, projection_count, row_count,
 				)
-			padded = np.pad(
-				image, ((0, 0), (self.pad_x, self.pad_x)), mode=self.pad_mode,
 			)
-			if self.skew_degrees != 0:
-				center = (
-					(data.shape[2] / 2 if self.center_px is None else self.center_px) + self.pad_x,
-					row_count / 2 if self.center_y_px is None else self.center_y_px,
-				)
-				matrix = cv2.getRotationMatrix2D(center, self.skew_degrees, 1.0)
-				padded = cv2.warpAffine(
-					padded, matrix, (width, row_count), flags=interpolation,
-				)
-			projection_view(output, self.target_layout, projection)[:] = padded
-		result = state.with_array(output, layout=self.target_layout)
+		result = commit_output(
+			state, output_buffer, retire_as=None, layout=self.target_layout,
+		)
 		result.artifacts["fused_layout_transition"] = {
 			"from": input_layout.__name__, "to": self.target_layout.__name__,
 			"pad_x": self.pad_x, "skew_degrees": self.skew_degrees,
