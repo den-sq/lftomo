@@ -490,7 +490,7 @@ def _center_artifacts(state: PipelineState) -> dict[str, Any]:
 	return {
 		key: _detached_artifact(value)
 		for key, value in state.artifacts.items()
-		if key == "center" or key.startswith("center_")
+		if key == "center" or key.startswith("center_") or key == "output_files"
 	}
 
 

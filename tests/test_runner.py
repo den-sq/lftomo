@@ -21,11 +21,32 @@ from lftomo.calibration import (
 )
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.stages import create_stage
-from lftomo.runner import load_recon, main, resolve_calibration, run_reconstruction
+from lftomo.runner import (
+	_center_artifacts,
+	load_recon,
+	main,
+	resolve_calibration,
+	run_reconstruction,
+)
 
 
 def write_yaml(path, value):
 	path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+
+def test_center_prepass_retains_durable_diagnostic_outputs():
+	state = type("State", (), {"artifacts": {
+		"center": 4.0,
+		"center_entropy": {"termination": "converged"},
+		"output_files": [Path("center-diagnostics/candidate.tif")],
+		"unrelated": "discarded",
+	}})()
+
+	assert _center_artifacts(state) == {
+		"center": 4.0,
+		"center_entropy": {"termination": "converged"},
+		"output_files": [Path("center-diagnostics/candidate.tif")],
+	}
 
 
 def scan_document(data_path):

@@ -42,6 +42,19 @@ def test_registered_tiff_write_stage_round_trips_float_slices(tmp_path):
 		np.testing.assert_allclose(tf.imread(path), array[index])
 
 
+def test_tiff_write_stage_appends_to_existing_output_ledger(tmp_path):
+	array = np.ones((1, 4, 5), dtype=np.float32)
+	config = StageConfig(kind="write", algorithm="tiff_slices")
+	state = _state(array, tmp_path, config)
+	diagnostic = tmp_path / "center-diagnostics" / "candidate.tif"
+	state.artifacts["output_files"] = [diagnostic]
+
+	result = Pipeline([create_stage(config)], backend=NumpyBackend()).run(state)
+
+	assert result.artifacts["output_files"][0] == diagnostic
+	assert result.artifacts["output_files"][1].name == "sample-a_00000.tif"
+
+
 @pytest.mark.parametrize("dtype", ["int16", "uint16"])
 def test_tiff_write_stage_supports_integer_template_and_multiprocessing(tmp_path, dtype):
 	array = np.linspace(0, 1, 2 * 4 * 5, dtype=np.float32).reshape(2, 4, 5)
