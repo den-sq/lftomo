@@ -47,6 +47,9 @@ domain does not assert identical physical scaling for every algorithm.
 
 The Paganin interpretation follows
 [Paganin et al. (2002)](https://doi.org/10.1046/j.1365-2818.2002.01010.x).
+The reciprocal-grid comparison and the decision to retain the DFT-bin
+`fftfreq` convention are recorded in
+[Paganin reciprocal-grid disposition](paganin-discretization.md).
 [TomoPy's phase retrieval](https://tomopy.readthedocs.io/en/latest/_modules/tomopy/prep/phase.html)
 likewise exposes the filtered array without applying negative-log. The BAC factorization follows
 [De Witte et al. (2009)](https://doi.org/10.1364/JOSAA.26.000890) and HoToPy's
