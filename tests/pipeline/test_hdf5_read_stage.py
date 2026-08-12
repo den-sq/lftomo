@@ -2,7 +2,15 @@ import h5py
 import numpy as np
 import pytest
 
-from lftomo.config import Acquisition, Detector, HDF5DxchangeProjections, Recon, Scan, StageConfig
+from lftomo.config import (
+	Acquisition,
+	Detector,
+	HDF5AngleSource,
+	HDF5DxchangeProjections,
+	Recon,
+	Scan,
+	StageConfig,
+)
 from lftomo.pipeline import NumpyBackend, Pipeline, PipelineRunContext, PipelineState, working_view
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.util.mem import SharedNPArray
@@ -120,6 +128,27 @@ def test_hdf5_stage_reads_strided_theta_window_with_matching_angles(tmp_path):
 	assert result.source_window.shape.Theta == 5
 	assert result.working_array.shape[0] == 3
 	assert result.source_window.step == ProjOrder(Theta=2, Y=1, X=1)
+
+
+def test_hdf5_stage_imports_explicit_angles_and_derives_indices(tmp_path):
+	count, size = 4, 3
+	data = np.ones((count, size, size), dtype=np.uint16)
+	path = tmp_path / "scan.h5"
+	_write(path, data)
+	with h5py.File(path, "a") as handle:
+		handle.create_dataset("exchange/theta", data=[0, 36, 108, 144])
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange")
+	state = _state(path, count, size, config)
+	state.scan.acquisition = Acquisition(
+		n_projections=5,
+		rotation_end_deg=180,
+		angle_source=HDF5AngleSource(),
+	)
+
+	result = _run(state, create_stage(config))
+
+	np.testing.assert_array_equal(result.artifacts["acquisition_indices"], [0, 1, 3, 4])
+	np.testing.assert_allclose(np.rad2deg(result.artifacts["angles"]), [0, 36, 108, 144])
 
 
 def test_hdf5_stage_uses_bounded_fallback_for_chunked_compressed_source(tmp_path):

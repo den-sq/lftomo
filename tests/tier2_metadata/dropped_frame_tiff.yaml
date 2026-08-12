@@ -1,0 +1,30 @@
+energy_keV: 20.0
+pixel_size_um: 0.5
+n_projections: 3935
+degrees_per_fov: 180.0
+n_fov: 1
+helical:
+  enabled: false
+detector:
+  pixel_size_um: 0.5
+  rows: 3984
+  columns: 4464
+  name: PCO Edge
+acquisition:
+  n_projections: 3937
+  rotation_start_deg: 0.0
+  rotation_end_deg: 180.0
+  exposure_ms: 200.0
+  angle_source:
+    kind: hardware_timestamps
+    path: scanlog.txt
+    timestamp_column: 3
+projections:
+  format: tiff_stack
+  path: projections
+  pattern: proj_*.tif
+metadata:
+  tier: 2
+  dataset: dropped_frame_tiff
+  sample_id: AAA388
+  angle_note: hardware buffer timestamps are authoritative; wall-clock timestamps are not used

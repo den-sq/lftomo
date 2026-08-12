@@ -18,6 +18,7 @@ class Tier2Dataset:
 	default_path: Path
 	pixel_size_um: float
 	producers: tuple[str, ...]
+	canonical_layout: bool = True
 
 
 DATASETS = {
@@ -54,6 +55,17 @@ DATASETS = {
 		),
 		pixel_size_um=0.7046,
 		producers=("r254",),
+	),
+	"dropped_frame_tiff": Tier2Dataset(
+		name="dropped_frame_tiff",
+		environment_variable="LFTOMO_DATASET_DROPPED_FRAME_TIFF",
+		default_path=Path(
+			"/mnt/wsl/PHYSICALDRIVE2p1/ru_samples/AAA388_20kV/"
+			"1653171676_3937projs_200000us_redo_scan"
+		),
+		pixel_size_um=0.5,
+		producers=(),
+		canonical_layout=False,
 	),
 }
 

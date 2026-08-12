@@ -14,6 +14,7 @@ dataset root as `scan.yaml`.
 | `dataset_phase_contrast_hdf5` | `/mnt/wsl/PHYSICALDRIVE2p1/B10/PCRBox_Octo0/20kev/voi2.1` | B10 dxchange HDF5, 20.0003 keV, 1,969 projections over 180°, 2,560 × 2,160 pixels, 0.637 µm effective pixel size. Existing recon: `alt_recon/recon`. | `r254`, `b10_recon` (old lftomo pinned as documented in the unification plan) |
 | `dataset_phase_contrast_tiff` | `/mnt/z/gpfs/Daphnia_Phase_ALS_B8_Oct_2023/AAA523_110mm_20keV/1696573090_1969projs_175000ussection2_projections_tiff` | AAA523 Daphnia ALS B8 sectional TIFF scan, 20 keV, 1,969 projections over 180°, 5,008 × 4,440 pixels, 0.365 µm pixel size, 110 mm propagation distance. Completed phase_contrast BAC 2/1.25 output is present beside the input. | `phase_contrast` |
 | `dataset_helical_tiff` | `/mnt/z/gpfs/phenome/Argonne/2022_April/initial_setup/AAAPhantom_25.45kV/scan/1650859932_32000projs_60000us_Helical_Whole_Phantom_Scan` | 25.45 keV, 32,000 TIFF projections, 60 ms exposure, 7,968 × 3,056 pixels, 0.7046 µm pixel size; helical motion is approximately 2,792 detector rows per 360°. Put generated reconstructions below this dataset root. | `r254` |
+| `dataset_dropped_frame_tiff` | `/mnt/wsl/PHYSICALDRIVE2p1/ru_samples/AAA388_20kV/1653171676_3937projs_200000us_redo_scan` | AAA388 two-drop TIFF acquisition: 3,937 planned slots and 3,935 recorded projections. Fourth-column hardware buffer timestamps are authoritative and resolve missing planned indices 2,837 and 2,888; wall-clock timestamps are not used. This is a metadata/import fixture and does not require a canonical reference-output layout. | angle-import validation only |
 
 Each path can be overridden without changing the tests:
 
@@ -21,6 +22,7 @@ Each path can be overridden without changing the tests:
 - `LFTOMO_DATASET_PHASE_CONTRAST_HDF5`
 - `LFTOMO_DATASET_PHASE_CONTRAST_TIFF`
 - `LFTOMO_DATASET_HELICAL_TIFF`
+- `LFTOMO_DATASET_DROPPED_FRAME_TIFF`
 
 The Windows `Z:` drive maps to
 `\\main.vast.pennstatehealth.net\Files\Labs\Keith_Cheng_Lab` and is exposed to

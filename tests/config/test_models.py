@@ -8,6 +8,7 @@ yaml = pytest.importorskip("yaml")
 from lftomo.config import (  # noqa: E402
 	Acquisition,
 	Detector,
+	ExplicitAngleSource,
 	HDF5DxchangeProjections,
 	Helical,
 	Machine,
@@ -69,6 +70,42 @@ def test_scan_rejects_projection_count_mismatch():
 			degrees_per_fov=180,
 			detector=Detector(pixel_size_um=1.3),
 			acquisition=Acquisition(n_projections=10, rotation_end_deg=180),
+			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
+		)
+
+
+def test_scan_distinguishes_recorded_projections_from_planned_slots():
+	model = Scan(
+		energy_keV=24,
+		pixel_size_um=1.3,
+		n_projections=4,
+		degrees_per_fov=180,
+		detector=Detector(pixel_size_um=1.3),
+		acquisition=Acquisition(
+			n_projections=5,
+			rotation_end_deg=180,
+			angle_source=ExplicitAngleSource(acquisition_indices=[0, 1, 3, 4]),
+		),
+		projections=TIFFStackProjections(format="tiff_stack", path="projections"),
+	)
+
+	assert model.n_projections == 4
+	assert model.acquisition.n_projections == 5
+
+
+def test_scan_rejects_fewer_planned_slots_than_recorded_projections():
+	with pytest.raises(ValueError, match="planned slots cannot be fewer"):
+		Scan(
+			energy_keV=24,
+			pixel_size_um=1.3,
+			n_projections=5,
+			degrees_per_fov=180,
+			detector=Detector(pixel_size_um=1.3),
+			acquisition=Acquisition(
+				n_projections=4,
+				rotation_end_deg=180,
+				angle_source=ExplicitAngleSource(acquisition_indices=[0, 1, 2, 3, 4]),
+			),
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		)
 

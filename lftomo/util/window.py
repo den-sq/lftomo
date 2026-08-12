@@ -166,7 +166,7 @@ class TomoDataSet(DataRef):
 
 	def __init__(self, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
 					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32,
-					*, angles: np.ndarray = None):
+					*, angles: np.ndarray = None, acquisition_indices: np.ndarray = None):
 		""" Initializes DataWindowSet.
 
 			:param ds_shape: Shape of the overall dataset.
@@ -206,10 +206,19 @@ class TomoDataSet(DataRef):
 				raise Exception("Missing Angle Steps for handling Missing Frames")
 		else:
 			self.__angles = np.array([step * np.deg2rad(fov.Degrees) / fov.Count for step in angle_steps])
+		if acquisition_indices is None:
+			acquisition_indices = np.arange(shape.Theta, dtype=np.int64)
+		if len(acquisition_indices) != shape.Theta:
+			raise ValueError("one acquisition index is required for every projection")
+		self.__acquisition_indices = np.asarray(acquisition_indices, dtype=np.int64)
 
 	@property
 	def angles(self):
 		return self.__angles
+
+	@property
+	def acquisition_indices(self):
+		return self.__acquisition_indices
 
 	@property
 	def fov(self):

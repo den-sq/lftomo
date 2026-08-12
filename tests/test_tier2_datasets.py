@@ -29,7 +29,11 @@ def test_tier2_dataset_layout(request, fixture_name: str, dataset_name: str):
 	assert scan.detector.pixel_size_um == pytest.approx(dataset.pixel_size_um)
 
 
-@pytest.mark.parametrize("dataset", DATASETS.values(), ids=lambda dataset: dataset.name)
+@pytest.mark.parametrize(
+	"dataset",
+	[dataset for dataset in DATASETS.values() if dataset.canonical_layout],
+	ids=lambda dataset: dataset.name,
+)
 def test_tier2_producer_directories(request, dataset):
 	root: Path = request.getfixturevalue(f"dataset_{dataset.name}")
 	validate_canonical_layout(root)

@@ -25,7 +25,13 @@ from lftomo.calibration import (
 	load_manifest,
 	validate_bundle,
 )
-from lftomo.config import HDF5DxchangeProjections, Recon, Scan, StageConfig
+from lftomo.config import (
+	HDF5DxchangeProjections,
+	HardwareTimestampAngleSource,
+	Recon,
+	Scan,
+	StageConfig,
+)
 from lftomo.pipeline import (
 	AxisPad,
 	Backend,
@@ -130,6 +136,9 @@ def load_scan(path: str | Path) -> tuple[Scan, Path]:
 	projection_path = Path(scan.projections.path)
 	if not projection_path.is_absolute():
 		scan.projections.path = (path.parent / projection_path).resolve()
+	angle_source = scan.acquisition.angle_source
+	if isinstance(angle_source, HardwareTimestampAngleSource) and not angle_source.path.is_absolute():
+		angle_source.path = (path.parent / angle_source.path).resolve()
 	return scan, path
 
 
