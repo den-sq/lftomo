@@ -22,6 +22,18 @@ can use `angle_source.kind: hdf5` to import an angle dataset.  `explicit`
 accepts embedded acquisition-index and/or degree arrays for small or generated
 metadata.
 
+Hardware-timestamp inference anchors the first recorded projection to planned
+slot zero.  A leading dropped frame is therefore not observable from the
+recorded timestamp intervals and is deliberately treated as a shifted
+acquisition origin.  Under that convention, a count deficit with no interior
+gap is assigned to the tail: for an ordinary long scan with its final frame
+missing, the last acquisition index is less than
+`Acquisition.n_projections - 1`.  The endpoint-calibrated nominal interval can
+be biased by boundary loss, however, and this inference is only valid while the
+observed interval ratios still round to their correct slot counts.  Use an
+`explicit` index or angle source when boundary-slot identity must be recovered
+independently of the first-record anchor.
+
 Theta start/stop/stride selection applies one identical slice to projection
 data, indices, and angles.  The full arrays remain on `TomoDataSet`, while the
 selected arrays are carried in `PipelineState.artifacts` to center and

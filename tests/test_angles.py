@@ -26,6 +26,16 @@ def test_hardware_gaps_are_applied_cumulatively():
 	np.testing.assert_allclose(np.rad2deg(angles), [0, 30, 90, 120, 150], atol=2e-5)
 
 
+def test_hardware_count_deficit_without_gap_is_assigned_to_the_tail():
+	indices = indices_from_hardware_timestamps(
+		[0, 100, 200, 300, 400],
+		recorded_count=5,
+		planned_count=6,
+	)
+
+	np.testing.assert_array_equal(indices, [0, 1, 2, 3, 4])
+
+
 @pytest.mark.parametrize(
 	"indices,message",
 	[
