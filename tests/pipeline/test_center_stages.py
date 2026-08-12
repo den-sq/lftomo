@@ -14,7 +14,8 @@ from lftomo.pipeline.stages import (
 	VoCenterStage,
 	create_stage,
 )
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.window import TomoWindow
 
 
 def _state(array, configs):
@@ -96,6 +97,105 @@ def test_vo_center_transposes_data_and_fits_tilt(monkeypatch):
 	assert all(call[0] == (3, 8) for call in calls)
 	np.testing.assert_allclose(result.artifacts["center"], 4 + 0.1 * np.arange(5), rtol=1e-6)
 	assert result.artifacts["center_fit"]["coefficients"].shape == (2,)
+	assert result.artifacts["center_fit"]["qc_status"] == "accepted"
+	assert result.artifacts["center_fit"]["row_span"] == 4
+
+
+def test_vo_tilt_fit_rejects_center_outlier(monkeypatch):
+	working = np.zeros((9, 3, 8), dtype=np.float32)
+	config = StageConfig(
+		kind="center",
+		algorithm="vo",
+		params={"tilt_fit": "polynomial", "tilt_samples": 5},
+	)
+	centers = iter([4.0, 4.2, 9.4, 4.6, 4.8])
+	monkeypatch.setattr("tomopy.find_center_vo", lambda *_args, **_kwargs: next(centers))
+
+	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
+
+	np.testing.assert_allclose(result.artifacts["center"], 4 + 0.1 * np.arange(9), atol=1e-6)
+	metadata = result.artifacts["center_fit"]
+	np.testing.assert_array_equal(metadata["inlier_mask"], [True, True, False, True, True])
+	np.testing.assert_array_equal(metadata["outlier_source_rows"], [4])
+	assert metadata["residual_rms_px"] == pytest.approx(0, abs=1e-12)
+
+
+def test_vo_tilt_fit_uses_source_y_coordinates_and_row_span(monkeypatch):
+	working = np.zeros((5, 3, 8), dtype=np.float32)
+	config = StageConfig(
+		kind="center",
+		algorithm="vo",
+		params={"tilt_fit": "polynomial", "tilt_samples": 3},
+	)
+	state = _state(working, [config])
+	state.source_window = TomoWindow(
+		ProjOrder(Theta=3, Y=5, X=8),
+		ProjOrder(Theta=0, Y=0, X=0),
+		ProjOrder(Theta=0, Y=100, X=0),
+		ProjOrder(Theta=1, Y=2, X=1),
+		np.float32,
+		np.float32,
+	)
+	centers = iter([14.0, 14.4, 14.8])
+	monkeypatch.setattr("tomopy.find_center_vo", lambda *_args, **_kwargs: next(centers))
+
+	result = Pipeline([create_stage(config)]).run(state)
+
+	np.testing.assert_allclose(result.artifacts["center"], [14, 14.2, 14.4, 14.6, 14.8])
+	metadata = result.artifacts["center_fit"]
+	np.testing.assert_array_equal(metadata["sampled_source_rows"], [100, 104, 108])
+	assert metadata["row_span"] == 8
+
+
+def test_vo_tilt_fit_rejects_or_forces_failed_residual_qc(monkeypatch):
+	working = np.zeros((5, 3, 8), dtype=np.float32)
+	base_params = {
+		"tilt_fit": "polynomial",
+		"tilt_samples": 5,
+		"tilt_outlier_sigma": 100,
+		"tilt_residual_cutoff_px": 0.1,
+	}
+	values = [4.0, 4.3, 3.8, 4.7, 4.1]
+
+	def run(policy):
+		centers = iter(values)
+		monkeypatch.setattr("tomopy.find_center_vo", lambda *_args, **_kwargs: next(centers))
+		config = StageConfig(
+			kind="center", algorithm="vo",
+			params={**base_params, "tilt_qc_policy": policy},
+		)
+		state = _state(working, [config])
+		if policy == "reject":
+			with pytest.raises(ValueError, match="tilt fit rejected"):
+				Pipeline([create_stage(config)]).run(state)
+			assert state.artifacts["center_fit"]["qc_status"] == "rejected"
+			return None
+		return Pipeline([create_stage(config)]).run(state)
+
+	run("reject")
+	forced = run("force")
+	assert forced.artifacts["center_fit"]["qc_status"] == "forced"
+	assert forced.artifacts["center_fit"]["qc_passed"] is False
+
+
+def test_vo_tilt_fit_quantizes_output_centers(monkeypatch):
+	working = np.zeros((5, 3, 8), dtype=np.float32)
+	config = StageConfig(
+		kind="center",
+		algorithm="vo",
+		params={
+			"tilt_fit": "polynomial",
+			"tilt_samples": 3,
+			"tilt_quantization_px": 0.25,
+		},
+	)
+	centers = iter([4.03, 4.23, 4.43])
+	monkeypatch.setattr("tomopy.find_center_vo", lambda *_args, **_kwargs: next(centers))
+
+	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
+
+	np.testing.assert_array_equal(result.artifacts["center"], [4, 4.25, 4.25, 4.25, 4.5])
+	assert result.artifacts["center_fit"]["quantization_px"] == 0.25
 
 
 def test_phase_correlation_uses_first_and_last_projection(monkeypatch):

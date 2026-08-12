@@ -356,6 +356,12 @@ class VoCenterStage(Stage):
 		tilt_fit: str | None = None,
 		tilt_samples: int = 5,
 		fit_degree: int = 1,
+		tilt_outlier_sigma: float = 3.5,
+		tilt_max_iterations: int = 5,
+		tilt_min_inliers: int | None = None,
+		tilt_residual_cutoff_px: float | None = None,
+		tilt_qc_policy: str = "reject",
+		tilt_quantization_px: float | None = None,
 		fallback: str | None = None,
 		fallback_params: dict | None = None,
 	):
@@ -365,6 +371,20 @@ class VoCenterStage(Stage):
 			raise ValueError("center.vo tilt_samples must be at least two")
 		if fit_degree < 1:
 			raise ValueError("center.vo fit_degree must be positive")
+		if tilt_outlier_sigma <= 0:
+			raise ValueError("center.vo tilt_outlier_sigma must be positive")
+		if tilt_max_iterations < 1:
+			raise ValueError("center.vo tilt_max_iterations must be positive")
+		if tilt_min_inliers is not None and tilt_min_inliers < fit_degree + 1:
+			raise ValueError(
+				"center.vo tilt_min_inliers must exceed the polynomial degree"
+			)
+		if tilt_residual_cutoff_px is not None and tilt_residual_cutoff_px < 0:
+			raise ValueError("center.vo tilt_residual_cutoff_px cannot be negative")
+		if tilt_qc_policy not in ("reject", "force"):
+			raise ValueError("center.vo tilt_qc_policy must be 'reject' or 'force'")
+		if tilt_quantization_px is not None and tilt_quantization_px <= 0:
+			raise ValueError("center.vo tilt_quantization_px must be positive")
 		if fallback not in (None, "entropy_local"):
 			raise ValueError("center.vo fallback must be entropy_local or omitted")
 		self.ind = ind
@@ -380,6 +400,12 @@ class VoCenterStage(Stage):
 		self.tilt_fit = tilt_fit
 		self.tilt_samples = tilt_samples
 		self.fit_degree = fit_degree
+		self.tilt_outlier_sigma = tilt_outlier_sigma
+		self.tilt_max_iterations = tilt_max_iterations
+		self.tilt_min_inliers = tilt_min_inliers
+		self.tilt_residual_cutoff_px = tilt_residual_cutoff_px
+		self.tilt_qc_policy = tilt_qc_policy
+		self.tilt_quantization_px = tilt_quantization_px
 		self.fallback = fallback
 		self.fallback_params = fallback_params or {}
 
@@ -395,25 +421,112 @@ class VoCenterStage(Stage):
 			raise ValueError("center.vo returned a non-finite center")
 		return center
 
+	def _robust_fit(
+		self, rows: np.ndarray, centers: np.ndarray,
+	) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, bool]:
+		"""Iteratively reject center residuals using a median/MAD scale."""
+
+		minimum = self.tilt_min_inliers
+		if minimum is None:
+			minimum = min(len(rows), max(self.fit_degree + 1, 3))
+		if len(rows) < minimum:
+			raise ValueError(
+				f"center.vo tilt fit requires at least {minimum} unique sampled rows"
+			)
+		mask = np.ones(len(rows), dtype=bool)
+		clipping_limited = False
+		iterations = 0
+		for iterations in range(1, self.tilt_max_iterations + 1):
+			coefficients = np.polyfit(rows[mask], centers[mask], self.fit_degree)
+			residuals = centers - np.polyval(coefficients, rows)
+			inlier_residuals = residuals[mask]
+			residual_center = float(np.median(inlier_residuals))
+			deviations = np.abs(residuals - residual_center)
+			mad = float(np.median(np.abs(inlier_residuals - residual_center)))
+			threshold = max(1e-6, self.tilt_outlier_sigma * 1.4826 * mad)
+			updated = mask & (deviations <= threshold)
+			if np.count_nonzero(updated) < minimum:
+				clipping_limited = True
+				break
+			if np.array_equal(updated, mask):
+				break
+			mask = updated
+		coefficients = np.polyfit(rows[mask], centers[mask], self.fit_degree)
+		residuals = centers - np.polyval(coefficients, rows)
+		return coefficients, residuals, mask, iterations, clipping_limited
+
+	def _tilt_center(self, state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
+		row_count = n_rows(data, layout)
+		count = min(self.tilt_samples, row_count)
+		local_rows = np.unique(np.linspace(0, row_count - 1, count).round().astype(int))
+		if len(local_rows) <= self.fit_degree:
+			raise ValueError("center.vo needs more sampled rows than the polynomial degree")
+		source_start = 0
+		source_step = 1
+		if state.source_window is not None:
+			source_start = int(state.source_window.pos.Y)
+			source_step = int(state.source_window.step.Y)
+		source_rows = source_start + local_rows * source_step
+		centers = np.asarray([
+			self._find(sinogram_scratch(data, layout, int(index))) for index in local_rows
+		], dtype=np.float64)
+		coefficients, residuals, inliers, iterations, clipping_limited = self._robust_fit(
+			source_rows.astype(np.float64), centers,
+		)
+		evaluation_rows = source_start + np.arange(row_count) * source_step
+		unquantized = np.polyval(coefficients, evaluation_rows)
+		center = unquantized
+		if self.tilt_quantization_px is not None:
+			center = (
+				np.round(center / self.tilt_quantization_px) * self.tilt_quantization_px
+			)
+		inlier_residuals = residuals[inliers]
+		residual_rms = float(np.sqrt(np.mean(np.square(inlier_residuals))))
+		residual_max = float(np.max(np.abs(inlier_residuals)))
+		qc_reasons = []
+		if clipping_limited:
+			qc_reasons.append("outlier clipping would leave too few inliers")
+		if (
+			self.tilt_residual_cutoff_px is not None
+			and residual_rms > self.tilt_residual_cutoff_px
+		):
+			qc_reasons.append("inlier residual RMS exceeds cutoff")
+		qc_passed = not qc_reasons
+		status = "accepted" if qc_passed else (
+			"forced" if self.tilt_qc_policy == "force" else "rejected"
+		)
+		state.artifacts["center_fit"] = {
+			"sampled_local_rows": local_rows,
+			"sampled_source_rows": source_rows,
+			"sampled_centers": centers,
+			"coefficients": coefficients,
+			"residuals_px": residuals,
+			"inlier_mask": inliers,
+			"outlier_source_rows": source_rows[~inliers],
+			"residual_rms_px": residual_rms,
+			"residual_max_abs_px": residual_max,
+			"residual_cutoff_px": self.tilt_residual_cutoff_px,
+			"row_span": int(source_rows.max() - source_rows.min()),
+			"fit_degree": self.fit_degree,
+			"outlier_sigma": self.tilt_outlier_sigma,
+			"fit_iterations": iterations,
+			"quantization_px": self.tilt_quantization_px,
+			"unquantized_center": unquantized,
+			"qc_passed": qc_passed,
+			"qc_policy": self.tilt_qc_policy,
+			"qc_status": status,
+			"qc_reasons": qc_reasons,
+		}
+		if not qc_passed and self.tilt_qc_policy == "reject":
+			raise ValueError("center.vo tilt fit rejected: " + "; ".join(qc_reasons))
+		return np.asarray(center, dtype=np.float32)
+
 	def run(self, state: PipelineState) -> PipelineState:
 		data, layout = _sinograms(state)
 		row_count = n_rows(data, layout)
 		try:
 			if self.tilt_fit == "polynomial":
-				count = min(self.tilt_samples, row_count)
-				indices = np.unique(np.linspace(0, row_count - 1, count).round().astype(int))
-				if len(indices) <= self.fit_degree:
-					raise ValueError("center.vo needs more sampled rows than the polynomial degree")
-				centers = np.asarray([
-					self._find(sinogram_scratch(data, layout, int(index))) for index in indices
-				])
-				coefficients = np.polyfit(indices, centers, self.fit_degree)
-				center = np.polyval(coefficients, np.arange(row_count)).astype(np.float32)
-				state.artifacts["center_fit"] = {
-					"indices": indices,
-					"centers": centers,
-					"coefficients": coefficients,
-				}
+				center = self._tilt_center(state, data, layout)
 			else:
 				index = row_count // 2 if self.ind is None else self.ind
 				if not 0 <= index < row_count:
