@@ -1,7 +1,16 @@
 import numpy as np
+import pytest
 import tifffile as tf
 
-from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
+from lftomo.config import (
+	Acquisition,
+	Detector,
+	HardwareTimestampAngleSource,
+	Recon,
+	Scan,
+	StageConfig,
+	TIFFStackProjections,
+)
 from lftomo.pipeline import (
 	NumpyBackend,
 	Pipeline,
@@ -12,6 +21,7 @@ from lftomo.pipeline import (
 	working_view,
 )
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
+from lftomo.pipeline.domains import DataDomain
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -40,6 +50,47 @@ def _state(projection_dir, count, size, config):
 		),
 		recon=Recon(pipeline=[config]),
 	)
+
+
+def _irregular_state(projection_dir, scanlog, size, configs):
+	return PipelineState(
+		working_array=np.empty(0),
+		scan=Scan(
+			energy_keV=20,
+			pixel_size_um=1.0,
+			n_projections=5,
+			degrees_per_fov=180,
+			detector=Detector(pixel_size_um=1.0, rows=size, columns=size),
+			acquisition=Acquisition(
+				n_projections=6,
+				rotation_end_deg=180,
+				angle_source=HardwareTimestampAngleSource(path=scanlog),
+			),
+			projections=TIFFStackProjections(
+				format="tiff_stack", path=projection_dir, pattern="projection_*.tif"
+			),
+		),
+		recon=Recon(pipeline=configs),
+	)
+
+
+def _write_irregular_fixture(tmp_path, size=4):
+	projection_dir = tmp_path / "projections"
+	projection_dir.mkdir()
+	stack = np.arange(5 * size * size, dtype=np.uint16).reshape(5, size, size)
+	for index, image in enumerate(stack):
+		tf.imwrite(projection_dir / f"projection_{index}.tif", image)
+	scanlog = tmp_path / "scanlog.txt"
+	scanlog.write_text(
+		"projection\twall_clock\tdelta\thardware\n"
+		+ "\n".join(
+			f"projection_{index}\tunused\tunused\t{timestamp}"
+			for index, timestamp in enumerate([0, 100, 300, 400, 500])
+		)
+		+ "\n",
+		encoding="utf-8",
+	)
+	return projection_dir, scanlog, stack
 
 
 def _run(state, *stages):
@@ -136,6 +187,80 @@ def test_tiff_stack_stage_reads_strided_theta_window_with_matching_angles(tmp_pa
 	assert result.source_window.shape.Theta == 5
 	assert result.working_array.shape[0] == 3
 	assert result.source_window.step == ProjOrder(Theta=2, Y=1, X=1)
+
+
+def test_irregular_indices_and_angles_share_theta_selection_and_stride(tmp_path):
+	projection_dir, scanlog, stack = _write_irregular_fixture(tmp_path)
+	config = StageConfig(
+		kind="read",
+		algorithm="tiff_stack",
+		params={"theta_start": 1, "theta_stop": 5, "theta_stride": 2},
+	)
+
+	result = _run(
+		_irregular_state(projection_dir, scanlog, 4, [config]),
+		create_stage(config),
+	)
+
+	np.testing.assert_array_equal(result.working_array, stack[1:5:2])
+	np.testing.assert_array_equal(result.artifacts["acquisition_indices"], [1, 4])
+	np.testing.assert_allclose(np.rad2deg(result.artifacts["angles"]), [30, 120])
+	np.testing.assert_array_equal(result.dataset.acquisition_indices, [0, 1, 3, 4, 5])
+	np.testing.assert_allclose(
+		np.rad2deg(result.dataset.angles), [0, 30, 90, 120, 150], atol=2e-5,
+	)
+	assert result.artifacts["angle_provenance"]["planned_slot_count"] == 6
+	assert result.artifacts["angle_provenance"]["recorded_projection_count"] == 5
+
+
+def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch):
+	projection_dir, scanlog, _stack = _write_irregular_fixture(tmp_path)
+	read_config = StageConfig(
+		kind="read", algorithm="tiff_stack", params={"order": "sinogram"},
+	)
+	center_config = StageConfig(
+		kind="center", algorithm="entropy_local",
+		params={"start": 2, "range": 0, "max_expansions": 0},
+	)
+	recon_config = StageConfig(
+		kind="recon", algorithm="gridrec",
+		params={"sinogram_order": True, "circle_mask": False},
+	)
+	seen_angles = []
+
+	def recon(data, angles, **_kwargs):
+		seen_angles.append(np.asarray(angles).copy())
+		return np.ones((data.shape[0], data.shape[2], data.shape[2]), dtype=np.float32)
+
+	monkeypatch.setattr("tomopy.recon", recon)
+	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
+	with PipelineRunContext() as context:
+		state = _irregular_state(
+			projection_dir, scanlog, 4, [read_config, center_config, recon_config],
+		)
+		state.storage = context.storage
+		state = Pipeline([create_stage(read_config)], backend=NumpyBackend()).run(state)
+		state.domain = DataDomain.ATTENUATION
+		result = Pipeline([
+			create_stage(center_config), create_stage(recon_config),
+		], backend=NumpyBackend()).run(state)
+
+	expected = np.deg2rad([0, 30, 90, 120, 150])
+	assert len(seen_angles) == 2
+	for angles in seen_angles:
+		np.testing.assert_allclose(angles, expected)
+	shape = result.working_array.shape
+	assert (shape.Y, shape.Z, shape.X) == (4, 4, 4)
+
+
+def test_irregular_source_count_mismatch_is_still_rejected(tmp_path):
+	projection_dir, scanlog, _stack = _write_irregular_fixture(tmp_path)
+	config = StageConfig(kind="read", algorithm="tiff_stack")
+	state = _irregular_state(projection_dir, scanlog, 4, [config])
+	state.scan.n_projections = 4
+
+	with pytest.raises(ValueError, match="scan declares 4.*source contains 5"):
+		_run(state, create_stage(config))
 
 
 def test_legacy_tiff_chunk_parameters_are_not_runtime_stage_state():

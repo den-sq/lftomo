@@ -66,6 +66,15 @@ def test_striping_reference_uses_aaa592_physical_drive_dataset():
 	assert dataset.pixel_size_um == pytest.approx(0.5)
 
 
+def test_dropped_frame_fixture_uses_aaa388_scan():
+	dataset = DATASETS["dropped_frame_tiff"]
+	assert dataset.default_path == Path(
+		"/mnt/wsl/PHYSICALDRIVE2p1/ru_samples/AAA388_20kV/"
+		"1653171676_3937projs_200000us_redo_scan"
+	)
+	assert dataset.canonical_layout is False
+
+
 @pytest.mark.parametrize("dataset_name", DATASETS)
 def test_installed_scan_template_validates(dataset_name):
 	template = Path(__file__).with_name("tier2_metadata") / f"{dataset_name}.yaml"

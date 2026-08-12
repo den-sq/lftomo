@@ -9,7 +9,22 @@ import h5py
 import numpy as np
 import tifffile as tf
 
-from lftomo.config import HDF5DxchangeProjections, StageConfig, TIFFStackProjections
+from lftomo.angles import (
+	angles_from_indices,
+	hardware_timestamps,
+	indices_from_angles,
+	indices_from_hardware_timestamps,
+	validate_acquisition_indices,
+)
+from lftomo.config import (
+	ExplicitAngleSource,
+	HDF5AngleSource,
+	HDF5DxchangeProjections,
+	HardwareTimestampAngleSource,
+	StageConfig,
+	TIFFStackProjections,
+	UniformAngleSource,
+)
 from lftomo.pipeline.core import PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
@@ -21,13 +36,14 @@ def _output_contract(order: str, *, required_metadata: tuple[str, ...],
 		produces_artifacts: tuple[str, ...] = ()) -> StageContract:
 	if order not in ("projection", "sinogram"):
 		raise ValueError("read order must be 'projection' or 'sinogram'")
+	angle_artifacts = ("angles", "acquisition_indices", "angle_provenance")
 	return StageContract(
 		produced_output=ProjOrder if order == "projection" else SinoOrder,
 		cacheable_prefix=True,
 		produces_domain=DataDomain.RAW,
 		window_axes=("Theta", "Y"),
 		required_metadata=required_metadata,
-		produces_artifacts=produces_artifacts,
+		produces_artifacts=angle_artifacts + produces_artifacts,
 		managed_artifacts=produces_artifacts,
 	)
 
@@ -38,14 +54,103 @@ def _storage(state: PipelineState):
 	return state.storage
 
 
-def _source_angles(state: PipelineState, count: int) -> np.ndarray:
-	return np.linspace(
-		np.deg2rad(state.scan.acquisition.rotation_start_deg),
-		np.deg2rad(state.scan.acquisition.rotation_end_deg),
-		count,
-		endpoint=False,
-		dtype=np.float32,
+def _source_angle_metadata(
+	state: PipelineState,
+	count: int,
+	*,
+	hdf5_handle=None,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+	acquisition = state.scan.acquisition
+	planned = acquisition.n_projections
+	source = acquisition.angle_source
+	angles = None
+	if isinstance(source, UniformAngleSource):
+		indices = np.arange(count, dtype=np.int64)
+		provenance = {"kind": "uniform"}
+	elif isinstance(source, ExplicitAngleSource):
+		indices = source.acquisition_indices
+		angles = (
+			None if source.angles_degrees is None
+			else np.deg2rad(np.asarray(source.angles_degrees, dtype=np.float64))
+		)
+		provenance = {"kind": "explicit"}
+	elif isinstance(source, HardwareTimestampAngleSource):
+		timestamps = hardware_timestamps(
+			source.path,
+			column=source.timestamp_column,
+			delimiter=source.delimiter,
+			header_rows=source.header_rows,
+		)
+		indices = indices_from_hardware_timestamps(
+			timestamps, recorded_count=count, planned_count=planned,
+		)
+		provenance = {
+			"kind": "hardware_timestamps",
+			"path": str(source.path),
+			"timestamp_column": source.timestamp_column,
+			"nominal_interval": (
+				float(timestamps[-1] - timestamps[0]) / (planned - 1)
+				if planned > 1 else None
+			),
+		}
+	elif isinstance(source, HDF5AngleSource):
+		if hdf5_handle is None:
+			raise ValueError("hdf5 angle source requires an HDF5 projection source")
+		if source.path not in hdf5_handle:
+			raise ValueError(f"HDF5 angle dataset {source.path!r} is missing")
+		angles = np.asarray(hdf5_handle[source.path], dtype=np.float64)
+		if source.units == "degrees":
+			angles = np.deg2rad(angles)
+		indices = None
+		provenance = {
+			"kind": "hdf5",
+			"path": source.path,
+			"source_units": source.units,
+		}
+	else:  # pragma: no cover - discriminated config union is exhaustive
+		raise TypeError(f"unsupported angle source: {type(source).__name__}")
+
+	if indices is None:
+		indices = indices_from_angles(
+			angles,
+			recorded_count=count,
+			planned_count=planned,
+			rotation_start_deg=acquisition.rotation_start_deg,
+			rotation_end_deg=acquisition.rotation_end_deg,
+		)
+	else:
+		indices = validate_acquisition_indices(
+			indices, recorded_count=count, planned_count=planned,
+		)
+	expected_angles = angles_from_indices(
+		indices,
+		planned_count=planned,
+		rotation_start_deg=acquisition.rotation_start_deg,
+		rotation_end_deg=acquisition.rotation_end_deg,
 	)
+	if angles is not None:
+		# Recovering indices above validates angle/index consistency. Explicit
+		# sources that supplied both still need that same check.
+		resolved = indices_from_angles(
+			angles,
+			recorded_count=count,
+			planned_count=planned,
+			rotation_start_deg=acquisition.rotation_start_deg,
+			rotation_end_deg=acquisition.rotation_end_deg,
+		)
+		if not np.array_equal(resolved, indices):
+			raise ValueError("angles and acquisition indices select different slots")
+		resolved_angles = np.asarray(angles, dtype=np.float32)
+	else:
+		resolved_angles = expected_angles
+	provenance.update({
+		"recorded_projection_count": count,
+		"planned_slot_count": planned,
+		"rotation_start_deg": acquisition.rotation_start_deg,
+		"rotation_end_deg": acquisition.rotation_end_deg,
+		"endpoint": False,
+	})
+	return indices, resolved_angles, provenance
 
 
 def _bind_source_state(
@@ -60,8 +165,9 @@ def _bind_source_state(
 	theta_stride: int,
 	y_start: int,
 	y_stop: int,
+	angles: np.ndarray,
+	acquisition_indices: np.ndarray,
 ) -> PipelineState:
-	angles = _source_angles(state, full_shape.Theta)
 	dataset = TomoDataSet(
 		CTFov(full_shape.Theta, state.scan.degrees_per_fov, 1),
 		full_shape,
@@ -69,6 +175,7 @@ def _bind_source_state(
 		dtype=dtype,
 		work_dtype=np.float32,
 		angles=angles,
+		acquisition_indices=acquisition_indices,
 	)
 	zero = ProjOrder(Theta=0, Y=0, X=0)
 	# A TomoWindow describes the covered source-coordinate span.  With a
@@ -146,6 +253,9 @@ class HDF5DxchangeReadStage(Stage):
 				raise ValueError(
 					f"scan declares {state.scan.n_projections} projections but HDF5 contains {theta_count}"
 				)
+			all_indices, all_angles, angle_provenance = _source_angle_metadata(
+				state, theta_count, hdf5_handle=handle,
+			)
 			theta_stop = theta_count if self.theta_stop is None else self.theta_stop
 			y_stop = rows if self.y_stop is None else self.y_stop
 			if not 0 <= self.theta_start < theta_stop <= theta_count:
@@ -189,6 +299,17 @@ class HDF5DxchangeReadStage(Stage):
 
 			artifacts = dict(state.artifacts)
 			artifacts["hdf5_read_strategy"] = read_strategy
+			angle_selection = slice(self.theta_start, theta_stop, self.theta_stride)
+			artifacts["acquisition_indices"] = all_indices[angle_selection]
+			artifacts["angles"] = all_angles[angle_selection]
+			artifacts["angle_provenance"] = {
+				**angle_provenance,
+				"selection": {
+					"start": self.theta_start,
+					"stop": theta_stop,
+					"stride": self.theta_stride,
+				},
+			}
 			if self.calibration_policy != "ignore":
 				missing = [
 					path for path in (source.white_path, source.dark_path) if path not in handle
@@ -213,18 +334,6 @@ class HDF5DxchangeReadStage(Stage):
 							source_sel=np.s_[:, self.y_start:y_stop, :],
 						)
 						artifacts[artifact_name] = artifact
-			if self.theta_start != 0 or theta_stop != theta_count or self.theta_stride != 1:
-				all_angles = np.linspace(
-					np.deg2rad(state.scan.acquisition.rotation_start_deg),
-					np.deg2rad(state.scan.acquisition.rotation_end_deg),
-					theta_count,
-					endpoint=False,
-					dtype=np.float32,
-				)
-				artifacts["angles"] = all_angles[
-					self.theta_start:theta_stop:self.theta_stride
-				]
-
 		result = _bind_source_state(
 			state,
 			memory,
@@ -236,6 +345,8 @@ class HDF5DxchangeReadStage(Stage):
 			theta_stride=self.theta_stride,
 			y_start=self.y_start,
 			y_stop=y_stop,
+			angles=all_angles,
+			acquisition_indices=all_indices,
 		)
 		result.artifacts = artifacts
 		return result
@@ -304,6 +415,7 @@ class TIFFStackReadStage(Stage):
 			raise ValueError(
 				f"read stage declares {self.projection_count} projections but TIFF source contains {count}"
 			)
+		all_indices, all_angles, angle_provenance = _source_angle_metadata(state, count)
 
 		stop = rows if self.y_stop is None else self.y_stop
 		if not 0 <= self.y_start < stop <= rows:
@@ -358,17 +470,19 @@ class TIFFStackReadStage(Stage):
 			theta_stride=self.theta_stride,
 			y_start=self.y_start,
 			y_stop=stop,
+			angles=all_angles,
+			acquisition_indices=all_indices,
 		)
-		if self.theta_start != 0 or theta_stop != count or self.theta_stride != 1:
-			all_angles = np.linspace(
-				np.deg2rad(state.scan.acquisition.rotation_start_deg),
-				np.deg2rad(state.scan.acquisition.rotation_end_deg),
-				count,
-				endpoint=False,
-				dtype=np.float32,
-			)
-			result.artifacts = dict(result.artifacts)
-			result.artifacts["angles"] = all_angles[
-				self.theta_start:theta_stop:self.theta_stride
-			]
+		angle_selection = slice(self.theta_start, theta_stop, self.theta_stride)
+		result.artifacts = dict(result.artifacts)
+		result.artifacts["acquisition_indices"] = all_indices[angle_selection]
+		result.artifacts["angles"] = all_angles[angle_selection]
+		result.artifacts["angle_provenance"] = {
+			**angle_provenance,
+			"selection": {
+				"start": self.theta_start,
+				"stop": theta_stop,
+				"stride": self.theta_stride,
+			},
+		}
 		return result

@@ -24,6 +24,7 @@ from lftomo.pipeline.stages import create_stage
 from lftomo.runner import (
 	_center_artifacts,
 	load_recon,
+	load_scan,
 	main,
 	resolve_calibration,
 	run_reconstruction,
@@ -47,6 +48,30 @@ def test_center_prepass_retains_durable_diagnostic_outputs():
 		"center_entropy": {"termination": "converged"},
 		"output_files": [Path("center-diagnostics/candidate.tif")],
 	}
+
+
+def test_load_scan_resolves_hardware_timestamp_source_relative_to_scan(tmp_path):
+	scan_path = tmp_path / "scan.yaml"
+	document = scan_document("projections")
+	document["n_projections"] = 2
+	document["acquisition"] = {
+		"n_projections": 3,
+		"rotation_end_deg": 180,
+		"angle_source": {
+			"kind": "hardware_timestamps",
+			"path": "scanlog.txt",
+		},
+	}
+	document["projections"] = {
+		"format": "tiff_stack",
+		"path": "projections",
+	}
+	write_yaml(scan_path, document)
+
+	scan, _ = load_scan(scan_path)
+
+	assert scan.projections.path == (tmp_path / "projections").resolve()
+	assert scan.acquisition.angle_source.path == (tmp_path / "scanlog.txt").resolve()
 
 
 def scan_document(data_path):

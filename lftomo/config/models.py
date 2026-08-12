@@ -63,13 +63,64 @@ class Helical(ConfigModel):
 	pitch_um_per_projection: float | None = Field(default=None, description="Vertical pitch per projection in micrometers.")
 
 
+class UniformAngleSource(ConfigModel):
+	"""Uniform endpoint-exclusive angles with no missing acquisition slots."""
+
+	kind: Literal["uniform"] = "uniform"
+
+
+class ExplicitAngleSource(ConfigModel):
+	"""Per-recorded-projection acquisition indices and/or angles."""
+
+	kind: Literal["explicit"] = "explicit"
+	acquisition_indices: list[int] | None = None
+	angles_degrees: list[float] | None = None
+
+	@model_validator(mode="after")
+	def _has_explicit_values(self):
+		if self.acquisition_indices is None and self.angles_degrees is None:
+			raise ValueError("explicit angle source requires indices or angles")
+		return self
+
+
+class HardwareTimestampAngleSource(ConfigModel):
+	"""Derive acquisition slots cumulatively from hardware timestamps."""
+
+	kind: Literal["hardware_timestamps"] = "hardware_timestamps"
+	path: Path
+	timestamp_column: int = Field(default=3, ge=0)
+	delimiter: str = Field(default="\t", min_length=1)
+	header_rows: int = Field(default=1, ge=0)
+
+
+class HDF5AngleSource(ConfigModel):
+	"""Read a per-projection angle dataset from the projection HDF5 file."""
+
+	kind: Literal["hdf5"] = "hdf5"
+	path: str = Field(default="exchange/theta", min_length=1)
+	units: Literal["degrees", "radians"] = "degrees"
+
+
+AngleSource = Annotated[
+	UniformAngleSource | ExplicitAngleSource | HardwareTimestampAngleSource | HDF5AngleSource,
+	Field(discriminator="kind"),
+]
+
+
 class Acquisition(ConfigModel):
 	"""Projection-count and angle metadata for a scan."""
 
-	n_projections: int = Field(gt=0, description="Number of acquired projections.")
+	n_projections: int = Field(
+		gt=0,
+		description="Number of planned acquisition/trigger slots, including dropped slots.",
+	)
 	rotation_start_deg: float = Field(default=0.0, description="Start angle in degrees.")
 	rotation_end_deg: float = Field(description="End angle in degrees.")
 	exposure_ms: float | None = Field(default=None, gt=0, description="Exposure time in milliseconds.")
+	angle_source: AngleSource = Field(
+		default_factory=UniformAngleSource,
+		exclude_if=lambda value: isinstance(value, UniformAngleSource),
+	)
 
 
 class TIFFStackProjections(ConfigModel):
@@ -99,7 +150,9 @@ class Scan(ConfigModel):
 	energy_keV: float = Field(gt=0, description="Beam energy in keV.")
 	pixel_size_um: float = Field(gt=0, description="Effective reconstructed pixel size in micrometers.")
 	ssd_cm: float | None = Field(default=None, gt=0, description="Sample-to-scintillator distance in centimeters.")
-	n_projections: int = Field(gt=0, description="Number of acquired projections.")
+	n_projections: int = Field(
+		gt=0, description="Number of recorded projection arrays/files present in the source."
+	)
 	degrees_per_fov: float = Field(gt=0, description="Angular coverage per field of view.")
 	n_fov: int = Field(default=1, gt=0, description="Number of fields of view in the scan.")
 	helical: Helical = Field(default_factory=Helical, description="Helical acquisition metadata.")
@@ -111,8 +164,21 @@ class Scan(ConfigModel):
 	@field_validator("acquisition")
 	@classmethod
 	def _projection_counts_match(cls, acquisition: Acquisition, info):
-		if "n_projections" in info.data and acquisition.n_projections != info.data["n_projections"]:
-			raise ValueError("acquisition.n_projections must match scan.n_projections")
+		recorded = info.data.get("n_projections")
+		if recorded is not None and acquisition.n_projections < recorded:
+			raise ValueError(
+				"acquisition.n_projections planned slots cannot be fewer than "
+				"scan.n_projections recorded projections"
+			)
+		if (
+			recorded is not None
+			and acquisition.n_projections != recorded
+			and isinstance(acquisition.angle_source, UniformAngleSource)
+		):
+			raise ValueError(
+				"differing planned and recorded projection counts require an explicit "
+				"angle_source"
+			)
 		return acquisition
 
 
