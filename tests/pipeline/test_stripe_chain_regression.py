@@ -8,12 +8,21 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, ExecutionKind, Pipeline, PipelineState, PRESERVE
+from lftomo.pipeline import (
+	DataDomain,
+	ExecutionKind,
+	Pipeline,
+	PipelineRunContext,
+	PipelineState,
+	PRESERVE,
+	working_view,
+)
 from lftomo.pipeline.stages import (
 	AllOfTheStripeStage,
 	FourierWaveletStripeStage,
 	VoDeadStripeStage,
 	VoFamilyStripeStage,
+	VoLargeStripeStage,
 	VoSortStripeStage,
 )
 from lftomo.runner import load_recon
@@ -197,6 +206,77 @@ def test_ndarray_real_chain_uses_one_live_scratch():
 	assert activity["peak"] == 1
 	row_scratch_bytes = projection.shape[0] * projection.shape[2] * projection.dtype.itemsize
 	assert activity["peak"] * row_scratch_bytes < projection.nbytes
+
+
+def _managed_vo_chain(workers: int):
+	projection = _fixture(rows=4)
+	scan = _scan(projection.shape[0], projection.shape[1], projection.shape[2])
+	stages = [
+		VoDeadStripeStage(snr=2, size=5, norm=False),
+		VoLargeStripeStage(snr=2, size=5, drop_ratio=0.1, norm=True),
+		VoSortStripeStage(size=5),
+	]
+	with PipelineRunContext(max_workers=workers) as context:
+		working = context.storage.allocate(
+			ProjOrder(*projection.shape), np.float32, role="normalized",
+		)
+		working.array()[...] = projection
+		state = PipelineState(
+			working, scan, _state(projection, ProjOrder).recon,
+			storage=context.storage, executor=context.executor,
+			layout=ProjOrder, domain=DataDomain.ATTENUATION,
+		)
+		result = Pipeline(
+			stages, scan=scan, initial_layout=ProjOrder,
+			initial_domain=DataDomain.ATTENUATION, bounded_workers=workers,
+		).run(state)
+		return (
+			working_view(result).copy(),
+			dict(result.artifacts["vo_scratch_allocations"][0]),
+			context.storage.allocation_events,
+			dict(result.artifacts),
+		)
+
+
+def test_managed_vo_chain_allocates_two_row_indexed_planes_once_and_matches_ndarray():
+	expected = _fixture(rows=4)
+	_pipeline([
+		VoDeadStripeStage(snr=2, size=5, norm=False),
+		VoLargeStripeStage(snr=2, size=5, drop_ratio=0.1, norm=True),
+		VoSortStripeStage(size=5),
+	], ProjOrder).run(_state(expected, ProjOrder))
+
+	actual, report, events, artifacts = _managed_vo_chain(2)
+	np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+	assert report == {
+		"scope": "whole_volume",
+		"rows": 4,
+		"sinogram_shape": [32, 32],
+		"float_dtype": np.dtype(np.float32).str,
+		"index_dtype": np.dtype(np.uint32).str,
+		"float_bytes": 4 * 32 * 32 * 4,
+		"index_bytes": 4 * 32 * 32 * 4,
+		"managed_bytes": 2 * 4 * 32 * 32 * 4,
+		"allocation_count": 2,
+		"indexing": "source_window_row",
+	}
+	work_events = [
+		event for event in events
+		if event["role"] in {"vo_float_work", "vo_index_work"}
+	]
+	assert [event["action"] for event in work_events] == [
+		"allocate", "allocate", "retire", "retire",
+	]
+	assert "_vo_float_work" not in artifacts
+	assert "_vo_index_work" not in artifacts
+
+
+def test_managed_vo_allocation_is_independent_of_worker_count():
+	one, one_report, _events, _artifacts = _managed_vo_chain(1)
+	two, two_report, _events, _artifacts = _managed_vo_chain(2)
+
+	assert one_report == two_report
+	np.testing.assert_allclose(one, two, rtol=1e-6, atol=1e-6)
 
 
 @pytest.mark.parametrize("stage", [

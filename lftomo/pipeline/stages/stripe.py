@@ -31,6 +31,32 @@ from lftomo.prep.stripe import (
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
+VO_FLOAT_WORK_ARTIFACT = "_vo_float_work"
+VO_INDEX_WORK_ARTIFACT = "_vo_index_work"
+SINOGRAM_ROW_ARTIFACT = "_sinogram_row_index"
+
+
+def _vo_work_planes(
+	state: PipelineState, sinogram: np.ndarray,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+	"""Open the row-indexed reusable planes prepared by bounded execution."""
+
+	float_buffer = state.artifacts.get(VO_FLOAT_WORK_ARTIFACT)
+	index_buffer = state.artifacts.get(VO_INDEX_WORK_ARTIFACT)
+	if float_buffer is None and index_buffer is None:
+		return None, None
+	if float_buffer is None or index_buffer is None:
+		raise ValueError("Vo reusable work requires both floating-point and index planes")
+	row = state.artifacts.get(SINOGRAM_ROW_ARTIFACT)
+	if row is None:
+		raise ValueError("Vo reusable work requires a bounded sinogram row index")
+	float_work = float_buffer.array()[int(row)]
+	index_work = index_buffer.array()[int(row)]
+	if float_work.shape != sinogram.shape or index_work.shape != sinogram.shape:
+		raise ValueError("Vo reusable work does not match the dispatched sinogram shape")
+	return float_work, index_work
+
+
 def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
 	return StageContract(
 		expected_input=SinoOrder,
@@ -68,6 +94,7 @@ def _run_sinogram_stage(
 class VoSortStripeStage(Stage):
 	name = "stripe.vo_sort"
 	contract = _contract()
+	uses_vo_work = True
 
 	def __init__(self, size: int = 21, dim: int = 1, ncore: int | None = None):
 		self.size = size
@@ -81,13 +108,18 @@ class VoSortStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		return _run_sinogram_stage(self, state)
 
-	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
-		_remove_sort_array(sinogram, size=self.size, dim=self.dim)
+	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		work, index_work = _vo_work_planes(state, sinogram)
+		_remove_sort_array(
+			sinogram, size=self.size, dim=self.dim,
+			work=work, index_work=index_work,
+		)
 
 
 class VoDeadStripeStage(Stage):
 	name = "stripe.vo_dead"
 	contract = _contract()
+	uses_vo_work = True
 
 	def __init__(self, snr: int = 3, size: int = 51, norm: bool = True):
 		self.snr = snr
@@ -101,15 +133,20 @@ class VoDeadStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		return _run_sinogram_stage(self, state)
 
-	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
-		_remove_dead_array(sinogram, snr=self.snr, size=self.size)
+	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		work, index_work = _vo_work_planes(state, sinogram)
+		_remove_dead_array(sinogram, snr=self.snr, size=self.size, work=work)
 		if self.norm:
-			_remove_large_array(sinogram, snr=self.snr, size=self.size, norm=True)
+			_remove_large_array(
+				sinogram, snr=self.snr, size=self.size, norm=True,
+				work=work, index_work=index_work,
+			)
 
 
 class VoLargeStripeStage(Stage):
 	name = "stripe.vo_large"
 	contract = _contract()
+	uses_vo_work = True
 
 	def __init__(self, snr: int = 3, size: int = 51,
 				drop_ratio: float = 0.1, norm: bool = True):
@@ -125,10 +162,12 @@ class VoLargeStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		return _run_sinogram_stage(self, state)
 
-	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		work, index_work = _vo_work_planes(state, sinogram)
 		_remove_large_array(
 			sinogram, snr=self.snr, size=self.size,
 			drop_ratio=self.drop_ratio, norm=self.norm,
+			work=work, index_work=index_work,
 		)
 
 
@@ -137,6 +176,7 @@ class VoFamilyStripeStage(Stage):
 
 	name = "stripe.vo_family"
 	contract = _contract()
+	uses_vo_work = True
 
 	def __init__(self, order: list[str] | tuple[str, ...] = (
 				"remove_dead_vo", "remove_large_vo", "remove_sort_vo"),
@@ -160,17 +200,24 @@ class VoFamilyStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		return _run_sinogram_stage(self, state)
 
-	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		work, index_work = _vo_work_planes(state, sinogram)
 		for operation in self.order:
 			if operation == "remove_dead_vo":
-				_remove_dead_array(sinogram, snr=self.snr, size=self.size)
+				_remove_dead_array(
+					sinogram, snr=self.snr, size=self.size, work=work,
+				)
 			elif operation == "remove_large_vo":
 				_remove_large_array(
 					sinogram, snr=self.snr, size=self.size,
 					drop_ratio=self.drop_ratio, norm=self.norm,
+					work=work, index_work=index_work,
 				)
 			else:
-				_remove_sort_array(sinogram, size=self.size, dim=self.dim)
+				_remove_sort_array(
+					sinogram, size=self.size, dim=self.dim,
+					work=work, index_work=index_work,
+				)
 
 
 class FourierWaveletStripeStage(Stage):
