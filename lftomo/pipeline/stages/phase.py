@@ -94,6 +94,8 @@ def _wavelength_cm(energy_kev: float) -> float:
 
 
 def _angular_frequency_squared(shape: tuple[int, int], pixel_size_cm: float) -> np.ndarray:
+	"""Return the intentional DFT-bin angular grid documented in issue #199."""
+
 	ky = 2 * np.pi * np.fft.fftfreq(shape[0], d=pixel_size_cm)
 	kx = 2 * np.pi * np.fft.fftfreq(shape[1], d=pixel_size_cm)
 	return np.add.outer(np.square(ky), np.square(kx))
