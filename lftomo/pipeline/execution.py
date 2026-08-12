@@ -126,12 +126,97 @@ def run_sinogram_chain_kernel(
 	else:
 		working = sinogram_view(data, layout, index)
 	state = _worker_state(buffer, payload)
+	from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
+
+	state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
 	for stage in stages:
 		result = stage.run_sinogram(working, state)
 		if result is not None and result is not working:
 			working = np.asarray(result)
 	if layout is ProjOrder:
 		sinogram_view(data, layout, index)[:] = working
+
+
+def _prepare_vo_work(
+	state: PipelineState,
+	stages: Sequence[Stage],
+	row_count: int,
+	sinogram_shape: tuple[int, int],
+) -> tuple[tuple[ManagedBuffer, str], ...]:
+	"""Allocate the two row-indexed planes shared by a fused Vo chain."""
+
+	if not any(getattr(stage, "uses_vo_work", False) for stage in stages):
+		return ()
+	if not isinstance(state.working_array, ManagedBuffer) or state.storage is None:
+		return ()
+	from lftomo.pipeline.stages.stripe import (
+		VO_FLOAT_WORK_ARTIFACT,
+		VO_INDEX_WORK_ARTIFACT,
+	)
+
+	if VO_FLOAT_WORK_ARTIFACT in state.artifacts or VO_INDEX_WORK_ARTIFACT in state.artifacts:
+		raise ValueError("Vo work artifacts are private to one bounded segment")
+	theta_count, column_count = sinogram_shape
+	if max(theta_count, column_count) > np.iinfo(np.uint32).max:
+		raise ValueError("Vo sorting indices exceed uint32 capacity")
+	shape = (row_count, theta_count, column_count)
+	float_dtype = np.dtype(state.working_array.dtype)
+	if not np.issubdtype(float_dtype, np.floating):
+		raise TypeError("Vo reusable work requires floating-point pipeline data")
+	allocated: list[tuple[ManagedBuffer, str]] = []
+	try:
+		float_work = state.storage.allocate(shape, float_dtype, role="vo_float_work")
+		if isinstance(float_work, list):
+			raise TypeError("Vo floating-point work allocation returned multiple buffers")
+		allocated.append((float_work, "vo_float_work"))
+		index_work = state.storage.allocate(shape, np.uint32, role="vo_index_work")
+		if isinstance(index_work, list):
+			raise TypeError("Vo sorting-index work allocation returned multiple buffers")
+		allocated.append((index_work, "vo_index_work"))
+	except BaseException:
+		for buffer, role in allocated:
+			state.storage.retire(buffer, role=role)
+		raise
+	state.artifacts[VO_FLOAT_WORK_ARTIFACT] = float_work
+	state.artifacts[VO_INDEX_WORK_ARTIFACT] = index_work
+	float_bytes = int(np.prod(shape, dtype=np.int64) * float_dtype.itemsize)
+	index_bytes = int(np.prod(shape, dtype=np.int64) * np.dtype(np.uint32).itemsize)
+	report = {
+		"scope": "window" if state.source_window is not None else "whole_volume",
+		"rows": row_count,
+		"sinogram_shape": [theta_count, column_count],
+		"float_dtype": float_dtype.str,
+		"index_dtype": np.dtype(np.uint32).str,
+		"float_bytes": float_bytes,
+		"index_bytes": index_bytes,
+		"managed_bytes": float_bytes + index_bytes,
+		"allocation_count": 2,
+		"indexing": "source_window_row",
+	}
+	state.artifacts.setdefault("vo_scratch_allocations", []).append(report)
+	return tuple(allocated)
+
+
+def _release_vo_work(
+	state: PipelineState, allocated: tuple[tuple[ManagedBuffer, str], ...],
+) -> None:
+	"""Retire temporary Vo planes after all dispatched rows have completed."""
+
+	from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
+
+	state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
+	if not allocated:
+		return
+	from lftomo.pipeline.stages.stripe import (
+		VO_FLOAT_WORK_ARTIFACT,
+		VO_INDEX_WORK_ARTIFACT,
+	)
+
+	state.artifacts.pop(VO_FLOAT_WORK_ARTIFACT, None)
+	state.artifacts.pop(VO_INDEX_WORK_ARTIFACT, None)
+	if state.storage is not None:
+		for buffer, role in allocated:
+			state.storage.retire(buffer, role=role)
 
 
 def write_tiff_slice_kernel(
@@ -541,29 +626,41 @@ def run_bounded_sinogram_segment(
 		if not callable(getattr(stage, "run_sinogram", None)):
 			raise TypeError(f"{stage.name} declares bounded views but has no run_sinogram kernel")
 	row_count = n_rows(data, state.layout)
-	if isinstance(state.working_array, ManagedBuffer) and executor is not None:
-		if checkpoint is not None:
-			checkpoint()
-		try:
-			executor.submit_all(run_sinogram_chain_kernel, (
-				(state.working_array, state.layout, index, tuple(stages), _payload(state))
-				for index in range(row_count)
-			))
-		except BaseException as error:
-			if failure_observer is not None:
-				failure_observer(stages[0], error)
-			raise
-		return state
-
-	# ndarray-only hermetic execution is deliberately serial.
-	for index in range(row_count):
-		working = sinogram_scratch(data, state.layout, index) if state.layout is ProjOrder else sinogram_view(data, state.layout, index)
-		for stage in stages:
+	sinogram_shape = (
+		(data.shape[0], data.shape[2])
+		if state.layout is ProjOrder else (data.shape[1], data.shape[2])
+	)
+	allocated = _prepare_vo_work(state, stages, row_count, sinogram_shape)
+	try:
+		if isinstance(state.working_array, ManagedBuffer) and executor is not None:
 			if checkpoint is not None:
 				checkpoint()
-			result = stage.run_sinogram(working, state)
-			if result is not None and result is not working:
-				working = np.asarray(result)
-		if state.layout is ProjOrder:
-			sinogram_view(data, state.layout, index)[:] = working
+			try:
+				executor.submit_all(run_sinogram_chain_kernel, (
+					(state.working_array, state.layout, index, tuple(stages), _payload(state))
+					for index in range(row_count)
+				))
+			except BaseException as error:
+				if failure_observer is not None:
+					failure_observer(stages[0], error)
+				raise
+			return state
+
+		# ndarray-only hermetic execution is deliberately serial.
+		from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
+
+		for index in range(row_count):
+			state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
+			working = sinogram_scratch(data, state.layout, index) if state.layout is ProjOrder else sinogram_view(data, state.layout, index)
+			for stage in stages:
+				if checkpoint is not None:
+					checkpoint()
+				result = stage.run_sinogram(working, state)
+				if result is not None and result is not working:
+					working = np.asarray(result)
+			if state.layout is ProjOrder:
+				sinogram_view(data, state.layout, index)[:] = working
+		state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
+	finally:
+		_release_vo_work(state, allocated)
 	return state

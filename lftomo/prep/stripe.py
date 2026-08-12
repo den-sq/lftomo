@@ -29,21 +29,66 @@ def _remove_sort_vo(sino_mem: SharedNPArray, i: int, size: int = 21, dim: int = 
 		_remove_sort_array(sino, size=size, dim=dim)
 
 
-def _remove_sort_array(sino: np.ndarray, size: int = 21, dim: int = 1) -> None:
+def _work_plane(work: np.ndarray | None, sino: np.ndarray, name: str) -> np.ndarray:
+	"""Return a reusable plane with the sinogram's shape and numeric dtype."""
+
+	if work is None:
+		return np.empty_like(sino)
+	if work.shape != sino.shape:
+		raise ValueError(f"{name} shape {work.shape} does not match sinogram {sino.shape}")
+	if work.dtype != sino.dtype:
+		raise TypeError(f"{name} dtype {work.dtype} does not match sinogram {sino.dtype}")
+	return work
+
+
+def _index_plane(index_work: np.ndarray | None, sino: np.ndarray) -> np.ndarray:
+	"""Return a reusable uint32 sorting-index plane."""
+
+	if index_work is None:
+		return np.empty(sino.shape, dtype=np.uint32)
+	if index_work.shape != sino.shape:
+		raise ValueError(
+			f"Vo sorting-index shape {index_work.shape} does not match sinogram {sino.shape}"
+		)
+	if index_work.dtype != np.dtype(np.uint32):
+		raise TypeError("Vo sorting-index work must use uint32 storage")
+	return index_work
+
+
+def _remove_sort_array(
+	sino: np.ndarray,
+	size: int = 21,
+	dim: int = 1,
+	*,
+	work: np.ndarray | None = None,
+	index_work: np.ndarray | None = None,
+) -> None:
 	"""Apply the local Vo sorting algorithm to one ``(Theta, X)`` sinogram."""
 	f_shape = (size, 1 if dim == 1 else size)
 
-	sino_mod = np.transpose(sino[:, :]).copy()
-	sort_idx = sino_mod.argsort(axis=1) 			# Track index separately to sort back.
+	# The source kernel reinterprets (rather than stride-transposes) each plane as
+	# (X, Theta), keeping the sort axis contiguous.  The same physical plane is
+	# viewed as (Theta, X) by the dead/large kernels later in a fused chain.
+	sino_mod = _work_plane(work, sino, "Vo floating-point work").reshape(
+		sino.shape[1], sino.shape[0],
+	)
+	sort_idx = _index_plane(index_work, sino).reshape(sino.shape[1], sino.shape[0])
+	sino_mod[:, :] = sino.T
+	sort_idx[:, :] = sino_mod.argsort(axis=1) 	# Track index separately to sort back.
 	sino_mod[:, :] = np.take_along_axis(sino_mod, sort_idx, axis=1)
-	sort_idx[:, :] = sort_idx.argsort(axis=1) 	# Now transition it to sort back index.
+	# Invert each permutation directly instead of running a second argsort.  The
+	# advanced-index arrays are resolved before assignment, so this safely
+	# converts the plane in place to the sort-back index.
+	sort_idx[np.arange(sort_idx.shape[0])[:, None], sort_idx] = np.arange(
+		sort_idx.shape[1], dtype=np.uint32,
+	)
 
 	# Apply filter to sorted memory.
 	sino_mod[:, :] = medfilt2d(sino_mod, f_shape)
 
 	# sort back and assign.
 	sino_mod[:, :] = np.take_along_axis(sino_mod, sort_idx, axis=1)
-	sino[:, :] = np.transpose(sino_mod)
+	sino[:, :] = sino_mod.T
 
 
 def _detect_stripe(listdata, snr):
@@ -77,10 +122,20 @@ def remove_large_vo(sino_mem: SharedNPArray, i: int, snr: int = 3, size: int = 5
 		_remove_large_array(sino_base, snr=snr, size=size, drop_ratio=drop_ratio, norm=norm)
 
 
-def _remove_large_array(sino_base: np.ndarray, snr: int = 3, size: int = 51,
-						drop_ratio: float = 0.1, norm: bool = True) -> None:
+def _remove_large_array(
+	sino_base: np.ndarray,
+	snr: int = 3,
+	size: int = 51,
+	drop_ratio: float = 0.1,
+	norm: bool = True,
+	*,
+	work: np.ndarray | None = None,
+	index_work: np.ndarray | None = None,
+) -> None:
 	"""Apply the local Vo large-stripe algorithm to one sinogram."""
-	sino = sino_base.copy()
+	sino = sino_base
+	sino_smooth = _work_plane(work, sino, "Vo floating-point work")
+	sort_idx = _index_plane(index_work, sino)
 
 	# Calculate # of outliers to drop.
 	drop_ratio = np.clip(drop_ratio, 0.0, 0.8)
@@ -89,10 +144,10 @@ def _remove_large_array(sino_base: np.ndarray, snr: int = 3, size: int = 51,
 	kept = slice(ndrop, -ndrop if ndrop else None)
 
 	# Get Sort Index (so sortback is easy)
-	sort_idx = sino.argsort(axis=0)
+	sort_idx[:, :] = sino.argsort(axis=0)
 
 	# Get mean of original and smoothed values after throwing out outliers.
-	sino_smooth = np.take_along_axis(sino, sort_idx, axis=0)
+	sino_smooth[:, :] = np.take_along_axis(sino, sort_idx, axis=0)
 	sort_mean = np.mean(sino_smooth[kept, :], axis=0)
 	sino_smooth[:, :] = medfilt2d(sino_smooth, (1, size))
 	smooth_mean = np.mean(sino_smooth[kept, :], axis=0)
@@ -106,7 +161,7 @@ def _remove_large_array(sino_base: np.ndarray, snr: int = 3, size: int = 51,
 	sino_mask = binary_dilation(_detect_stripe(factor, snr), iterations=1)
 
 	if norm:
-		np.divide(sino, np.tile(factor, (nrow, 1)), out=sino_base[:, :])
+		np.divide(sino, factor[None, :], out=sino_base[:, :])
 	sino_base[:, sino_mask] = sino_smooth[:, sino_mask]
 
 
@@ -125,12 +180,22 @@ def _remove_dead_vo(sino_mem: SharedNPArray, i: int, snr: int = 3, size: int = 5
 		remove_large_vo(sino_mem, i, snr, size, norm=norm)
 
 
-def _remove_dead_array(sino_base: np.ndarray, snr: int = 3, size: int = 51) -> None:
+def _remove_dead_array(
+	sino_base: np.ndarray,
+	snr: int = 3,
+	size: int = 51,
+	*,
+	work: np.ndarray | None = None,
+) -> None:
 	"""Apply the local Vo dead-line interpolation to one sinogram."""
 	mask_cut = np.s_[2:-2]
-	sino = np.ascontiguousarray(sino_base[:, :], dtype=sino_base.dtype)
+	sino = sino_base
+	smoothed = _work_plane(work, sino, "Vo floating-point work")
 
-	smooth_diff = np.sum(np.abs(sino - np.apply_along_axis(uniform_filter1d, 0, sino, 10)), axis=0)
+	uniform_filter1d(sino, 10, axis=0, output=smoothed)
+	np.subtract(sino, smoothed, out=smoothed)
+	np.abs(smoothed, out=smoothed)
+	smooth_diff = np.sum(smoothed, axis=0)
 	median_diff = median_filter(smooth_diff, size)
 	factor = np.divide(smooth_diff, median_diff, out=np.ones_like(smooth_diff), where=median_diff != 0)
 
