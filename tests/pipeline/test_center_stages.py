@@ -143,6 +143,119 @@ def test_entropy_local_selects_lowest_entropy_candidate(monkeypatch):
 	assert all(call[0] == (1, 4, 8) for call in calls)
 	assert result.artifacts["center"] == pytest.approx(4)
 	np.testing.assert_array_equal(result.artifacts["center_entropy"]["entropies"], [1, 0, 1])
+	assert result.artifacts["center_entropy"]["termination"] == "converged"
+	assert result.artifacts["center_entropy"]["expansions"] == 0
+
+
+def test_entropy_local_expands_from_boundary_and_updates_current_center(monkeypatch):
+	working = np.ones((3, 4, 8), dtype=np.float32)
+	config = StageConfig(
+		kind="center",
+		algorithm="entropy_local",
+		params={"start": 4, "range": 1, "step": 1, "max_expansions": 3},
+	)
+	candidates = []
+
+	def recon(_data, _angles, center, **_kwargs):
+		candidates.append(center)
+		return np.full((1, 8, 8), center, dtype=np.float32)
+
+	monkeypatch.setattr("tomopy.recon", recon)
+	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
+	monkeypatch.setattr(
+		"lftomo.pipeline.stages.center.shannon_entropy",
+		lambda data: abs(float(np.mean(data)) - 6),
+	)
+	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
+
+	assert candidates == [3, 4, 5, 5, 6, 7]
+	assert result.artifacts["center"] == pytest.approx(6)
+	metadata = result.artifacts["center_entropy"]
+	assert metadata["termination"] == "converged"
+	assert metadata["expansions"] == 1
+	assert [search["start"] for search in metadata["searches"]] == [4, 6]
+
+
+def test_entropy_local_stops_at_expansion_cap(monkeypatch):
+	working = np.ones((3, 4, 8), dtype=np.float32)
+	config = StageConfig(
+		kind="center",
+		algorithm="entropy_local",
+		params={"start": 4, "range": 1, "step": 1, "max_expansions": 2},
+	)
+	monkeypatch.setattr(
+		"tomopy.recon",
+		lambda _data, _angles, center, **_kwargs:
+			np.full((1, 8, 8), center, dtype=np.float32),
+	)
+	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
+	monkeypatch.setattr(
+		"lftomo.pipeline.stages.center.shannon_entropy",
+		lambda data: -float(np.mean(data)),
+	)
+	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
+
+	assert result.artifacts["center"] == pytest.approx(9)
+	metadata = result.artifacts["center_entropy"]
+	assert metadata["termination"] == "cap-reached"
+	assert metadata["expansions"] == 2
+	assert metadata["converged"] is False
+
+
+def test_entropy_local_stops_when_the_same_candidate_remains_at_a_boundary(monkeypatch):
+	working = np.ones((3, 4, 8), dtype=np.float32)
+	config = StageConfig(
+		kind="center",
+		algorithm="entropy_local",
+		params={"start": 4, "range": 1, "step": 1, "max_expansions": 3},
+	)
+	monkeypatch.setattr(
+		"tomopy.recon",
+		lambda _data, _angles, center, **_kwargs:
+			np.full((1, 8, 8), center, dtype=np.float32),
+	)
+	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
+	monkeypatch.setattr(
+		"lftomo.pipeline.stages.center.shannon_entropy",
+		lambda data: abs(float(np.mean(data)) - 5),
+	)
+	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
+
+	assert result.artifacts["center"] == pytest.approx(5)
+	metadata = result.artifacts["center_entropy"]
+	assert metadata["termination"] == "boundary-persisted"
+	assert metadata["expansions"] == 1
+
+
+def test_entropy_local_diagnostics_are_durable_outputs(tmp_path, monkeypatch):
+	working = np.ones((3, 4, 8), dtype=np.float32)
+	config = StageConfig(
+		kind="center",
+		algorithm="entropy_local",
+		params={
+			"start": 4,
+			"range": 1,
+			"step": 1,
+			"max_expansions": 0,
+			"diagnostic_images": True,
+		},
+	)
+	state = _state(working, [config])
+	state.recon.output_path = tmp_path
+	monkeypatch.setattr(
+		"tomopy.recon",
+		lambda _data, _angles, center, **_kwargs:
+			np.full((1, 8, 8), center, dtype=np.float32),
+	)
+	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
+	result = Pipeline([create_stage(config)]).run(state)
+
+	outputs = result.artifacts["output_files"]
+	assert len(outputs) == 3
+	assert all(path.is_file() for path in outputs)
+	assert all(path.parent == tmp_path / "center-diagnostics" for path in outputs)
+	assert result.artifacts["center_entropy"]["diagnostic_files"] == outputs
+	assert "output_files" in create_stage(config).contract.produces_artifacts
 
 
 def test_vo_can_fall_back_to_entropy_local(monkeypatch):

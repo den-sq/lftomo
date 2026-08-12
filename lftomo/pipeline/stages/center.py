@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
+from pathlib import Path
 import numpy as np
 from skimage.measure import shannon_entropy
+import tifffile as tf
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
@@ -156,6 +159,9 @@ class EntropyLocalCenterStage(Stage):
 		filter_parameters: list[float] | tuple[float, ...] = (0.2, 2),
 		ncore: int | None = None,
 		circle_mask_ratio: float = 1.0,
+		max_expansions: int = 3,
+		diagnostic_images: bool = False,
+		diagnostic_subdirectory: str = "center-diagnostics",
 	):
 		if range < 0:
 			raise ValueError("center.entropy_local range cannot be negative")
@@ -165,6 +171,17 @@ class EntropyLocalCenterStage(Stage):
 			raise ValueError("center.entropy_local ncore must be positive")
 		if not 0 < circle_mask_ratio <= 1:
 			raise ValueError("center.entropy_local circle_mask_ratio must be in (0, 1]")
+		if max_expansions < 0:
+			raise ValueError("center.entropy_local max_expansions cannot be negative")
+		diagnostic_path = Path(diagnostic_subdirectory)
+		if (
+			diagnostic_path.is_absolute()
+			or not diagnostic_path.parts
+			or ".." in diagnostic_path.parts
+		):
+			raise ValueError(
+				"center.entropy_local diagnostic_subdirectory must be a safe relative path"
+			)
 		self.start = start
 		self.range = range
 		self.step = step
@@ -173,10 +190,40 @@ class EntropyLocalCenterStage(Stage):
 		self.filter_parameters = filter_parameters
 		self.ncore = ncore
 		self.circle_mask_ratio = circle_mask_ratio
+		self.max_expansions = max_expansions
+		self.diagnostic_images = diagnostic_images
+		self.diagnostic_subdirectory = diagnostic_path
+		produces = ("center", "center_entropy")
+		if diagnostic_images:
+			produces += ("output_files",)
+		self.contract = replace(type(self).contract, produces_artifacts=produces)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "EntropyLocalCenterStage":
 		return cls(**config.params)
+
+	def _diagnostic_root(self, state: PipelineState) -> Path:
+		output = state.recon.output_path
+		if output is None:
+			raise ValueError(
+				"center.entropy_local diagnostic_images requires Recon.output_path"
+			)
+		output = Path(output)
+		if output.suffix.lower() in {".h5", ".hdf5"}:
+			root = output.parent / f"{output.stem}-{self.diagnostic_subdirectory}"
+		else:
+			root = output / self.diagnostic_subdirectory
+		root.mkdir(parents=True, exist_ok=True)
+		return root
+
+	def _diagnostic_path(
+		self, root: Path, source_slice: int, search: int,
+		candidate_index: int, center: float,
+	) -> Path:
+		return root / (
+			f"slice-{source_slice:05d}-search-{search:02d}-"
+			f"candidate-{candidate_index:03d}-center-{center:.4f}.tif"
+		)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data, layout = _sinograms(state)
@@ -184,44 +231,106 @@ class EntropyLocalCenterStage(Stage):
 		index = row_count // 2 if self.slice_index is None else self.slice_index
 		if not 0 <= index < row_count:
 			raise ValueError("center.entropy_local slice_index is outside the sinogram window")
-		start = data.shape[2] / 2 if self.start is None else self.start
-		candidates = np.arange(
-			start - self.range,
-			start + self.range + self.step / 2,
-			self.step,
-			dtype=np.float32,
-		)
+		current_start = data.shape[2] / 2 if self.start is None else self.start
 		angles = _angles(state, n_projections(data, layout))
 		sinogram = sinogram_scratch(data, layout, index)
+		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
+		source_slice = source_y + index
+		diagnostic_root = self._diagnostic_root(state) if self.diagnostic_images else None
 
 		import tomopy
 
-		entropies = []
-		for center in candidates:
-			reconstruction = tomopy.recon(
-				sinogram[np.newaxis, :, :],
-				angles,
-				center=float(center),
-				sinogram_order=True,
-				algorithm="gridrec",
-				filter_name=self.filter_name,
-				filter_par=self.filter_parameters,
-				ncore=self.ncore,
+		searches = []
+		all_candidates = []
+		all_entropies = []
+		diagnostic_files = []
+		previous_boundary = None
+		termination = "cap-reached"
+		converged = False
+		selected_center = float(current_start)
+		for search in range(self.max_expansions + 1):
+			candidates = np.arange(
+				current_start - self.range,
+				current_start + self.range + self.step / 2,
+				self.step,
+				dtype=np.float32,
 			)
-			reconstruction = tomopy.circ_mask(
-				reconstruction,
-				axis=0,
-				ratio=self.circle_mask_ratio,
-				ncore=self.ncore,
-			)
-			entropies.append(float(shannon_entropy(reconstruction)))
-		best = int(np.argmin(entropies))
+			entropies = []
+			for candidate_index, center in enumerate(candidates):
+				reconstruction = tomopy.recon(
+					sinogram[np.newaxis, :, :],
+					angles,
+					center=float(center),
+					sinogram_order=True,
+					algorithm="gridrec",
+					filter_name=self.filter_name,
+					filter_par=self.filter_parameters,
+					ncore=self.ncore,
+				)
+				reconstruction = tomopy.circ_mask(
+					reconstruction,
+					axis=0,
+					ratio=self.circle_mask_ratio,
+					ncore=self.ncore,
+				)
+				entropies.append(float(shannon_entropy(reconstruction)))
+				if diagnostic_root is not None:
+					path = self._diagnostic_path(
+						diagnostic_root, source_slice, search,
+						candidate_index, float(center),
+					)
+					tf.imwrite(path, np.asarray(reconstruction[0], dtype=np.float32))
+					diagnostic_files.append(path)
+			entropies_array = np.asarray(entropies, dtype=np.float64)
+			best = int(np.argmin(entropies_array))
+			selected_center = float(candidates[best])
+			left = best == 0
+			right = best == len(candidates) - 1
+			boundary = "left" if left else "right" if right else None
+			searches.append({
+				"iteration": search,
+				"start": float(current_start),
+				"candidates": candidates,
+				"entropies": entropies_array,
+				"best_index": best,
+				"best_center": selected_center,
+				"boundary": boundary,
+			})
+			all_candidates.append(candidates)
+			all_entropies.append(entropies_array)
+			if boundary is None:
+				termination = "converged"
+				converged = True
+				break
+			if len(candidates) == 1 or self.range == 0 or (
+				previous_boundary is not None and boundary != previous_boundary
+			):
+				termination = "boundary-persisted"
+				break
+			if search == self.max_expansions:
+				termination = "cap-reached"
+				break
+			current_start += -2 * self.range if boundary == "left" else 2 * self.range
+			previous_boundary = boundary
 		state.artifacts["center_entropy"] = {
-			"candidates": candidates,
-			"entropies": np.asarray(entropies, dtype=np.float64),
+			"candidates": np.concatenate(all_candidates),
+			"entropies": np.concatenate(all_entropies),
 			"slice_index": index,
+			"source_slice_index": source_slice,
+			"searches": searches,
+			"termination": termination,
+			"converged": converged,
+			"expansions": len(searches) - 1,
+			"max_expansions": self.max_expansions,
+			"selected_center": selected_center,
+			"diagnostic_files": diagnostic_files,
 		}
-		return _store_center(state, candidates[best])
+		if diagnostic_files:
+			existing = list(state.artifacts.get("output_files", ()))
+			state.artifacts["output_files"] = existing + [
+				path for path in diagnostic_files if path not in existing
+			]
+		return _store_center(state, selected_center)
 
 
 class VoCenterStage(Stage):

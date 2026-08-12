@@ -44,6 +44,13 @@ def _write_array_slice(array: np.ndarray, path: Path, dtype: np.dtype) -> None:
 	tf.imwrite(path, values)
 
 
+def _record_outputs(state: PipelineState, paths: list[Path]) -> None:
+	"""Append durable files to the run's output ledger without duplicates."""
+
+	existing = list(state.artifacts.get("output_files", ()))
+	state.artifacts["output_files"] = existing + [path for path in paths if path not in existing]
+
+
 class TIFFSlicesWriteStage(Stage):
 	"""Write one TIFF per first-axis reconstruction slice."""
 
@@ -124,7 +131,7 @@ class TIFFSlicesWriteStage(Stage):
 			# ndarray-only hermetic tests remain serial; slices are never pickled.
 			for index, path in enumerate(paths):
 				_write_array_slice(working[index], path, self.dtype)
-		state.artifacts["output_files"] = paths
+		_record_outputs(state, paths)
 		return state
 
 
@@ -201,7 +208,7 @@ class HDF5VolumeWriteStage(Stage):
 				handle[self.dataset][
 					int(streaming["output_start"]):int(streaming["output_stop"])
 				] = data
-		state.artifacts["output_files"] = [path]
+		_record_outputs(state, [path])
 		return state
 
 
@@ -300,6 +307,6 @@ class NeuroglancerWriteStage(Stage):
 			volume[:, :, output_start + start:output_start + stop] = np.transpose(
 				data[start:stop], (2, 1, 0),
 			)
-		state.artifacts["output_files"] = [layer / "info"]
+		_record_outputs(state, [layer / "info"])
 		state.artifacts["neuroglancer_source"] = cloudpath
 		return state
