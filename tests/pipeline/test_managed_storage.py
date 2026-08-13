@@ -216,6 +216,28 @@ def test_killed_process_group_does_not_leak_manager_segments(stop_signal):
 	assert not _segment_exists(name)
 
 
+def _owned_python_paths(repository: Path) -> list[Path]:
+	"""Return Python files from repository-owned source and test roots only."""
+
+	paths = []
+	for name in ("lftomo", "tests", "benchmarks", "B10Scripts", "examples"):
+		root = repository / name
+		if root.is_dir():
+			paths.extend(root.rglob("*.py"))
+	return sorted(paths)
+
+
+def test_working_array_gate_ignores_non_source_python_trees(tmp_path):
+	owned = tmp_path / "lftomo" / "owned.py"
+	owned.parent.mkdir()
+	owned.write_text("value = 1\n", encoding="utf-8")
+	vendored = tmp_path / ".venv" / "site-packages" / "vendored.py"
+	vendored.parent.mkdir(parents=True)
+	vendored.write_text("value = 2\n", encoding="utf-8")
+
+	assert _owned_python_paths(tmp_path) == [owned]
+
+
 def test_pipeline_has_one_working_array_boundary_idiom():
 	repository = Path(__file__).parents[2]
 	root = repository / "lftomo"
@@ -227,11 +249,7 @@ def test_pipeline_has_one_working_array_boundary_idiom():
 		*(root / "pipeline").rglob("*.py"),
 		root / "evaluation" / "stage.py",
 	}
-	python_paths = [
-		path for path in repository.rglob("*.py")
-		if ".git" not in path.parts
-	]
-	for path in python_paths:
+	for path in _owned_python_paths(repository):
 		text = path.read_text(encoding="utf-8")
 		tree = ast.parse(text)
 		if legacy_accessor in text:
