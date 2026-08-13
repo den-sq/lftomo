@@ -27,8 +27,18 @@ Production runs enter `PipelineRunContext`, which owns one `SharedNPManager`
 for the complete run. `SharedNPManager` implements `StorageBackend` directly,
 and the handles it returns are `SharedNPArray` objects implementing
 `ManagedBuffer` directly; there is no wrapper around the existing shared-memory
-objects. Pipeline Stages open the process-local NumPy view with
-`working_view(state)`. Plain NumPy arrays remain valid for hermetic Stage tests.
+objects. At a Stage or state boundary, the single access idiom for the
+process-local NumPy view is `np.asarray(state.working_array)`. This is a
+no-copy conversion for managed buffers and plain NumPy arrays; tests pin that
+contract. Code that deliberately needs a private copy uses
+`np.asarray(state.working_array).copy()` rather than
+`np.array(state.working_array)`.
+
+Direct `state.working_array.array()` is not the Stage-boundary idiom because
+plain NumPy arrays, which remain valid for hermetic Stage tests, do not expose
+that method. Low-level worker kernels and storage code that receive a
+`ManagedBuffer` handle directly still use its `array()` method to open the
+process-local mapping.
 
 All production Stage allocations go through the manager. A handle sent to a
 worker is a non-owning attachment and cannot unlink the segment. Normal and

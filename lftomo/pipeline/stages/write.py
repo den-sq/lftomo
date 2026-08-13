@@ -14,7 +14,6 @@ from lftomo.pipeline.core import (
 	RuntimeRequirement,
 	Stage,
 	StageContract,
-	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer
@@ -100,7 +99,7 @@ class TIFFSlicesWriteStage(Stage):
 			raise TypeError("TIFFSlicesWriteStage currently requires the NumPy backend")
 		if state.recon.output_path is None:
 			raise ValueError("write.tiff_slices requires Recon.output_path")
-		working = working_view(state)
+		working = np.asarray(state.working_array)
 		if working.ndim != 3:
 			raise ValueError("write.tiff_slices expects a (Y, Z, X) reconstruction array")
 
@@ -173,7 +172,7 @@ class HDF5VolumeWriteStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("HDF5VolumeWriteStage currently requires the NumPy backend")
-		data = working_view(state)
+		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("write.hdf5_volume expects a (Y, Z, X) reconstruction array")
 		path = self._path(state)
@@ -254,7 +253,7 @@ class NeuroglancerWriteStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("NeuroglancerWriteStage currently requires the NumPy backend")
-		data = working_view(state)
+		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("write.neuroglancer expects a (Y, Z, X) reconstruction array")
 		root = self.path or state.recon.output_path

@@ -10,7 +10,6 @@ from lftomo.pipeline import (
 	PipelineState,
 	Stage,
 	StageContract,
-	working_view,
 )
 from lftomo.pipeline.stages.normalize import TaperBlendedNormalizeStage, WeightedNormalizeStage
 from lftomo.prep.flat import weighted_normalize
@@ -134,7 +133,7 @@ def test_float32_normalization_replaces_raw_handle_after_successful_handoff():
 		assert isinstance(result.working_array, SharedNPArray)
 		assert result.working_array is not buffer
 		assert result.working_array.name != buffer.name
-		np.testing.assert_allclose(working_view(result), 0.5)
+		np.testing.assert_allclose(np.asarray(result.working_array), 0.5)
 		assert any(
 			event["action"] == "retire" and event["name"] == buffer.name
 			for event in context.storage.allocation_events

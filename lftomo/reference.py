@@ -20,7 +20,6 @@ from lftomo.pipeline import (
 	PipelineRunContext,
 	PipelineState,
 	validate_pipeline,
-	working_view,
 )
 from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
@@ -281,7 +280,7 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 				state = create_stage(batch_read).run(state)
 				for config in pre_configs:
 					state = create_stage(config).run(state)
-				batch = working_view(state).astype(np.float32, copy=True)
+				batch = np.asarray(state.working_array).astype(np.float32, copy=True)
 			if volume is None:
 				shape = (projection_count, batch.shape[1], batch.shape[2])
 				volume = np.memmap(
@@ -305,7 +304,7 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 		state = state.with_array(volume[:, local_start:local_stop, :])
 		for config in post_configs:
 			state = create_stage(config).run(state)
-		return working_view(state).astype(np.float32, copy=True)
+		return np.asarray(state.working_array).astype(np.float32, copy=True)
 
 
 def _cap_parallelism(recon, workers: int = 2) -> None:
@@ -392,12 +391,12 @@ def run_reference_archive(root: str | Path, producer: str,
 				if not cropped and config.kind in {"center", "recon"}:
 					start = min(selected) - window_start
 					stop = max(selected) - window_start + 1
-					state = state.with_array(working_view(state)[start:stop].copy())
+					state = state.with_array(np.asarray(state.working_array)[start:stop].copy())
 					cropped = True
 				state = stage.run(state)
 			if not cropped:
 				raise ValueError("canonical pipeline has no reconstruction boundary")
-			generated = working_view(state).copy()
+			generated = np.asarray(state.working_array).copy()
 		layout = "sinogram"
 		batch_size = None
 	if generated.shape[0] != len(selected):

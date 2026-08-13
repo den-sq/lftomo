@@ -18,7 +18,6 @@ from lftomo.pipeline.core import (
 	StageObserver,
 	allocate_output,
 	commit_output,
-	working_view,
 )
 from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
 from lftomo.pipeline.dispatch import DispatchKind, DispatchSpec
@@ -121,7 +120,6 @@ __all__ = [
 	"WindowConfig",
 	"WindowPlanError",
 	"WindowRegion",
-	"working_view",
 	"CandidateLimitError",
 	"CandidateSpaceError",
 	"ContinuousDomainError",

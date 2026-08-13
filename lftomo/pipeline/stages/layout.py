@@ -6,7 +6,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality, PipelineState, Stage, StageContract, allocate_output, commit_output, working_view,
+	Locality, PipelineState, Stage, StageContract, allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import PRESERVE
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -53,7 +53,7 @@ class LayoutConvertStage(Stage):
 			raise TypeError("layout.convert requires ProjOrder or SinoOrder input")
 		if state.layout is self.target:
 			raise ValueError("layout.convert target is already the current layout")
-		data = working_view(state)
+		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("layout.convert expects a three-dimensional tomography array")
 		shape = self.target(data.shape[1], data.shape[0], data.shape[2])

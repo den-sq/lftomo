@@ -18,7 +18,6 @@ from lftomo.pipeline.core import (
 	Stage,
 	allocate_output,
 	commit_output,
-	working_view,
 )
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.pipeline.layout import n_rows, projection_view, sinogram_scratch, sinogram_view
@@ -120,7 +119,7 @@ def run_sinogram_chain_kernel(
 ) -> None:
 	"""Gather/process/scatter one row for a complete bounded Stage chain."""
 
-	data = working_view(_worker_state(buffer, payload))
+	data = np.asarray(_worker_state(buffer, payload).working_array)
 	if layout is ProjOrder:
 		working = sinogram_scratch(data, layout, index)
 	else:
@@ -445,7 +444,7 @@ class PipelineExecutor:
 			from lftomo.pipeline.stages.phase import prepare_phase_filter
 
 			prepare_phase_filter(stage, working_state)
-		data = working_view(working_state)
+		data = np.asarray(working_state.working_array)
 		layout = working_state.layout
 		if layout not in (ProjOrder, SinoOrder):
 			return stage.run(state)
@@ -472,7 +471,7 @@ class PipelineExecutor:
 			return stage.run(state)
 		from lftomo.pipeline.stages import AffineSkewMovementStage, HelicalIndexRemapStage
 
-		data = working_view(state)
+		data = np.asarray(state.working_array)
 		if stage.name == "layout.convert":
 			if state.layout not in (ProjOrder, SinoOrder):
 				raise TypeError("layout.convert requires ProjOrder or SinoOrder input")
@@ -619,7 +618,7 @@ def run_bounded_sinogram_segment(
 		raise ValueError("bounded sinogram execution requires tomography layout input")
 	if max_workers < 1:
 		raise ValueError("bounded sinogram workers must be positive")
-	data = working_view(state)
+	data = np.asarray(state.working_array)
 	if data.ndim != 3:
 		raise ValueError("bounded sinogram execution expects a three-dimensional array")
 	for stage in stages:

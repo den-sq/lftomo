@@ -18,7 +18,6 @@ from lftomo.pipeline import (
 	PipelineState,
 	Stage,
 	StageContract,
-	working_view,
 )
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.pipeline.domains import DataDomain
@@ -98,7 +97,7 @@ def _run(state, *stages):
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
 		assert isinstance(result.working_array, SharedNPArray)
-		return result.with_array(working_view(result).copy())
+		return result.with_array(np.asarray(result.working_array).copy())
 
 
 def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path):

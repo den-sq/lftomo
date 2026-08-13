@@ -16,7 +16,6 @@ from lftomo.pipeline.core import (
 	RuntimeRequirement,
 	Stage,
 	StageContract,
-	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.runtime import tomopy_requirement
@@ -52,7 +51,7 @@ def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> Stag
 def _sinograms(state: PipelineState) -> tuple[np.ndarray, type]:
 	if state.backend.name != "numpy":
 		raise TypeError("center Stages currently require the NumPy backend")
-	data = working_view(state)
+	data = np.asarray(state.working_array)
 	if data.ndim != 3:
 		raise ValueError("center Stages expect a (Y, Theta, X) sinogram array")
 	return data, resolve_layout(state, None, "center")
@@ -129,7 +128,7 @@ class ManualCenterStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("center.manual currently requires the NumPy backend")
-		data = working_view(state)
+		data = np.asarray(state.working_array)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("center.manual expects a three-dimensional tomography array")

@@ -317,10 +317,12 @@ class SharedNPArray(ManagedBuffer):
 		return self.__load()
 
 	def __array__(self, dtype=None, copy=None):
-		"""Compatibility conversion; Stage code uses ``working_view`` explicitly."""
+		"""Return the mapped view used by NumPy at PipelineState boundaries."""
 
 		result = self.array()
 		if dtype is not None:
+			if copy is False and np.dtype(dtype) != result.dtype:
+				raise ValueError("dtype conversion cannot be honored with copy=False")
 			result = result.astype(dtype, copy=False)
 		if copy:
 			result = result.copy()

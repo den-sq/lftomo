@@ -332,12 +332,6 @@ class PipelineState:
 			self.buffer_spec = self.buffer_spec.with_layout(self.layout)
 
 
-def working_view(state: PipelineState) -> np.ndarray:
-	"""Return the process-local NumPy view of the current working buffer."""
-
-	return buffer_view(state.working_array)
-
-
 def allocate_output(
 	state: PipelineState,
 	shape: Any,

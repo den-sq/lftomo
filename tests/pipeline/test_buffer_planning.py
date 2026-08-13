@@ -9,7 +9,6 @@ from lftomo.pipeline import (
 	DataDomain,
 	PipelineRunContext,
 	PipelineState,
-	working_view,
 	validate_pipeline,
 )
 from lftomo.pipeline.stages import (
@@ -72,7 +71,7 @@ def test_retirement_occurs_only_after_normalization_handoff():
 		assert result.working_array.name != raw.name
 		retire = [event for event in context.storage.allocation_events if event["action"] == "retire"]
 		assert retire[-1]["name"] == raw.name
-		np.testing.assert_allclose(working_view(result), 0.5)
+		np.testing.assert_allclose(np.asarray(result.working_array), 0.5)
 
 
 def test_failed_normalization_does_not_retire_current_input():
@@ -284,7 +283,7 @@ def _actual_gridrec(*, engine_aliasing: bool):
 			artifacts={"angles": angles},
 		)
 		result = GridrecStage(center=4, circle_mask=False, ncore=1).run(state)
-		return working.name, result.working_array.name, working_view(result).copy()
+		return working.name, result.working_array.name, np.asarray(result.working_array).copy()
 
 
 def test_installed_tomopy_runtime_proves_projection_input_alias_parity():
@@ -314,7 +313,7 @@ def _normalization_to_recon_pipeline(*, aliasing: bool):
 		state = NegativeLogStage(order="projection").run(state)
 		state.domain = DataDomain.ATTENUATION
 		state = GridrecStage(center=4, circle_mask=False, ncore=1).run(state)
-		return raw.name, state.working_array.name, working_view(state).copy()
+		return raw.name, state.working_array.name, np.asarray(state.working_array).copy()
 
 
 def test_raw_staging_alias_matches_unaliased_full_numeric_pipeline():

@@ -23,7 +23,7 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from lftomo.config import ConfigModel, StageConfig
-from lftomo.pipeline import Pipeline, PipelineState, Stage, StageObserver, working_view
+from lftomo.pipeline import Pipeline, PipelineState, Stage, StageObserver
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 
 from .models import canonical_json
@@ -475,7 +475,7 @@ def _run_stages(
 
 
 def _clone_initial_state(state: PipelineState) -> PipelineState:
-	working = working_view(state)
+	working = np.asarray(state.working_array)
 	working_copy = (
 		working.copy() if state.storage is None or working.size == 0 else
 		state.storage.fork(state.working_array, label="experiment.prefix-fork")
@@ -716,7 +716,7 @@ class PrefixCacheStore:
 		try:
 			array_path = build / "working.npy"
 			with array_path.open("xb") as stream:
-				np.save(stream, working_view(state), allow_pickle=False)
+				np.save(stream, np.asarray(state.working_array), allow_pickle=False)
 				stream.flush()
 				os.fsync(stream.fileno())
 			artifact_files = {}
@@ -1042,7 +1042,7 @@ class PrefixCacheStore:
 				)
 			if not (
 				_equivalent(
-					working_view(check), working_view(fork),
+					np.asarray(check.working_array), np.asarray(fork.working_array),
 					rtol=self.policy.verify_rtol, atol=self.policy.verify_atol,
 				)
 				and _equivalent(
