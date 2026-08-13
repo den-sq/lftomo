@@ -19,11 +19,25 @@ class DataRef(object):
 					step: DataShape, dtype: type = None, offset: int = 0):
 
 		pad_shift = pos.param_max(pos, pad) - pos
-		if pad_shift:
-			print("Shifting position and shape for padding.")
+		self._set_geometry(
+			shape - pad_shift,
+			pad,
+			pos + pad_shift,
+			step,
+			dtype,
+			offset,
+		)
 
-		self.__pos = pos + pad_shift
-		self.__shape = shape - pad_shift  # If padding reallocates position, we shrink.
+	def _set_geometry(self, shape: DataShape, pad: DataShape, pos: DataShape,
+					step: DataShape, dtype: type = None, offset: int = 0) -> None:
+		"""Set geometry without applying legacy lower-bound pad adjustment.
+
+		Subclasses with an authoritative bounding scope use this seam to preserve
+		the requested logical extent and derive clipping separately.
+		"""
+
+		self.__pos = pos
+		self.__shape = shape
 		self.__pad = pad
 		self.__step = step
 		self.__dtype = dtype
@@ -124,13 +138,183 @@ class DataRef(object):
 
 class TomoWindow(DataRef):
 	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape, step: DataShape,
-					dtype: type, work_dtype: type):
-		super().__init__(shape, pad, pos, step, dtype)
+					dtype: type, work_dtype: type, *, bounds: DataRange | None = None,
+					dataset: "TomoDataSet | None" = None):
+		"""Describe one logical core and its bounded source allocation.
+
+		``shape`` and ``pos`` always describe the requested logical core. ``pad``
+		is the symmetric requirement supplied by the caller. The realized source
+		extent is derived by clipping that request to ``bounds``; it is never a
+		second independently supplied region.
+		"""
+
+		if any(value < 0 for value in asdict(pad).values()):
+			raise ValueError("window padding cannot be negative")
+		self._set_geometry(shape, pad, pos, step, dtype)
 		self.__work_dtype = work_dtype
+		self.__dataset = dataset
+		zero = shape.make_with(0)
+		core_pos = replace(zero, **asdict(pos))
+		requested = replace(zero, **asdict(pad))
+		core_stop = core_pos + shape
+		if bounds is None:
+			bound_start = zero
+			# Directly constructed legacy windows have always clipped at zero but
+			# had no upper-bound authority. Preserve that behavior while making
+			# their logical core explicit.
+			bound_stop = core_stop + requested
+		else:
+			bound_start = replace(zero, **asdict(bounds.start))
+			bound_stop = replace(core_stop, **asdict(bounds.stop))
+		if not (bound_start <= core_pos and core_stop <= bound_stop):
+			raise ValueError("window core must be contained by its authoritative bounds")
+		self.__bounds = DataRange(bound_start, bound_stop, shape.make_with(1))
+		self.__source_pos = type(shape).param_max(bound_start, core_pos - requested)
+		self.__source_stop = type(shape).param_min(bound_stop, core_stop + requested)
+
+	@property
+	def work_dtype(self) -> type:
+		return self.__work_dtype
+
+	@property
+	def dataset(self) -> "TomoDataSet | None":
+		return self.__dataset
+
+	@property
+	def bounds(self) -> DataRange:
+		return self.__bounds
+
+	@property
+	def core_pos(self) -> DataShape:
+		return self.pos
+
+	@property
+	def core_shape(self) -> DataShape:
+		return self.shape
+
+	@property
+	def source_pos(self) -> DataShape:
+		return self.__source_pos
+
+	@property
+	def source_shape(self) -> DataShape:
+		return self.__source_stop - self.__source_pos
+
+	@property
+	def realized_pad_before(self) -> DataShape:
+		zero = self.shape.make_with(0)
+		core_pos = replace(zero, **asdict(self.pos))
+		return core_pos - self.__source_pos
+
+	@property
+	def realized_pad_after(self) -> DataShape:
+		zero = self.shape.make_with(0)
+		core_stop = replace(zero, **asdict(self.pos)) + self.shape
+		return self.__source_stop - core_stop
+
+	@staticmethod
+	def _sample_shape(shape: DataShape, step: DataShape) -> DataShape:
+		values = asdict(shape)
+		for name, stride in asdict(step).items():
+			if stride < 1:
+				raise ValueError("window steps must be positive")
+			values[name] = -(-values[name] // stride)
+		return type(shape)(**values)
+
+	@property
+	def allocation_shape(self) -> DataShape:
+		"""Contiguous buffer shape required for the realized source extent."""
+
+		return self._sample_shape(self.source_shape, self.step)
 
 	@property
 	def internal(self):
-		return self.rescope(pos=self.pad.extract(self.pos), dtype=self.__work_dtype)
+		"""Return the logical core in contiguous buffer-local coordinates."""
+
+		zero = self.shape.make_with(0)
+		core_pos = replace(zero, **asdict(self.pos))
+		offset = core_pos - self.source_pos
+		local = asdict(offset)
+		for name, stride in asdict(self.step).items():
+			if local[name] % stride:
+				raise ValueError("window core is not aligned to its source stride")
+			local[name] //= stride
+		local_pos = type(self.pos)(**{
+			name: local[name] for name in asdict(self.pos)
+		})
+		return DataRef(
+			self._sample_shape(self.shape, self.step),
+			self.shape.make_with(0),
+			local_pos,
+			self.shape.make_with(1),
+			self.__work_dtype,
+		)
+
+	def with_pad(self, pad_dim: Sequence = None, shrink=False) -> Self:
+		"""Return the bounded source view derived from selected pad dimensions."""
+
+		if pad_dim is None:
+			pad_dim = [field.name for field in fields(self.pad)]
+		unknown = set(pad_dim) - {field.name for field in fields(self.pad)}
+		if unknown:
+			raise TypeError("No padding found for dimension.")
+		zero = self.shape.make_with(0)
+		selected = replace(
+			zero,
+			**{
+				name: value if name in pad_dim else 0
+				for name, value in asdict(replace(zero, **asdict(self.pad))).items()
+			},
+		)
+		core_pos = replace(zero, **asdict(self.pos))
+		core_stop = core_pos + self.shape
+		source_pos = type(self.shape).param_max(self.bounds.start, core_pos - selected)
+		source_stop = type(self.shape).param_min(self.bounds.stop, core_stop + selected)
+		source_shape = source_stop - source_pos
+		return TomoWindow(
+			source_shape,
+			zero,
+			source_pos,
+			self.step,
+			self.dtype,
+			self.__work_dtype,
+			bounds=DataRange(source_pos, source_stop, self.shape.make_with(1)),
+			dataset=self.__dataset,
+		)
+
+	def rescope(self, pos: DataShape = None, pad: DataShape = None,
+					dtype: type = None, shape: DataShape = None) -> Self:
+		"""Return another logical core resolved against the same bounds."""
+
+		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape
+		new_pos = replace(self.pos, **asdict(pos)) if pos is not None else self.pos
+		new_pad = replace(self.pad, **asdict(pad)) if pad is not None else self.pad
+		return TomoWindow(
+			new_shape, new_pad, new_pos, self.step,
+			self.dtype if dtype is None else dtype, self.__work_dtype,
+			bounds=self.__bounds, dataset=self.__dataset,
+		)
+
+	def expanded(self, pad: DataShape) -> Self:
+		"""Return generated output geometry expanded symmetrically by ``pad``.
+
+		Unlike a source halo, generated output padding is not clipped to the input
+		dataset. The returned object is still the canonical owner of the resulting
+		allocation and coordinate translation.
+		"""
+
+		if any(value < 0 for value in asdict(pad).values()):
+			raise ValueError("window expansion cannot be negative")
+		zero = self.shape.make_with(0)
+		expansion = replace(zero, **asdict(pad))
+		core_pos = replace(zero, **asdict(self.pos)) - expansion
+		core_shape = self.shape + expansion + expansion
+		core_stop = core_pos + core_shape
+		return TomoWindow(
+			core_shape, zero, core_pos, self.step, self.dtype, self.__work_dtype,
+			bounds=DataRange(core_pos, core_stop, self.shape.make_with(1)),
+			dataset=self.__dataset,
+		)
 
 
 class TomoWindowIter(TFIter):
@@ -225,7 +409,47 @@ class TomoDataSet(DataRef):
 		return self.__fov
 
 	def full_window(self) -> TomoWindow:
-		return TomoWindow(self.shape, self.pad, self.pos, self.step, self.dtype, self.__work_dtype)
+		zero = self.shape.make_with(0)
+		dataset_pos = replace(zero, **asdict(self.pos))
+		return TomoWindow(
+			self.shape, self.pad, self.pos, self.step, self.dtype, self.__work_dtype,
+			bounds=DataRange(
+				dataset_pos, dataset_pos + self.shape, self.shape.make_with(1),
+			),
+			dataset=self,
+		)
+
+	def window(self, shape: DataShape, *, pos: DataShape = None,
+					pad: DataShape = None, step: DataShape = None,
+					bounds: DataRange = None) -> TomoWindow:
+		"""Resolve a logical window against this dataset's selected source scope."""
+
+		core_shape = replace(self.shape, **asdict(shape))
+		zero = self.shape.make_with(0)
+		dataset_pos = replace(zero, **asdict(self.pos))
+		core_pos = dataset_pos if pos is None else replace(dataset_pos, **asdict(pos))
+		requested = zero if pad is None else replace(zero, **asdict(pad))
+		resolved_step = core_shape.make_with(1) if step is None else replace(
+			core_shape.make_with(1), **asdict(step),
+		)
+		dataset_stop = dataset_pos + self.shape
+		if bounds is None:
+			resolved_bounds = DataRange(
+				dataset_pos, dataset_stop, self.shape.make_with(1),
+			)
+		else:
+			bound_start = replace(dataset_pos, **asdict(bounds.start))
+			bound_stop = replace(dataset_stop, **asdict(bounds.stop))
+			if not (dataset_pos <= bound_start and bound_stop <= dataset_stop):
+				raise ValueError("window bounds must be contained by the dataset")
+			resolved_bounds = DataRange(
+				bound_start, bound_stop, self.shape.make_with(1),
+			)
+		return TomoWindow(
+			core_shape, requested, core_pos, resolved_step,
+			self.dtype, self.__work_dtype,
+			bounds=resolved_bounds, dataset=self,
+		)
 
 	def __iter__(self) -> Iterator:
 		partial_twi = partial(TomoWindowIter, shape=self.step_shape, pad=self.pad, dtype=self.dtype,

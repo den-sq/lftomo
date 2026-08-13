@@ -152,6 +152,82 @@ def test_tomo_window():
 	assert twi.dtype == np.float32
 
 
+def test_dataset_window_owns_bounded_asymmetric_source_geometry():
+	dataset = TomoDataSet(
+		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=10, X=6), Y(1),
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+	bounds = Y.drange(2, 9, 1)
+
+	first = dataset.window(Y(3), pos=Y(2), pad=Y(2), bounds=bounds)
+	middle = dataset.window(Y(3), pos=Y(5), pad=Y(2), bounds=bounds)
+	last = dataset.window(Y(1), pos=Y(8), pad=Y(2), bounds=bounds)
+
+	assert first.dataset is dataset
+	assert first.pos == ProjOrder(Theta=0, Y=2, X=0)
+	assert first.shape == ProjOrder(Theta=4, Y=3, X=6)
+	assert first.source_pos == ProjOrder(Theta=0, Y=2, X=0)
+	assert first.source_shape == ProjOrder(Theta=4, Y=5, X=6)
+	assert first.realized_pad_before == ProjOrder(Theta=0, Y=0, X=0)
+	assert first.realized_pad_after == ProjOrder(Theta=0, Y=2, X=0)
+	assert first.internal.pos == ProjOrder(Theta=0, Y=0, X=0)
+	assert first.internal.shape == ProjOrder(Theta=4, Y=3, X=6)
+
+	assert middle.source_pos == ProjOrder(Theta=0, Y=3, X=0)
+	assert middle.source_shape == ProjOrder(Theta=4, Y=6, X=6)
+	assert middle.realized_pad_before == ProjOrder(Theta=0, Y=2, X=0)
+	assert middle.realized_pad_after == ProjOrder(Theta=0, Y=1, X=0)
+	assert middle.internal.pos == ProjOrder(Theta=0, Y=2, X=0)
+	assert middle.allocation_shape == ProjOrder(Theta=4, Y=6, X=6)
+
+	assert last.source_pos == ProjOrder(Theta=0, Y=6, X=0)
+	assert last.source_shape == ProjOrder(Theta=4, Y=3, X=6)
+	assert last.realized_pad_before == ProjOrder(Theta=0, Y=2, X=0)
+	assert last.realized_pad_after == ProjOrder(Theta=0, Y=0, X=0)
+	assert last.internal.pos == ProjOrder(Theta=0, Y=2, X=0)
+
+
+def test_window_source_view_and_generated_output_expansion_are_canonical():
+	dataset = TomoDataSet(
+		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=10, X=6), Y(1),
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+	window = dataset.window(Y(3), pos=Y(5), pad=Proj(Y=2, X=1))
+
+	source = window.with_pad()
+	assert isinstance(source, TomoWindow)
+	assert source.dataset is dataset
+	assert source.pos == ProjOrder(Theta=0, Y=3, X=0)
+	assert source.shape == ProjOrder(Theta=4, Y=7, X=6)
+	assert source.pad == ProjOrder(Theta=0, Y=0, X=0)
+	assert source.allocation_shape == source.shape
+
+	expanded = window.expanded(Proj(Y=0, X=2))
+	assert expanded.dataset is dataset
+	assert expanded.pos == ProjOrder(Theta=0, Y=5, X=-2)
+	assert expanded.shape == ProjOrder(Theta=4, Y=3, X=10)
+	assert expanded.source_pos == expanded.pos
+	assert expanded.allocation_shape == expanded.shape
+	assert expanded.internal.pos == ProjOrder(Theta=0, Y=0, X=0)
+
+
+def test_window_allocation_and_internal_coordinates_honor_source_stride():
+	dataset = TomoDataSet(
+		CTFov(6, 180, 1), ProjOrder(Theta=6, Y=5, X=4), Y(1),
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+	window = dataset.window(
+		ProjOrder(Theta=5, Y=3, X=4),
+		pos=ProjOrder(Theta=1, Y=1, X=0),
+		step=ProjOrder(Theta=2, Y=1, X=1),
+	)
+
+	assert window.source_shape == ProjOrder(Theta=5, Y=3, X=4)
+	assert window.allocation_shape == ProjOrder(Theta=3, Y=3, X=4)
+	assert window.internal.shape == ProjOrder(Theta=3, Y=3, X=4)
+	assert window.internal.step == ProjOrder(Theta=1, Y=1, X=1)
+
+
 def test_data_ref_fields():
 	df = generate_dataref()
 
