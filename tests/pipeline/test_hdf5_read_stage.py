@@ -11,8 +11,15 @@ from lftomo.config import (
 	Scan,
 	StageConfig,
 )
-from lftomo.pipeline import NumpyBackend, Pipeline, PipelineRunContext, PipelineState
-from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
+from lftomo.pipeline import (
+	NumpyBackend,
+	Pipeline,
+	PipelineRunContext,
+	PipelineState,
+	WindowConfig,
+	resolve_streaming_plan,
+)
+from lftomo.pipeline.stages import BilateralFilterStage, STAGE_REGISTRY, create_stage
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -73,6 +80,7 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	assert result.dataset.shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=1, Y=2, X=0)
 	assert result.source_window.shape == ProjOrder(Theta=2, Y=3, X=size)
+	assert result.source_window.dataset is result.dataset
 	assert result.buffer_spec.layout is SinoOrder
 
 
@@ -87,6 +95,38 @@ def test_hdf5_stage_allows_absent_optional_calibration(tmp_path):
 	assert "white_fields" not in result.artifacts
 	assert "dark_fields" not in result.artifacts
 	assert result.artifacts["hdf5_read_strategy"] == "direct"
+
+
+def test_hdf5_read_rebinds_planned_window_to_authoritative_dataset(tmp_path):
+	count, size = 4, 6
+	data = np.arange(count * size * size, dtype=np.uint16).reshape(count, size, size)
+	path = tmp_path / "scan.h5"
+	_write(path, data)
+	base_config = StageConfig(kind="read", algorithm="hdf5_dxchange")
+	base_state = _state(path, count, size, base_config)
+	plan = resolve_streaming_plan(
+		[create_stage(base_config), BilateralFilterStage(diameter=3)],
+		base_state.scan,
+		WindowConfig(rows=2),
+	)
+	planned = plan.windows[1]
+	read_config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={
+		"y_start": int(planned.source_pos.Y),
+		"y_stop": int(planned.source_pos.Y + planned.source_shape.Y),
+	})
+	state = _state(path, count, size, read_config)
+	state.dataset = plan.dataset
+	state.source_window = planned
+
+	result = _run(state, create_stage(read_config))
+
+	assert result.dataset is not plan.dataset
+	assert result.source_window.dataset is result.dataset
+	assert result.source_window.pos == planned.pos
+	assert result.source_window.shape == planned.shape
+	assert result.source_window.pad == planned.pad
+	assert result.source_window.source_pos == planned.source_pos
+	assert result.source_window.source_shape == planned.source_shape
 
 
 def test_hdf5_stage_reports_missing_projection_dataset(tmp_path):

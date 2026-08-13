@@ -33,7 +33,6 @@ from lftomo.config import (
 	StageConfig,
 )
 from lftomo.pipeline import (
-	AxisPad,
 	Backend,
 	CandidateLimitError,
 	NumpyBackend,
@@ -52,6 +51,7 @@ from lftomo.pipeline import (
 from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.storage import ManagedBuffer, buffer_view
+from lftomo.util.shapes import Y
 
 
 PipelineStateExecutor = Callable[
@@ -426,8 +426,8 @@ def _window_recon(recon: Recon, window) -> Recon:
 	resolved = recon.model_copy(deep=True)
 	for config in resolved.pipeline:
 		if config.kind == "read":
-			config.params["y_start"] = window.source_start
-			config.params["y_stop"] = window.source_stop
+			config.params["y_start"] = int(window.source_pos.Y)
+			config.params["y_stop"] = int(window.source_pos.Y + window.source_shape.Y)
 	return resolved
 
 
@@ -439,10 +439,11 @@ def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
 		values = np.asarray(fields)
 		if values.ndim == 3:
 			if values.shape[1] == plan.selection[1] - plan.selection[0]:
-				start = window.source_start - plan.selection[0]
-				stop = window.source_stop - plan.selection[0]
+				start = int(window.source_pos.Y) - plan.selection[0]
+				stop = int(window.source_pos.Y + window.source_shape.Y) - plan.selection[0]
 			elif values.shape[1] == scan.detector.rows:
-				start, stop = window.source_start, window.source_stop
+				start = int(window.source_pos.Y)
+				stop = int(window.source_pos.Y + window.source_shape.Y)
 			else:
 				raise ValueError(
 					"resolved flat_fields do not cover the selected streaming rows"
@@ -516,7 +517,7 @@ def _run_streaming_pipeline(
 	output_files = []
 	reserve = getattr(run_context.storage, "reserve", None)
 	if reserve is not None:
-		largest = max(window_plan.windows, key=lambda item: item.source_rows)
+		largest = max(window_plan.windows, key=lambda item: item.allocation_shape.Y)
 		reserve_recon = _window_recon(concrete, largest)
 		reserve_scan = _window_scan(run_scan, window_plan, largest)
 		reserve_stages = [create_stage(config) for config in reserve_recon.pipeline]
@@ -530,7 +531,7 @@ def _run_streaming_pipeline(
 		)
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
-	for window in window_plan.windows:
+	for window_index, window in enumerate(window_plan.windows):
 		window_recon = _window_recon(concrete, window)
 		window_scan = _window_scan(run_scan, window_plan, window)
 		window_stages = [create_stage(config) for config in window_recon.pipeline]
@@ -547,6 +548,7 @@ def _run_streaming_pipeline(
 				np.empty((0,), dtype=np.float32), window_scan, window_recon,
 				artifacts=dict(window_initial), backend=backend,
 				storage=run_context.storage, executor=run_context.executor,
+				dataset=window.dataset, source_window=window,
 			)
 			prepass = _planned_pipeline(
 				prepass_stages, window_scan, backend, window_initial, stage_observer,
@@ -572,6 +574,7 @@ def _run_streaming_pipeline(
 			np.empty((0,), dtype=np.float32), window_scan, window_recon,
 			artifacts=dict(window_initial), backend=backend,
 			storage=run_context.storage, executor=run_context.executor,
+			dataset=window.dataset, source_window=window,
 		)
 		compute = _planned_pipeline(
 			compute_stages, window_scan, backend, window_initial, stage_observer,
@@ -579,7 +582,9 @@ def _run_streaming_pipeline(
 		)
 		state = compute.run(state)
 		if state.domain is DataDomain.RECON:
-			state = crop_reconstruction_to_interior(state, window, window_plan)
+			state = crop_reconstruction_to_interior(
+				state, window, window_plan, index=window_index,
+			)
 		elif writer_stages:
 			raise ValueError("windowed writers require a reconstruction-producing Stage")
 		if writer_stages:
@@ -593,7 +598,7 @@ def _run_streaming_pipeline(
 		files = window_artifacts.get("output_files", [])
 		output_files.extend(path for path in files if path not in output_files)
 		window_records.append({
-			"window": window_plan.record()["windows"][window.index],
+			"window": window_plan.record()["windows"][window_index],
 			"center_artifacts": center_artifacts,
 			"artifacts": window_artifacts,
 		})
@@ -712,6 +717,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					backend=backend,
 					storage=run_context.storage,
 					executor=run_context.executor,
+					dataset=window_plan.dataset,
+					source_window=window_plan.windows[0],
 				)
 				state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
 				# Experiment-managed arrays belong to the run context. Do not return
@@ -807,7 +814,7 @@ def main(pipeline_path: Path, scan_path: Path, output_path: Path | None,
 	backend = Backend(name="numpy", supports_gpu=True) if gpu else NumpyBackend()
 	results = run_reconstruction(
 		pipeline_path, scan_path, output_path, backend,
-		window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=extra_pad_y)),
+		window_config=WindowConfig(rows=window_rows, extra_pad=Y(extra_pad_y)),
 	)
 	if json_output:
 		click.echo(json.dumps([_json_result(result) for result in results], indent=2))

@@ -8,8 +8,6 @@ import yaml
 
 from lftomo.config import Acquisition, Detector, Scan, TIFFStackProjections
 from lftomo.pipeline import (
-	AxisPad,
-	PadRequirement,
 	Stage,
 	StageContract,
 	WindowConfig,
@@ -22,9 +20,11 @@ from lftomo.pipeline.stages import (
 	MovementCorrectStage,
 	NegativeLogStage,
 	PaganinFilterStage,
+	TIFFStackReadStage,
 )
 from lftomo.prep.phase import _phase_pad
 from lftomo.runner import run_reconstruction
+from lftomo.util.shapes import ProjOrder, Y
 from tests.fixtures.tier1 import projection_stack
 
 
@@ -53,18 +53,18 @@ def test_pad_quantities_are_separate_and_neighborhood_stages_compose():
 		MovementCorrectStage(y=3),
 	]
 	plan = resolve_streaming_plan(
-		stages, _scan(), WindowConfig(rows=3, extra_pad=AxisPad(y=5)),
+		stages, _scan(), WindowConfig(rows=3, extra_pad=Y(5)),
 	)
 	assert plan.window_rows == 3
-	assert plan.required_pad == AxisPad(y=7, x=4)
-	assert plan.extra_pad == AxisPad(y=5)
-	assert plan.effective_pad == AxisPad(y=7, x=4)
+	assert plan.required_pad == ProjOrder(Theta=0, Y=7, X=4)
+	assert plan.extra_pad == ProjOrder(Theta=0, Y=5, X=0)
+	assert plan.effective_pad == ProjOrder(Theta=0, Y=7, X=4)
 
 	user_dominates = resolve_streaming_plan(
-		stages, _scan(), WindowConfig(rows=3, extra_pad=AxisPad(y=10)),
+		stages, _scan(), WindowConfig(rows=3, extra_pad=Y(10)),
 	)
-	assert user_dominates.required_pad.y == 7
-	assert user_dominates.effective_pad.y == 10
+	assert user_dominates.required_pad.Y == 7
+	assert user_dominates.effective_pad.Y == 10
 
 
 def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
@@ -72,7 +72,7 @@ def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
 	plan = resolve_streaming_plan(
 		[PaganinFilterStage(), NegativeLogStage()], scan, WindowConfig(rows=8),
 	)
-	assert plan.required_pad.y == _phase_pad(8, 1e-4, 10, 20)
+	assert plan.required_pad.Y == _phase_pad(8, 1e-4, 10, 20)
 	assert "phase.paganin_filter" in plan.warnings[0]
 	assert "whole-volume equivalence" in plan.warnings[0]
 
@@ -91,12 +91,49 @@ def test_retained_fresh_transition_is_explicit_but_prefix_is_not_retained():
 		[BilateralFilterStage(diameter=5)], _scan(rows=10), WindowConfig(rows=3),
 	)
 	first, second = plan.windows[:2]
-	assert first.transition.retained is None
-	assert first.transition.fresh == ((0, 5),)
-	assert second.transition.adjacent
-	assert second.transition.retained == (1, 5)
-	assert second.transition.fresh == ((5, 8),)
-	assert second.transition.prefix_valid is False
+	first_transition, second_transition = plan.transitions[:2]
+	assert first.dataset is plan.dataset
+	assert first.pos == ProjOrder(Theta=0, Y=0, X=0)
+	assert first.shape == ProjOrder(Theta=4, Y=3, X=8)
+	assert first.source_pos == ProjOrder(Theta=0, Y=0, X=0)
+	assert first.source_shape == ProjOrder(Theta=4, Y=5, X=8)
+	assert first.internal.pos == ProjOrder(Theta=0, Y=0, X=0)
+	assert second.internal.pos.Y == 2
+	assert first_transition.retained is None
+	assert first_transition.fresh == ((0, 5),)
+	assert second_transition.adjacent
+	assert second_transition.retained == (1, 5)
+	assert second_transition.fresh == ((5, 8),)
+	assert second_transition.prefix_valid is False
+
+
+def test_canonical_windows_clip_to_nonzero_read_selection_on_both_edges():
+	plan = resolve_streaming_plan(
+		[
+			TIFFStackReadStage(y_start=2, y_stop=9),
+			BilateralFilterStage(diameter=5),
+		],
+		_scan(rows=10),
+		WindowConfig(rows=3),
+	)
+	first, middle, last = plan.windows
+
+	assert plan.selection == (2, 9)
+	assert first.pos.Y == 2
+	assert first.source_pos.Y == 2
+	assert first.source_shape.Y == 5
+	assert first.realized_pad_before.Y == 0
+	assert first.realized_pad_after.Y == 2
+	assert middle.pos.Y == 5
+	assert middle.source_pos.Y == 3
+	assert middle.source_shape.Y == 6
+	assert middle.realized_pad_before.Y == 2
+	assert middle.realized_pad_after.Y == 1
+	assert last.pos.Y == 8
+	assert last.source_pos.Y == 6
+	assert last.source_shape.Y == 3
+	assert last.realized_pad_before.Y == 2
+	assert last.realized_pad_after.Y == 0
 
 
 def _write_yaml(path: Path, value):

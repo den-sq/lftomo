@@ -8,7 +8,7 @@ from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	AxisPad, Locality, PadRequirement, PipelineState, Stage, StageContract,
+	Locality, PadRequirement, PipelineState, Stage, StageContract,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -19,7 +19,7 @@ from lftomo.pipeline.layout import (
 	projection_view,
 	resolve_layout,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import Proj, ProjOrder, SinoOrder
 
 
 def _contract(order: str | None = None, *, resamples_detector: bool = False,
@@ -181,9 +181,9 @@ class MovementCorrectStage(Stage):
 		active = enabled and (y != 0 or x != 0)
 		self.contract = _contract(
 			array_order, resamples_detector=active, mutates_input=active,
-			required_pad=PadRequirement(fixed=AxisPad(
-				y=int(np.ceil(abs(y))) if active else 0,
-				x=int(np.ceil(abs(x))) if active else 0,
+			required_pad=PadRequirement(fixed=Proj(
+				Y=int(np.ceil(abs(y))) if active else 0,
+				X=int(np.ceil(abs(x))) if active else 0,
 			)),
 		)
 
@@ -266,9 +266,9 @@ class AffineSkewMovementStage(Stage):
 			self.contract = _contract(
 				resamples_detector=active_resample,
 				mutates_input=active_resample,
-				required_pad=PadRequirement(fixed=AxisPad(
-					y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
-					x=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
+				required_pad=PadRequirement(fixed=Proj(
+					Y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
+					X=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
 				)),
 			)
 		else:
@@ -280,9 +280,9 @@ class AffineSkewMovementStage(Stage):
 				produces_domain=PRESERVE, locality=Locality.VOLUME,
 				fused_transition=True, resamples_detector=active_resample,
 				mutates_input=False,
-				required_pad=PadRequirement(fixed=AxisPad(
-					y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
-					x=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
+				required_pad=PadRequirement(fixed=Proj(
+					Y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
+					X=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
 				)),
 			)
 

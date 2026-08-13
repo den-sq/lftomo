@@ -119,6 +119,7 @@ def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path)
 	np.testing.assert_array_equal(result.working_array, np.transpose(stack, (1, 0, 2)))
 	assert result.dataset.shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=0)
+	assert result.source_window.dataset is result.dataset
 	assert result.buffer_spec.layout is SinoOrder
 
 

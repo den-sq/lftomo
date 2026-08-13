@@ -108,8 +108,9 @@ path; mutating suffixes continue to receive an independent writable copy.
 Read Stages also establish three distinct coordinate records on `PipelineState`:
 
 - `dataset`: the full source `TomoDataSet`, including the complete angle vector;
-- `source_window`: the immutable global source selection, position, stride, and
-  padding; and
+- `source_window`: the canonical `TomoWindow`, whose logical core, requested
+  padding, clipped source extent, allocation shape, and buffer-local
+  `internal` coordinates derive from its parent `TomoDataSet`; and
 - `buffer_spec`: the current allocation's shape, dtype, and layout.
 
 Layout conversion and reconstruction update `buffer_spec`; they do not rewrite

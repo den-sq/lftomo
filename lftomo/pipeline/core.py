@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import astuple, dataclass, field, is_dataclass, replace
+from dataclasses import asdict, astuple, dataclass, field, is_dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
@@ -12,6 +12,7 @@ import numpy as np
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer, StorageBackend, buffer_view
+from lftomo.util.shapes import DataShape, ProjOrder, Y
 
 if TYPE_CHECKING:
 	from lftomo.pipeline.execution import PipelineExecutor
@@ -52,40 +53,22 @@ class Locality(Enum):
 
 
 @dataclass(frozen=True)
-class AxisPad:
-	"""Symmetric source halo required along tomography axes."""
-
-	theta: int = 0
-	y: int = 0
-	x: int = 0
-
-	def __post_init__(self):
-		if min(self.theta, self.y, self.x) < 0:
-			raise ValueError("axis padding cannot be negative")
-
-	def __add__(self, other: "AxisPad") -> "AxisPad":
-		return AxisPad(
-			self.theta + other.theta, self.y + other.y, self.x + other.x,
-		)
-
-	def maximum(self, other: "AxisPad") -> "AxisPad":
-		return AxisPad(
-			max(self.theta, other.theta), max(self.y, other.y), max(self.x, other.x),
-		)
-
-	def as_dict(self) -> dict[str, int]:
-		return {"theta": self.theta, "y": self.y, "x": self.x}
-
-
-@dataclass(frozen=True)
 class PadRequirement:
-	"""Serializable Stage pad rule resolved from scan and input shape."""
+	"""Stage halo rule expressed in the canonical semantic-axis vocabulary."""
 
-	fixed: AxisPad = AxisPad()
+	fixed: DataShape = field(
+		default_factory=lambda: ProjOrder(Theta=0, Y=0, X=0),
+	)
 	phase_fft_y: bool = False
 
-	def resolve(self, scan: Any, input_shape: Any) -> AxisPad:
-		resolved = self.fixed
+	def __post_init__(self):
+		if not set(asdict(self.fixed)).issubset({"Theta", "Y", "X"}):
+			raise ValueError("padding requirements may use only Theta, Y, and X axes")
+		if any(value < 0 for value in asdict(self.fixed).values()):
+			raise ValueError("axis padding cannot be negative")
+
+	def resolve(self, scan: Any, input_shape: Any) -> ProjOrder:
+		resolved = ProjOrder(Theta=0, Y=0, X=0) + self.fixed
 		if self.phase_fft_y:
 			from lftomo.prep.phase import _phase_pad
 
@@ -96,7 +79,7 @@ class PadRequirement:
 				float(scan.ssd_cm),
 				float(scan.energy_keV),
 			))
-			resolved = resolved + AxisPad(y=max(0, phase_y))
+			resolved = resolved + Y(max(0, phase_y))
 		return resolved
 
 

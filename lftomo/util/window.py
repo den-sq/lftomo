@@ -316,6 +316,17 @@ class TomoWindow(DataRef):
 			dataset=self.__dataset,
 		)
 
+	def rebind(self, dataset: "TomoDataSet") -> Self:
+		"""Resolve this same canonical geometry against an authoritative dataset."""
+
+		return dataset.window(
+			self.shape,
+			pos=self.pos,
+			pad=self.pad,
+			step=self.step,
+			bounds=self.bounds,
+		)
+
 
 class TomoWindowIter(TFIter):
 	def __init__(self, dr: DataRange, shape: DataShape, pad: DataShape,

@@ -29,7 +29,7 @@ from lftomo.pipeline.core import PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
 from lftomo.util.shapes import ProjOrder, SinoOrder, Y
-from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
+from lftomo.util.window import CTFov, TomoDataSet
 
 
 def _output_contract(order: str, *, required_metadata: tuple[str, ...],
@@ -177,19 +177,35 @@ def _bind_source_state(
 		angles=angles,
 		acquisition_indices=acquisition_indices,
 	)
-	zero = ProjOrder(Theta=0, Y=0, X=0)
 	# A TomoWindow describes the covered source-coordinate span.  With a
 	# strided Theta selection its shape is therefore ``stop - start`` while the
 	# working buffer contains ``len(range(start, stop, stride))`` samples; step
 	# carries the mapping between those two extents.
-	source_window = TomoWindow(
-		ProjOrder(Theta=theta_stop - theta_start, Y=y_stop - y_start, X=full_shape.X),
-		zero,
-		ProjOrder(Theta=theta_start, Y=y_start, X=0),
-		ProjOrder(Theta=theta_stride, Y=1, X=1),
-		dtype,
-		np.float32,
-	)
+	if state.source_window is None:
+		source_window = dataset.window(
+			ProjOrder(
+				Theta=theta_stop - theta_start,
+				Y=y_stop - y_start,
+				X=full_shape.X,
+			),
+			pos=ProjOrder(Theta=theta_start, Y=y_start, X=0),
+			step=ProjOrder(Theta=theta_stride, Y=1, X=1),
+			bounds=ProjOrder.drange(
+				(theta_start, y_start, 0),
+				(theta_stop, y_stop, full_shape.X),
+				(1, 1, 1),
+			),
+		)
+	else:
+		source_window = state.source_window.rebind(dataset)
+		if (
+			int(source_window.source_pos.Theta) != theta_start
+			or int(source_window.source_pos.Y) != y_start
+			or int(source_window.source_shape.Theta) != theta_stop - theta_start
+			or int(source_window.source_shape.Y) != y_stop - y_start
+			or int(source_window.step.Theta) != theta_stride
+		):
+			raise ValueError("planned source window does not match the read selection")
 	result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
 	result.dataset = dataset
 	result.source_window = source_window
