@@ -152,6 +152,48 @@ def test_tomo_window():
 	assert twi.dtype == np.float32
 
 
+def test_window_coordinate_operations_share_the_existing_dataref_model():
+	window = TomoWindow(
+		ProjOrder(Theta=4, Y=100, X=6), Y(10), Y(100), Y(1),
+		np.uint16, np.float32,
+	)
+
+	assert window.index == np.s_[0:4:1, 100:200:1, 0:6:1]
+
+	read_window = window.with_pad(["Y"])
+	assert read_window.index == np.s_[0:4:1, 90:210:1, 0:6:1]
+	assert read_window.pad == Y(0)
+
+	internal = window.internal
+	assert internal.index == np.s_[0:4:1, 10:110:1, 0:6:1]
+	assert internal.dtype == np.dtype(np.float32)
+
+	rescoped = window.rescope(pos=Y(30), shape=Y(40))
+	assert rescoped.index == np.s_[0:4:1, 30:70:1, 0:6:1]
+	assert list(rescoped.int_iter()) == list(range(30, 70))
+	assert list(rescoped.slice_iter()) == [np.s_[:, y, :] for y in range(30, 70)]
+
+
+def test_nondivisible_selection_emits_a_short_final_unpadded_window():
+	selection = Y.drange(100, 1000, 400)
+	dataset = TomoDataSet(
+		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+
+	windows = list(dataset)
+
+	assert dataset.frange == selection
+	assert [window.pos for window in windows] == [Y(100), Y(500), Y(900)]
+	assert [window.shape.Y for window in windows] == [400, 400, 100]
+	assert [window.index for window in windows] == [
+		np.s_[0:4:1, 100:500:1, 0:6:1],
+		np.s_[0:4:1, 500:900:1, 0:6:1],
+		np.s_[0:4:1, 900:1000:1, 0:6:1],
+	]
+	assert windows[-1].internal.index == np.s_[0:4:1, 0:100:1, 0:6:1]
+
+
 def test_data_ref_fields():
 	df = generate_dataref()
 
