@@ -39,6 +39,14 @@ block at its output-row offset. Shared storage reserves the largest planned
 window capacity and reuses the same named physical roles, so edge-window sizes
 do not make memory grow with the window count.
 
+The fused affine transition applies output X padding with
+`TomoWindow.expanded()`. The canonical result supplies output width, allocation
+shape, buffer fill on each side, center translation, and the published
+`PipelineState.source_window`. Static planning, serial execution, and process
+execution all consume that same transformation; `pad_x` is no longer
+recalculated as independent geometry in those paths. As before, `pad_x` is
+operative only for the fused `transition_to` form.
+
 Automatic center finding uses the **replay** policy. For each window, the
 driver first executes the actual read-through-center processed prefix in its
 own managed buffers, detaches the center artifacts, retires those buffers, and

@@ -10,7 +10,8 @@ from lftomo.pipeline.stages import (
 	SkewCorrectStage,
 	create_stage,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.window import CTFov, TomoDataSet
 
 
 def _state(array, config):
@@ -118,6 +119,46 @@ def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(mo
 	assert result.working_array.flags.c_contiguous
 	expected = np.pad(working.transpose(1, 0, 2), ((0, 0), (0, 0), (1, 1)), mode="edge")
 	np.testing.assert_array_equal(result.working_array, expected)
+
+
+def test_fused_affine_output_geometry_derives_from_canonical_window(monkeypatch):
+	config = StageConfig(
+		kind="geometry", algorithm="affine_skew_movement",
+		params={
+			"transition_to": "projection", "pad_x": 1,
+			"skew_degrees": 0.2, "center_px": 2,
+		},
+	)
+	dataset = TomoDataSet(
+		CTFov(3, 180, 1), ProjOrder(Theta=3, Y=6, X=4), Y(1),
+		dtype=np.float32, work_dtype=np.float32,
+	)
+	window = dataset.window(Y(2), pos=Y(2), pad=Y(1))
+	working = np.ones((4, 3, 4), dtype=np.float32)
+	state = _state(working, config)
+	state.layout = SinoOrder
+	state.domain = DataDomain.ATTENUATION
+	state.dataset = dataset
+	state.source_window = window
+	centers = []
+	monkeypatch.setattr(
+		"cv2.getRotationMatrix2D",
+		lambda center, *_args: centers.append(center) or np.eye(2, 3),
+	)
+	monkeypatch.setattr("cv2.warpAffine", lambda image, *_args, **_kwargs: image)
+
+	result = create_stage(config).run(state)
+
+	assert result.working_array.shape == (3, 4, 6)
+	assert centers == [(3, 2)] * 3
+	assert result.source_window.dataset is dataset
+	assert result.source_window.pos == ProjOrder(Theta=0, Y=2, X=-1)
+	assert result.source_window.shape == ProjOrder(Theta=3, Y=2, X=6)
+	assert result.source_window.pad == ProjOrder(Theta=0, Y=1, X=0)
+	assert result.source_window.source_pos == ProjOrder(Theta=0, Y=1, X=-1)
+	assert result.source_window.source_shape == ProjOrder(Theta=3, Y=4, X=6)
+	assert result.source_window.allocation_shape == ProjOrder(Theta=3, Y=4, X=6)
+	assert result.source_window.internal.pos == ProjOrder(Theta=0, Y=1, X=0)
 
 
 def test_fused_transition_is_direction_parametric():

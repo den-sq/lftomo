@@ -257,6 +257,9 @@ def run_affine_fill_kernel(
 	projection_count: int,
 	row_count: int,
 	stage: Stage,
+	pad_before_x: int,
+	pad_after_x: int,
+	output_width: int,
 ) -> None:
 	"""Transform one projection into a manager-owned fused output."""
 
@@ -268,6 +271,7 @@ def run_affine_fill_kernel(
 	projection_view(target_values, target_layout, projection)[:] = (
 		transform_affine_projection(
 			stage, image, projection, projection_count, row_count,
+			pad_before_x, pad_after_x, output_width,
 		)
 	)
 
@@ -506,25 +510,31 @@ class PipelineExecutor:
 				raise ValueError("fused affine transition must change layout")
 			projection_count = data.shape[0] if input_layout is ProjOrder else data.shape[1]
 			row_count = data.shape[1] if input_layout is ProjOrder else data.shape[0]
-			width = data.shape[2] + 2 * stage.pad_x
-			shape = (
-				(projection_count, row_count, width)
-				if stage.target_layout is ProjOrder else
-				(row_count, projection_count, width)
+			input_shape = input_layout(*data.shape)
+			input_window = stage.input_window(
+				input_shape, input_layout, data.dtype,
+				source_window=state.source_window,
 			)
+			output_window = stage.output_window(input_window)
+			pad_before_x, pad_after_x = stage.output_padding(
+				input_window, output_window,
+			)
+			shape = output_window.allocation_shape.to(stage.target_layout)
 			output, _target = allocate_output(
-				state, stage.target_layout(*shape), data.dtype, role="fused_geometry",
+				state, shape, data.dtype, role="fused_geometry",
 			)
 			self.submit_all(run_affine_fill_kernel, (
 				(
 					state.working_array, output, input_layout, stage.target_layout,
 					index, projection_count, row_count, stage,
+					pad_before_x, pad_after_x, shape.X,
 				)
 				for index in range(projection_count)
 			))
 			result = commit_output(
 				state, output, retire_as=None, layout=stage.target_layout,
 			)
+			result.source_window = output_window
 			result.artifacts["fused_layout_transition"] = {
 				"from": input_layout.__name__, "to": stage.target_layout.__name__,
 				"pad_x": stage.pad_x, "skew_degrees": stage.skew_degrees,

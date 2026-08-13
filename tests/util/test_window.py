@@ -206,9 +206,10 @@ def test_window_source_view_and_generated_output_expansion_are_canonical():
 	assert expanded.dataset is dataset
 	assert expanded.pos == ProjOrder(Theta=0, Y=5, X=-2)
 	assert expanded.shape == ProjOrder(Theta=4, Y=3, X=10)
-	assert expanded.source_pos == expanded.pos
-	assert expanded.allocation_shape == expanded.shape
-	assert expanded.internal.pos == ProjOrder(Theta=0, Y=0, X=0)
+	assert expanded.source_pos == ProjOrder(Theta=0, Y=3, X=-2)
+	assert expanded.source_shape == ProjOrder(Theta=4, Y=7, X=10)
+	assert expanded.allocation_shape == ProjOrder(Theta=4, Y=7, X=10)
+	assert expanded.internal.pos == ProjOrder(Theta=0, Y=2, X=0)
 
 
 def test_window_allocation_and_internal_coordinates_honor_source_stride():

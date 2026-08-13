@@ -309,10 +309,11 @@ class TomoWindow(DataRef):
 		expansion = replace(zero, **asdict(pad))
 		core_pos = replace(zero, **asdict(self.pos)) - expansion
 		core_shape = self.shape + expansion + expansion
-		core_stop = core_pos + core_shape
+		bound_start = self.bounds.start - expansion
+		bound_stop = self.bounds.stop + expansion
 		return TomoWindow(
-			core_shape, zero, core_pos, self.step, self.dtype, self.__work_dtype,
-			bounds=DataRange(core_pos, core_stop, self.shape.make_with(1)),
+			core_shape, self.pad, core_pos, self.step, self.dtype, self.__work_dtype,
+			bounds=DataRange(bound_start, bound_stop, self.shape.make_with(1)),
 			dataset=self.__dataset,
 		)
 

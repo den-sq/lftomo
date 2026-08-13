@@ -328,6 +328,13 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		np.testing.assert_allclose(
 			np.asarray(result.working_array), np.asarray(expected.working_array),
 		)
+		if isinstance(stage, AffineSkewMovementStage):
+			assert result.source_window is not None
+			assert result.source_window.pos == expected.source_window.pos
+			assert result.source_window.shape == expected.source_window.shape
+			assert result.source_window.source_pos == expected.source_window.source_pos
+			assert result.source_window.allocation_shape == expected.source_window.allocation_shape
+			assert result.source_window.allocation_shape.to(result.layout) == result.buffer_spec.shape
 
 
 def test_bounded_process_child_mutation_is_visible_in_parent():

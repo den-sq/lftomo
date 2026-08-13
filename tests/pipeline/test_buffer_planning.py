@@ -6,11 +6,13 @@ import pytest
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
 	BufferAction,
+	BufferSpec,
 	DataDomain,
 	PipelineRunContext,
 	PipelineState,
 	validate_pipeline,
 )
+from lftomo.pipeline.planning import stage_output_spec
 from lftomo.pipeline.stages import (
 	AffineSkewMovementStage,
 	DRHTStage,
@@ -147,6 +149,27 @@ def test_fused_geometry_and_helical_outputs_are_manager_issued():
 		).run(geometry)
 		assert isinstance(remapped.working_array, ManagedBuffer)
 		assert remapped.working_array.name != geometry.working_array.name
+
+
+def test_fused_affine_planner_exercises_canonical_window_geometry(monkeypatch):
+	stage = AffineSkewMovementStage(transition_to="sinogram", pad_x=2)
+	input_spec = BufferSpec(
+		ProjOrder(Theta=3, Y=2, X=4), np.dtype(np.float32), ProjOrder,
+	)
+	calls = []
+	original = stage.output_window
+
+	def observed(*args, **kwargs):
+		window = original(*args, **kwargs)
+		calls.append(window)
+		return window
+
+	monkeypatch.setattr(stage, "output_window", observed)
+	result = stage_output_spec(stage, input_spec, _scan(projections=3))
+
+	assert calls
+	assert result.shape == SinoOrder(Y=2, Theta=3, X=8)
+	assert result.shape == calls[0].allocation_shape.to(SinoOrder)
 
 
 def test_phase_filter_is_a_manager_issued_producer_artifact():
