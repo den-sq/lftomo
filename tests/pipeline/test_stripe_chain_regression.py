@@ -15,7 +15,6 @@ from lftomo.pipeline import (
 	PipelineRunContext,
 	PipelineState,
 	PRESERVE,
-	working_view,
 )
 from lftomo.pipeline.stages import (
 	AllOfTheStripeStage,
@@ -231,7 +230,7 @@ def _managed_vo_chain(workers: int):
 			initial_domain=DataDomain.ATTENUATION, bounded_workers=workers,
 		).run(state)
 		return (
-			working_view(result).copy(),
+			np.asarray(result.working_array).copy(),
 			dict(result.artifacts["vo_scratch_allocations"][0]),
 			context.storage.allocation_events,
 			dict(result.artifacts),

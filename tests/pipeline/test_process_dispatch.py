@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, Pipeline, PipelineRunContext, PipelineState, working_view
+from lftomo.pipeline import DataDomain, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.core import Locality, Stage, StageContract
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.pipeline.execution import (
@@ -190,7 +190,7 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 			expected[index] = 10 / (
 				20 * (1 - global_index / 10) + 40 * (global_index / 10)
 			)
-		np.testing.assert_allclose(working_view(result), expected)
+		np.testing.assert_allclose(np.asarray(result.working_array), expected)
 
 
 def test_process_phase_chain_matches_intentionally_coupled_stage():
@@ -212,7 +212,7 @@ def test_process_phase_chain_matches_intentionally_coupled_stage():
 		)
 		state = context.executor.run_stage(state, PaganinFilterStage(alpha=0.06, order="projection"))
 		state = context.executor.run_stage(state, NegativeLogStage(order="projection"))
-		np.testing.assert_allclose(working_view(state), expected, rtol=1e-5, atol=1e-6)
+		np.testing.assert_allclose(np.asarray(state.working_array), expected, rtol=1e-5, atol=1e-6)
 
 
 def test_process_bac_filter_then_negative_log_matches_coupled_stage(
@@ -261,7 +261,7 @@ class BronnikovAidedCorrection:
 			state, BronnikovAidedCorrectionFilterStage(alpha=2, gamma=1.25),
 		)
 		state = context.executor.run_stage(state, NegativeLogStage(epsilon=None))
-		np.testing.assert_allclose(working_view(state), expected, rtol=2e-6, atol=2e-7)
+		np.testing.assert_allclose(np.asarray(state.working_array), expected, rtol=2e-6, atol=2e-7)
 
 
 def test_process_beam_tracking_matches_serial_and_merges_qc():
@@ -282,7 +282,9 @@ def test_process_beam_tracking_matches_serial_and_merges_qc():
 			layout=ProjOrder, domain=DataDomain.RAW,
 		)
 		result = context.executor.run_stage(state, BeamTrackingNormalizeStage(**params))
-		np.testing.assert_allclose(working_view(result), working_view(expected_state))
+		np.testing.assert_allclose(
+			np.asarray(result.working_array), np.asarray(expected_state.working_array),
+		)
 		assert result.artifacts["beam_tracking_qc"]["projection_count"] == 6
 
 
@@ -323,7 +325,9 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		assert isinstance(result.working_array, ManagedBuffer)
 		assert all(isinstance(task[0], ManagedBuffer) for task in captured)
 		assert all(isinstance(task[1], ManagedBuffer) for task in captured)
-		np.testing.assert_allclose(working_view(result), working_view(expected))
+		np.testing.assert_allclose(
+			np.asarray(result.working_array), np.asarray(expected.working_array),
+		)
 
 
 def test_bounded_process_child_mutation_is_visible_in_parent():

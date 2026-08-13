@@ -21,7 +21,7 @@ from scipy.ndimage import binary_dilation, median_filter, uniform_filter1d
 from scipy.signal import medfilt2d
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, Pipeline, PipelineRunContext, PipelineState, working_view
+from lftomo.pipeline import DataDomain, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.stages import VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
 from lftomo.prep.stripe import _detect_stripe
 from lftomo.util.shapes import ProjOrder
@@ -265,7 +265,7 @@ def run(
 			started = time.perf_counter()
 			result = pipeline.run(state)
 			seconds = time.perf_counter() - started
-		fingerprint = _fingerprint(working_view(result))
+		fingerprint = _fingerprint(np.asarray(result.working_array))
 	return VoBenchmarkResult(
 		variant, operation, shape, workers, False,
 		bytes_report["input_bytes"], managed,

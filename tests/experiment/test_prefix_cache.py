@@ -176,7 +176,7 @@ class ArtifactTailStage(Stage):
 		assert state.artifacts["center"] == 7.5
 		assert state.artifacts["qc"] == {"valid": True}
 		if self.mutates:
-			buffer_view(state.working_array)[:] += 1
+			np.asarray(state.working_array)[:] += 1
 		return state
 
 
@@ -287,7 +287,7 @@ def _crashing_cached_trial(connection, scratch):
 		initial.working_array = context.storage.allocate(
 			values.shape, values.dtype, role="trial-input",
 		)
-		initial.working_array.array()[...] = values
+		np.asarray(initial.working_array)[...] = values
 		executor.execute(
 			plan.decisions[0], initial,
 			(SourceStage(values), MutatingTailStage(2)), candidates[0].configs,
@@ -436,7 +436,7 @@ def test_cache_fork_is_manager_issued_and_identity_ignores_buffer_name(tmp_path)
 			initial.working_array = context.storage.allocate(
 				values.shape, values.dtype, role=role,
 			)
-			initial.working_array.array()[...] = values
+			np.asarray(initial.working_array)[...] = values
 			return executor.execute(
 				decision, initial,
 				(SourceStage(values), MutatingTailStage(2)), configs,
@@ -453,8 +453,8 @@ def test_cache_fork_is_manager_issued_and_identity_ignores_buffer_name(tmp_path)
 			event["action"] == "allocate" and event["role"] == "experiment.cache-fork"
 			for event in context.storage.allocation_events
 		)
-		np.testing.assert_array_equal(buffer_view(first.working_array), values * 2)
-		np.testing.assert_array_equal(buffer_view(second.working_array), values * 2)
+		np.testing.assert_array_equal(np.asarray(first.working_array), values * 2)
+		np.testing.assert_array_equal(np.asarray(second.working_array), values * 2)
 
 
 def test_declared_large_artifact_uses_mutability_aware_managed_handles(tmp_path):

@@ -24,7 +24,6 @@ from lftomo.pipeline.core import (
 	StageContract,
 	allocate_output,
 	commit_output,
-	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.layout import (
@@ -41,7 +40,7 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 	"""Return a float32 prospective output while the raw input remains live."""
 
-	source = working_view(state)
+	source = np.asarray(state.working_array)
 	# Plain arrays remain a lightweight hermetic-test compatibility path. Real
 	# runs always provide storage and therefore take the managed replacement path.
 	if state.storage is None and source.dtype == np.dtype(np.float32):
@@ -193,7 +192,7 @@ def _tracking_fields(
 		fields = np.asarray(state.scan.metadata["flat_fields"])
 	else:
 		raise ValueError("normalize.beam_tracking requires a calibration bundle or legacy flat_fields")
-	if fields.shape != (4, y_size, working_view(state).shape[2]):
+	if fields.shape != (4, y_size, np.asarray(state.working_array).shape[2]):
 		raise ValueError("legacy flat_fields must have shape (4, Y, X) for beam tracking")
 	return tuple(fields)
 
@@ -674,7 +673,7 @@ def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 
 	if not isinstance(stage, BeamTrackingNormalizeStage) or not stage.fit_schedule:
 		return
-	data = working_view(state)
+	data = np.asarray(state.working_array)
 	layout = resolve_layout(state, stage.order, stage.name)
 	y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
 	pre_gain, post_gain, _pre_dark, _post_dark = _tracking_fields(

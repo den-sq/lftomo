@@ -11,7 +11,7 @@ from lftomo.config import (
 	Scan,
 	StageConfig,
 )
-from lftomo.pipeline import NumpyBackend, Pipeline, PipelineRunContext, PipelineState, working_view
+from lftomo.pipeline import NumpyBackend, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -46,7 +46,7 @@ def _run(state, *stages):
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
 		assert isinstance(result.working_array, SharedNPArray)
-		return result.with_array(working_view(result).copy())
+		return result.with_array(np.asarray(result.working_array).copy())
 
 
 def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):

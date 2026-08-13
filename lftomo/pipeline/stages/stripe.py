@@ -11,7 +11,6 @@ from lftomo.pipeline.core import (
 	RuntimeRequirement,
 	Stage,
 	StageContract,
-	working_view,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.runtime import tomopy_requirement
@@ -77,7 +76,7 @@ def _run_sinogram_stage(
 ) -> PipelineState:
 	if state.backend.name != "numpy":
 		raise TypeError(f"{stage.name} currently requires the NumPy backend")
-	data = working_view(state)
+	data = np.asarray(state.working_array)
 	layout = resolve_layout(state, configured, stage.name)
 	if data.ndim != 3:
 		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
@@ -303,7 +302,7 @@ class AllOfTheStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("AllOfTheStripeStage currently requires the NumPy backend")
-		data = working_view(state)
+		data = np.asarray(state.working_array)
 		layout = resolve_layout(state, None, self.name)
 		if data.ndim != 3:
 			raise ValueError("stripe.all_of_the_stripe expects a (Y, Theta, X) sinogram array")

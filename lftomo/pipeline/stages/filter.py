@@ -8,7 +8,7 @@ import numpy as np
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	AxisPad, Locality, PadRequirement, PipelineState, Stage,
-	StageContract, working_view,
+	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.layout import configured_layout, n_projections, projection_view, resolve_layout
@@ -65,7 +65,7 @@ class BilateralFilterStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BilateralFilterStage currently requires the NumPy backend")
-		data = working_view(state)
+		data = np.asarray(state.working_array)
 		layout = resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("filter.bilateral expects a (Y, Theta, X) sinogram array")
