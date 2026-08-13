@@ -246,7 +246,7 @@ class TomoWindow(DataRef):
 			self._sample_shape(self.shape, self.step),
 			self.shape.make_with(0),
 			local_pos,
-			self.shape.make_with(1),
+			type(local_pos).make_with(1),
 			self.__work_dtype,
 		)
 

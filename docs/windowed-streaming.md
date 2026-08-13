@@ -3,7 +3,8 @@
 Windowing is runner/machine configuration, not candidate configuration. Use
 `--window-rows` and `--extra-pad-y` on the runner CLI, or pass `WindowConfig`
 to `run_reconstruction()`. Omitting the row limit produces one full-selection
-window through the same driver.
+window through the same driver. External runner adapters may import both
+`WindowConfig` and the canonical `Y` geometry type from `lftomo.pipeline`.
 
 Three quantities remain separate in the resolved plan:
 

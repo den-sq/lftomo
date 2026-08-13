@@ -12,6 +12,7 @@ from lftomo.pipeline import (
 	StageContract,
 	WindowConfig,
 	WindowPlanError,
+	Y,
 	resolve_streaming_plan,
 )
 from lftomo.pipeline.stages import (
@@ -24,7 +25,7 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.prep.phase import _phase_pad
 from lftomo.runner import run_reconstruction
-from lftomo.util.shapes import ProjOrder, Y
+from lftomo.util.shapes import ProjOrder, Y as CanonicalY
 from tests.fixtures.tier1 import projection_stack
 
 
@@ -44,6 +45,10 @@ class _FullYStage(Stage):
 
 	def run(self, state):
 		return state
+
+
+def test_pipeline_exports_the_canonical_y_geometry_type():
+	assert Y is CanonicalY
 
 
 def test_pad_quantities_are_separate_and_neighborhood_stages_compose():
@@ -168,6 +173,9 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 			"order": "projection", "calibration_policy": "required",
 		}},
 		{"kind": "normalize", "algorithm": "weighted"},
+		{"kind": "geometry", "algorithm": "affine_skew_movement", "params": {
+			"transition_to": "sinogram", "pad_x": 1, "skew_degrees": 0,
+		}},
 		{"kind": "filter", "algorithm": "bilateral", "params": {"diameter": 3}},
 		{"kind": "phase", "algorithm": "negative_log"},
 		{"kind": "center", "algorithm": "pc"},
@@ -181,7 +189,7 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 
 	monkeypatch.setattr(tomopy, "find_center_pc", lambda *args, **kwargs: 2.0)
 	monkeypatch.setattr(tomopy, "recon", lambda data, *args, **kwargs:
-		np.repeat(np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1))
+		np.repeat(np.asarray(data).mean(axis=1)[:, None, :], data.shape[2], axis=1))
 	whole_output = tmp_path / "whole"
 	window_output = tmp_path / "windowed"
 	whole = run_reconstruction(pipeline_path, scan_path, whole_output)[0]

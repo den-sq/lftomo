@@ -149,6 +149,7 @@ def test_tomo_window():
 	twi = tw.internal
 
 	assert twi.pos == Y(2)
+	assert twi.step == Y(1)
 	assert twi.dtype == np.float32
 
 

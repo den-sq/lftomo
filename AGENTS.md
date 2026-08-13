@@ -32,9 +32,13 @@ regression tests rather than in a second specification here.
 - An algorithm may use a numerical padding primitive to fill a buffer, but it
   must consume geometry derived from and expressed by the canonical window
   model. It must not independently decide or represent that geometry.
-- `lftomo.pipeline.core.AxisPad` and parallel padding descriptions are
-  consolidation targets, not patterns to extend. Do not add another padding
-  model. Consult `docs/windowed-streaming.md` and `tests/util/test_window.py`.
+- The removed `AxisPad` / `WindowRegion` types and parallel padding
+  descriptions must not be reintroduced. Express Stage requirements with the
+  canonical semantic-axis `DataShape` vocabulary and resolve them through
+  `TomoDataSet.window`; derive generated output padding with
+  `TomoWindow.expanded`. Consult `docs/windowed-streaming.md`,
+  `tests/util/test_window.py`, and
+  `tests/pipeline/test_window_geometry_ownership.py`.
 
 ### Managed storage and work planes
 

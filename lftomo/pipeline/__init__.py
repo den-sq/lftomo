@@ -19,6 +19,7 @@ from lftomo.pipeline.core import (
 	commit_output,
 )
 from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
+from lftomo.util.shapes import Y
 from lftomo.pipeline.dispatch import DispatchKind, DispatchSpec
 from lftomo.pipeline.execution import PipelineExecutor, WorkerTimeoutError
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
@@ -116,6 +117,7 @@ __all__ = [
 	"WorkerTimeoutError",
 	"WindowConfig",
 	"WindowPlanError",
+	"Y",
 	"CandidateLimitError",
 	"CandidateSpaceError",
 	"ContinuousDomainError",
