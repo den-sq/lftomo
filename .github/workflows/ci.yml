@@ -24,7 +24,7 @@ jobs:
       - name: Install lightweight test dependencies
         run: >-
           python -m pip install
-          numpy "pydantic>=2" PyYAML scipy pytest
+          click numpy psutil "pydantic>=2" PyYAML scipy pytest
 
       - name: Run lightweight unit tests
         shell: bash
