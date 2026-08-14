@@ -142,7 +142,7 @@ def _prepare_vo_work(
 	row_count: int,
 	sinogram_shape: tuple[int, int],
 ) -> tuple[tuple[ManagedBuffer, str], ...]:
-	"""Allocate the two row-indexed planes shared by a fused Vo chain."""
+	"""Allocate row-indexed work planes shared by a fused Vo chain."""
 
 	if not any(getattr(stage, "uses_vo_work", False) for stage in stages):
 		return ()
@@ -151,9 +151,12 @@ def _prepare_vo_work(
 	from lftomo.pipeline.stages.stripe import (
 		VO_FLOAT_WORK_ARTIFACT,
 		VO_INDEX_WORK_ARTIFACT,
+		VO_MEDIAN_PAD_WORK_ARTIFACT,
 	)
 
-	if VO_FLOAT_WORK_ARTIFACT in state.artifacts or VO_INDEX_WORK_ARTIFACT in state.artifacts:
+	if any(key in state.artifacts for key in (
+		VO_FLOAT_WORK_ARTIFACT, VO_INDEX_WORK_ARTIFACT, VO_MEDIAN_PAD_WORK_ARTIFACT,
+	)):
 		raise ValueError("Vo work artifacts are private to one bounded segment")
 	theta_count, column_count = sinogram_shape
 	if max(theta_count, column_count) > np.iinfo(np.uint32).max:
@@ -162,6 +165,12 @@ def _prepare_vo_work(
 	float_dtype = np.dtype(state.working_array.dtype)
 	if not np.issubdtype(float_dtype, np.floating):
 		raise TypeError("Vo reusable work requires floating-point pipeline data")
+	median_half_width = max(
+		(int(getattr(stage, "vo_line_median_half_width", 0)) for stage in stages),
+		default=0,
+	)
+	if float_dtype not in (np.dtype(np.float32), np.dtype(np.float64)) or not float_dtype.isnative:
+		median_half_width = 0
 	allocated: list[tuple[ManagedBuffer, str]] = []
 	try:
 		float_work = state.storage.allocate(shape, float_dtype, role="vo_float_work")
@@ -172,14 +181,32 @@ def _prepare_vo_work(
 		if isinstance(index_work, list):
 			raise TypeError("Vo sorting-index work allocation returned multiple buffers")
 		allocated.append((index_work, "vo_index_work"))
+		median_pad_work = None
+		if median_half_width:
+			median_pad_shape = (
+				row_count, theta_count, column_count + 2 * median_half_width,
+			)
+			median_pad_work = state.storage.allocate(
+				median_pad_shape, float_dtype, role="vo_median_pad_work",
+			)
+			if isinstance(median_pad_work, list):
+				raise TypeError("Vo median-pad work allocation returned multiple buffers")
+			allocated.append((median_pad_work, "vo_median_pad_work"))
+			median_pad_work.array().fill(0)
 	except BaseException:
 		for buffer, role in allocated:
 			state.storage.retire(buffer, role=role)
 		raise
 	state.artifacts[VO_FLOAT_WORK_ARTIFACT] = float_work
 	state.artifacts[VO_INDEX_WORK_ARTIFACT] = index_work
+	if median_pad_work is not None:
+		state.artifacts[VO_MEDIAN_PAD_WORK_ARTIFACT] = median_pad_work
 	float_bytes = int(np.prod(shape, dtype=np.int64) * float_dtype.itemsize)
 	index_bytes = int(np.prod(shape, dtype=np.int64) * np.dtype(np.uint32).itemsize)
+	median_pad_bytes = (
+		int(np.prod(median_pad_shape, dtype=np.int64) * float_dtype.itemsize)
+		if median_pad_work is not None else 0
+	)
 	report = {
 		"scope": "window" if state.source_window is not None else "whole_volume",
 		"rows": row_count,
@@ -188,8 +215,10 @@ def _prepare_vo_work(
 		"index_dtype": np.dtype(np.uint32).str,
 		"float_bytes": float_bytes,
 		"index_bytes": index_bytes,
-		"managed_bytes": float_bytes + index_bytes,
-		"allocation_count": 2,
+		"median_pad_half_width": median_half_width,
+		"median_pad_bytes": median_pad_bytes,
+		"managed_bytes": float_bytes + index_bytes + median_pad_bytes,
+		"allocation_count": 2 + int(median_pad_work is not None),
 		"indexing": "source_window_row",
 	}
 	state.artifacts.setdefault("vo_scratch_allocations", []).append(report)
@@ -209,10 +238,12 @@ def _release_vo_work(
 	from lftomo.pipeline.stages.stripe import (
 		VO_FLOAT_WORK_ARTIFACT,
 		VO_INDEX_WORK_ARTIFACT,
+		VO_MEDIAN_PAD_WORK_ARTIFACT,
 	)
 
 	state.artifacts.pop(VO_FLOAT_WORK_ARTIFACT, None)
 	state.artifacts.pop(VO_INDEX_WORK_ARTIFACT, None)
+	state.artifacts.pop(VO_MEDIAN_PAD_WORK_ARTIFACT, None)
 	if state.storage is not None:
 		for buffer, role in allocated:
 			state.storage.retire(buffer, role=role)

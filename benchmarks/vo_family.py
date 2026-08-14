@@ -1,9 +1,8 @@
-"""Opt-in Vo-family kernel/scratch benchmark for issue #198.
+"""Opt-in SciPy/Bottleneck Vo benchmark for issue #209.
 
-The execution arm uses the real manager-owned buffer and process dispatcher.
-Use ``--variant legacy`` to exercise allocation-per-kernel fallbacks or
-``--variant reusable`` for the row-indexed managed work planes.  ``--plan-only``
-reports exact scratch bytes without allocating a potentially large volume.
+Both arms use the real manager-owned work planes and process dispatcher.
+``--plan-only`` reports exact scratch bytes without allocating a potentially
+large volume.
 """
 
 from __future__ import annotations
@@ -17,13 +16,12 @@ import time
 
 import numpy as np
 import psutil
-from scipy.ndimage import binary_dilation, median_filter, uniform_filter1d
-from scipy.signal import medfilt2d
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import DataDomain, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.stages import VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
-from lftomo.prep.stripe import _detect_stripe
+from lftomo.pipeline.stages.stripe import _vo_work_planes
+from lftomo.prep.stripe import _remove_large_array, _remove_sort_array
 from lftomo.util.shapes import ProjOrder
 
 
@@ -38,6 +36,7 @@ class VoBenchmarkResult:
 	managed_scratch_bytes: int
 	float_work_bytes: int
 	index_work_bytes: int
+	median_pad_work_bytes: int
 	seconds: float | None
 	private_bytes_before: int | None
 	private_bytes_peak: int | None
@@ -45,18 +44,26 @@ class VoBenchmarkResult:
 	fingerprint: tuple[float, float, float] | None
 
 
-def scratch_report(shape: tuple[int, int, int], dtype=np.float32) -> dict[str, int]:
+def scratch_report(
+	shape: tuple[int, int, int], dtype=np.float32, *, median_pad_half_width: int = 0,
+) -> dict[str, int]:
 	"""Return exact rows-proportional Vo scratch allocation for ``Theta,Y,X``."""
 
 	theta, rows, columns = shape
 	items = int(theta) * int(rows) * int(columns)
 	float_bytes = items * np.dtype(dtype).itemsize
 	index_bytes = items * np.dtype(np.uint32).itemsize
+	median_pad_bytes = (
+		int(rows) * int(theta) * (int(columns) + 2 * median_pad_half_width)
+		* np.dtype(dtype).itemsize
+		if median_pad_half_width else 0
+	)
 	return {
 		"input_bytes": float_bytes,
 		"float_work_bytes": float_bytes,
 		"index_work_bytes": index_bytes,
-		"managed_scratch_bytes": float_bytes + index_bytes,
+		"median_pad_work_bytes": median_pad_bytes,
+		"managed_scratch_bytes": float_bytes + index_bytes + median_pad_bytes,
 	}
 
 
@@ -105,90 +112,41 @@ def _scan(shape: tuple[int, int, int]) -> Scan:
 	)
 
 
-class _BaselineVoSortStage(VoSortStripeStage):
-	"""The allocation-per-call implementation from lftomo@dd4ce95."""
+class _ScipyVoSortStage(VoSortStripeStage):
+	"""Pre-#209 reusable-work stage retaining the SciPy line median."""
 
-	uses_vo_work = False
+	@property
+	def vo_line_median_half_width(self) -> int:
+		return 0
 
-	def run_sinogram(self, sinogram, _state):
-		shape = (self.size, 1 if self.dim == 1 else self.size)
-		modified = sinogram.T.copy()
-		indices = modified.argsort(axis=1)
-		modified[:] = np.take_along_axis(modified, indices, axis=1)
-		indices[:] = indices.argsort(axis=1)
-		modified[:] = medfilt2d(modified, shape)
-		modified[:] = np.take_along_axis(modified, indices, axis=1)
-		sinogram[:] = modified.T
-
-
-class _BaselineVoLargeStage(VoLargeStripeStage):
-	"""The allocation-per-call implementation from lftomo@dd4ce95."""
-
-	uses_vo_work = False
-
-	def run_sinogram(self, sinogram_base, _state):
-		sinogram = sinogram_base.copy()
-		drop_ratio = np.clip(self.drop_ratio, 0.0, 0.8)
-		rows = sinogram.shape[0]
-		drop = int(0.5 * drop_ratio * rows)
-		kept = slice(drop, -drop if drop else None)
-		indices = sinogram.argsort(axis=0)
-		smoothed = np.take_along_axis(sinogram, indices, axis=0)
-		sorted_mean = np.mean(smoothed[kept, :], axis=0)
-		smoothed[:] = medfilt2d(smoothed, (1, self.size))
-		smooth_mean = np.mean(smoothed[kept, :], axis=0)
-		indices[:] = indices.argsort(axis=0)
-		smoothed[:] = np.take_along_axis(smoothed, indices, axis=0)
-		factor = np.divide(
-			sorted_mean, smooth_mean, out=np.ones_like(sorted_mean),
-			where=smooth_mean != 0,
+	def run_sinogram(self, sinogram, state):
+		work, index_work, _pad_work = _vo_work_planes(state, sinogram)
+		_remove_sort_array(
+			sinogram, size=self.size, dim=self.dim, work=work,
+			index_work=index_work, use_bottleneck=False,
 		)
-		mask = binary_dilation(_detect_stripe(factor, self.snr), iterations=1)
-		if self.norm:
-			np.divide(
-				sinogram, np.tile(factor, (rows, 1)), out=sinogram_base,
-			)
-		sinogram_base[:, mask] = smoothed[:, mask]
 
 
-class _BaselineVoDeadStage(VoDeadStripeStage):
-	"""The allocation-per-call implementation from lftomo@dd4ce95."""
+class _ScipyVoLargeStage(VoLargeStripeStage):
+	"""Pre-#209 reusable-work stage retaining the SciPy line median."""
 
-	uses_vo_work = False
+	@property
+	def vo_line_median_half_width(self) -> int:
+		return 0
 
-	def run_sinogram(self, sinogram_base, state):
-		mask_cut = np.s_[2:-2]
-		sinogram = np.ascontiguousarray(sinogram_base, dtype=sinogram_base.dtype)
-		smooth_diff = np.sum(
-			np.abs(sinogram - np.apply_along_axis(uniform_filter1d, 0, sinogram, 10)),
-			axis=0,
+	def run_sinogram(self, sinogram, state):
+		work, index_work, _pad_work = _vo_work_planes(state, sinogram)
+		_remove_large_array(
+			sinogram, snr=self.snr, size=self.size, drop_ratio=self.drop_ratio,
+			norm=self.norm, work=work, index_work=index_work,
+			use_bottleneck=False,
 		)
-		median_diff = median_filter(smooth_diff, self.size)
-		factor = np.divide(
-			smooth_diff, median_diff, out=np.ones_like(smooth_diff),
-			where=median_diff != 0,
-		)
-		mask = np.full(factor.shape, False)
-		mask[mask_cut] = binary_dilation(
-			_detect_stripe(factor, self.snr), iterations=1,
-		)[mask_cut]
-		changed = mask.nonzero()[0]
-		kept = np.invert(mask).nonzero()[0]
-		if len(changed) > 0:
-			for theta in range(sinogram.shape[0]):
-				sinogram_base[theta, changed] = np.interp(
-					changed, kept, sinogram[theta, kept],
-				)
-		if self.norm:
-			_BaselineVoLargeStage(
-				snr=self.snr, size=self.size, norm=True,
-			).run_sinogram(sinogram_base, state)
 
 
-def _stages(operation: str, *, reusable: bool):
-	dead = VoDeadStripeStage if reusable else _BaselineVoDeadStage
-	large = VoLargeStripeStage if reusable else _BaselineVoLargeStage
-	sort = VoSortStripeStage if reusable else _BaselineVoSortStage
+def _stages(operation: str, *, bottleneck: bool):
+	dead = VoDeadStripeStage
+	large = VoLargeStripeStage if bottleneck else _ScipyVoLargeStage
+	sort = VoSortStripeStage if bottleneck else _ScipyVoSortStage
 	available = {
 		"dead": [dead(snr=3, size=51, norm=False)],
 		"large": [large(snr=3, size=51, drop_ratio=0.1, norm=True)],
@@ -230,20 +188,27 @@ def run(
 ) -> VoBenchmarkResult:
 	"""Run or plan one isolated benchmark arm."""
 
-	if variant not in {"legacy", "reusable"}:
-		raise ValueError("variant must be legacy or reusable")
+	if variant not in {"scipy", "bottleneck"}:
+		raise ValueError("variant must be scipy or bottleneck")
 	if len(shape) != 3 or min(shape) < 1:
 		raise ValueError("shape must contain positive Theta,Y,X dimensions")
 	if workers < 1:
 		raise ValueError("workers must be positive")
-	bytes_report = scratch_report(shape)
-	managed = bytes_report["managed_scratch_bytes"] if variant == "reusable" else 0
+	stages = _stages(operation, bottleneck=variant == "bottleneck")
+	median_half_width = max(
+		(int(getattr(stage, "vo_line_median_half_width", 0)) for stage in stages),
+		default=0,
+	)
+	bytes_report = scratch_report(
+		shape, median_pad_half_width=median_half_width,
+	)
+	managed = bytes_report["managed_scratch_bytes"]
 	if plan_only:
 		return VoBenchmarkResult(
 			variant, operation, shape, workers, True,
 			bytes_report["input_bytes"], managed,
-			bytes_report["float_work_bytes"] if variant == "reusable" else 0,
-			bytes_report["index_work_bytes"] if variant == "reusable" else 0,
+			bytes_report["float_work_bytes"], bytes_report["index_work_bytes"],
+			bytes_report["median_pad_work_bytes"],
 			None, None, None, None, None,
 		)
 
@@ -257,7 +222,7 @@ def run(
 			layout=ProjOrder, domain=DataDomain.ATTENUATION,
 		)
 		pipeline = Pipeline(
-			_stages(operation, reusable=variant == "reusable"), scan=scan,
+			stages, scan=scan,
 			initial_layout=ProjOrder, initial_domain=DataDomain.ATTENUATION,
 			bounded_workers=workers,
 		)
@@ -269,8 +234,8 @@ def run(
 	return VoBenchmarkResult(
 		variant, operation, shape, workers, False,
 		bytes_report["input_bytes"], managed,
-		bytes_report["float_work_bytes"] if variant == "reusable" else 0,
-		bytes_report["index_work_bytes"] if variant == "reusable" else 0,
+		bytes_report["float_work_bytes"], bytes_report["index_work_bytes"],
+		bytes_report["median_pad_work_bytes"],
 		seconds, memory.before, memory.peak, memory.after, fingerprint,
 	)
 
@@ -287,7 +252,7 @@ def _shape(value: str) -> tuple[int, int, int]:
 
 def main() -> None:
 	parser = argparse.ArgumentParser(description=__doc__)
-	parser.add_argument("--variant", required=True, choices=("legacy", "reusable"))
+	parser.add_argument("--variant", required=True, choices=("scipy", "bottleneck"))
 	parser.add_argument("--operation", default="chain", choices=("dead", "large", "sort", "chain"))
 	parser.add_argument("--shape", required=True, type=_shape, help="Theta,Y,X")
 	parser.add_argument("--workers", type=int, default=2)

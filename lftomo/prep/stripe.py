@@ -2,6 +2,7 @@
 from collections import namedtuple
 from dataclasses import astuple
 from multiprocessing import Pool
+from numbers import Integral
 
 import numpy as np
 import pywt
@@ -55,6 +56,84 @@ def _index_plane(index_work: np.ndarray | None, sino: np.ndarray) -> np.ndarray:
 	return index_work
 
 
+def _bottleneck_line_half_width(size: int) -> int:
+	"""Return reusable border width for a supported odd line median."""
+
+	if not isinstance(size, Integral) or size < 1 or size % 2 == 0:
+		return 0
+	return int(size) // 2
+
+
+def _move_median(values: np.ndarray, *, window: int, min_count: int, axis: int) -> np.ndarray:
+	"""Import Bottleneck only in workers that execute a Vo line median."""
+
+	from bottleneck import move_median
+
+	return move_median(values, window=window, min_count=min_count, axis=axis)
+
+
+def _line_median(
+	values: np.ndarray,
+	size: int,
+	axis: int,
+	*,
+	pad_work: np.ndarray | None = None,
+	use_bottleneck: bool = True,
+) -> np.ndarray:
+	"""Match a centered, zero-padded SciPy line median with Bottleneck.
+
+	Only native float32/float64 finite inputs use Bottleneck. Other dtypes and
+	non-finite values retain the established SciPy behavior.
+	"""
+
+	if axis not in (0, 1):
+		raise ValueError("Vo line median axis must be 0 or 1")
+	kernel = (size, 1) if axis == 0 else (1, size)
+	half_width = _bottleneck_line_half_width(size)
+	if (
+		not use_bottleneck
+		or not isinstance(size, Integral) or size < 1 or size % 2 == 0
+		or values.dtype not in (np.dtype(np.float32), np.dtype(np.float64))
+		or not values.dtype.isnative
+		or not np.isfinite(values).all()
+	):
+		return medfilt2d(values, kernel)
+
+	if pad_work is None:
+		if half_width:
+			padding = [(0, 0), (0, 0)]
+			padding[axis] = (half_width, half_width)
+			padded = np.pad(values, padding, mode="constant")
+		else:
+			padded = values
+	else:
+		if pad_work.dtype != values.dtype:
+			raise TypeError("Vo median-pad work dtype does not match sinogram")
+		other_axis = 1 - axis
+		if pad_work.shape[other_axis] != values.shape[other_axis]:
+			raise ValueError("Vo median-pad work does not match the unfiltered axis")
+		extra = pad_work.shape[axis] - values.shape[axis]
+		if extra < 2 * half_width or extra % 2:
+			raise ValueError("Vo median-pad work cannot provide centered line padding")
+		managed_half_width = extra // 2
+		selection = [slice(None), slice(None)]
+		selection[axis] = slice(
+			managed_half_width - half_width,
+			managed_half_width + values.shape[axis] + half_width,
+		)
+		padded = pad_work[tuple(selection)]
+		interior = [slice(None), slice(None)]
+		interior[axis] = slice(half_width, half_width + values.shape[axis])
+		padded[tuple(interior)] = values
+
+	filtered = _move_median(
+		padded, window=int(size), min_count=int(size), axis=axis,
+	)
+	crop = [slice(None), slice(None)]
+	crop[axis] = slice(int(size) - 1, int(size) - 1 + values.shape[axis])
+	return filtered[tuple(crop)]
+
+
 def _remove_sort_array(
 	sino: np.ndarray,
 	size: int = 21,
@@ -62,6 +141,8 @@ def _remove_sort_array(
 	*,
 	work: np.ndarray | None = None,
 	index_work: np.ndarray | None = None,
+	median_pad_work: np.ndarray | None = None,
+	use_bottleneck: bool = True,
 ) -> None:
 	"""Apply the local Vo sorting algorithm to one ``(Theta, X)`` sinogram."""
 	f_shape = (size, 1 if dim == 1 else size)
@@ -84,7 +165,15 @@ def _remove_sort_array(
 	)
 
 	# Apply filter to sorted memory.
-	sino_mod[:, :] = medfilt2d(sino_mod, f_shape)
+	if dim == 1:
+		pad = None if median_pad_work is None else median_pad_work.T
+		sino_mod[:, :] = _line_median(
+			sino_mod, size, axis=0, pad_work=pad,
+			use_bottleneck=use_bottleneck,
+		)
+	else:
+		# The square dim=2 kernel is intentionally retained on SciPy.
+		sino_mod[:, :] = medfilt2d(sino_mod, f_shape)
 
 	# sort back and assign.
 	sino_mod[:, :] = np.take_along_axis(sino_mod, sort_idx, axis=1)
@@ -131,6 +220,8 @@ def _remove_large_array(
 	*,
 	work: np.ndarray | None = None,
 	index_work: np.ndarray | None = None,
+	median_pad_work: np.ndarray | None = None,
+	use_bottleneck: bool = True,
 ) -> None:
 	"""Apply the local Vo large-stripe algorithm to one sinogram."""
 	sino = sino_base
@@ -149,7 +240,10 @@ def _remove_large_array(
 	# Get mean of original and smoothed values after throwing out outliers.
 	sino_smooth[:, :] = np.take_along_axis(sino, sort_idx, axis=0)
 	sort_mean = np.mean(sino_smooth[kept, :], axis=0)
-	sino_smooth[:, :] = medfilt2d(sino_smooth, (1, size))
+	sino_smooth[:, :] = _line_median(
+		sino_smooth, size, axis=1, pad_work=median_pad_work,
+		use_bottleneck=use_bottleneck,
+	)
 	smooth_mean = np.mean(sino_smooth[kept, :], axis=0)
 
 	# Sort back sino_smooth.

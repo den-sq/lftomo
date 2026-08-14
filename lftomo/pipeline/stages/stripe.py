@@ -22,6 +22,7 @@ from lftomo.pipeline.layout import (
 	sinogram_view,
 )
 from lftomo.prep.stripe import (
+	_bottleneck_line_half_width,
 	_remove_dead_array,
 	_remove_large_array,
 	_remove_sort_array,
@@ -32,18 +33,20 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 
 VO_FLOAT_WORK_ARTIFACT = "_vo_float_work"
 VO_INDEX_WORK_ARTIFACT = "_vo_index_work"
+VO_MEDIAN_PAD_WORK_ARTIFACT = "_vo_median_pad_work"
 SINOGRAM_ROW_ARTIFACT = "_sinogram_row_index"
 
 
 def _vo_work_planes(
 	state: PipelineState, sinogram: np.ndarray,
-) -> tuple[np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
 	"""Open the row-indexed reusable planes prepared by bounded execution."""
 
 	float_buffer = state.artifacts.get(VO_FLOAT_WORK_ARTIFACT)
 	index_buffer = state.artifacts.get(VO_INDEX_WORK_ARTIFACT)
-	if float_buffer is None and index_buffer is None:
-		return None, None
+	median_pad_buffer = state.artifacts.get(VO_MEDIAN_PAD_WORK_ARTIFACT)
+	if float_buffer is None and index_buffer is None and median_pad_buffer is None:
+		return None, None, None
 	if float_buffer is None or index_buffer is None:
 		raise ValueError("Vo reusable work requires both floating-point and index planes")
 	row = state.artifacts.get(SINOGRAM_ROW_ARTIFACT)
@@ -53,7 +56,16 @@ def _vo_work_planes(
 	index_work = index_buffer.array()[int(row)]
 	if float_work.shape != sinogram.shape or index_work.shape != sinogram.shape:
 		raise ValueError("Vo reusable work does not match the dispatched sinogram shape")
-	return float_work, index_work
+	median_pad_work = None
+	if median_pad_buffer is not None:
+		median_pad_work = median_pad_buffer.array()[int(row)]
+		if (
+			median_pad_work.shape[0] != sinogram.shape[0]
+			or median_pad_work.shape[1] < sinogram.shape[1]
+			or median_pad_work.dtype != sinogram.dtype
+		):
+			raise ValueError("Vo median-pad work does not match the dispatched sinogram")
+	return float_work, index_work, median_pad_work
 
 
 def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
@@ -107,11 +119,15 @@ class VoSortStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		return _run_sinogram_stage(self, state)
 
+	@property
+	def vo_line_median_half_width(self) -> int:
+		return _bottleneck_line_half_width(self.size) if self.dim == 1 else 0
+
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
-		work, index_work = _vo_work_planes(state, sinogram)
+		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		_remove_sort_array(
 			sinogram, size=self.size, dim=self.dim,
-			work=work, index_work=index_work,
+			work=work, index_work=index_work, median_pad_work=median_pad_work,
 		)
 
 
@@ -132,13 +148,17 @@ class VoDeadStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		return _run_sinogram_stage(self, state)
 
+	@property
+	def vo_line_median_half_width(self) -> int:
+		return _bottleneck_line_half_width(self.size) if self.norm else 0
+
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
-		work, index_work = _vo_work_planes(state, sinogram)
+		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		_remove_dead_array(sinogram, snr=self.snr, size=self.size, work=work)
 		if self.norm:
 			_remove_large_array(
 				sinogram, snr=self.snr, size=self.size, norm=True,
-				work=work, index_work=index_work,
+				work=work, index_work=index_work, median_pad_work=median_pad_work,
 			)
 
 
@@ -161,12 +181,16 @@ class VoLargeStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		return _run_sinogram_stage(self, state)
 
+	@property
+	def vo_line_median_half_width(self) -> int:
+		return _bottleneck_line_half_width(self.size)
+
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
-		work, index_work = _vo_work_planes(state, sinogram)
+		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		_remove_large_array(
 			sinogram, snr=self.snr, size=self.size,
 			drop_ratio=self.drop_ratio, norm=self.norm,
-			work=work, index_work=index_work,
+			work=work, index_work=index_work, median_pad_work=median_pad_work,
 		)
 
 
@@ -199,8 +223,14 @@ class VoFamilyStripeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		return _run_sinogram_stage(self, state)
 
+	@property
+	def vo_line_median_half_width(self) -> int:
+		uses_large = "remove_large_vo" in self.order
+		uses_sort = "remove_sort_vo" in self.order and self.dim == 1
+		return _bottleneck_line_half_width(self.size) if uses_large or uses_sort else 0
+
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
-		work, index_work = _vo_work_planes(state, sinogram)
+		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		for operation in self.order:
 			if operation == "remove_dead_vo":
 				_remove_dead_array(
@@ -210,12 +240,12 @@ class VoFamilyStripeStage(Stage):
 				_remove_large_array(
 					sinogram, snr=self.snr, size=self.size,
 					drop_ratio=self.drop_ratio, norm=self.norm,
-					work=work, index_work=index_work,
+					work=work, index_work=index_work, median_pad_work=median_pad_work,
 				)
 			else:
 				_remove_sort_array(
 					sinogram, size=self.size, dim=self.dim,
-					work=work, index_work=index_work,
+					work=work, index_work=index_work, median_pad_work=median_pad_work,
 				)
 
 
