@@ -122,12 +122,27 @@ class DataRef(object):
 
 		pad_shift_before = new_pad_before - self.pad_before
 		pad_shift_after = new_pad_after - self.pad_after
-		new_pos += pad_shift_before.extract(new_pos)
+		position_fields = {field.name for field in fields(new_pos)}
+		new_pos += replace(new_pos.make_with(0), **{
+			key: value for key, value in asdict(pad_shift_before).items()
+			if key in position_fields
+		})
 		new_shape -= (pad_shift_before + pad_shift_after)
 
 		DataRef.__init__(new_ref, new_shape, new_pad_before, new_pos, self.step, new_dtype, self.__offset,
 						pad_after=new_pad_after)
 		return new_ref
+
+	def with_output_padding(self, padding: DataShape) -> Self:
+		"""Expand published output coordinates; unlike source padding, do not clip."""
+
+		if any(value < 0 for value in asdict(padding).values()):
+			raise ValueError("output padding cannot be negative")
+		expansion = replace(self.shape.make_with(0), **asdict(padding))
+		return self.rescope(
+			pos=self.pos - expansion.extract(self.pos),
+			shape=self.shape + expansion + expansion,
+		)
 
 	def int_iter(self) -> Iterator:
 		return self.frange.get_iter(conv=IntIter)

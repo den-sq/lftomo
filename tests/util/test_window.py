@@ -2,7 +2,7 @@ from functools import partial
 import numpy as np
 import pytest
 
-from lftomo.util.shapes import ProjOrder, Y, ImgSlice, IntIter, SliceIter, Proj
+from lftomo.util.shapes import ProjOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
 from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, DataRef
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
 
@@ -213,6 +213,23 @@ def test_data_ref_supports_asymmetric_padding_without_a_wrapper_type():
 	assert (rebalanced.pos.Y, rebalanced.shape.Y) == (9, 5)
 	assert rebalanced.with_pad(["Y"]).index == window.with_pad(["Y"]).index
 	assert rebalanced.internal.index == np.s_[0:4:1, 1:6:1, 0:6:1]
+
+
+def test_output_padding_expands_coordinates_without_becoming_source_padding():
+	window = TomoWindow(
+		ProjOrder(Theta=4, Y=5, X=6), ProjOrder(0, 2, 0), ProjOrder(0, 10, 0),
+		ProjOrder(1, 1, 1), np.uint16, np.float32,
+		pad_after=ProjOrder(0, 3, 0),
+	)
+
+	expanded = window.with_output_padding(X(4))
+
+	assert expanded.pos == ProjOrder(Theta=0, Y=10, X=-4)
+	assert expanded.shape == ProjOrder(Theta=4, Y=5, X=14)
+	assert expanded.pad_before == ProjOrder(Theta=0, Y=2, X=0)
+	assert expanded.pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	assert expanded.with_pad(["Y"]).index == np.s_[0:4:1, 8:18:1, -4:10:1]
+	assert expanded.internal.index == np.s_[0:4:1, 2:7:1, 0:14:1]
 
 
 def test_dataset_keeps_physical_shape_separate_from_output_range():

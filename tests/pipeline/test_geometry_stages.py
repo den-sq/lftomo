@@ -1,3 +1,5 @@
+from dataclasses import astuple
+
 import numpy as np
 import pytest
 
@@ -11,6 +13,7 @@ from lftomo.pipeline.stages import (
 	create_stage,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.window import TomoWindow
 
 
 def _state(array, config):
@@ -107,6 +110,10 @@ def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(mo
 	state = _state(working, config)
 	state.layout = SinoOrder
 	state.domain = DataDomain.ATTENUATION
+	state.source_window = TomoWindow(
+		ProjOrder(Theta=3, Y=2, X=4), ProjOrder(0, 0, 0),
+		ProjOrder(0, 0, 0), ProjOrder(1, 1, 1), np.float32, np.float32,
+	)
 	monkeypatch.setattr("cv2.warpAffine", lambda *_args, **_kwargs:
 		(_ for _ in ()).throw(AssertionError("zero skew must not interpolate")))
 
@@ -118,6 +125,9 @@ def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(mo
 	assert result.working_array.flags.c_contiguous
 	expected = np.pad(working.transpose(1, 0, 2), ((0, 0), (0, 0), (1, 1)), mode="edge")
 	np.testing.assert_array_equal(result.working_array, expected)
+	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=-1)
+	assert result.source_window.shape == ProjOrder(Theta=3, Y=2, X=6)
+	assert result.buffer_spec.shape == astuple(result.source_window.shape)
 
 
 def test_fused_transition_is_direction_parametric():

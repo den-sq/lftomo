@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import cv2
 import numpy as np
 from scipy.ndimage import shift
@@ -19,7 +21,8 @@ from lftomo.pipeline.layout import (
 	projection_view,
 	resolve_layout,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, X
+from lftomo.util.window import TomoWindow
 
 
 def _contract(order: str | None = None, *, resamples_detector: bool = False,
@@ -80,10 +83,11 @@ def transform_affine_projection(
 		image, ((0, 0), (stage.pad_x, stage.pad_x)), mode=stage.pad_mode,
 	)
 	if stage.skew_degrees != 0:
-		width = image.shape[1] + 2 * stage.pad_x
+		width = padded.shape[1]
+		left_padding = (padded.shape[1] - image.shape[1]) // 2
 		center = (
 			(image.shape[1] / 2 if stage.center_px is None else stage.center_px)
-			+ stage.pad_x,
+			+ left_padding,
 			row_count / 2 if stage.center_y_px is None else stage.center_y_px,
 		)
 		matrix = cv2.getRotationMatrix2D(center, stage.skew_degrees, 1.0)
@@ -290,6 +294,20 @@ class AffineSkewMovementStage(Stage):
 	def from_config(cls, config: StageConfig) -> "AffineSkewMovementStage":
 		return cls(**config.params)
 
+	def output_window(self, source: TomoWindow) -> TomoWindow:
+		"""Return the published output canvas for the fused affine transition."""
+
+		return source.with_output_padding(X(self.pad_x))
+
+	def output_shape(self, source_shape, dtype) -> ProjOrder | SinoOrder:
+		"""Derive a target-layout allocation shape through the canonical window."""
+
+		zero = source_shape.make_with(0)
+		unit = source_shape.make_with(1)
+		source = TomoWindow(source_shape, zero, zero, unit, dtype, dtype)
+		output = self.output_window(source)
+		return self.target_layout(**asdict(output.shape))
+
 	def run(self, state: PipelineState) -> PipelineState:
 		if self.target_layout is None:
 			return self.skew.run(self.movement.run(state))
@@ -305,14 +323,9 @@ class AffineSkewMovementStage(Stage):
 			raise ValueError("fused affine transition must change layout")
 		projection_count = n_projections(data, input_layout)
 		row_count = n_rows(data, input_layout)
-		width = data.shape[2] + 2 * self.pad_x
-		shape = (
-			(projection_count, row_count, width)
-			if self.target_layout is ProjOrder
-			else (row_count, projection_count, width)
-		)
+		shape = self.output_shape(input_layout(*data.shape), data.dtype)
 		output_buffer, output = allocate_output(
-			state, self.target_layout(*shape), data.dtype, role="fused_geometry",
+			state, shape, data.dtype, role="fused_geometry",
 		)
 		for projection in range(projection_count):
 			image = projection_view(data, input_layout, projection)
@@ -324,6 +337,8 @@ class AffineSkewMovementStage(Stage):
 		result = commit_output(
 			state, output_buffer, retire_as=None, layout=self.target_layout,
 		)
+		if state.source_window is not None:
+			result.source_window = self.output_window(state.source_window)
 		result.artifacts["fused_layout_transition"] = {
 			"from": input_layout.__name__, "to": self.target_layout.__name__,
 			"pad_x": self.pad_x, "skew_degrees": self.skew_degrees,
