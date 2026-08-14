@@ -7,12 +7,12 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	AxisPad, Locality, PadRequirement, PipelineState, Stage,
+	Locality, PadRequirement, PipelineState, Stage,
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.layout import configured_layout, n_projections, projection_view, resolve_layout
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import Proj, ProjOrder, SinoOrder
 
 
 class BilateralFilterStage(Stage):
@@ -48,7 +48,7 @@ class BilateralFilterStage(Stage):
 			produces_domain=PRESERVE, locality=Locality.PROJECTION,
 			window_axes=("Y", "Theta"),
 			required_pad=PadRequirement(
-				fixed=AxisPad(y=diameter // 2, x=diameter // 2),
+				fixed=Proj(Y=diameter // 2, X=diameter // 2),
 			),
 		)
 		self.diameter = diameter

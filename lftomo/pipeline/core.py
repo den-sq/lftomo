@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import astuple, dataclass, field, is_dataclass, replace
+from dataclasses import asdict, astuple, dataclass, field, is_dataclass, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
 
@@ -12,6 +12,7 @@ import numpy as np
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer, StorageBackend, buffer_view
+from lftomo.util.shapes import DataShape, ProjOrder, Y
 
 if TYPE_CHECKING:
 	from lftomo.pipeline.execution import PipelineExecutor
@@ -51,41 +52,36 @@ class Locality(Enum):
 	METADATA = auto()
 
 
-@dataclass(frozen=True)
-class AxisPad:
-	"""Symmetric source halo required along tomography axes."""
+def _canonical_pad(value: DataShape) -> ProjOrder:
+	"""Normalize semantic tomography-axis padding without owning its geometry."""
 
-	theta: int = 0
-	y: int = 0
-	x: int = 0
-
-	def __post_init__(self):
-		if min(self.theta, self.y, self.x) < 0:
-			raise ValueError("axis padding cannot be negative")
-
-	def __add__(self, other: "AxisPad") -> "AxisPad":
-		return AxisPad(
-			self.theta + other.theta, self.y + other.y, self.x + other.x,
-		)
-
-	def maximum(self, other: "AxisPad") -> "AxisPad":
-		return AxisPad(
-			max(self.theta, other.theta), max(self.y, other.y), max(self.x, other.x),
-		)
-
-	def as_dict(self) -> dict[str, int]:
-		return {"theta": self.theta, "y": self.y, "x": self.x}
+	if not set(asdict(value)).issubset({"Theta", "Y", "X"}):
+		raise ValueError("padding may use only Theta, Y, and X axes")
+	if any(component < 0 for component in asdict(value).values()):
+		raise ValueError("axis padding cannot be negative")
+	return ProjOrder(Theta=0, Y=0, X=0) + value
 
 
 @dataclass(frozen=True)
 class PadRequirement:
-	"""Serializable Stage pad rule resolved from scan and input shape."""
+	"""Stage source-context rule resolved to semantic before/after shapes.
 
-	fixed: AxisPad = AxisPad()
+	``fixed`` remains the symmetric input. Supplying ``fixed_after`` makes
+	``fixed`` the before-side requirement and sets the after side explicitly.
+	"""
+
+	fixed: DataShape = field(default_factory=lambda: ProjOrder(0, 0, 0))
+	fixed_after: DataShape | None = None
 	phase_fft_y: bool = False
 
-	def resolve(self, scan: Any, input_shape: Any) -> AxisPad:
-		resolved = self.fixed
+	def __post_init__(self):
+		_canonical_pad(self.fixed)
+		if self.fixed_after is not None:
+			_canonical_pad(self.fixed_after)
+
+	def resolve(self, scan: Any, input_shape: Any) -> tuple[ProjOrder, ProjOrder]:
+		before = _canonical_pad(self.fixed)
+		after = before if self.fixed_after is None else _canonical_pad(self.fixed_after)
 		if self.phase_fft_y:
 			from lftomo.prep.phase import _phase_pad
 
@@ -96,8 +92,10 @@ class PadRequirement:
 				float(scan.ssd_cm),
 				float(scan.energy_keV),
 			))
-			resolved = resolved + AxisPad(y=max(0, phase_y))
-		return resolved
+			phase = Y(max(0, phase_y))
+			before = before + phase
+			after = after + phase
+		return before, after
 
 
 @dataclass(frozen=True)

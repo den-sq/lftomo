@@ -33,7 +33,6 @@ from lftomo.config import (
 	StageConfig,
 )
 from lftomo.pipeline import (
-	AxisPad,
 	Backend,
 	CandidateLimitError,
 	NumpyBackend,
@@ -877,7 +876,7 @@ def main(pipeline_path: Path, scan_path: Path, output_path: Path | None,
 	backend = Backend(name="numpy", supports_gpu=True) if gpu else NumpyBackend()
 	results = run_reconstruction(
 		pipeline_path, scan_path, output_path, backend,
-		window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=extra_pad_y)),
+		window_config=WindowConfig(rows=window_rows, extra_pad=Y(extra_pad_y)),
 	)
 	if json_output:
 		click.echo(json.dumps([_json_result(result) for result in results], indent=2))

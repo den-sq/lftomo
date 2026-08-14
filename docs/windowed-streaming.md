@@ -10,25 +10,35 @@ Three quantities remain separate in the resolved plan:
 1. Each Stage declares an algorithm requirement with
    `StageContract.required_pad`. Paganin uses the canonical `_phase_pad`
    calculation, bilateral filtering uses its kernel radius, and movement uses
-   the ceiling of its maximum displacement.
+   the ceiling of its maximum displacement. Requirements use semantic
+   `DataShape` values; `fixed` is symmetric unless `fixed_after` is supplied.
 2. `WindowConfig.rows` selects the core rows held by one machine-sized window.
-3. `WindowConfig.extra_pad` is the optional operator override.
+3. `WindowConfig.extra_pad` is the optional operator override. It is symmetric
+   unless `extra_pad_after` is supplied.
 
-Requirements compose by componentwise addition through the streaming segment.
+Before and after requirements compose independently by componentwise addition
+through the streaming segment.
 For example, filters requiring two and three Y rows require five rows when
 chained; `max(2, 3)` is insufficient because the second filter consumes the
 first filter's neighborhood-dependent output. Effective padding is the
-componentwise maximum of that composed requirement and the user padding.
-The resolved selection, window size, all three pad records, warnings, and every
-core/source interval are written to `recon_run.yaml`. Those serialized
+componentwise maximum of each composed side and the corresponding user padding.
+The resolved selection, window size, before/after records for required,
+operator, and effective padding, warnings, and every core/source interval are
+written to `recon_run.yaml`. Those serialized
 intervals are derived from the plan's canonical `TomoWindow` objects; they are
 records, not a second geometry authority.
 
+Source-context padding and generated output padding are distinct. Source
+padding is carried as `TomoWindow.pad_before` / `pad_after`, and is realized
+against the physical source bounds by `TomoDataSet`. The fused affine stage's
+`pad_x` creates a wider published canvas instead; `with_output_padding()`
+derives that canvas without pretending it can read pixels outside the source.
+
 `StreamingPlan` reiterates the `TomoWindow` sequence from its physical
 `TomoDataSet`; it does not cache a second window collection. Every iteration
-reads `window.with_pad()` from the physical source, runs the normal managed Pipeline,
-uses `window.internal` to discard source-context rows before reconstruction,
-and exposes only the requested rows to writers. TIFF
+reads `window.with_pad()` from the physical source, runs the normal managed
+Pipeline, uses `window.internal` to discard source-context rows before
+reconstruction, and exposes only the requested rows to writers. TIFF
 names use global detector Y; HDF5 and Neuroglancer writers place each interior
 block at its output-row offset. Shared storage reserves the largest planned
 window capacity and reuses the same named physical roles, so edge-window sizes

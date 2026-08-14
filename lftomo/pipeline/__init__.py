@@ -2,7 +2,6 @@
 
 from lftomo.pipeline.core import (
 	Backend,
-	AxisPad,
 	BufferSpec,
 	DaskArrayStub,
 	DaskStubBackend,
@@ -65,10 +64,10 @@ from lftomo.pipeline.streaming import (
 	WindowPlanError,
 	resolve_streaming_plan,
 )
+from lftomo.util.shapes import Y
 
 __all__ = [
 	"Backend",
-	"AxisPad",
 	"BufferSpec",
 	"DaskArrayStub",
 	"DaskStubBackend",
@@ -115,6 +114,7 @@ __all__ = [
 	"WorkerTimeoutError",
 	"WindowConfig",
 	"WindowPlanError",
+	"Y",
 	"CandidateLimitError",
 	"CandidateSpaceError",
 	"ContinuousDomainError",

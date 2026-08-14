@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 from typing import Any, Sequence
 
-from lftomo.pipeline.core import AxisPad, Stage
-from lftomo.util.shapes import ProjOrder, Y
+from lftomo.pipeline.core import _canonical_pad, Stage
+from lftomo.util.shapes import DataShape, ProjOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet
 
 
@@ -20,14 +20,21 @@ class WindowPlanError(ValueError):
 
 @dataclass(frozen=True)
 class WindowConfig:
-	"""Machine/runner window selection, deliberately outside Recon YAML."""
+	"""Machine/runner window selection, deliberately outside Recon YAML.
+
+	``extra_pad`` is symmetric unless ``extra_pad_after`` is supplied.
+	"""
 
 	rows: int | None = None
-	extra_pad: AxisPad = AxisPad()
+	extra_pad: DataShape = field(default_factory=lambda: Y(0))
+	extra_pad_after: DataShape | None = None
 
 	def __post_init__(self):
 		if self.rows is not None and self.rows < 1:
 			raise ValueError("window rows must be positive")
+		_canonical_pad(self.extra_pad)
+		if self.extra_pad_after is not None:
+			_canonical_pad(self.extra_pad_after)
 
 
 @dataclass(frozen=True)
@@ -36,9 +43,12 @@ class StreamingPlan:
 
 	selection: tuple[int, int]
 	window_rows: int
-	required_pad: AxisPad
-	extra_pad: AxisPad
-	effective_pad: AxisPad
+	required_pad: ProjOrder
+	required_pad_after: ProjOrder
+	extra_pad: ProjOrder
+	extra_pad_after: ProjOrder
+	effective_pad: ProjOrder
+	effective_pad_after: ProjOrder
 	dataset: TomoDataSet
 	warnings: tuple[str, ...] = ()
 	center_prepass: str | None = None
@@ -46,9 +56,8 @@ class StreamingPlan:
 	def __iter__(self):
 		return self.dataset.iter_with(
 			wsize=Y(self.window_rows),
-			pad=ProjOrder(
-				self.effective_pad.theta, self.effective_pad.y, self.effective_pad.x,
-			),
+			pad=self.effective_pad,
+			pad_after=self.effective_pad_after,
 		)
 
 	@property
@@ -67,9 +76,12 @@ class StreamingPlan:
 		record = {
 			"selection": list(self.selection),
 			"window_rows": self.window_rows,
-			"required_pad": self.required_pad.as_dict(),
-			"extra_pad": self.extra_pad.as_dict(),
-			"effective_pad": self.effective_pad.as_dict(),
+			"required_pad": _pad_record(self.required_pad),
+			"required_pad_after": _pad_record(self.required_pad_after),
+			"extra_pad": _pad_record(self.extra_pad),
+			"extra_pad_after": _pad_record(self.extra_pad_after),
+			"effective_pad": _pad_record(self.effective_pad),
+			"effective_pad_after": _pad_record(self.effective_pad_after),
 			"whole_volume": self.whole_volume,
 			"center_prepass": self.center_prepass,
 			"warnings": list(self.warnings),
@@ -86,6 +98,15 @@ class StreamingPlan:
 				"interior": [interior.start, interior.stop],
 			})
 		return record
+
+
+def _pad_record(value: DataShape) -> dict[str, int]:
+	canonical = _canonical_pad(value)
+	return {
+		"theta": int(canonical.Theta),
+		"y": int(canonical.Y),
+		"x": int(canonical.X),
+	}
 
 
 def resolve_streaming_plan(
@@ -108,10 +129,17 @@ def resolve_streaming_plan(
 	window_rows = selected_rows if config.rows is None else min(config.rows, selected_rows)
 	theta_count = scan.n_projections
 	input_shape = ProjOrder(theta_count, window_rows, columns)
-	required = AxisPad()
+	required = ProjOrder(0, 0, 0)
+	required_after = ProjOrder(0, 0, 0)
 	for stage in stages:
-		required = required + stage.contract.required_pad.resolve(scan, input_shape)
-	effective = required.maximum(config.extra_pad)
+		stage_before, stage_after = stage.contract.required_pad.resolve(scan, input_shape)
+		required = required + stage_before
+		required_after = required_after + stage_after
+	extra = _canonical_pad(config.extra_pad)
+	extra_after = extra if config.extra_pad_after is None \
+		else _canonical_pad(config.extra_pad_after)
+	effective = ProjOrder.param_max(required, extra)
+	effective_after = ProjOrder.param_max(required_after, extra_after)
 	multiple = window_rows < selected_rows
 	if multiple:
 		for stage in stages:
@@ -149,7 +177,9 @@ def resolve_streaming_plan(
 	)
 	return StreamingPlan(
 		selection=(selection_start, selection_stop), window_rows=window_rows,
-		required_pad=required, extra_pad=config.extra_pad,
-		effective_pad=effective, dataset=dataset,
+		required_pad=required, required_pad_after=required_after,
+		extra_pad=extra, extra_pad_after=extra_after,
+		effective_pad=effective, effective_pad_after=effective_after,
+		dataset=dataset,
 		warnings=tuple(warnings), center_prepass=center_prepass,
 	)

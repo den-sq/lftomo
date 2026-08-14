@@ -8,7 +8,6 @@ import yaml
 
 from lftomo.config import Acquisition, Detector, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
-	AxisPad,
 	PadRequirement,
 	Stage,
 	StageContract,
@@ -49,6 +48,16 @@ class _FullYStage(Stage):
 		return state
 
 
+class _AsymmetricStage(Stage):
+	name = "test.asymmetric"
+	contract = StageContract(
+		required_pad=PadRequirement(fixed=Y(1), fixed_after=Y(3)),
+	)
+
+	def run(self, state):
+		return state
+
+
 def test_pad_quantities_are_separate_and_neighborhood_stages_compose():
 	stages = [
 		BilateralFilterStage(diameter=5),
@@ -56,18 +65,41 @@ def test_pad_quantities_are_separate_and_neighborhood_stages_compose():
 		MovementCorrectStage(y=3),
 	]
 	plan = resolve_streaming_plan(
-		stages, _scan(), WindowConfig(rows=3, extra_pad=AxisPad(y=5)),
+		stages, _scan(), WindowConfig(rows=3, extra_pad=Y(5)),
 	)
 	assert plan.window_rows == 3
-	assert plan.required_pad == AxisPad(y=7, x=4)
-	assert plan.extra_pad == AxisPad(y=5)
-	assert plan.effective_pad == AxisPad(y=7, x=4)
+	assert plan.required_pad == ProjOrder(Theta=0, Y=7, X=4)
+	assert plan.required_pad_after == ProjOrder(Theta=0, Y=7, X=4)
+	assert plan.extra_pad == ProjOrder(Theta=0, Y=5, X=0)
+	assert plan.extra_pad_after == ProjOrder(Theta=0, Y=5, X=0)
+	assert plan.effective_pad == ProjOrder(Theta=0, Y=7, X=4)
+	assert plan.effective_pad_after == ProjOrder(Theta=0, Y=7, X=4)
 
 	user_dominates = resolve_streaming_plan(
-		stages, _scan(), WindowConfig(rows=3, extra_pad=AxisPad(y=10)),
+		stages, _scan(), WindowConfig(rows=3, extra_pad=Y(10)),
 	)
-	assert user_dominates.required_pad.y == 7
-	assert user_dominates.effective_pad.y == 10
+	assert user_dominates.required_pad.Y == 7
+	assert user_dominates.effective_pad.Y == 10
+
+
+def test_asymmetric_stage_and_operator_requirements_compose_by_side():
+	plan = resolve_streaming_plan(
+		[_AsymmetricStage()], _scan(),
+		WindowConfig(rows=4, extra_pad=Y(2), extra_pad_after=Y(1)),
+	)
+
+	assert plan.required_pad == ProjOrder(Theta=0, Y=1, X=0)
+	assert plan.required_pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	assert plan.effective_pad == ProjOrder(Theta=0, Y=2, X=0)
+	assert plan.effective_pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	windows = tuple(plan)
+	assert windows[0].pad_before == ProjOrder(Theta=0, Y=0, X=0)
+	assert windows[0].pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	assert windows[1].pad_before == ProjOrder(Theta=0, Y=2, X=0)
+	assert windows[1].pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	record = plan.record()
+	assert record["effective_pad"] == {"theta": 0, "y": 2, "x": 0}
+	assert record["effective_pad_after"] == {"theta": 0, "y": 3, "x": 0}
 
 
 def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
@@ -75,7 +107,8 @@ def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
 	plan = resolve_streaming_plan(
 		[PaganinFilterStage(), NegativeLogStage()], scan, WindowConfig(rows=8),
 	)
-	assert plan.required_pad.y == _phase_pad(8, 1e-4, 10, 20)
+	assert plan.required_pad.Y == _phase_pad(8, 1e-4, 10, 20)
+	assert plan.required_pad_after.Y == _phase_pad(8, 1e-4, 10, 20)
 	assert "phase.paganin_filter" in plan.warnings[0]
 	assert "whole-volume equivalence" in plan.warnings[0]
 
