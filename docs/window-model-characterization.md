@@ -44,13 +44,35 @@ edge padding:
 - `with_pad()` has no physical upper-bound record and the model cannot yet
   carry distinct realized padding before and after a window.
 
-#212 deliberately corrects these behaviors. The selected range describes
-output; it is not the source clipping boundary. A separate physical source
-shape on `TomoDataSet` will allow padding to read outside the selection, and
-only a physical edge may reduce the realized padding. The eventual padded
-version of the remainder test must therefore continue to emit `900:1000`
-while clipping only its after-padding at physical row 1000.
+#212 corrects these behaviors in the canonical seam. The selected range
+describes output; it is not the source clipping boundary.
 
-This characterization does not select the name or public form of the future
-physical-shape record or asymmetric-padding value. Those belong to the next
-implementation steps and must extend the existing window seam narrowly.
+## Core extension
+
+`TomoDataSet.physical_shape` retains the full shape discovered from the source.
+The inherited dataset `shape`, `pos`, and `frange` continue to describe the
+selected output scope, so a selection such as `100:900` does not erase the
+fact that physical rows `0:1000` exist.
+
+`DataRef` and `TomoWindow` retain the existing symmetric `pad` constructor
+argument and property. Internally and for asymmetric consumers, the same
+objects expose ordinary semantic `DataShape` values as `pad_before` and
+`pad_after`; no padding wrapper or second geometry model is introduced. The
+single `pad` property remains available when both sides are equal and rejects
+an asymmetric window so a caller cannot silently ignore one side.
+
+`TomoDataSet.iter_with()` accepts requested `pad` and optional `pad_after`
+values. Its iterator resolves each side against `physical_shape`, then creates
+the canonical `TomoWindow` with the realized values. `with_pad()` expands by
+`pad_before + pad_after`, while `internal` starts at `pad_before` and retains
+the unpadded output shape.
+
+Consequently, padding 10 around selected output `100:900` over physical rows
+`0:1000` reads through `90:910`. For a non-divisible selection `100:1000`
+with rows 400, the final output remains `900:1000`; its source read is
+`890:1000`, with before-padding 10 and after-padding 0. Only the physical edge
+clips padding, and clipping never shifts or shortens the requested output.
+
+A directly constructed `DataRef`, `TomoWindow`, or `TomoWindowIter` without a
+physical source record trusts the padding supplied by its caller. It does not
+infer a source bound from the configured output range.
