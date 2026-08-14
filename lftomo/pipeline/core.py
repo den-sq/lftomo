@@ -510,6 +510,7 @@ class Pipeline:
 				run_id=run_id,
 				span_id=f"{run_id}:{ordinal}",
 				ordinal=ordinal,
+				total=len(segments),
 				kind=segment.kind,
 				member_start=members[0].index,
 				member_stop=members[-1].index + 1,

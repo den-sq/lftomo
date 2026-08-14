@@ -110,6 +110,7 @@ class ExecutionSpan:
 	run_id: str
 	span_id: str
 	ordinal: int
+	total: int
 	kind: ExecutionKind
 	member_start: int
 	member_stop: int

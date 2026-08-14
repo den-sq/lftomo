@@ -114,6 +114,8 @@ def test_sequential_span_reports_truthful_single_member_wall_time():
 	]
 	completed = events[-1]
 	assert completed.span.kind is ExecutionKind.SEQUENTIAL
+	assert completed.span.ordinal == 0
+	assert completed.span.total == 1
 	assert completed.span.member_start == 7
 	assert completed.span.member_stop == 8
 	assert completed.span.members[0].index == 7

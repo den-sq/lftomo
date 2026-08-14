@@ -81,7 +81,7 @@ def test_acceptance_stage_progress_names_the_independent_run_and_window(tmp_path
 def _span_event(phase):
 	member = LogicalStageMember(0, "read.test", "tests.ReadStage", DispatchKind.THREAD)
 	span = ExecutionSpan(
-		"run", "run:0", 0, ExecutionKind.SEQUENTIAL, 0, 1, (member,),
+		"run", "run:0", 0, 1, ExecutionKind.SEQUENTIAL, 0, 1, (member,),
 	)
 	return ExecutionSpanEvent(phase, span)
 
