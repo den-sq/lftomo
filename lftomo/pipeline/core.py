@@ -488,7 +488,7 @@ class Pipeline:
 			) for index, stage in enumerate(self.stages))
 		from lftomo.pipeline.planning import ExecutionKind
 		if self.execution_observer is not None:
-			from lftomo.pipeline.stages import dispatch_for_stage
+			from lftomo.pipeline.dispatch import dispatch_for_stage
 			from lftomo.pipeline.telemetry import (
 				ExecutionSpan,
 				ExecutionSpanEvent,
