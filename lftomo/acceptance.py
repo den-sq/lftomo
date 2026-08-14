@@ -38,8 +38,7 @@ from lftomo.experiment import (
 	collect_environment_identity,
 )
 from lftomo.experiment.cli import PipelineTrialExecutor, build_experiment_inputs
-from lftomo.pipeline import WindowConfig, Y
-from lftomo.pipeline.stages import dispatch_for_stage
+from lftomo.pipeline import ExecutionSpanEvent, ExecutionSpanPhase, WindowConfig, Y
 from lftomo.prep.flat import FLAT
 from lftomo.reference import NumericalTolerance, checksum_manifest, compare_slice, sha256_file
 from lftomo.runner import load_recon, load_scan, run_reconstruction
@@ -151,9 +150,9 @@ def _private_bytes(process: psutil.Process) -> int:
 
 
 class ProcessTreeMemorySampler(AbstractContextManager):
-	"""Record non-gating, per-Stage process-tree memory observations.
+	"""Record non-gating, per-span process-tree memory observations.
 
-	Private mappings are sampled relative to each Stage's start. Managed
+	Private mappings are sampled relative to each execution span's start. Managed
 	``/dev/shm`` mappings are excluded so the run-owned allocation ledger remains
 	the separate source for shared-memory observations. These are diagnostic
 	measurements, not estimates or upper-bound proofs.
@@ -246,25 +245,34 @@ class ProcessTreeMemorySampler(AbstractContextManager):
 			self._thread.join(timeout=2)
 		return False
 
-	def observer(self, phase, index, stage, _error) -> None:
-		if phase == "started":
+	def observer(self, event: ExecutionSpanEvent) -> None:
+		if event.phase is ExecutionSpanPhase.STARTED:
 			self._finish_active("superseded")
-			if stage.name.startswith("read."):
+			if any(member.stage_name.startswith("read.") for member in event.span.members):
 				self._window_index += 1
 			window_index = max(self._window_index, 0)
 			window_index = min(window_index, len(self._windows) - 1)
 			start, stop = self._windows[window_index]
-			dispatch = dispatch_for_stage(stage)
 			baseline = self._snapshot()
 			with self._lock:
 				self._sequence += 1
 				self._active = {
 					"sequence": self._sequence,
-					"stage": stage.name,
-					"stage_index": index,
-					"dispatch_kind": dispatch.kind.name.lower(),
+					"span_id": event.span.span_id,
+					"execution_kind": event.span.kind.name.lower(),
+					"member_range": [event.span.member_start, event.span.member_stop],
+					"members": [
+						{
+							"index": member.index,
+							"stage": member.stage_name,
+							"dispatch_kind": member.dispatch_kind.name.lower(),
+						}
+						for member in event.span.members
+					],
 					"window_index": window_index,
 					"core_interval": [start, stop],
+					"scope": "sampled execution span and process tree",
+					"attribution": "observed",
 					"started_at": _utcnow(),
 					"sample_interval_seconds": self.interval_seconds,
 					"sample_count": 0,
@@ -272,8 +280,12 @@ class ProcessTreeMemorySampler(AbstractContextManager):
 					"_baseline": baseline,
 					"_peak_by_pid": {},
 				}
-		elif phase in ("completed", "failed"):
-			self._finish_active(phase)
+		elif event.phase in (
+			ExecutionSpanPhase.COMPLETED,
+			ExecutionSpanPhase.FAILED,
+			ExecutionSpanPhase.INTERRUPTED,
+		):
+			self._finish_active(event.phase.value)
 
 	@property
 	def records(self) -> list[dict[str, Any]]:
@@ -589,10 +601,11 @@ def _memory_record_logger(
 	def emit(record: dict[str, Any]) -> None:
 		start, stop = record["core_interval"]
 		peak = record["peak_process_tree_private_delta_bytes"]
+		members = " -> ".join(item["stage"] for item in record["members"])
 		log.emit(
-			f"{event_prefix}.window.stage.memory_observed",
+			f"{event_prefix}.window.segment.memory_observed",
 			f"{run_label}: window {record['window_index'] + 1} [{start}, {stop}) "
-			f"{record['stage']} observed {peak / 1024**2:.1f} MiB peak "
+			f"{members} observed {peak / 1024**2:.1f} MiB peak "
 			"process-tree private delta",
 			**record,
 		)
@@ -779,17 +792,15 @@ def run_windowed_acceptance(
 			scan_path,
 			frozen_reproduction_output,
 			window_config=WindowConfig(rows=window_rows, extra_pad=Y(0)),
-			stage_observer=_compose_observers(
-				sampler.observer,
-				_progress_observer(
-					log,
-					"windowed.frozen_b10_reproduction",
-					"frozen-B10 reproduction",
-					y_start=y_start,
-					y_stop=y_stop,
-					window_rows=window_rows,
-				),
+			stage_observer=_progress_observer(
+				log,
+				"windowed.frozen_b10_reproduction",
+				"frozen-B10 reproduction",
+				y_start=y_start,
+				y_stop=y_stop,
+				window_rows=window_rows,
 			),
+			execution_observer=sampler.observer,
 		)[0]
 	memory_observations = {
 		"gating": False,
@@ -798,17 +809,17 @@ def run_windowed_acceptance(
 		),
 		"shared_memory_basis": "unique physical allocations in the manager ledger",
 		"private_memory_basis": (
-			"per-Stage sampled process-tree private mapped-byte delta from Stage start; "
+			"per-span sampled process-tree private mapped-byte delta from span start; "
 			"/dev/shm excluded"
 		),
-		"stages": sampler.records,
+		"spans": sampler.records,
 	}
 	log.emit(
 		"windowed.frozen_b10_reproduction.memory_observed",
-		"frozen-B10 reproduction: recorded non-gating shared and per-Stage "
+		"frozen-B10 reproduction: recorded non-gating shared and per-span "
 		"private-memory observations",
 		shared_memory_allocated_bytes=memory_observations["shared_memory_allocated_bytes"],
-		stage_observation_count=len(memory_observations["stages"]),
+		span_observation_count=len(memory_observations["spans"]),
 	)
 	archive = dataset_root / "reference" / "b10_recon"
 	frozen = _frozen_b10_parity(frozen_reproduction_output, archive)

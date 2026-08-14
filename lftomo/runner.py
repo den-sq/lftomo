@@ -39,6 +39,7 @@ from lftomo.pipeline import (
 	Pipeline,
 	PipelineRunContext,
 	PipelineState,
+	ExecutionSpanObserver,
 	StreamingPlan,
 	Stage,
 	StageObserver,
@@ -527,7 +528,9 @@ def _retire_window_state(state: PipelineState) -> None:
 def _planned_pipeline(
 	stages: list[Stage], scan: Scan, backend: Backend,
 	available_artifacts: dict[str, Any], observer: StageObserver | None, recon: Recon,
-	*, mode: str = "complete", initial_layout=None, initial_domain=None,
+	*, execution_observer: ExecutionSpanObserver | None = None,
+	stage_index_offset: int = 0, mode: str = "complete",
+	initial_layout=None, initial_domain=None,
 ) -> Pipeline:
 	plan = validate_pipeline(
 		stages, scan, backend, available_artifacts=available_artifacts,
@@ -537,6 +540,8 @@ def _planned_pipeline(
 	)
 	pipeline = Pipeline(
 		stages, backend=backend, validate=False, observer=observer,
+		execution_observer=execution_observer,
+		stage_indices=tuple(range(stage_index_offset, stage_index_offset + len(stages))),
 	)
 	pipeline.plan = plan
 	pipeline._validated = True
@@ -555,6 +560,7 @@ def _run_streaming_pipeline(
 	*, stages: list[Stage], concrete: Recon, run_scan: Scan,
 	initial_artifacts: dict[str, Any], backend: Backend, run_context,
 	window_plan: StreamingPlan, stage_observer: StageObserver | None,
+	execution_observer: ExecutionSpanObserver | None,
 ) -> dict[str, Any]:
 	"""Execute one whole-volume or multi-window run through the same driver."""
 
@@ -576,6 +582,7 @@ def _run_streaming_pipeline(
 		reserve_pipeline = _planned_pipeline(
 			reserve_stages[:reserve_writer], reserve_scan, backend,
 			initial_artifacts, None, reserve_recon,
+			execution_observer=None,
 		)
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
@@ -600,7 +607,7 @@ def _run_streaming_pipeline(
 			)
 			prepass = _planned_pipeline(
 				prepass_stages, window_scan, backend, window_initial, stage_observer,
-				window_recon,
+				window_recon, execution_observer=execution_observer,
 			)
 			prepass_state = prepass.run(prepass_state)
 			center_artifacts = _center_artifacts(prepass_state)
@@ -631,13 +638,14 @@ def _run_streaming_pipeline(
 		if reconstruction_start is None:
 			compute = _planned_pipeline(
 				compute_stages, window_scan, backend, window_initial, stage_observer,
-				window_recon,
+				window_recon, execution_observer=execution_observer,
 			)
 			state = compute.run(state)
 		else:
 			prefix = _planned_pipeline(
 				compute_stages[:reconstruction_start], window_scan, backend,
 				window_initial, stage_observer, window_recon,
+				execution_observer=execution_observer,
 			)
 			state = prefix.run(state)
 			state = _crop_to_window_interior(
@@ -646,6 +654,8 @@ def _run_streaming_pipeline(
 			reconstruction = _planned_pipeline(
 				compute_stages[reconstruction_start:], window_scan, backend,
 				state.artifacts, stage_observer, window_recon,
+				execution_observer=execution_observer,
+				stage_index_offset=reconstruction_start,
 				mode="fragment", initial_layout=state.layout, initial_domain=state.domain,
 			)
 			state = reconstruction.run(state)
@@ -654,6 +664,8 @@ def _run_streaming_pipeline(
 		if writer_stages:
 			state = Pipeline(
 				writer_stages, backend=backend, validate=False, observer=stage_observer,
+				execution_observer=execution_observer,
+				stage_indices=tuple(range(writer_start, writer_start + len(writer_stages))),
 			).run(state)
 		window_artifacts = {
 			key: _detached_artifact(value) for key, value in state.artifacts.items()
@@ -687,6 +699,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			verify_calibration_hashes: bool = True,
 			state_executor: PipelineStateExecutor | None = None,
 			stage_observer: StageObserver | None = None,
+			execution_observer: ExecutionSpanObserver | None = None,
 			window_config: WindowConfig | None = None) -> list[RunResult]:
 	"""Load, expand, and execute every concrete run described by YAML files."""
 	recon, resolved_pipeline_path = load_recon(pipeline_path)
@@ -807,6 +820,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					initial_artifacts=initial_artifacts, backend=backend,
 					run_context=run_context, window_plan=window_plan,
 					stage_observer=stage_observer,
+					execution_observer=execution_observer,
 				)
 			results.append(RunResult(
 				run.index,

@@ -18,6 +18,14 @@ from lftomo.acceptance import (
 	audit_pin_events,
 	run_experiment_acceptance,
 )
+from lftomo.pipeline import (
+	DispatchKind,
+	ExecutionKind,
+	ExecutionSpan,
+	ExecutionSpanEvent,
+	ExecutionSpanPhase,
+	LogicalStageMember,
+)
 from lftomo.runner import load_scan
 from lftomo.util.log import LOG, log
 
@@ -70,7 +78,15 @@ def test_acceptance_stage_progress_names_the_independent_run_and_window(tmp_path
 	)
 
 
-def test_memory_sampler_records_each_stage_without_turning_it_into_a_proof():
+def _span_event(phase):
+	member = LogicalStageMember(0, "read.test", "tests.ReadStage", DispatchKind.THREAD)
+	span = ExecutionSpan(
+		"run", "run:0", 0, ExecutionKind.SEQUENTIAL, 0, 1, (member,),
+	)
+	return ExecutionSpanEvent(phase, span)
+
+
+def test_memory_sampler_records_each_span_without_turning_it_into_a_proof():
 	recorded = []
 	sampler = ProcessTreeMemorySampler(
 		y_start=1068, y_stop=1092, window_rows=12, on_record=recorded.append,
@@ -81,19 +97,19 @@ def test_memory_sampler_records_each_stage_without_turning_it_into_a_proof():
 		{1: 120, 2: 35},
 	))
 	sampler._snapshot = lambda: next(snapshots)
-	stage = type("Stage", (), {"name": "read.test"})()
-
-	sampler.observer("started", 0, stage, None)
+	sampler.observer(_span_event(ExecutionSpanPhase.STARTED))
 	sampler._sample()
-	sampler.observer("completed", 0, stage, None)
+	sampler.observer(_span_event(ExecutionSpanPhase.COMPLETED))
 
 	assert sampler.records == recorded
 	assert len(recorded) == 1
 	observation = recorded[0]
-	assert observation["stage"] == "read.test"
+	assert observation["span_id"] == "run:0"
+	assert observation["members"][0]["stage"] == "read.test"
 	assert observation["window_index"] == 0
 	assert observation["core_interval"] == [1068, 1080]
-	assert observation["dispatch_kind"] == "exempt"
+	assert observation["members"][0]["dispatch_kind"] == "thread"
+	assert observation["scope"] == "sampled execution span and process tree"
 	assert observation["outcome"] == "completed"
 	assert observation["peak_process_private_delta_bytes"] == 40
 	assert observation["peak_process_tree_private_delta_bytes"] == 65
@@ -109,13 +125,13 @@ def test_stage_memory_observation_uses_shared_logger(tmp_path):
 	emit({
 		"window_index": 1,
 		"core_interval": [1080, 1092],
-		"stage": "recon.gridrec",
+		"members": [{"stage": "recon.gridrec"}],
 		"peak_process_tree_private_delta_bytes": 3 * 1024**2,
 	})
 
 	record = json.loads(progress.path.read_text(encoding="utf-8"))
-	assert record["event"] == "windowed.frozen.window.stage.memory_observed"
-	assert record["details"]["stage"] == "recon.gridrec"
+	assert record["event"] == "windowed.frozen.window.segment.memory_observed"
+	assert record["details"]["members"][0]["stage"] == "recon.gridrec"
 	assert "3.0 MiB" in logger.calls[0][1]
 
 

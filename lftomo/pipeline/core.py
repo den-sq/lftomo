@@ -5,7 +5,9 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import asdict, astuple, dataclass, field, is_dataclass, replace
 from enum import Enum, auto
+import time
 from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
+import uuid
 
 import numpy as np
 
@@ -16,6 +18,7 @@ from lftomo.util.shapes import DataShape, ProjOrder, Y
 
 if TYPE_CHECKING:
 	from lftomo.pipeline.execution import PipelineExecutor
+	from lftomo.pipeline.telemetry import ExecutionSpanObserver
 	from lftomo.util.window import TomoDataSet, TomoWindow
 
 
@@ -389,6 +392,26 @@ StageObserver = Callable[
 ]
 
 
+def _allocation_cursor(storage: StorageBackend | None) -> int | None:
+	events = getattr(storage, "allocation_events", None)
+	return None if events is None else len(events)
+
+
+def _allocation_changes(storage: StorageBackend | None, cursor: int | None):
+	from lftomo.pipeline.telemetry import ManagedAllocationChange
+
+	if cursor is None:
+		return ()
+	events = getattr(storage, "allocation_events", ())
+	return tuple(ManagedAllocationChange(
+		action=str(event["action"]),
+		role=None if event.get("role") is None else str(event["role"]),
+		name=str(event["name"]),
+		bytes=int(event["bytes"]),
+		alias=None if event.get("alias") is None else str(event["alias"]),
+	) for event in events[cursor:])
+
+
 class Pipeline:
 	"""Sequential Pipeline over an ordered list of Stages."""
 
@@ -398,10 +421,23 @@ class Pipeline:
 			initial_layout: type[Any] | None = None,
 			initial_domain: DataDomain | None = None,
 			bounded_workers: int = 1, observer: StageObserver | None = None,
+			execution_observer: ExecutionSpanObserver | None = None,
+			stage_indices: tuple[int, ...] | None = None,
 			checkpoint: Callable[[], None] | None = None):
 		if bounded_workers < 1:
 			raise ValueError("bounded_workers must be positive")
 		self.stages = tuple(stages)
+		self.stage_indices = (
+			tuple(range(len(self.stages))) if stage_indices is None else tuple(stage_indices)
+		)
+		if len(self.stage_indices) != len(self.stages):
+			raise ValueError("stage_indices must identify every authored Stage occurrence")
+		if any(index < 0 for index in self.stage_indices):
+			raise ValueError("authored Stage indices cannot be negative")
+		if any(right <= left for left, right in zip(
+			self.stage_indices, self.stage_indices[1:],
+		)):
+			raise ValueError("authored Stage indices must be strictly increasing")
 		self.backend = backend or NumpyBackend()
 		self.validate = validate
 		self.validation_mode = validation_mode
@@ -409,6 +445,7 @@ class Pipeline:
 		self.initial_domain = initial_domain
 		self.bounded_workers = bounded_workers
 		self.observer = observer
+		self.execution_observer = execution_observer
 		self.checkpoint = checkpoint
 		self.plan = None
 		self._validated = False
@@ -450,8 +487,45 @@ class Pipeline:
 				index, index + 1, ExecutionKind.SEQUENTIAL, (stage.name,),
 			) for index, stage in enumerate(self.stages))
 		from lftomo.pipeline.planning import ExecutionKind
-		for segment in segments:
+		from lftomo.pipeline.stages import dispatch_for_stage
+		from lftomo.pipeline.telemetry import (
+			ExecutionSpan,
+			ExecutionSpanEvent,
+			ExecutionSpanPhase,
+			LogicalStageMember,
+			MemberTiming,
+			WorkerTimingAggregate,
+		)
+
+		run_id = uuid.uuid4().hex
+		for ordinal, segment in enumerate(segments):
 			segment_stages = self.stages[segment.start:segment.stop]
+			members = tuple(LogicalStageMember(
+				index=self.stage_indices[index],
+				stage_name=stage.name,
+				stage_type=f"{type(stage).__module__}.{type(stage).__qualname__}",
+				dispatch_kind=dispatch_for_stage(stage).kind,
+			) for index, stage in enumerate(segment_stages, start=segment.start))
+			span = ExecutionSpan(
+				run_id=run_id,
+				span_id=f"{run_id}:{ordinal}",
+				ordinal=ordinal,
+				kind=segment.kind,
+				member_start=members[0].index,
+				member_stop=members[-1].index + 1,
+				members=members,
+			)
+			allocation_cursor = _allocation_cursor(state.storage)
+			unavailable = []
+			if allocation_cursor is None:
+				unavailable.append("managed_allocation_ledger")
+			unavailable.append("process_private_memory")
+			if self.execution_observer is not None:
+				self.execution_observer(ExecutionSpanEvent(
+					phase=ExecutionSpanPhase.STARTED,
+					span=span,
+					unavailable_observations=tuple(unavailable),
+				))
 			if segment.kind is ExecutionKind.BOUNDED_SINOGRAM:
 				from lftomo.pipeline.execution import run_bounded_sinogram_segment
 
@@ -462,6 +536,13 @@ class Pipeline:
 				if self.observer is not None:
 					for offset, stage in enumerate(segment_stages, start=segment.start):
 						self.observer("started", offset, stage, None)
+				member_samples: tuple[tuple[float, ...], ...] = ()
+
+				def capture_timings(samples: tuple[tuple[float, ...], ...]) -> None:
+					nonlocal member_samples
+					member_samples = samples
+
+				span_started = time.perf_counter()
 				try:
 					state = run_bounded_sinogram_segment(
 						state,
@@ -475,10 +556,31 @@ class Pipeline:
 								error,
 							)
 						),
+						timing_observer=(
+							capture_timings if self.execution_observer is not None else None
+						),
 						checkpoint=self.checkpoint,
 						executor=executor,
 					)
-				except BaseException:
+					wall_seconds = time.perf_counter() - span_started
+				except BaseException as error:
+					if self.execution_observer is not None:
+						phase = (
+							ExecutionSpanPhase.INTERRUPTED
+							if isinstance(error, (KeyboardInterrupt, InterruptedError)) else
+							ExecutionSpanPhase.FAILED
+						)
+						self.execution_observer(ExecutionSpanEvent(
+							phase=phase,
+							span=span,
+							coordinator_wall_seconds=time.perf_counter() - span_started,
+							managed_allocation_changes=_allocation_changes(
+								state.storage, allocation_cursor,
+							),
+							unavailable_observations=tuple(unavailable),
+							error_type=f"{type(error).__module__}.{type(error).__qualname__}",
+							error_message=str(error),
+						))
 					raise
 				if self.observer is not None:
 					for offset, stage in enumerate(segment_stages, start=segment.start):
@@ -487,22 +589,60 @@ class Pipeline:
 					state.layout = stage.contract.output_layout(state.layout)
 					state.domain = stage.contract.output_domain(state.domain)
 				state.sync_buffer_spec()
+				if self.execution_observer is not None:
+					member_timings = tuple(MemberTiming(
+						member=member,
+						worker=(
+							WorkerTimingAggregate.from_samples(samples)
+							if samples else None
+						),
+						unavailable=(() if samples else ("bounded_worker_timing",)),
+					) for member, samples in zip(members, member_samples))
+					self.execution_observer(ExecutionSpanEvent(
+						phase=ExecutionSpanPhase.COMPLETED,
+						span=span,
+						coordinator_wall_seconds=wall_seconds,
+						member_timings=member_timings,
+						managed_allocation_changes=_allocation_changes(
+							state.storage, allocation_cursor,
+						),
+						unavailable_observations=tuple(unavailable),
+					))
 				continue
 			for index, stage in enumerate(segment_stages, start=segment.start):
-				if self.checkpoint is not None:
-					self.checkpoint()
 				input_layout = state.layout
 				input_domain = state.domain
 				if self.observer is not None:
 					self.observer("started", index, stage, None)
+				span_started = time.perf_counter()
 				try:
+					if self.checkpoint is not None:
+						self.checkpoint()
 					state = (
 						executor.run_stage(state, stage)
 						if executor is not None else stage.run(state)
 					)
+					wall_seconds = time.perf_counter() - span_started
 				except BaseException as error:
 					if self.observer is not None:
 						self.observer("failed", index, stage, error)
+					if self.execution_observer is not None:
+						phase = (
+							ExecutionSpanPhase.INTERRUPTED
+							if isinstance(error, (KeyboardInterrupt, InterruptedError)) else
+							ExecutionSpanPhase.FAILED
+						)
+						self.execution_observer(ExecutionSpanEvent(
+							phase=phase,
+							span=span,
+							coordinator_wall_seconds=time.perf_counter() - span_started,
+							managed_allocation_changes=_allocation_changes(
+								state.storage, allocation_cursor,
+							),
+							unavailable_observations=tuple(unavailable),
+							error_type=f"{type(error).__module__}.{type(error).__qualname__}",
+							error_message=str(error),
+						))
 					raise
 				if self.observer is not None:
 					self.observer("completed", index, stage, None)
@@ -513,4 +653,24 @@ class Pipeline:
 				if output_domain is not None:
 					state.domain = output_domain
 				state.sync_buffer_spec()
+				if self.execution_observer is not None:
+					member = members[0]
+					member_unavailable = (
+						("external_engine_internal_timing",)
+						if member.dispatch_kind.name == "ENGINE" else ()
+					)
+					self.execution_observer(ExecutionSpanEvent(
+						phase=ExecutionSpanPhase.COMPLETED,
+						span=span,
+						coordinator_wall_seconds=wall_seconds,
+						member_timings=(MemberTiming(
+							member=member,
+							coordinator_wall_seconds=wall_seconds,
+							unavailable=member_unavailable,
+						),),
+						managed_allocation_changes=_allocation_changes(
+							state.storage, allocation_cursor,
+						),
+						unavailable_observations=tuple(unavailable),
+					))
 		return state
