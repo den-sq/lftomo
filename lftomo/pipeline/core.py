@@ -487,41 +487,41 @@ class Pipeline:
 				index, index + 1, ExecutionKind.SEQUENTIAL, (stage.name,),
 			) for index, stage in enumerate(self.stages))
 		from lftomo.pipeline.planning import ExecutionKind
-		from lftomo.pipeline.stages import dispatch_for_stage
-		from lftomo.pipeline.telemetry import (
-			ExecutionSpan,
-			ExecutionSpanEvent,
-			ExecutionSpanPhase,
-			LogicalStageMember,
-			MemberTiming,
-			WorkerTimingAggregate,
-		)
-
-		run_id = uuid.uuid4().hex
+		if self.execution_observer is not None:
+			from lftomo.pipeline.stages import dispatch_for_stage
+			from lftomo.pipeline.telemetry import (
+				ExecutionSpan,
+				ExecutionSpanEvent,
+				ExecutionSpanPhase,
+				LogicalStageMember,
+				MemberTiming,
+				WorkerTimingAggregate,
+			)
+			run_id = uuid.uuid4().hex
 		for ordinal, segment in enumerate(segments):
 			segment_stages = self.stages[segment.start:segment.stop]
-			members = tuple(LogicalStageMember(
-				index=self.stage_indices[index],
-				stage_name=stage.name,
-				stage_type=f"{type(stage).__module__}.{type(stage).__qualname__}",
-				dispatch_kind=dispatch_for_stage(stage).kind,
-			) for index, stage in enumerate(segment_stages, start=segment.start))
-			span = ExecutionSpan(
-				run_id=run_id,
-				span_id=f"{run_id}:{ordinal}",
-				ordinal=ordinal,
-				total=len(segments),
-				kind=segment.kind,
-				member_start=members[0].index,
-				member_stop=members[-1].index + 1,
-				members=members,
-			)
-			allocation_cursor = _allocation_cursor(state.storage)
-			unavailable = []
-			if allocation_cursor is None:
-				unavailable.append("managed_allocation_ledger")
-			unavailable.append("process_private_memory")
 			if self.execution_observer is not None:
+				members = tuple(LogicalStageMember(
+					index=self.stage_indices[index],
+					stage_name=stage.name,
+					stage_type=f"{type(stage).__module__}.{type(stage).__qualname__}",
+					dispatch_kind=dispatch_for_stage(stage).kind,
+				) for index, stage in enumerate(segment_stages, start=segment.start))
+				span = ExecutionSpan(
+					run_id=run_id,
+					span_id=f"{run_id}:{ordinal}",
+					ordinal=ordinal,
+					total=len(segments),
+					kind=segment.kind,
+					member_start=members[0].index,
+					member_stop=members[-1].index + 1,
+					members=members,
+				)
+				allocation_cursor = _allocation_cursor(state.storage)
+				unavailable = []
+				if allocation_cursor is None:
+					unavailable.append("managed_allocation_ledger")
+				unavailable.append("process_private_memory")
 				self.execution_observer(ExecutionSpanEvent(
 					phase=ExecutionSpanPhase.STARTED,
 					span=span,

@@ -1,3 +1,5 @@
+import builtins
+
 import numpy as np
 import pytest
 
@@ -100,6 +102,22 @@ class _AllocatingStage(_PassStage):
 		buffer = state.storage.allocate((1,), np.uint8, role="telemetry_probe")
 		state.storage.retire(buffer, role="telemetry_probe")
 		return state
+
+
+def test_unobserved_pipeline_does_not_load_optional_stage_registry(monkeypatch):
+	"""Telemetry opt-out must preserve the lightweight core dependency boundary."""
+
+	original_import = builtins.__import__
+
+	def guarded_import(name, *args, **kwargs):
+		if name == "lftomo.pipeline.stages" or name.startswith("lftomo.pipeline.stages."):
+			raise AssertionError("unobserved Pipeline loaded the built-in Stage registry")
+		return original_import(name, *args, **kwargs)
+
+	monkeypatch.setattr(builtins, "__import__", guarded_import)
+	Pipeline([_PassStage()], validate=False).run(
+		_state(np.zeros((6, 3, 8), dtype=np.float32))
+	)
 
 
 def test_sequential_span_reports_truthful_single_member_wall_time():
