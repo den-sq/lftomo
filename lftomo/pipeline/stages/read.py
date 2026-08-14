@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from natsort import natsorted
@@ -168,10 +169,11 @@ def _bind_source_state(
 	angles: np.ndarray,
 	acquisition_indices: np.ndarray,
 ) -> PipelineState:
+	output_range = state.dataset.frange if state.dataset is not None else Y(1)
 	dataset = TomoDataSet(
 		CTFov(full_shape.Theta, state.scan.degrees_per_fov, 1),
 		full_shape,
-		Y(1),
+		output_range,
 		dtype=dtype,
 		work_dtype=np.float32,
 		angles=angles,
@@ -182,14 +184,31 @@ def _bind_source_state(
 	# strided Theta selection its shape is therefore ``stop - start`` while the
 	# working buffer contains ``len(range(start, stop, stride))`` samples; step
 	# carries the mapping between those two extents.
-	source_window = TomoWindow(
-		ProjOrder(Theta=theta_stop - theta_start, Y=y_stop - y_start, X=full_shape.X),
-		zero,
-		ProjOrder(Theta=theta_start, Y=y_start, X=0),
-		ProjOrder(Theta=theta_stride, Y=1, X=1),
-		dtype,
-		np.float32,
-	)
+	planned = state.source_window
+	if planned is None:
+		source_window = TomoWindow(
+			ProjOrder(Theta=theta_stop - theta_start, Y=y_stop - y_start, X=full_shape.X),
+			zero,
+			ProjOrder(Theta=theta_start, Y=y_start, X=0),
+			ProjOrder(Theta=theta_stride, Y=1, X=1),
+			dtype,
+			np.float32,
+		)
+	else:
+		planned_source = planned.with_pad(["Y"])
+		if (planned_source.pos.Y, planned_source.pos.Y + planned_source.shape.Y) != (y_start, y_stop):
+			raise ValueError("read selection does not match the planned canonical window")
+		pad_before = replace(zero, **asdict(planned.pad_before))
+		pad_after = replace(zero, **asdict(planned.pad_after))
+		source_window = TomoWindow(
+			ProjOrder(Theta=theta_stop - theta_start, Y=planned.shape.Y, X=full_shape.X),
+			pad_before,
+			ProjOrder(Theta=theta_start, Y=planned.pos.Y, X=0),
+			ProjOrder(Theta=theta_stride, Y=1, X=1),
+			dtype,
+			np.float32,
+			pad_after=pad_after,
+		)
 	result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
 	result.dataset = dataset
 	result.source_window = source_window

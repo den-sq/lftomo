@@ -20,10 +20,15 @@ chained; `max(2, 3)` is insufficient because the second filter consumes the
 first filter's neighborhood-dependent output. Effective padding is the
 componentwise maximum of that composed requirement and the user padding.
 The resolved selection, window size, all three pad records, warnings, and every
-core/source interval are written to `recon_run.yaml`.
+core/source interval are written to `recon_run.yaml`. Those serialized
+intervals are derived from the plan's canonical `TomoWindow` objects; they are
+records, not a second geometry authority.
 
-Every iteration reads its padded source interval, runs the normal managed
-Pipeline, and exposes only the interior reconstruction rows to writers. TIFF
+`StreamingPlan.windows` contains the `TomoWindow` sequence created by the
+physical `TomoDataSet`. Retained/fresh transition metadata is stored separately
+and derives its intervals from adjacent padded windows. Every iteration reads
+`window.with_pad()` from the physical source, runs the normal managed Pipeline,
+and exposes `window.internal` reconstruction rows to writers. TIFF
 names use global detector Y; HDF5 and Neuroglancer writers place each interior
 block at its output-row offset. Shared storage reserves the largest planned
 window capacity and reuses the same named physical roles, so edge-window sizes

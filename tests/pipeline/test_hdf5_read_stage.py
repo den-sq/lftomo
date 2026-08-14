@@ -14,7 +14,8 @@ from lftomo.config import (
 from lftomo.pipeline import NumpyBackend, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.window import CTFov, TomoDataSet
 
 
 def _state(path, count, size, config):
@@ -74,6 +75,34 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	assert result.source_window.pos == ProjOrder(Theta=1, Y=2, X=0)
 	assert result.source_window.shape == ProjOrder(Theta=2, Y=3, X=size)
 	assert result.buffer_spec.layout is SinoOrder
+
+
+def test_read_state_retains_the_planned_canonical_window(tmp_path):
+	count, size = 4, 10
+	data = np.arange(count * size * size, dtype=np.uint16).reshape(count, size, size)
+	path = tmp_path / "scan.h5"
+	_write(path, data)
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={
+		"y_start": 0, "y_stop": 8,
+	})
+	state = _state(path, count, size, config)
+	state.dataset = TomoDataSet(
+		CTFov(count, 180, 1), ProjOrder(count, size, size),
+		Y.drange(2, 8, 4), dtype=np.uint16, work_dtype=np.float32,
+	)
+	state.source_window = next(state.dataset.iter_with(wsize=Y(4), pad=Y(2)))
+
+	result = _run(state, create_stage(config))
+
+	assert result.dataset.physical_shape == ProjOrder(count, size, size)
+	assert result.dataset.frange == Y.drange(2, 8, 4)
+	assert result.source_window.pos == ProjOrder(0, 2, 0)
+	assert result.source_window.shape == ProjOrder(count, 4, size)
+	assert result.source_window.pad_before == ProjOrder(0, 2, 0)
+	assert result.source_window.pad_after == ProjOrder(0, 2, 0)
+	assert result.source_window.with_pad(["Y"]).index[1] == slice(0, 8, 1)
+	assert result.source_window.internal.index[1] == slice(2, 6, 1)
+	np.testing.assert_array_equal(result.working_array, data[:, :8, :])
 
 
 def test_hdf5_stage_allows_absent_optional_calibration(tmp_path):

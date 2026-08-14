@@ -6,7 +6,7 @@ import pytest
 import tifffile as tf
 import yaml
 
-from lftomo.config import Acquisition, Detector, Scan, TIFFStackProjections
+from lftomo.config import Acquisition, Detector, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
 	AxisPad,
 	PadRequirement,
@@ -22,9 +22,12 @@ from lftomo.pipeline.stages import (
 	MovementCorrectStage,
 	NegativeLogStage,
 	PaganinFilterStage,
+	create_stage,
 )
 from lftomo.prep.phase import _phase_pad
 from lftomo.runner import run_reconstruction
+from lftomo.util.shapes import ProjOrder, Y
+from lftomo.util.window import TomoWindow
 from tests.fixtures.tier1 import projection_stack
 
 
@@ -90,13 +93,48 @@ def test_retained_fresh_transition_is_explicit_but_prefix_is_not_retained():
 	plan = resolve_streaming_plan(
 		[BilateralFilterStage(diameter=5)], _scan(rows=10), WindowConfig(rows=3),
 	)
-	first, second = plan.windows[:2]
-	assert first.transition.retained is None
-	assert first.transition.fresh == ((0, 5),)
-	assert second.transition.adjacent
-	assert second.transition.retained == (1, 5)
-	assert second.transition.fresh == ((5, 8),)
-	assert second.transition.prefix_valid is False
+	assert all(isinstance(window, TomoWindow) for window in plan.windows)
+	first, second = plan.transitions[:2]
+	assert first.retained is None
+	assert first.fresh == ((0, 5),)
+	assert second.adjacent
+	assert second.retained == (1, 5)
+	assert second.fresh == ((5, 8),)
+	assert second.prefix_valid is False
+
+
+def test_streaming_windows_read_physical_neighbors_outside_selection():
+	read = StageConfig(
+		kind="read", algorithm="hdf5_dxchange",
+		params={"y_start": 2, "y_stop": 10},
+	)
+	stages = [create_stage(read), BilateralFilterStage(diameter=5)]
+	plan = resolve_streaming_plan(stages, _scan(rows=12), WindowConfig(rows=4))
+
+	assert plan.dataset.physical_shape == ProjOrder(Theta=4, Y=12, X=8)
+	assert plan.dataset.frange == Y.drange(2, 10, 4)
+	assert [window.index[1] for window in plan.windows] == [
+		slice(2, 6, 1), slice(6, 10, 1),
+	]
+	assert [window.with_pad(["Y"]).index[1] for window in plan.windows] == [
+		slice(0, 8, 1), slice(4, 12, 1),
+	]
+	assert plan.record()["windows"] == [
+		{
+			"index": 0, "core": [2, 6], "source": [0, 8], "interior": [2, 6],
+			"transition": {
+				"adjacent": False, "retained": None, "fresh": ((0, 8),),
+				"prefix_valid": False,
+			},
+		},
+		{
+			"index": 1, "core": [6, 10], "source": [4, 12], "interior": [2, 6],
+			"transition": {
+				"adjacent": True, "retained": (4, 8), "fresh": ((8, 12),),
+				"prefix_valid": False,
+			},
+		},
+	]
 
 
 def _write_yaml(path: Path, value):

@@ -64,7 +64,6 @@ from lftomo.pipeline.streaming import (
 	StreamingPlan,
 	WindowConfig,
 	WindowPlanError,
-	WindowRegion,
 	crop_reconstruction_to_interior,
 	resolve_streaming_plan,
 )
@@ -119,7 +118,6 @@ __all__ = [
 	"WorkerTimeoutError",
 	"WindowConfig",
 	"WindowPlanError",
-	"WindowRegion",
 	"CandidateLimitError",
 	"CandidateSpaceError",
 	"ContinuousDomainError",

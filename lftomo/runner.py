@@ -424,28 +424,36 @@ class _ReplayCenterArtifactStage(Stage):
 
 def _window_recon(recon: Recon, window) -> Recon:
 	resolved = recon.model_copy(deep=True)
+	source = window.with_pad(["Y"])
 	for config in resolved.pipeline:
 		if config.kind == "read":
-			config.params["y_start"] = window.source_start
-			config.params["y_stop"] = window.source_stop
+			config.params["y_start"] = source.pos.Y
+			config.params["y_stop"] = source.pos.Y + source.shape.Y
 	return resolved
 
 
 def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
 	resolved = scan.model_copy(deep=False)
 	resolved.metadata = dict(scan.metadata)
+	source = window.with_pad(["Y"])
+	source_start = source.pos.Y
+	source_stop = source_start + source.shape.Y
 	fields = resolved.metadata.get("flat_fields")
 	if fields is not None:
 		values = np.asarray(fields)
 		if values.ndim == 3:
 			if values.shape[1] == plan.selection[1] - plan.selection[0]:
-				start = window.source_start - plan.selection[0]
-				stop = window.source_stop - plan.selection[0]
+				start = source_start - plan.selection[0]
+				stop = source_stop - plan.selection[0]
+				if start < 0 or stop > values.shape[1]:
+					raise ValueError(
+						"selected flat_fields do not cover the canonical padded source window"
+					)
 			elif values.shape[1] == scan.detector.rows:
-				start, stop = window.source_start, window.source_stop
+				start, stop = source_start, source_stop
 			else:
 				raise ValueError(
-					"resolved flat_fields do not cover the selected streaming rows"
+					"resolved flat_fields do not cover the canonical padded source window"
 				)
 			resolved.metadata["flat_fields"] = values[:, start:stop]
 	return resolved
@@ -516,7 +524,7 @@ def _run_streaming_pipeline(
 	output_files = []
 	reserve = getattr(run_context.storage, "reserve", None)
 	if reserve is not None:
-		largest = max(window_plan.windows, key=lambda item: item.source_rows)
+		largest = max(window_plan.windows, key=lambda item: item.with_pad(["Y"]).shape.Y)
 		reserve_recon = _window_recon(concrete, largest)
 		reserve_scan = _window_scan(run_scan, window_plan, largest)
 		reserve_stages = [create_stage(config) for config in reserve_recon.pipeline]
@@ -530,7 +538,8 @@ def _run_streaming_pipeline(
 		)
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
-	for window in window_plan.windows:
+	window_plan_record = window_plan.record()
+	for index, window in enumerate(window_plan.windows):
 		window_recon = _window_recon(concrete, window)
 		window_scan = _window_scan(run_scan, window_plan, window)
 		window_stages = [create_stage(config) for config in window_recon.pipeline]
@@ -547,6 +556,7 @@ def _run_streaming_pipeline(
 				np.empty((0,), dtype=np.float32), window_scan, window_recon,
 				artifacts=dict(window_initial), backend=backend,
 				storage=run_context.storage, executor=run_context.executor,
+				dataset=window_plan.dataset, source_window=window,
 			)
 			prepass = _planned_pipeline(
 				prepass_stages, window_scan, backend, window_initial, stage_observer,
@@ -572,6 +582,7 @@ def _run_streaming_pipeline(
 			np.empty((0,), dtype=np.float32), window_scan, window_recon,
 			artifacts=dict(window_initial), backend=backend,
 			storage=run_context.storage, executor=run_context.executor,
+			dataset=window_plan.dataset, source_window=window,
 		)
 		compute = _planned_pipeline(
 			compute_stages, window_scan, backend, window_initial, stage_observer,
@@ -579,7 +590,9 @@ def _run_streaming_pipeline(
 		)
 		state = compute.run(state)
 		if state.domain is DataDomain.RECON:
-			state = crop_reconstruction_to_interior(state, window, window_plan)
+			state = crop_reconstruction_to_interior(
+				state, window, window_plan, index=index,
+			)
 		elif writer_stages:
 			raise ValueError("windowed writers require a reconstruction-producing Stage")
 		if writer_stages:
@@ -593,7 +606,7 @@ def _run_streaming_pipeline(
 		files = window_artifacts.get("output_files", [])
 		output_files.extend(path for path in files if path not in output_files)
 		window_records.append({
-			"window": window_plan.record()["windows"][window.index],
+			"window": window_plan_record["windows"][index],
 			"center_artifacts": center_artifacts,
 			"artifacts": window_artifacts,
 		})
