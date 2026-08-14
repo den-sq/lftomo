@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
+
 import cv2
 import numpy as np
 from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	AxisPad, Locality, PadRequirement, PipelineState, Stage, StageContract,
+	Locality, PadRequirement, PipelineState, Stage, StageContract,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -19,7 +21,8 @@ from lftomo.pipeline.layout import (
 	projection_view,
 	resolve_layout,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import Proj, ProjOrder, SinoOrder, X
+from lftomo.util.window import TomoWindow
 
 
 def _contract(order: str | None = None, *, resamples_detector: bool = False,
@@ -80,10 +83,11 @@ def transform_affine_projection(
 		image, ((0, 0), (stage.pad_x, stage.pad_x)), mode=stage.pad_mode,
 	)
 	if stage.skew_degrees != 0:
-		width = image.shape[1] + 2 * stage.pad_x
+		width = padded.shape[1]
+		left_padding = (padded.shape[1] - image.shape[1]) // 2
 		center = (
 			(image.shape[1] / 2 if stage.center_px is None else stage.center_px)
-			+ stage.pad_x,
+			+ left_padding,
 			row_count / 2 if stage.center_y_px is None else stage.center_y_px,
 		)
 		matrix = cv2.getRotationMatrix2D(center, stage.skew_degrees, 1.0)
@@ -181,9 +185,9 @@ class MovementCorrectStage(Stage):
 		active = enabled and (y != 0 or x != 0)
 		self.contract = _contract(
 			array_order, resamples_detector=active, mutates_input=active,
-			required_pad=PadRequirement(fixed=AxisPad(
-				y=int(np.ceil(abs(y))) if active else 0,
-				x=int(np.ceil(abs(x))) if active else 0,
+			required_pad=PadRequirement(fixed=Proj(
+				Y=int(np.ceil(abs(y))) if active else 0,
+				X=int(np.ceil(abs(x))) if active else 0,
 			)),
 		)
 
@@ -266,9 +270,9 @@ class AffineSkewMovementStage(Stage):
 			self.contract = _contract(
 				resamples_detector=active_resample,
 				mutates_input=active_resample,
-				required_pad=PadRequirement(fixed=AxisPad(
-					y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
-					x=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
+				required_pad=PadRequirement(fixed=Proj(
+					Y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
+					X=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
 				)),
 			)
 		else:
@@ -280,15 +284,26 @@ class AffineSkewMovementStage(Stage):
 				produces_domain=PRESERVE, locality=Locality.VOLUME,
 				fused_transition=True, resamples_detector=active_resample,
 				mutates_input=False,
-				required_pad=PadRequirement(fixed=AxisPad(
-					y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
-					x=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
+				required_pad=PadRequirement(fixed=Proj(
+					Y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
+					X=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
 				)),
 			)
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "AffineSkewMovementStage":
 		return cls(**config.params)
+
+	def output_window(self, source: TomoWindow) -> TomoWindow:
+		"""Return the published output canvas for the fused affine transition."""
+
+		return source.with_output_padding(X(self.pad_x))
+
+	def output_shape(self, source_shape) -> ProjOrder | SinoOrder:
+		"""Return the one canonical target-layout affine allocation shape."""
+
+		expanded = source_shape + X(self.pad_x) + X(self.pad_x)
+		return self.target_layout(**asdict(expanded))
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if self.target_layout is None:
@@ -305,14 +320,9 @@ class AffineSkewMovementStage(Stage):
 			raise ValueError("fused affine transition must change layout")
 		projection_count = n_projections(data, input_layout)
 		row_count = n_rows(data, input_layout)
-		width = data.shape[2] + 2 * self.pad_x
-		shape = (
-			(projection_count, row_count, width)
-			if self.target_layout is ProjOrder
-			else (row_count, projection_count, width)
-		)
+		shape = self.output_shape(input_layout(*data.shape))
 		output_buffer, output = allocate_output(
-			state, self.target_layout(*shape), data.dtype, role="fused_geometry",
+			state, shape, data.dtype, role="fused_geometry",
 		)
 		for projection in range(projection_count):
 			image = projection_view(data, input_layout, projection)
@@ -324,6 +334,8 @@ class AffineSkewMovementStage(Stage):
 		result = commit_output(
 			state, output_buffer, retire_as=None, layout=self.target_layout,
 		)
+		if state.source_window is not None:
+			result.source_window = self.output_window(state.source_window)
 		result.artifacts["fused_layout_transition"] = {
 			"from": input_layout.__name__, "to": self.target_layout.__name__,
 			"pad_x": self.pad_x, "skew_degrees": self.skew_degrees,

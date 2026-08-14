@@ -31,6 +31,7 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import ProjOrder, ReconOrder
+from lftomo.util.window import TomoWindow
 
 
 def _scan(theta=6, rows=2, columns=8):
@@ -301,9 +302,13 @@ def test_process_beam_tracking_matches_serial_and_merges_qc():
 def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypatch):
 	values = np.arange(4 * 6 * 8, dtype=np.float32).reshape(4, 6, 8)
 	scan = _scan(theta=4, rows=6, columns=8)
+	source_window = TomoWindow(
+		ProjOrder(4, 6, 8), ProjOrder(0, 0, 0), ProjOrder(0, 0, 0),
+		ProjOrder(1, 1, 1), np.float32, np.float32,
+	)
 	expected = stage.run(PipelineState(
 		values.copy(), scan, _recon(), layout=ProjOrder,
-		domain=DataDomain.TRANSMISSION,
+		domain=DataDomain.TRANSMISSION, source_window=source_window,
 	))
 	with PipelineRunContext(max_workers=2) as context:
 		working = context.storage.allocate(ProjOrder(4, 6, 8), np.float32, role="normalized")
@@ -311,6 +316,7 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		state = PipelineState(
 			working, scan, _recon(), storage=context.storage, executor=context.executor,
 			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			source_window=source_window,
 		)
 		captured = []
 		original = context.executor.submit_all
@@ -328,6 +334,8 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		np.testing.assert_allclose(
 			np.asarray(result.working_array), np.asarray(expected.working_array),
 		)
+		assert result.source_window.pos == expected.source_window.pos
+		assert result.source_window.shape == expected.source_window.shape
 
 
 def test_bounded_process_child_mutation_is_visible_in_parent():

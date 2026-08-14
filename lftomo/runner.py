@@ -33,7 +33,6 @@ from lftomo.config import (
 	StageConfig,
 )
 from lftomo.pipeline import (
-	AxisPad,
 	Backend,
 	CandidateLimitError,
 	NumpyBackend,
@@ -44,7 +43,6 @@ from lftomo.pipeline import (
 	Stage,
 	StageObserver,
 	WindowConfig,
-	crop_reconstruction_to_interior,
 	expand_recon_sweeps,
 	resolve_streaming_plan,
 	validate_pipeline,
@@ -52,6 +50,7 @@ from lftomo.pipeline import (
 from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.storage import ManagedBuffer, buffer_view
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
 
 
 PipelineStateExecutor = Callable[
@@ -424,28 +423,36 @@ class _ReplayCenterArtifactStage(Stage):
 
 def _window_recon(recon: Recon, window) -> Recon:
 	resolved = recon.model_copy(deep=True)
+	source = window.with_pad(["Y"])
 	for config in resolved.pipeline:
 		if config.kind == "read":
-			config.params["y_start"] = window.source_start
-			config.params["y_stop"] = window.source_stop
+			config.params["y_start"] = source.pos.Y
+			config.params["y_stop"] = source.pos.Y + source.shape.Y
 	return resolved
 
 
 def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
 	resolved = scan.model_copy(deep=False)
 	resolved.metadata = dict(scan.metadata)
+	source = window.with_pad(["Y"])
+	source_start = source.pos.Y
+	source_stop = source_start + source.shape.Y
 	fields = resolved.metadata.get("flat_fields")
 	if fields is not None:
 		values = np.asarray(fields)
 		if values.ndim == 3:
 			if values.shape[1] == plan.selection[1] - plan.selection[0]:
-				start = window.source_start - plan.selection[0]
-				stop = window.source_stop - plan.selection[0]
+				start = source_start - plan.selection[0]
+				stop = source_stop - plan.selection[0]
+				if start < 0 or stop > values.shape[1]:
+					raise ValueError(
+						"selected flat_fields do not cover the canonical padded source window"
+					)
 			elif values.shape[1] == scan.detector.rows:
-				start, stop = window.source_start, window.source_stop
+				start, stop = source_start, source_stop
 			else:
 				raise ValueError(
-					"resolved flat_fields do not cover the selected streaming rows"
+					"resolved flat_fields do not cover the canonical padded source window"
 				)
 			resolved.metadata["flat_fields"] = values[:, start:stop]
 	return resolved
@@ -465,6 +472,45 @@ def _detached_artifact(value: Any) -> Any:
 	return deepcopy(value)
 
 
+def _crop_to_window_interior(
+	state: PipelineState, window, plan: StreamingPlan, *, index: int,
+) -> PipelineState:
+	"""Discard source-context rows before reconstruction and publish core coordinates."""
+
+	interior = window.internal.index[1]
+	working = state.working_array
+	values = working if isinstance(working, ManagedBuffer) else np.asarray(working)
+	if state.layout is ProjOrder:
+		view = values[:, interior, :]
+	elif state.layout is SinoOrder:
+		view = values[interior, :, :]
+	else:
+		raise TypeError("window interior cropping requires projection or sinogram order")
+	result = state.with_array(view)
+	if state.source_window is not None:
+		result.source_window = state.source_window.with_pad(["Y"]).rescope(
+			pos=Y(window.pos.Y), shape=Y(window.shape.Y),
+		)
+	center = result.artifacts.get("center")
+	if center is not None:
+		center_values = np.asarray(center)
+		row_count = values.shape[1] if state.layout is ProjOrder else values.shape[0]
+		if center_values.ndim == 1 and len(center_values) == row_count:
+			result.artifacts["center"] = center_values[interior]
+	core = window.index[1]
+	result.artifacts["streaming_window"] = {
+		"index": index,
+		"core_start": core.start,
+		"core_stop": core.stop,
+		"output_start": core.start - plan.selection[0],
+		"output_stop": core.stop - plan.selection[0],
+		"total_rows": plan.selection[1] - plan.selection[0],
+		"first": index == 0,
+		"last": index == plan.window_count - 1,
+	}
+	return result
+
+
 def _retire_window_state(state: PipelineState) -> None:
 	if state.storage is None:
 		return
@@ -481,10 +527,12 @@ def _retire_window_state(state: PipelineState) -> None:
 def _planned_pipeline(
 	stages: list[Stage], scan: Scan, backend: Backend,
 	available_artifacts: dict[str, Any], observer: StageObserver | None, recon: Recon,
+	*, mode: str = "complete", initial_layout=None, initial_domain=None,
 ) -> Pipeline:
 	plan = validate_pipeline(
 		stages, scan, backend, available_artifacts=available_artifacts,
-		mode="complete", enable_aliasing=recon.buffer_aliasing,
+		mode=mode, initial_layout=initial_layout, initial_domain=initial_domain,
+		enable_aliasing=recon.buffer_aliasing,
 		enable_engine_aliasing=recon.tomopy_input_aliasing,
 	)
 	pipeline = Pipeline(
@@ -511,12 +559,13 @@ def _run_streaming_pipeline(
 	"""Execute one whole-volume or multi-window run through the same driver."""
 
 	aggregated = dict(initial_artifacts)
-	aggregated["window_plan"] = window_plan.record()
+	window_plan_record = window_plan.record()
+	aggregated["window_plan"] = window_plan_record
 	window_records = []
 	output_files = []
 	reserve = getattr(run_context.storage, "reserve", None)
 	if reserve is not None:
-		largest = max(window_plan.windows, key=lambda item: item.source_rows)
+		largest = max(window_plan, key=lambda item: item.with_pad(["Y"]).shape.Y)
 		reserve_recon = _window_recon(concrete, largest)
 		reserve_scan = _window_scan(run_scan, window_plan, largest)
 		reserve_stages = [create_stage(config) for config in reserve_recon.pipeline]
@@ -530,7 +579,7 @@ def _run_streaming_pipeline(
 		)
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
-	for window in window_plan.windows:
+	for index, window in enumerate(window_plan):
 		window_recon = _window_recon(concrete, window)
 		window_scan = _window_scan(run_scan, window_plan, window)
 		window_stages = [create_stage(config) for config in window_recon.pipeline]
@@ -547,6 +596,7 @@ def _run_streaming_pipeline(
 				np.empty((0,), dtype=np.float32), window_scan, window_recon,
 				artifacts=dict(window_initial), backend=backend,
 				storage=run_context.storage, executor=run_context.executor,
+				dataset=window_plan.dataset, source_window=window,
 			)
 			prepass = _planned_pipeline(
 				prepass_stages, window_scan, backend, window_initial, stage_observer,
@@ -572,15 +622,34 @@ def _run_streaming_pipeline(
 			np.empty((0,), dtype=np.float32), window_scan, window_recon,
 			artifacts=dict(window_initial), backend=backend,
 			storage=run_context.storage, executor=run_context.executor,
+			dataset=window_plan.dataset, source_window=window,
 		)
-		compute = _planned_pipeline(
-			compute_stages, window_scan, backend, window_initial, stage_observer,
-			window_recon,
-		)
-		state = compute.run(state)
-		if state.domain is DataDomain.RECON:
-			state = crop_reconstruction_to_interior(state, window, window_plan)
-		elif writer_stages:
+		reconstruction_start = next((
+			stage_index for stage_index, stage in enumerate(compute_stages)
+			if stage.name.startswith("recon.")
+		), None)
+		if reconstruction_start is None:
+			compute = _planned_pipeline(
+				compute_stages, window_scan, backend, window_initial, stage_observer,
+				window_recon,
+			)
+			state = compute.run(state)
+		else:
+			prefix = _planned_pipeline(
+				compute_stages[:reconstruction_start], window_scan, backend,
+				window_initial, stage_observer, window_recon,
+			)
+			state = prefix.run(state)
+			state = _crop_to_window_interior(
+				state, window, window_plan, index=index,
+			)
+			reconstruction = _planned_pipeline(
+				compute_stages[reconstruction_start:], window_scan, backend,
+				state.artifacts, stage_observer, window_recon,
+				mode="fragment", initial_layout=state.layout, initial_domain=state.domain,
+			)
+			state = reconstruction.run(state)
+		if writer_stages and state.domain is not DataDomain.RECON:
 			raise ValueError("windowed writers require a reconstruction-producing Stage")
 		if writer_stages:
 			state = Pipeline(
@@ -593,7 +662,7 @@ def _run_streaming_pipeline(
 		files = window_artifacts.get("output_files", [])
 		output_files.extend(path for path in files if path not in output_files)
 		window_records.append({
-			"window": window_plan.record()["windows"][window.index],
+			"window": window_plan_record["windows"][index],
 			"center_artifacts": center_artifacts,
 			"artifacts": window_artifacts,
 		})
@@ -807,7 +876,7 @@ def main(pipeline_path: Path, scan_path: Path, output_path: Path | None,
 	backend = Backend(name="numpy", supports_gpu=True) if gpu else NumpyBackend()
 	results = run_reconstruction(
 		pipeline_path, scan_path, output_path, backend,
-		window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=extra_pad_y)),
+		window_config=WindowConfig(rows=window_rows, extra_pad=Y(extra_pad_y)),
 	)
 	if json_output:
 		click.echo(json.dumps([_json_result(result) for result in results], indent=2))

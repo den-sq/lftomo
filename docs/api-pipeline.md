@@ -118,8 +118,8 @@ global Y position plus the buffer-local row.
 
 Runner-level streaming is specified in [windowed-streaming.md](windowed-streaming.md).
 It resolves Stage pad contracts before allocation, rejects unsatisfied full-axis
-requirements, records retained/fresh transitions, and treats a full-volume run
-as the one-window case.
+requirements, derives manifest window records from `TomoDataSet`, and treats a
+full-volume run as the one-window case.
 
 ## Validation Rules
 

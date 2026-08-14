@@ -2,7 +2,6 @@
 
 from lftomo.pipeline.core import (
 	Backend,
-	AxisPad,
 	BufferSpec,
 	DaskArrayStub,
 	DaskStubBackend,
@@ -60,18 +59,15 @@ from lftomo.pipeline.sweep import (
 	parameter_domains,
 )
 from lftomo.pipeline.streaming import (
-	RetainedFreshRegion,
 	StreamingPlan,
 	WindowConfig,
 	WindowPlanError,
-	WindowRegion,
-	crop_reconstruction_to_interior,
 	resolve_streaming_plan,
 )
+from lftomo.util.shapes import Y
 
 __all__ = [
 	"Backend",
-	"AxisPad",
 	"BufferSpec",
 	"DaskArrayStub",
 	"DaskStubBackend",
@@ -85,7 +81,6 @@ __all__ = [
 	"PadRequirement",
 	"ResourceHints",
 	"RuntimeRequirement",
-	"RetainedFreshRegion",
 	"ContractEffect",
 	"DataDomain",
 	"PRESERVE",
@@ -119,14 +114,13 @@ __all__ = [
 	"WorkerTimeoutError",
 	"WindowConfig",
 	"WindowPlanError",
-	"WindowRegion",
+	"Y",
 	"CandidateLimitError",
 	"CandidateSpaceError",
 	"ContinuousDomainError",
 	"SweepRun",
 	"candidate_key",
 	"count_recon_candidates",
-	"crop_reconstruction_to_interior",
 	"domain_values",
 	"expand_recon_sweeps",
 	"expand_sweep",

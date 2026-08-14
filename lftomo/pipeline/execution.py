@@ -506,14 +506,9 @@ class PipelineExecutor:
 				raise ValueError("fused affine transition must change layout")
 			projection_count = data.shape[0] if input_layout is ProjOrder else data.shape[1]
 			row_count = data.shape[1] if input_layout is ProjOrder else data.shape[0]
-			width = data.shape[2] + 2 * stage.pad_x
-			shape = (
-				(projection_count, row_count, width)
-				if stage.target_layout is ProjOrder else
-				(row_count, projection_count, width)
-			)
+			shape = stage.output_shape(input_layout(*data.shape))
 			output, _target = allocate_output(
-				state, stage.target_layout(*shape), data.dtype, role="fused_geometry",
+				state, shape, data.dtype, role="fused_geometry",
 			)
 			self.submit_all(run_affine_fill_kernel, (
 				(
@@ -525,6 +520,8 @@ class PipelineExecutor:
 			result = commit_output(
 				state, output, retire_as=None, layout=stage.target_layout,
 			)
+			if state.source_window is not None:
+				result.source_window = stage.output_window(state.source_window)
 			result.artifacts["fused_layout_transition"] = {
 				"from": input_layout.__name__, "to": stage.target_layout.__name__,
 				"pad_x": stage.pad_x, "skew_degrees": stage.skew_degrees,

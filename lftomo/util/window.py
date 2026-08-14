@@ -16,15 +16,12 @@ CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
 
 class DataRef(object):
 	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape,
-					step: DataShape, dtype: type = None, offset: int = 0):
-
-		pad_shift = pos.param_max(pos, pad) - pos
-		if pad_shift:
-			print("Shifting position and shape for padding.")
-
-		self.__pos = pos + pad_shift
-		self.__shape = shape - pad_shift  # If padding reallocates position, we shrink.
-		self.__pad = pad
+					step: DataShape, dtype: type = None, offset: int = 0,
+					*, pad_after: DataShape = None):
+		self.__pos = pos
+		self.__shape = shape
+		self.__pad_before = pad
+		self.__pad_after = pad if pad_after is None else type(pad)(**asdict(pad_after))
 		self.__step = step
 		self.__dtype = dtype
 		self.__offset = offset
@@ -55,7 +52,18 @@ class DataRef(object):
 
 	@property
 	def pad(self) -> DataShape:
-		return self.__pad
+		"""Return the legacy symmetric value, rejecting an ambiguous asymmetric reference."""
+		if self.pad_before != self.pad_after:
+			raise ValueError("asymmetric padding has no single value; use pad_before and pad_after")
+		return self.pad_before
+
+	@property
+	def pad_before(self) -> DataShape:
+		return self.__pad_before
+
+	@property
+	def pad_after(self) -> DataShape:
+		return self.__pad_after
 
 	@property
 	def dtype(self) -> type:
@@ -82,19 +90,23 @@ class DataRef(object):
 		new_ref = deepcopy(self)
 
 		if pad_dim is None:
-			pad_dim = [field.name for field in fields(self.__pad)]
+			pad_dim = [field.name for field in fields(self.pad_before)]
 		try:
-			kept = replace(self.__pad, **{key: 0 for key in pad_dim})
-			shift = self.pad - kept
+			kept_before = replace(self.pad_before, **{key: 0 for key in pad_dim})
+			kept_after = replace(self.pad_after, **{key: 0 for key in pad_dim})
+			shift_before = self.pad_before - kept_before
+			shift_after = self.pad_after - kept_after
 		except TypeError as te:
 			te.add_note("No padding found for dimension.")
 			raise te
 
-		DataRef.__init__(new_ref, self.shape + shift + shift, kept, self.pos - shift.extract(self.pos),
-						self.step, self.dtype, self.__offset)
+		DataRef.__init__(new_ref, self.shape + shift_before + shift_after, kept_before,
+						self.pos - shift_before.extract(self.pos), self.step, self.dtype, self.__offset,
+						pad_after=kept_after)
 		return new_ref
 
-	def rescope(self, pos: DataShape = None, pad: DataShape = None, dtype: type = None, shape: DataShape = None) -> Self:
+	def rescope(self, pos: DataShape = None, pad: DataShape = None, dtype: type = None,
+					shape: DataShape = None, *, pad_after: DataShape = None) -> Self:
 		new_ref = deepcopy(self)
 
 		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape
@@ -102,15 +114,35 @@ class DataRef(object):
 		new_dtype = dtype if dtype is not None else self.dtype
 
 		if pad is not None:
-			new_pad = replace(self.pad, **asdict(pad))
-			pad_shift = pad + (-self.pad)
-			new_pos += pad_shift
-			new_shape -= (pad_shift + pad_shift)
+			new_pad_before = replace(self.pad_before, **asdict(pad))
+			new_pad_after = replace(self.pad_after, **asdict(pad if pad_after is None else pad_after))
 		else:
-			new_pad = self.pad
+			new_pad_before = self.pad_before
+			new_pad_after = self.pad_after if pad_after is None else replace(self.pad_after, **asdict(pad_after))
 
-		DataRef.__init__(new_ref, new_shape, new_pad, new_pos, self.step, new_dtype, self.__offset)
+		pad_shift_before = new_pad_before - self.pad_before
+		pad_shift_after = new_pad_after - self.pad_after
+		position_fields = {field.name for field in fields(new_pos)}
+		new_pos += replace(new_pos.make_with(0), **{
+			key: value for key, value in asdict(pad_shift_before).items()
+			if key in position_fields
+		})
+		new_shape -= (pad_shift_before + pad_shift_after)
+
+		DataRef.__init__(new_ref, new_shape, new_pad_before, new_pos, self.step, new_dtype, self.__offset,
+						pad_after=new_pad_after)
 		return new_ref
+
+	def with_output_padding(self, padding: DataShape) -> Self:
+		"""Expand published output coordinates; unlike source padding, do not clip."""
+
+		if any(value < 0 for value in asdict(padding).values()):
+			raise ValueError("output padding cannot be negative")
+		expansion = replace(self.shape.make_with(0), **asdict(padding))
+		return self.rescope(
+			pos=self.pos - expansion.extract(self.pos),
+			shape=self.shape + expansion + expansion,
+		)
 
 	def int_iter(self) -> Iterator:
 		return self.frange.get_iter(conv=IntIter)
@@ -124,38 +156,66 @@ class DataRef(object):
 
 class TomoWindow(DataRef):
 	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape, step: DataShape,
-					dtype: type, work_dtype: type):
-		super().__init__(shape, pad, pos, step, dtype)
+					dtype: type, work_dtype: type, *, pad_after: DataShape = None):
+		super().__init__(shape, pad, pos, step, dtype, pad_after=pad_after)
 		self.__work_dtype = work_dtype
 
 	@property
 	def internal(self):
-		return self.rescope(pos=self.pad.extract(self.pos), dtype=self.__work_dtype)
+		return self.rescope(pos=self.pad_before.extract(self.pos), dtype=self.__work_dtype)
+
+
+def _resolved_padding(pos: DataShape, shape: DataShape, pad_before: DataShape, pad_after: DataShape,
+						physical_shape: DataShape = None) -> tuple[DataShape, DataShape]:
+	if physical_shape is None:
+		return pad_before, pad_after
+
+	physical_pos = replace(physical_shape.make_with(0), **asdict(pos))
+	physical_core_shape = replace(physical_shape, **asdict(shape))
+	physical_stop = physical_pos + physical_core_shape
+	zero = physical_shape.make_with(0)
+	if not physical_pos >= zero or not physical_stop <= physical_shape:
+		raise ValueError("window output must remain within the physical source shape")
+
+	requested_before = replace(zero, **asdict(pad_before))
+	requested_after = replace(zero, **asdict(pad_after))
+	available_before = physical_pos
+	available_after = physical_shape - physical_stop
+	realized_before = type(physical_shape).param_min(requested_before, available_before)
+	realized_after = type(physical_shape).param_min(requested_after, available_after)
+	return realized_before.extract(pad_before), realized_after.extract(pad_after)
 
 
 class TomoWindowIter(TFIter):
 	def __init__(self, dr: DataRange, shape: DataShape, pad: DataShape,
-					dtype: type, work_dtype: type, substep: DataShape = None):
+					dtype: type, work_dtype: type, substep: DataShape = None,
+					pad_after: DataShape = None, physical_shape: DataShape = None):
 		self.shape = shape
-		self.pad = pad
+		self.pad_before = pad
+		self.pad_after = pad if pad_after is None else type(pad)(**asdict(pad_after))
 		self.dtype = dtype
 		self.work_dtype = work_dtype
 		self.stop = dr.stop
 		self.substep = substep if substep is not None else dr.step.make_with(1)
+		self.physical_shape = physical_shape
 		self.__step_class = type(dr.step)
 
 	def __call__(self, pos) -> tuple:
 		pos = self.__step_class(*pos)
-		step_end = (self.shape + pos + self.pad).extract(pos)
+		step_end = (self.shape + pos).extract(pos)
 
 		if step_end < self.stop:
 			winshape = self.shape
 		else:
 			# Standard shape would extend beyond the range, so cut it down.
-			winshape = replace(self.shape, **{k: v for k, v in asdict(self.stop - pos - self.pad.extract(pos)).items()
+			winshape = replace(self.shape, **{k: v for k, v in asdict(self.stop - pos).items()
 											if v < asdict(self.shape)[k]})
 
-		return TomoWindow(winshape, self.pad, pos, self.substep, self.dtype, self.work_dtype)
+		pad_before, pad_after = _resolved_padding(
+			pos, winshape, self.pad_before, self.pad_after, self.physical_shape,
+		)
+		return TomoWindow(winshape, pad_before, pos, self.substep, self.dtype, self.work_dtype,
+						pad_after=pad_after)
 
 
 class TomoDataSet(DataRef):
@@ -175,11 +235,19 @@ class TomoDataSet(DataRef):
 			:param dtype: Type of data being iterated over.
 			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
 		"""
+		self.__physical_shape = shape
+
 		if isinstance(over, DataShape):
 			pos = over.make_with(0)
 			shape = shape
 			step = over
 		elif isinstance(over, DataRange):
+			for axis, start in asdict(over.start).items():
+				if start < 0 or not hasattr(self.physical_shape, axis):
+					raise ValueError(f"output range starts outside physical axis {axis}")
+			for axis, stop in asdict(over.stop).items():
+				if not hasattr(self.physical_shape, axis) or stop > getattr(self.physical_shape, axis):
+					raise ValueError(f"output range stops outside physical axis {axis}")
 			pos = over.start
 			shape = replace(shape, **asdict(over.stop - over.start))
 			step = over.step
@@ -224,15 +292,27 @@ class TomoDataSet(DataRef):
 	def fov(self):
 		return self.__fov
 
+	@property
+	def physical_shape(self) -> DataShape:
+		"""Full source shape, independent of the selected output range in ``frange``."""
+		return self.__physical_shape
+
 	def full_window(self) -> TomoWindow:
-		return TomoWindow(self.shape, self.pad, self.pos, self.step, self.dtype, self.__work_dtype)
+		pad_before, pad_after = _resolved_padding(
+			self.pos, self.shape, self.pad_before, self.pad_after, self.physical_shape,
+		)
+		return TomoWindow(self.shape, pad_before, self.pos, self.step, self.dtype, self.__work_dtype,
+						pad_after=pad_after)
 
 	def __iter__(self) -> Iterator:
-		partial_twi = partial(TomoWindowIter, shape=self.step_shape, pad=self.pad, dtype=self.dtype,
-								work_dtype=self.__work_dtype)
+		partial_twi = partial(TomoWindowIter, shape=self.step_shape, pad=self.pad_before,
+								pad_after=self.pad_after, physical_shape=self.physical_shape,
+								dtype=self.dtype, work_dtype=self.__work_dtype)
 		return self.frange.get_iter(partial_twi)
 
-	def iter_with(self, *, wsize: DataShape = None, substep: DataShape = None):
+	def iter_with(self, *, wsize: DataShape = None, substep: DataShape = None,
+					pad: DataShape = None, pad_after: DataShape = None):
+		"""Iterate output windows with padding realized against ``physical_shape``."""
 		window = self.step_shape
 		if wsize is not None:
 			window = replace(window, **asdict(wsize))
@@ -240,8 +320,15 @@ class TomoDataSet(DataRef):
 		else:
 			frange = self.frange
 
-		return frange.get_iter(partial(TomoWindowIter, shape=window, pad=self.pad, dtype=self.dtype,
-											work_dtype=self.__work_dtype, substep=substep))
+		pad_before = self.pad_before if pad is None else replace(self.pad_before, **asdict(pad))
+		if pad_after is None:
+			resolved_pad_after = self.pad_after if pad is None else replace(self.pad_after, **asdict(pad))
+		else:
+			resolved_pad_after = replace(self.pad_after, **asdict(pad_after))
+
+		return frange.get_iter(partial(TomoWindowIter, shape=window, pad=pad_before,
+											pad_after=resolved_pad_after, physical_shape=self.physical_shape,
+											dtype=self.dtype, work_dtype=self.__work_dtype, substep=substep))
 
 	@classmethod
 	def from_disk(cls, source: PathLike, fov: CTFov, shape_type: type, over: DataRange | DataShape,

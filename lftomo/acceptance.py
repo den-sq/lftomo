@@ -38,7 +38,7 @@ from lftomo.experiment import (
 	collect_environment_identity,
 )
 from lftomo.experiment.cli import PipelineTrialExecutor, build_experiment_inputs
-from lftomo.pipeline import AxisPad, WindowConfig
+from lftomo.pipeline import WindowConfig, Y
 from lftomo.pipeline.stages import dispatch_for_stage
 from lftomo.prep.flat import FLAT
 from lftomo.reference import NumericalTolerance, checksum_manifest, compare_slice, sha256_file
@@ -628,7 +628,7 @@ def _interrupt_child(
 	SharedNPManager.allocate = traced
 	run_reconstruction(
 		pipeline_path, scan_path, output_path,
-		window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=0)),
+		window_config=WindowConfig(rows=window_rows, extra_pad=Y(0)),
 	)
 
 
@@ -740,7 +740,7 @@ def run_windowed_acceptance(
 		current_reproduction_pipeline,
 		scan_path,
 		current_reproduction_output,
-		window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=0)),
+		window_config=WindowConfig(rows=window_rows, extra_pad=Y(0)),
 		stage_observer=_progress_observer(
 			log,
 			"windowed.current_oracle_reproduction",
@@ -778,7 +778,7 @@ def run_windowed_acceptance(
 			frozen_reproduction_pipeline,
 			scan_path,
 			frozen_reproduction_output,
-			window_config=WindowConfig(rows=window_rows, extra_pad=AxisPad(y=0)),
+			window_config=WindowConfig(rows=window_rows, extra_pad=Y(0)),
 			stage_observer=_compose_observers(
 				sampler.observer,
 				_progress_observer(
@@ -872,7 +872,7 @@ def run_windowed_acceptance(
 		"configuration": {
 			"selection": [y_start, y_stop],
 			"window_rows": window_rows,
-			"extra_pad": AxisPad(y=0).as_dict(),
+			"extra_pad": {"theta": 0, "y": 0, "x": 0},
 			"workers": workers,
 			"current_oracle_reproduction_pipeline": str(current_reproduction_pipeline),
 			"frozen_b10_reproduction_pipeline": str(frozen_reproduction_pipeline),

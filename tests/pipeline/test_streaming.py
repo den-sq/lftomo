@@ -6,9 +6,8 @@ import pytest
 import tifffile as tf
 import yaml
 
-from lftomo.config import Acquisition, Detector, Scan, TIFFStackProjections
+from lftomo.config import Acquisition, Detector, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
-	AxisPad,
 	PadRequirement,
 	Stage,
 	StageContract,
@@ -22,9 +21,12 @@ from lftomo.pipeline.stages import (
 	MovementCorrectStage,
 	NegativeLogStage,
 	PaganinFilterStage,
+	create_stage,
 )
 from lftomo.prep.phase import _phase_pad
 from lftomo.runner import run_reconstruction
+from lftomo.util.shapes import ProjOrder, Y
+from lftomo.util.window import TomoWindow
 from tests.fixtures.tier1 import projection_stack
 
 
@@ -46,6 +48,16 @@ class _FullYStage(Stage):
 		return state
 
 
+class _AsymmetricStage(Stage):
+	name = "test.asymmetric"
+	contract = StageContract(
+		required_pad=PadRequirement(fixed=Y(1), fixed_after=Y(3)),
+	)
+
+	def run(self, state):
+		return state
+
+
 def test_pad_quantities_are_separate_and_neighborhood_stages_compose():
 	stages = [
 		BilateralFilterStage(diameter=5),
@@ -53,18 +65,41 @@ def test_pad_quantities_are_separate_and_neighborhood_stages_compose():
 		MovementCorrectStage(y=3),
 	]
 	plan = resolve_streaming_plan(
-		stages, _scan(), WindowConfig(rows=3, extra_pad=AxisPad(y=5)),
+		stages, _scan(), WindowConfig(rows=3, extra_pad=Y(5)),
 	)
 	assert plan.window_rows == 3
-	assert plan.required_pad == AxisPad(y=7, x=4)
-	assert plan.extra_pad == AxisPad(y=5)
-	assert plan.effective_pad == AxisPad(y=7, x=4)
+	assert plan.required_pad == ProjOrder(Theta=0, Y=7, X=4)
+	assert plan.required_pad_after == ProjOrder(Theta=0, Y=7, X=4)
+	assert plan.extra_pad == ProjOrder(Theta=0, Y=5, X=0)
+	assert plan.extra_pad_after == ProjOrder(Theta=0, Y=5, X=0)
+	assert plan.effective_pad == ProjOrder(Theta=0, Y=7, X=4)
+	assert plan.effective_pad_after == ProjOrder(Theta=0, Y=7, X=4)
 
 	user_dominates = resolve_streaming_plan(
-		stages, _scan(), WindowConfig(rows=3, extra_pad=AxisPad(y=10)),
+		stages, _scan(), WindowConfig(rows=3, extra_pad=Y(10)),
 	)
-	assert user_dominates.required_pad.y == 7
-	assert user_dominates.effective_pad.y == 10
+	assert user_dominates.required_pad.Y == 7
+	assert user_dominates.effective_pad.Y == 10
+
+
+def test_asymmetric_stage_and_operator_requirements_compose_by_side():
+	plan = resolve_streaming_plan(
+		[_AsymmetricStage()], _scan(),
+		WindowConfig(rows=4, extra_pad=Y(2), extra_pad_after=Y(1)),
+	)
+
+	assert plan.required_pad == ProjOrder(Theta=0, Y=1, X=0)
+	assert plan.required_pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	assert plan.effective_pad == ProjOrder(Theta=0, Y=2, X=0)
+	assert plan.effective_pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	windows = tuple(plan)
+	assert windows[0].pad_before == ProjOrder(Theta=0, Y=0, X=0)
+	assert windows[0].pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	assert windows[1].pad_before == ProjOrder(Theta=0, Y=2, X=0)
+	assert windows[1].pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	record = plan.record()
+	assert record["effective_pad"] == {"theta": 0, "y": 2, "x": 0}
+	assert record["effective_pad_after"] == {"theta": 0, "y": 3, "x": 0}
 
 
 def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
@@ -72,7 +107,8 @@ def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
 	plan = resolve_streaming_plan(
 		[PaganinFilterStage(), NegativeLogStage()], scan, WindowConfig(rows=8),
 	)
-	assert plan.required_pad.y == _phase_pad(8, 1e-4, 10, 20)
+	assert plan.required_pad.Y == _phase_pad(8, 1e-4, 10, 20)
+	assert plan.required_pad_after.Y == _phase_pad(8, 1e-4, 10, 20)
 	assert "phase.paganin_filter" in plan.warnings[0]
 	assert "whole-volume equivalence" in plan.warnings[0]
 
@@ -86,17 +122,43 @@ def test_full_axis_contract_rejects_silent_window_degradation():
 		], _scan(), WindowConfig(rows=4))
 
 
-def test_retained_fresh_transition_is_explicit_but_prefix_is_not_retained():
+def test_streaming_plan_reiterates_the_canonical_dataset_without_a_window_cache():
 	plan = resolve_streaming_plan(
 		[BilateralFilterStage(diameter=5)], _scan(rows=10), WindowConfig(rows=3),
 	)
-	first, second = plan.windows[:2]
-	assert first.transition.retained is None
-	assert first.transition.fresh == ((0, 5),)
-	assert second.transition.adjacent
-	assert second.transition.retained == (1, 5)
-	assert second.transition.fresh == ((5, 8),)
-	assert second.transition.prefix_valid is False
+	first_pass = tuple(plan)
+	second_pass = tuple(plan)
+	assert plan.window_count == 4
+	assert all(isinstance(window, TomoWindow) for window in first_pass)
+	assert [window.index for window in first_pass] == [
+		window.index for window in second_pass
+	]
+
+
+def test_streaming_windows_read_physical_neighbors_outside_selection():
+	read = StageConfig(
+		kind="read", algorithm="hdf5_dxchange",
+		params={"y_start": 2, "y_stop": 10},
+	)
+	stages = [create_stage(read), BilateralFilterStage(diameter=5)]
+	plan = resolve_streaming_plan(stages, _scan(rows=12), WindowConfig(rows=4))
+
+	assert plan.dataset.physical_shape == ProjOrder(Theta=4, Y=12, X=8)
+	assert plan.dataset.frange == Y.drange(2, 10, 4)
+	assert [window.index[1] for window in plan] == [
+		slice(2, 6, 1), slice(6, 10, 1),
+	]
+	assert [window.with_pad(["Y"]).index[1] for window in plan] == [
+		slice(0, 8, 1), slice(4, 12, 1),
+	]
+	assert plan.record()["windows"] == [
+		{
+			"index": 0, "core": [2, 6], "source": [0, 8], "interior": [2, 6],
+		},
+		{
+			"index": 1, "core": [6, 10], "source": [4, 12], "interior": [2, 6],
+		},
+	]
 
 
 def _write_yaml(path: Path, value):
@@ -143,8 +205,15 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 	import tomopy
 
 	monkeypatch.setattr(tomopy, "find_center_pc", lambda *args, **kwargs: 2.0)
-	monkeypatch.setattr(tomopy, "recon", lambda data, *args, **kwargs:
-		np.repeat(np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1))
+	reconstruction_inputs = []
+
+	def reconstruct(data, *args, **kwargs):
+		reconstruction_inputs.append(tuple(data.shape))
+		return np.repeat(
+			np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1,
+		)
+
+	monkeypatch.setattr(tomopy, "recon", reconstruct)
 	whole_output = tmp_path / "whole"
 	window_output = tmp_path / "windowed"
 	whole = run_reconstruction(pipeline_path, scan_path, whole_output)[0]
@@ -152,6 +221,9 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 		pipeline_path, scan_path, window_output,
 		window_config=WindowConfig(rows=2),
 	)[0]
+	assert reconstruction_inputs == [(theta, rows, columns)] + [
+		(theta, 2, columns), (theta, 2, columns), (theta, 2, columns),
+	]
 
 	for row in range(rows):
 		np.testing.assert_allclose(

@@ -2,7 +2,7 @@ from functools import partial
 import numpy as np
 import pytest
 
-from lftomo.util.shapes import ProjOrder, Y, ImgSlice, IntIter, SliceIter, Proj
+from lftomo.util.shapes import ProjOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
 from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, DataRef
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
 
@@ -40,8 +40,8 @@ def test_creation():
 
 	tdr = DataRef(shape, Y(2), Y(0), Y(1), dtype)
 
-	assert tdr.pos == Y(2)
-	assert tdr.shape == ProjOrder(1501, 2046, 2048)
+	assert tdr.pos == Y(0)
+	assert tdr.shape == shape
 
 	tw = tds.full_window()
 
@@ -92,7 +92,7 @@ def test_dataset_methods():
 	print([(ProjOrder(Theta=1969, Y=min(24, 236 - x), X=2048), Y(max(x, 2))) for x in range(2, 236, 24)])
 	assert [(f.shape, f.pos) for f in std_list] == [(ProjOrder(Theta=1969, Y=min(24, 240 - x), X=2048), Y(x))
 												for x in range(0, 240, 24)]
-	assert [(f.shape, f.pos) for f in rs_list] == [(ProjOrder(Theta=1969, Y=min(24, 236 - x), X=2048), Y(max(x, 2)))
+	assert [(f.shape, f.pos) for f in rs_list] == [(ProjOrder(Theta=1969, Y=min(24, 238 - x), X=2048), Y(max(x, 2)))
 												for x in range(2, 238, 24)]
 
 
@@ -118,17 +118,18 @@ def test_1d_window_iter():
 
 	assert [(win.shape, win.pos) for win in alt_list[:-1]] == \
 			[(ProjOrder(Theta=1900, Y=24, X=2048), Y(y)) for y in range(2, 74, 24)]
-	assert (alt_list[-1].shape, alt_list[-1].pos) == (ProjOrder(Theta=1900, Y=14, X=2048), Y(74))
+	assert (alt_list[-1].shape, alt_list[-1].pos) == (ProjOrder(Theta=1900, Y=16, X=2048), Y(74))
+	assert alt_list[-1].with_pad(["Y"]).index[1] == slice(72, 92, 1)
 
 
 def test_2d_window_iter():
 	# 2D Window
 	twitwo_manual = [(ProjOrder(Theta=1900, Y=24, X=24), Proj(Y=2, X=600)),
 					(ProjOrder(Theta=1900, Y=24, X=24), Proj(Y=2, X=624)),
-					(ProjOrder(Theta=1900, Y=24, X=18), Proj(Y=2, X=648)),
-					(ProjOrder(Theta=1900, Y=18, X=24), Proj(Y=26, X=600)),
-					(ProjOrder(Theta=1900, Y=18, X=24), Proj(Y=26, X=624)),
-					(ProjOrder(Theta=1900, Y=18, X=18), Proj(Y=26, X=648))]
+					(ProjOrder(Theta=1900, Y=24, X=22), Proj(Y=2, X=648)),
+					(ProjOrder(Theta=1900, Y=20, X=24), Proj(Y=26, X=600)),
+					(ProjOrder(Theta=1900, Y=20, X=24), Proj(Y=26, X=624)),
+					(ProjOrder(Theta=1900, Y=20, X=22), Proj(Y=26, X=648))]
 
 	ttwi_two = partial(TomoWindowIter, shape=ProjOrder(Theta=1900, Y=24, X=24), pad=Proj(Y=2, X=4),
 						dtype=np.int16, work_dtype=np.float32)
@@ -150,6 +151,183 @@ def test_tomo_window():
 
 	assert twi.pos == Y(2)
 	assert twi.dtype == np.float32
+
+
+def test_window_coordinate_operations_share_the_existing_dataref_model():
+	window = TomoWindow(
+		ProjOrder(Theta=4, Y=100, X=6), Y(10), Y(100), Y(1),
+		np.uint16, np.float32,
+	)
+
+	assert window.index == np.s_[0:4:1, 100:200:1, 0:6:1]
+
+	read_window = window.with_pad(["Y"])
+	assert read_window.index == np.s_[0:4:1, 90:210:1, 0:6:1]
+	assert read_window.pad == Y(0)
+
+	internal = window.internal
+	assert internal.index == np.s_[0:4:1, 10:110:1, 0:6:1]
+	assert internal.dtype == np.dtype(np.float32)
+
+	rescoped = window.rescope(pos=Y(30), shape=Y(40))
+	assert rescoped.index == np.s_[0:4:1, 30:70:1, 0:6:1]
+	assert list(rescoped.int_iter()) == list(range(30, 70))
+	assert list(rescoped.slice_iter()) == [np.s_[:, y, :] for y in range(30, 70)]
+
+
+def test_nondivisible_selection_emits_a_short_final_unpadded_window():
+	selection = Y.drange(100, 1000, 400)
+	dataset = TomoDataSet(
+		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+
+	windows = list(dataset)
+
+	assert dataset.frange == selection
+	assert [window.pos for window in windows] == [Y(100), Y(500), Y(900)]
+	assert [window.shape.Y for window in windows] == [400, 400, 100]
+	assert [window.index for window in windows] == [
+		np.s_[0:4:1, 100:500:1, 0:6:1],
+		np.s_[0:4:1, 500:900:1, 0:6:1],
+		np.s_[0:4:1, 900:1000:1, 0:6:1],
+	]
+	assert windows[-1].internal.index == np.s_[0:4:1, 0:100:1, 0:6:1]
+
+
+def test_data_ref_supports_asymmetric_padding_without_a_wrapper_type():
+	window = TomoWindow(
+		ProjOrder(Theta=4, Y=5, X=6), Y(2), Y(10), Y(1),
+		np.uint16, np.float32, pad_after=Y(3),
+	)
+
+	assert window.pad_before == Y(2)
+	assert window.pad_after == Y(3)
+	with pytest.raises(ValueError, match="no single value"):
+		_ = window.pad
+
+	assert window.with_pad(["Y"]).index == np.s_[0:4:1, 8:18:1, 0:6:1]
+	assert window.internal.index == np.s_[0:4:1, 2:7:1, 0:6:1]
+
+	rebalanced = window.rescope(pad=Y(1), pad_after=Y(4))
+	assert (rebalanced.pos.Y, rebalanced.shape.Y) == (9, 5)
+	assert rebalanced.with_pad(["Y"]).index == window.with_pad(["Y"]).index
+	assert rebalanced.internal.index == np.s_[0:4:1, 1:6:1, 0:6:1]
+
+
+def test_output_padding_expands_coordinates_without_becoming_source_padding():
+	window = TomoWindow(
+		ProjOrder(Theta=4, Y=5, X=6), ProjOrder(0, 2, 1), ProjOrder(0, 10, 0),
+		ProjOrder(1, 1, 1), np.uint16, np.float32,
+		pad_after=ProjOrder(0, 3, 2),
+	)
+
+	expanded = window.with_output_padding(X(4))
+
+	assert expanded.pos == ProjOrder(Theta=0, Y=10, X=-4)
+	assert expanded.shape == ProjOrder(Theta=4, Y=5, X=14)
+	assert expanded.pad_before == ProjOrder(Theta=0, Y=2, X=1)
+	assert expanded.pad_after == ProjOrder(Theta=0, Y=3, X=2)
+	assert expanded.with_pad(["Y"]).index == np.s_[0:4:1, 8:18:1, -4:10:1]
+	assert expanded.with_pad().index == np.s_[0:4:1, 8:18:1, -5:12:1]
+	assert expanded.internal.index == np.s_[0:4:1, 2:7:1, 1:15:1]
+
+
+def test_dataset_keeps_physical_shape_separate_from_output_range():
+	selection = Y.drange(100, 900, 400)
+	dataset = TomoDataSet(
+		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+
+	assert dataset.physical_shape == ProjOrder(Theta=4, Y=1000, X=6)
+	assert dataset.shape == ProjOrder(Theta=4, Y=800, X=6)
+	assert dataset.frange == selection
+
+	windows = list(dataset.iter_with(wsize=Y(400), pad=Y(10)))
+	assert [(window.pos.Y, window.shape.Y) for window in windows] == [(100, 400), (500, 400)]
+	assert [window.with_pad(["Y"]).index[1] for window in windows] == [
+		slice(90, 510, 1), slice(490, 910, 1),
+	]
+	assert [window.internal.index[1] for window in windows] == [
+		slice(10, 410, 1), slice(10, 410, 1),
+	]
+
+
+def test_dataset_clips_padding_only_at_physical_boundaries():
+	dataset = TomoDataSet(
+		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
+		Y.drange(0, 1000, 400), dtype=np.uint16, work_dtype=np.float32,
+	)
+
+	windows = list(dataset.iter_with(wsize=Y(400), pad=Y(10)))
+	first, middle, final = windows
+
+	assert (first.pos.Y, first.shape.Y) == (0, 400)
+	assert (first.pad_before.Y, first.pad_after.Y) == (0, 10)
+	assert first.with_pad(["Y"]).index[1] == slice(0, 410, 1)
+	assert first.internal.index[1] == slice(0, 400, 1)
+
+	assert (middle.pos.Y, middle.shape.Y) == (400, 400)
+	assert (middle.pad_before.Y, middle.pad_after.Y) == (10, 10)
+	assert middle.with_pad(["Y"]).index[1] == slice(390, 810, 1)
+
+	assert (final.pos.Y, final.shape.Y) == (800, 200)
+	assert (final.pad_before.Y, final.pad_after.Y) == (10, 0)
+	assert final.with_pad(["Y"]).index[1] == slice(790, 1000, 1)
+	assert final.internal.index[1] == slice(10, 210, 1)
+
+
+def test_nondivisible_selected_edge_keeps_short_output_when_padding_clips():
+	dataset = TomoDataSet(
+		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
+		Y.drange(100, 1000, 400), dtype=np.uint16, work_dtype=np.float32,
+	)
+
+	final = list(dataset.iter_with(wsize=Y(400), pad=Y(10)))[-1]
+
+	assert (final.pos.Y, final.shape.Y) == (900, 100)
+	assert (final.pad_before.Y, final.pad_after.Y) == (10, 0)
+	assert final.index[1] == slice(900, 1000, 1)
+	assert final.with_pad(["Y"]).index[1] == slice(890, 1000, 1)
+	assert final.internal.index[1] == slice(10, 110, 1)
+
+
+def test_dataset_resolves_explicit_asymmetric_padding():
+	dataset = TomoDataSet(
+		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
+		Y.drange(100, 500, 400), dtype=np.uint16, work_dtype=np.float32,
+	)
+
+	window = next(dataset.iter_with(wsize=Y(400), pad=Y(20), pad_after=Y(5)))
+
+	assert (window.pad_before.Y, window.pad_after.Y) == (20, 5)
+	assert window.with_pad(["Y"]).index[1] == slice(80, 505, 1)
+	assert window.internal.index[1] == slice(20, 420, 1)
+
+
+def test_selected_range_must_fit_physical_source_shape():
+	with pytest.raises(ValueError, match="stops outside physical axis Y"):
+		TomoDataSet(
+			CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
+			Y.drange(100, 1001, 400), dtype=np.uint16, work_dtype=np.float32,
+		)
+
+
+def test_from_disk_retains_physical_shape_for_selected_output(tmp_path):
+	h5py = pytest.importorskip("h5py")
+	source = tmp_path / "selected.h5"
+	with h5py.File(source, "w") as h5:
+		h5.create_dataset("exchange/data", shape=(4, 10, 6), dtype=np.uint16)
+
+	dataset = TomoDataSet.from_disk(
+		source, CTFov(4, 180, 1), ProjOrder, Y.drange(2, 9, 3),
+		work_dtype=np.float32,
+	)
+
+	assert dataset.physical_shape == ProjOrder(Theta=4, Y=10, X=6)
+	assert dataset.shape == ProjOrder(Theta=4, Y=7, X=6)
+	assert dataset.frange == Y.drange(2, 9, 3)
 
 
 def test_data_ref_fields():
@@ -212,9 +390,9 @@ def test_data_ref_rescope():
 	df = generate_dataref()
 
 	dfr = df.rescope(pos=Y(0), dtype=np.float32)
-	assert dfr.frange == Y.drange(2, 24, 1)					# Move the pos and reduced the shape due to Y=2 padding.
+	assert dfr.frange == Y.drange(0, 24, 1)
 	assert dfr.itemsize == 4
-	assert dfr.shape == ProjOrder(1900, 22, 2048)
+	assert dfr.shape == ProjOrder(1900, 24, 2048)
 
 	dfr = df.rescope(shape=ProjOrder(1900, 14, 2048))
 	assert dfr.frange == Y.drange(1024, 1038, 1)
