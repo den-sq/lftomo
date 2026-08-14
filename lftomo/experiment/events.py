@@ -18,11 +18,12 @@ import os
 from pathlib import Path
 import threading
 import time
-from typing import Any, Callable, Iterator, Literal, Mapping
+from typing import Any, Callable, Iterator, Literal, Mapping, Sequence
 
 from pydantic import Field, JsonValue
 
 from lftomo.config import ConfigModel
+from lftomo.pipeline.telemetry import ExecutionSpanEvent, ExecutionSpanPhase
 
 
 EventSeverity = Literal["debug", "info", "warning", "error"]
@@ -33,6 +34,9 @@ ExperimentState = Literal[
 	"planned", "running", "succeeded", "failed", "interrupted", "mixed", "unknown",
 ]
 ProgressCallback = Callable[["ProgressEvent"], None]
+StageCacheState = Literal[
+	"executing", "executed", "cached", "cache_build", "cache_verify",
+]
 
 
 def _utcnow() -> datetime:
@@ -125,10 +129,64 @@ def secret_material_paths(
 	return tuple(paths)
 
 
+class StageProgressMember(ConfigModel):
+	"""One authored logical Stage occurrence in structured progress."""
+
+	authored_index: int = Field(ge=0)
+	position: int = Field(ge=1)
+	total: int = Field(ge=1)
+	occurrence_id: str
+	algorithm: str | None = None
+	stage_name: str
+	stage_type: str
+	dispatch_kind: str
+	cache_state: StageCacheState
+	coordinator_wall_seconds: float | None = Field(default=None, ge=0)
+	timing_unavailable: tuple[str, ...] = ()
+
+
+class WorkerTimingProgress(ConfigModel):
+	"""Bounded worker-work aggregate, explicitly distinct from wall time."""
+
+	authored_index: int = Field(ge=0)
+	invocation_count: int = Field(ge=1)
+	minimum_seconds: float = Field(ge=0)
+	median_seconds: float = Field(ge=0)
+	maximum_seconds: float = Field(ge=0)
+	sum_seconds: float = Field(ge=0)
+	basis: str
+	unavailable: tuple[str, ...] = ()
+
+
+class ManagedAllocationProgress(ConfigModel):
+	"""Managed-storage ledger change scoped to one execution segment."""
+
+	action: str
+	role: str | None = None
+	name: str
+	bytes: int = Field(ge=0)
+	alias: str | None = None
+	attribution: str
+	scope: str
+
+
+class ResourceObservationProgress(ConfigModel):
+	"""Observed or attributed resource value with its actual scope."""
+
+	metric: str
+	value: int | float | None = None
+	unit: str
+	scope: str
+	attribution: str
+	process_ids: tuple[int, ...] = ()
+	detail: str | None = None
+
+
 class ProgressEvent(ConfigModel):
 	"""Versioned, totally ordered experiment progress event."""
 
-	schema_version: Literal[1] = 1
+	schema_version: Literal[1, 2] = 2
+	context_update: Literal["replace"] = "replace"
 	sequence: int = Field(ge=1)
 	timestamp: datetime
 	experiment_id: str = Field(min_length=1)
@@ -161,6 +219,22 @@ class ProgressEvent(ConfigModel):
 	stage_position: int | None = Field(default=None, ge=1)
 	stage_total: int | None = Field(default=None, ge=1)
 	stage_elapsed_seconds: float | None = Field(default=None, ge=0)
+	segment_run_id: str | None = None
+	segment_id: str | None = None
+	segment_kind: str | None = None
+	segment_position: int | None = Field(default=None, ge=1)
+	segment_total: int | None = Field(default=None, ge=1)
+	segment_member_start: int | None = Field(default=None, ge=0)
+	segment_member_stop: int | None = Field(default=None, ge=0)
+	segment_members: tuple[StageProgressMember, ...] = ()
+	segment_elapsed_seconds: float | None = Field(default=None, ge=0)
+	segment_coordinator_wall_seconds: float | None = Field(default=None, ge=0)
+	segment_worker_timings: tuple[WorkerTimingProgress, ...] = ()
+	segment_allocation_changes: tuple[ManagedAllocationProgress, ...] = ()
+	segment_resource_observations: tuple[ResourceObservationProgress, ...] = ()
+	segment_unavailable_observations: tuple[str, ...] = ()
+	cached_stage_count: int = Field(default=0, ge=0)
+	cached_stage_members: tuple[StageProgressMember, ...] = ()
 	lifecycle_state: LifecycleState | None = None
 	elapsed_seconds: float | None = Field(default=None, ge=0)
 	resource_bytes: int | None = Field(default=None, ge=0)
@@ -181,12 +255,14 @@ class FailureContext(ConfigModel):
 	window_id: str | None = None
 	stage_occurrence_id: str | None = None
 	stage_algorithm: str | None = None
+	segment_id: str | None = None
 
 
 class AttemptProgress(ConfigModel):
 	"""Atomic authoritative projection for one logical attempt."""
 
-	schema_version: Literal[1] = 1
+	schema_version: Literal[1, 2] = 2
+	context_update: Literal["replace"] = "replace"
 	experiment_id: str
 	fidelity_id: str
 	candidate_key: str
@@ -210,6 +286,22 @@ class AttemptProgress(ConfigModel):
 	stage_position: int | None = Field(default=None, ge=1)
 	stage_total: int | None = Field(default=None, ge=1)
 	stage_elapsed_seconds: float | None = Field(default=None, ge=0)
+	segment_run_id: str | None = None
+	segment_id: str | None = None
+	segment_kind: str | None = None
+	segment_position: int | None = Field(default=None, ge=1)
+	segment_total: int | None = Field(default=None, ge=1)
+	segment_member_start: int | None = Field(default=None, ge=0)
+	segment_member_stop: int | None = Field(default=None, ge=0)
+	segment_members: tuple[StageProgressMember, ...] = ()
+	segment_elapsed_seconds: float | None = Field(default=None, ge=0)
+	segment_coordinator_wall_seconds: float | None = Field(default=None, ge=0)
+	segment_worker_timings: tuple[WorkerTimingProgress, ...] = ()
+	segment_allocation_changes: tuple[ManagedAllocationProgress, ...] = ()
+	segment_resource_observations: tuple[ResourceObservationProgress, ...] = ()
+	segment_unavailable_observations: tuple[str, ...] = ()
+	cached_stage_count: int = Field(default=0, ge=0)
+	cached_stage_members: tuple[StageProgressMember, ...] = ()
 	resource_bytes: int | None = Field(default=None, ge=0)
 	output_bytes: int | None = Field(default=None, ge=0)
 	cache_bytes: int | None = Field(default=None, ge=0)
@@ -443,6 +535,7 @@ class ExecutionContext:
 	clock_started: float = field(default_factory=time.perf_counter)
 	window_clock_started: float | None = None
 	stage_clocks_started: dict[str, float] = field(default_factory=dict)
+	segment_clock_started: float | None = None
 
 	def _persist_progress(self, kind: str) -> None:
 		try:
@@ -478,6 +571,28 @@ class ExecutionContext:
 					stage_position=self.progress.stage_position,
 					stage_total=self.progress.stage_total,
 					stage_elapsed_seconds=self.progress.stage_elapsed_seconds,
+					segment_run_id=self.progress.segment_run_id,
+					segment_id=self.progress.segment_id,
+					segment_kind=self.progress.segment_kind,
+					segment_position=self.progress.segment_position,
+					segment_total=self.progress.segment_total,
+					segment_member_start=self.progress.segment_member_start,
+					segment_member_stop=self.progress.segment_member_stop,
+					segment_members=self.progress.segment_members,
+					segment_elapsed_seconds=self.progress.segment_elapsed_seconds,
+					segment_coordinator_wall_seconds=(
+						self.progress.segment_coordinator_wall_seconds
+					),
+					segment_worker_timings=self.progress.segment_worker_timings,
+					segment_allocation_changes=self.progress.segment_allocation_changes,
+					segment_resource_observations=(
+						self.progress.segment_resource_observations
+					),
+					segment_unavailable_observations=(
+						self.progress.segment_unavailable_observations
+					),
+					cached_stage_count=self.progress.cached_stage_count,
+					cached_stage_members=self.progress.cached_stage_members,
 					lifecycle_state=self.progress.state,
 					elapsed_seconds=self.progress.elapsed_seconds,
 					resource_bytes=self.progress.resource_bytes,
@@ -501,20 +616,220 @@ class ExecutionContext:
 	def checkpoint(self) -> None:
 		self.cancellation.raise_if_requested()
 
+	@staticmethod
+	def _clear_segment_fields(*, clear_cache: bool = False) -> dict[str, Any]:
+		result = {
+			"stage_occurrence_id": None,
+			"stage_algorithm": None,
+			"stage_position": None,
+			"stage_total": None,
+			"stage_elapsed_seconds": None,
+			"segment_run_id": None,
+			"segment_id": None,
+			"segment_kind": None,
+			"segment_position": None,
+			"segment_total": None,
+			"segment_member_start": None,
+			"segment_member_stop": None,
+			"segment_members": (),
+			"segment_elapsed_seconds": None,
+			"segment_coordinator_wall_seconds": None,
+			"segment_worker_timings": (),
+			"segment_allocation_changes": (),
+			"segment_resource_observations": (),
+			"segment_unavailable_observations": (),
+		}
+		if clear_cache:
+			result.update({"cached_stage_count": 0, "cached_stage_members": ()})
+		return result
+
+	@staticmethod
+	def _span_members(
+		event: ExecutionSpanEvent,
+		configs: Sequence[Any],
+		cache_state: StageCacheState,
+	) -> tuple[StageProgressMember, ...]:
+		timings = {item.member.index: item for item in event.member_timings}
+		members = []
+		for member in event.span.members:
+			if member.index >= len(configs):
+				raise ValueError(
+					f"span member index {member.index} exceeds authored pipeline length "
+					f"{len(configs)}"
+				)
+			config = configs[member.index]
+			occurrence_id = (
+				getattr(config, "id", None)
+				or f"{getattr(config, 'kind', member.stage_name)}[{member.index}]"
+			)
+			algorithm = getattr(config, "algorithm", None) or member.stage_name
+			timing = timings.get(member.index)
+			member_state = (
+				"executed"
+				if cache_state == "executing"
+				and event.phase is ExecutionSpanPhase.COMPLETED
+				else cache_state
+			)
+			members.append(StageProgressMember(
+				authored_index=member.index,
+				position=member.index + 1,
+				total=len(configs),
+				occurrence_id=occurrence_id,
+				algorithm=algorithm,
+				stage_name=member.stage_name,
+				stage_type=member.stage_type,
+				dispatch_kind=member.dispatch_kind.name.lower(),
+				cache_state=member_state,
+				coordinator_wall_seconds=(
+					None if timing is None else timing.coordinator_wall_seconds
+				),
+				timing_unavailable=() if timing is None else timing.unavailable,
+			))
+		return tuple(members)
+
+	def execution_span(
+		self,
+		event: ExecutionSpanEvent,
+		configs: Sequence[Any],
+		*,
+		cache_state: StageCacheState = "executing",
+	) -> None:
+		"""Project one public pipeline span event into authoritative progress."""
+
+		members = self._span_members(event, configs, cache_state)
+		standalone = members[0] if len(members) == 1 else None
+		common = {
+			"segment_run_id": event.span.run_id,
+			"segment_id": event.span.span_id,
+			"segment_kind": event.span.kind.name.lower(),
+			"segment_position": event.span.ordinal + 1,
+			"segment_total": event.span.total,
+			"segment_member_start": event.span.member_start,
+			"segment_member_stop": event.span.member_stop,
+			"segment_members": members,
+			"stage_occurrence_id": None if standalone is None else standalone.occurrence_id,
+			"stage_algorithm": None if standalone is None else standalone.algorithm,
+			"stage_position": None if standalone is None else standalone.position,
+			"stage_total": None if standalone is None else standalone.total,
+		}
+		if event.phase is ExecutionSpanPhase.STARTED:
+			self.segment_clock_started = time.perf_counter()
+			cached_prefix = (
+				f"{self.progress.cached_stage_count} cached; "
+				if self.progress.cached_stage_count else ""
+			)
+			self.update(
+				"segment.started",
+				cached_prefix
+				+ f"segment {event.span.ordinal + 1}/{event.span.total} started: "
+				+ " -> ".join(member.occurrence_id for member in members),
+				**common,
+				segment_elapsed_seconds=0,
+				segment_coordinator_wall_seconds=None,
+				segment_worker_timings=(),
+				segment_allocation_changes=(),
+				segment_resource_observations=(),
+				segment_unavailable_observations=event.unavailable_observations,
+				stage_elapsed_seconds=0 if standalone is not None else None,
+			)
+			return
+
+		worker_timings = tuple(WorkerTimingProgress(
+			authored_index=item.member.index,
+			invocation_count=item.worker.invocation_count,
+			minimum_seconds=item.worker.minimum_seconds,
+			median_seconds=item.worker.median_seconds,
+			maximum_seconds=item.worker.maximum_seconds,
+			sum_seconds=item.worker.sum_seconds,
+			basis=item.worker.basis,
+			unavailable=item.unavailable,
+		) for item in event.member_timings if item.worker is not None)
+		allocations = tuple(ManagedAllocationProgress(
+			action=item.action,
+			role=item.role,
+			name=item.name,
+			bytes=item.bytes,
+			alias=item.alias,
+			attribution=item.attribution.value,
+			scope=item.scope,
+		) for item in event.managed_allocation_changes)
+		resources = tuple(ResourceObservationProgress(
+			metric=item.metric,
+			value=item.value,
+			unit=item.unit,
+			scope=item.scope,
+			attribution=item.attribution.value,
+			process_ids=item.process_ids,
+			detail=item.detail,
+		) for item in event.resource_observations)
+		changes = {
+			**common,
+			"updated_at": _utcnow(),
+			"elapsed_seconds": time.perf_counter() - self.clock_started,
+			"segment_elapsed_seconds": event.coordinator_wall_seconds,
+			"segment_coordinator_wall_seconds": event.coordinator_wall_seconds,
+			"segment_worker_timings": worker_timings,
+			"segment_allocation_changes": allocations,
+			"segment_resource_observations": resources,
+			"segment_unavailable_observations": event.unavailable_observations,
+			"stage_elapsed_seconds": (
+				None if standalone is None else standalone.coordinator_wall_seconds
+			),
+		}
+		kind = f"segment.{event.phase.value}"
+		message = (
+			f"segment {event.span.ordinal + 1}/{event.span.total} "
+			f"{event.phase.value}: "
+			+ " -> ".join(member.occurrence_id for member in members)
+		)
+		fields: dict[str, Any] = {}
+		if event.phase in (ExecutionSpanPhase.FAILED, ExecutionSpanPhase.INTERRUPTED):
+			secrets = () if self.writer is None else self.writer.secrets
+			error_message = str(redact_secrets(
+				event.error_message or event.error_type or event.phase.value,
+				secrets=secrets,
+			))
+			failure = FailureContext(
+				type=(event.error_type or event.phase.value).rsplit(".", 1)[-1],
+				message=error_message,
+				window_id=self.progress.window_id,
+				stage_occurrence_id=(
+					None if standalone is None else standalone.occurrence_id
+				),
+				stage_algorithm=None if standalone is None else standalone.algorithm,
+				segment_id=event.span.span_id,
+			)
+			changes["failure"] = failure
+			fields = {
+				"severity": "error" if event.phase is ExecutionSpanPhase.FAILED else "warning",
+				"failure_type": failure.type,
+				"failure_message": failure.message,
+			}
+		self.progress = self.progress.model_copy(update=changes)
+		self._publish(kind, message, **fields)
+		self.segment_clock_started = None
+		if event.phase is ExecutionSpanPhase.COMPLETED:
+			self.progress = self.progress.model_copy(update={
+				"updated_at": _utcnow(), **self._clear_segment_fields(),
+			})
+			self._persist_progress(kind)
+
 	def window_started(
 		self, window_id: str, *, position: int | None = None, total: int | None = None,
 	) -> None:
 		self.checkpoint()
 		self.window_clock_started = time.perf_counter()
+		cleared = self._clear_segment_fields(clear_cache=True)
 		self.update(
 			"window.started", (
 				f"window {position}/{total} {window_id} started"
 				if position is not None and total is not None
 				else f"window {window_id} started"
 			),
-			window_id=window_id, stage_occurrence_id=None, stage_algorithm=None,
+			window_id=window_id,
 			window_position=position, window_total=total, window_elapsed_seconds=0,
-			stage_position=None, stage_total=None, stage_elapsed_seconds=None,
+			failure=None,
+			**cleared,
 		)
 
 	def window_completed(self, window_id: str) -> None:
@@ -522,6 +837,7 @@ class ExecutionContext:
 			None if self.window_clock_started is None
 			else time.perf_counter() - self.window_clock_started
 		)
+		cleared = self._clear_segment_fields()
 		self.update(
 			"window.completed", (
 				f"window {self.progress.window_position}/{self.progress.window_total} "
@@ -530,16 +846,18 @@ class ExecutionContext:
 				and self.progress.window_total is not None
 				else f"window {window_id} completed"
 			),
-			window_id=window_id, stage_occurrence_id=None, stage_algorithm=None,
+			window_id=window_id,
 			window_elapsed_seconds=window_elapsed,
-			stage_position=None, stage_total=None, stage_elapsed_seconds=None,
+			**cleared,
 		)
 		self.progress = self.progress.model_copy(update={
 			"updated_at": _utcnow(), "window_id": None,
 			"window_position": None, "window_total": None,
 			"window_elapsed_seconds": None,
+			"cached_stage_count": 0, "cached_stage_members": (),
 		})
 		self.window_clock_started = None
+		self.segment_clock_started = None
 		self._persist_progress("window.completed")
 
 	def stage_started(
@@ -552,6 +870,7 @@ class ExecutionContext:
 	) -> None:
 		self.checkpoint()
 		self.stage_clocks_started[occurrence_id] = time.perf_counter()
+		cleared = self._clear_segment_fields()
 		self.update(
 			"stage.started", (
 				f"Stage {position}/{total} {occurrence_id}:{algorithm} started"
@@ -560,6 +879,7 @@ class ExecutionContext:
 			),
 			stage_occurrence_id=occurrence_id, stage_algorithm=algorithm,
 			stage_position=position, stage_total=total, stage_elapsed_seconds=0,
+			**{key: value for key, value in cleared.items() if not key.startswith("stage_")},
 		)
 
 	def stage_completed(
@@ -601,7 +921,21 @@ class ExecutionContext:
 		"""Publish exact current-boundary elapsed time without inventing a percentage."""
 
 		self.checkpoint()
-		if self.progress.stage_occurrence_id is not None:
+		if self.progress.segment_id is not None:
+			segment_elapsed = (
+				None if self.segment_clock_started is None
+				else time.perf_counter() - self.segment_clock_started
+			)
+			self.update(
+				"segment.heartbeat",
+				f"segment {self.progress.segment_id} is running",
+				segment_elapsed_seconds=segment_elapsed,
+				stage_elapsed_seconds=(
+					segment_elapsed
+					if len(self.progress.segment_members) == 1 else None
+				),
+			)
+		elif self.progress.stage_occurrence_id is not None:
 			started = self.stage_clocks_started.get(self.progress.stage_occurrence_id)
 			stage_elapsed = (
 				None if started is None else time.perf_counter() - started
@@ -667,6 +1001,7 @@ class ExecutionContext:
 		event: str,
 		*,
 		cache_bytes: int | None = None,
+		cached_members: Sequence[StageProgressMember] | None = None,
 		details: Mapping[str, Any] | None = None,
 	) -> None:
 		"""Publish one explicitly projected cache event.
@@ -680,6 +1015,11 @@ class ExecutionContext:
 				"updated_at": _utcnow(),
 				"elapsed_seconds": time.perf_counter() - self.clock_started,
 			}
+			if cached_members is not None:
+				changes.update({
+					"cached_stage_count": len(cached_members),
+					"cached_stage_members": tuple(cached_members),
+				})
 			if cache_bytes is not None:
 				changes["cache_bytes"] = cache_bytes
 			self.progress = self.progress.model_copy(update=changes)

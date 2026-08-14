@@ -289,6 +289,7 @@ def test_progress_reports_aggregate_counts_human_context_and_resume_dispositions
 
 def test_progress_schema_one_remains_backward_compatible_with_absent_display_fields():
 	event = ProgressEvent.model_validate({
+		"schema_version": 1,
 		"sequence": 1,
 		"timestamp": "2026-08-10T00:00:00Z",
 		"experiment_id": "legacy",
@@ -296,6 +297,9 @@ def test_progress_schema_one_remains_backward_compatible_with_absent_display_fie
 		"message": "legacy schema-one event",
 	})
 	assert event.schema_version == 1
+	assert event.context_update == "replace"
+	assert event.segment_id is None
+	assert event.segment_members == ()
 	assert event.sampler_position is None
 	assert event.remaining_candidates is None
 

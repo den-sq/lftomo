@@ -705,6 +705,26 @@ class IndependentExperimentRunner:
 				stage_position=progress.stage_position,
 				stage_total=progress.stage_total,
 				stage_elapsed_seconds=progress.stage_elapsed_seconds,
+				segment_run_id=progress.segment_run_id,
+				segment_id=progress.segment_id,
+				segment_kind=progress.segment_kind,
+				segment_position=progress.segment_position,
+				segment_total=progress.segment_total,
+				segment_member_start=progress.segment_member_start,
+				segment_member_stop=progress.segment_member_stop,
+				segment_members=progress.segment_members,
+				segment_elapsed_seconds=progress.segment_elapsed_seconds,
+				segment_coordinator_wall_seconds=(
+					progress.segment_coordinator_wall_seconds
+				),
+				segment_worker_timings=progress.segment_worker_timings,
+				segment_allocation_changes=progress.segment_allocation_changes,
+				segment_resource_observations=progress.segment_resource_observations,
+				segment_unavailable_observations=(
+					progress.segment_unavailable_observations
+				),
+				cached_stage_count=progress.cached_stage_count,
+				cached_stage_members=progress.cached_stage_members,
 				lifecycle_state=progress.state,
 				elapsed_seconds=progress.elapsed_seconds,
 				resource_bytes=progress.resource_bytes,
@@ -924,6 +944,7 @@ class IndependentExperimentRunner:
 					message=clean_message,
 					stage_id=context.progress.stage_occurrence_id,
 					stage_algorithm=context.progress.stage_algorithm,
+					segment_id=context.progress.segment_id,
 					window_id=context.progress.window_id,
 					traceback=clean_traceback,
 				),
@@ -940,6 +961,7 @@ class IndependentExperimentRunner:
 					window_id=context.progress.window_id,
 					stage_occurrence_id=context.progress.stage_occurrence_id,
 					stage_algorithm=context.progress.stage_algorithm,
+					segment_id=context.progress.segment_id,
 				),
 			})
 			try:
@@ -992,6 +1014,7 @@ class IndependentExperimentRunner:
 					message=clean_message,
 					stage_id=context.progress.stage_occurrence_id,
 					stage_algorithm=context.progress.stage_algorithm,
+					segment_id=context.progress.segment_id,
 					window_id=context.progress.window_id,
 					traceback=clean_traceback,
 				),
@@ -1008,6 +1031,7 @@ class IndependentExperimentRunner:
 				window_id=attempt.failure.window_id,
 				stage_occurrence_id=attempt.failure.stage_id,
 				stage_algorithm=attempt.failure.stage_algorithm,
+				segment_id=attempt.failure.segment_id,
 			)
 		output_bytes = None
 		if attempt.result is not None:
