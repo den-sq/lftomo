@@ -299,14 +299,11 @@ class AffineSkewMovementStage(Stage):
 
 		return source.with_output_padding(X(self.pad_x))
 
-	def output_shape(self, source_shape, dtype) -> ProjOrder | SinoOrder:
-		"""Derive a target-layout allocation shape through the canonical window."""
+	def output_shape(self, source_shape) -> ProjOrder | SinoOrder:
+		"""Return the one canonical target-layout affine allocation shape."""
 
-		zero = source_shape.make_with(0)
-		unit = source_shape.make_with(1)
-		source = TomoWindow(source_shape, zero, zero, unit, dtype, dtype)
-		output = self.output_window(source)
-		return self.target_layout(**asdict(output.shape))
+		expanded = source_shape + X(self.pad_x) + X(self.pad_x)
+		return self.target_layout(**asdict(expanded))
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if self.target_layout is None:
@@ -323,7 +320,7 @@ class AffineSkewMovementStage(Stage):
 			raise ValueError("fused affine transition must change layout")
 		projection_count = n_projections(data, input_layout)
 		row_count = n_rows(data, input_layout)
-		shape = self.output_shape(input_layout(*data.shape), data.dtype)
+		shape = self.output_shape(input_layout(*data.shape))
 		output_buffer, output = allocate_output(
 			state, shape, data.dtype, role="fused_geometry",
 		)

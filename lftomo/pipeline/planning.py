@@ -168,7 +168,7 @@ def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) ->
 	elif stage.name == "layout.convert":
 		shape = layout(values[1], values[0], values[2])
 	elif stage.name == "geometry.affine_skew_movement" and getattr(stage, "target_layout", None) is not None:
-		shape = stage.output_shape(shape, dtype)
+		shape = stage.output_shape(shape)
 	elif stage.name == "helical_correct.index_remap" and getattr(stage, "enabled", True):
 		if getattr(stage, "crop_valid", False):
 			count = values[0] if input_spec.layout is ProjOrder else values[1]

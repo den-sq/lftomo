@@ -506,7 +506,7 @@ class PipelineExecutor:
 				raise ValueError("fused affine transition must change layout")
 			projection_count = data.shape[0] if input_layout is ProjOrder else data.shape[1]
 			row_count = data.shape[1] if input_layout is ProjOrder else data.shape[0]
-			shape = stage.output_shape(input_layout(*data.shape), data.dtype)
+			shape = stage.output_shape(input_layout(*data.shape))
 			output, _target = allocate_output(
 				state, shape, data.dtype, role="fused_geometry",
 			)
