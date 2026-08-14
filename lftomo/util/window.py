@@ -252,7 +252,6 @@ class TomoDataSet(DataRef):
 			shape = replace(shape, **asdict(over.stop - over.start))
 			step = over.step
 		else:
-			print(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
 			raise TypeError(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
 
 		super().__init__(shape=shape, pad=shape.make_with(0), pos=pos, step=step, dtype=dtype)
@@ -368,7 +367,7 @@ class TomoDataSet(DataRef):
 				img_dtype = tif.pages[0].dtype
 				length = len(tif.pages)
 		else:
-			print("Could not ID file type. exiting.")
+			raise ValueError(f"could not identify tomography file type for {source}")
 
 		if fov.Theta is None:
 			if "Theta" in [field.name for field in fields(shape_type)]:

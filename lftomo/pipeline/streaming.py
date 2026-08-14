@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import logging
 from typing import Any, Sequence
 
 from lftomo.pipeline.core import _canonical_pad, Stage
 from lftomo.util.shapes import DataShape, ProjOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet
-
-
-LOGGER = logging.getLogger(__name__)
+from lftomo.util.log import LOG, log
 
 
 class WindowPlanError(ValueError):
@@ -164,7 +161,7 @@ def resolve_streaming_plan(
 				"not whole-volume equivalence: " + ", ".join(sensitive)
 			)
 			warnings.append(message)
-			LOGGER.warning(message)
+			log.write("Window Plan", message, LOG.WARN)
 	dataset = TomoDataSet(
 		CTFov(theta_count, scan.degrees_per_fov, 1),
 		ProjOrder(theta_count, rows, columns),

@@ -1,6 +1,9 @@
 from datetime import datetime
 import io
 import os
+from pathlib import Path
+import subprocess
+import sys
 
 from lftomo.util.log import LOG, Logger, log
 
@@ -67,6 +70,58 @@ def test_log(capfd, tmp_path):
 	assert err == ""
 	assert out[:28] == F"TIME  |{'ERRORED':20}|"
 	assert out[-12:] == "\"Ignore Me\"\n"
+	log.close()
+
+
+def test_import_construct_and_default_write_create_no_cwd_file(tmp_path, monkeypatch, capfd):
+	monkeypatch.chdir(tmp_path)
+	local = Logger()
+	local.write("Default", "screen only", LOG.STATUS)
+	local.close()
+	capfd.readouterr()
+	assert list(tmp_path.iterdir()) == []
+
+	repository = Path(__file__).resolve().parents[2]
+	environment = dict(os.environ)
+	environment["PYTHONPATH"] = os.pathsep.join(filter(None, (
+		str(repository), environment.get("PYTHONPATH"),
+	)))
+	subprocess.run(
+		[sys.executable, "-c", (
+			"from lftomo.util.log import Logger; "
+			"logger = Logger(); logger.write('Import', 'screen only'); logger.close()"
+		)],
+		cwd=tmp_path,
+		env=environment,
+		check=True,
+		capture_output=True,
+		text=True,
+	)
+	assert list(tmp_path.iterdir()) == []
+
+
+def test_explicit_path_sink_flushes_and_closes(tmp_path):
+	path = tmp_path / "operator.log"
+	with Logger(
+		log_screen={},
+		log_files={"operator": (path, LOG.TIME)},
+	) as local:
+		assert not path.exists()
+		local.write("Explicit", "written", LOG.TIME)
+		assert path.read_text(encoding="utf-8").endswith('|"written"\n')
+	assert path.is_file()
+
+
+def test_caller_stream_sink_is_flushed_but_not_closed():
+	stream = io.StringIO()
+	local = Logger(
+		log_screen={},
+		log_files={"borrowed": (stream, LOG.TIME)},
+	)
+	local.write("Borrowed", "still owned by caller", LOG.TIME)
+	local.close()
+	assert not stream.closed
+	assert stream.getvalue().endswith('|"still owned by caller"\n')
 
 
 def test_confirm(monkeypatch, tmp_path):
@@ -92,6 +147,7 @@ def test_confirm(monkeypatch, tmp_path):
 	# General prompt testing
 	monkeypatch.setattr('sys.stdin', io.StringIO("My Hat\n"))
 	assert new_log.prompt("PROMPT TEST", "What is on my head?") == "My Hat"
+	new_log.close()
 
 
 def test_out_set(capfd, tmp_path):
@@ -125,3 +181,4 @@ def test_out_set(capfd, tmp_path):
 
 	assert x.getvalue()[:28] == F"INFO  |{'LOG EXC TEST':20}|"
 	assert x.getvalue()[-19:] == "\"No Error-tb-None\"\n"
+	new_log.close()

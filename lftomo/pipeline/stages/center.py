@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import logging
 from pathlib import Path
 import numpy as np
 from skimage.measure import shannon_entropy
@@ -28,9 +27,7 @@ from lftomo.pipeline.layout import (
 	sinogram_scratch,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
-
-
-LOGGER = logging.getLogger(__name__)
+from lftomo.util.log import LOG, log
 
 
 def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
@@ -534,10 +531,11 @@ class VoCenterStage(Stage):
 		except (ValueError, RuntimeError, ArithmeticError) as error:
 			if self.fallback != "entropy_local":
 				raise
-			LOGGER.warning(
-				"center.vo failed with %s; using center.entropy_local fallback",
-				error,
-				exc_info=True,
+			log.write(
+				"Center Finding",
+				f"center.vo failed with {error}; using center.entropy_local fallback",
+				LOG.WARN,
+				write_tb=True,
 			)
 			return EntropyLocalCenterStage(**self.fallback_params).run(state)
 		return _store_center(state, center)

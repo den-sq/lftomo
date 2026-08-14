@@ -1323,6 +1323,7 @@ def run_acceptance(
 			f"record: {record_path}",
 			log_level=LOG.STATUS if record["passed"] else LOG.ERROR,
 		)
+		shared_log.close()
 	return record
 
 
