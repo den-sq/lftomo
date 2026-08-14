@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.15"
 dependencies = [
 	"numpy",
+	"bottleneck>=1.6.0",
 	"click",
 	"psutil",
 	"h5py",

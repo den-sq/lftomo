@@ -237,7 +237,7 @@ def _managed_vo_chain(workers: int):
 		)
 
 
-def test_managed_vo_chain_allocates_two_row_indexed_planes_once_and_matches_ndarray():
+def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
 	expected = _fixture(rows=4)
 	_pipeline([
 		VoDeadStripeStage(snr=2, size=5, norm=False),
@@ -255,19 +255,24 @@ def test_managed_vo_chain_allocates_two_row_indexed_planes_once_and_matches_ndar
 		"index_dtype": np.dtype(np.uint32).str,
 		"float_bytes": 4 * 32 * 32 * 4,
 		"index_bytes": 4 * 32 * 32 * 4,
-		"managed_bytes": 2 * 4 * 32 * 32 * 4,
-		"allocation_count": 2,
+		"median_pad_half_width": 2,
+		"median_pad_bytes": 4 * 32 * 36 * 4,
+		"managed_bytes": 2 * 4 * 32 * 32 * 4 + 4 * 32 * 36 * 4,
+		"allocation_count": 3,
 		"indexing": "source_window_row",
 	}
 	work_events = [
 		event for event in events
-		if event["role"] in {"vo_float_work", "vo_index_work"}
+		if event["role"] in {
+			"vo_float_work", "vo_index_work", "vo_median_pad_work",
+		}
 	]
 	assert [event["action"] for event in work_events] == [
-		"allocate", "allocate", "retire", "retire",
+		"allocate", "allocate", "allocate", "retire", "retire", "retire",
 	]
 	assert "_vo_float_work" not in artifacts
 	assert "_vo_index_work" not in artifacts
+	assert "_vo_median_pad_work" not in artifacts
 
 
 def test_managed_vo_allocation_is_independent_of_worker_count():
