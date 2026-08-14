@@ -1,4 +1,4 @@
-"""Runner-level window planning and retained/fresh transition contracts."""
+"""Runner-level planning through canonical tomography windows."""
 
 from __future__ import annotations
 
@@ -6,12 +6,9 @@ from dataclasses import dataclass
 import logging
 from typing import Any, Sequence
 
-import numpy as np
-
-from lftomo.pipeline.core import AxisPad, PipelineState, Stage
-from lftomo.storage import ManagedBuffer
+from lftomo.pipeline.core import AxisPad, Stage
 from lftomo.util.shapes import ProjOrder, Y
-from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
+from lftomo.util.window import CTFov, TomoDataSet
 
 
 LOGGER = logging.getLogger(__name__)
@@ -34,18 +31,8 @@ class WindowConfig:
 
 
 @dataclass(frozen=True)
-class RetainedFreshRegion:
-	"""Explicit transition seam consumed later by retention and prefetch."""
-
-	adjacent: bool
-	retained: tuple[int, int] | None
-	fresh: tuple[tuple[int, int], ...]
-	prefix_valid: bool
-
-
-@dataclass(frozen=True)
 class StreamingPlan:
-	"""Resolved padding and canonical dataset windows plus transition metadata."""
+	"""Resolved padding plus the canonical iterable physical dataset."""
 
 	selection: tuple[int, int]
 	window_rows: int
@@ -53,17 +40,31 @@ class StreamingPlan:
 	extra_pad: AxisPad
 	effective_pad: AxisPad
 	dataset: TomoDataSet
-	windows: tuple[TomoWindow, ...]
-	transitions: tuple[RetainedFreshRegion, ...]
 	warnings: tuple[str, ...] = ()
 	center_prepass: str | None = None
 
+	def __iter__(self):
+		return self.dataset.iter_with(
+			wsize=Y(self.window_rows),
+			pad=ProjOrder(
+				self.effective_pad.theta, self.effective_pad.y, self.effective_pad.x,
+			),
+		)
+
+	@property
+	def window_count(self) -> int:
+		return len(self.dataset.frange)
+
 	@property
 	def whole_volume(self) -> bool:
-		return len(self.windows) == 1 and _y_bounds(self.windows[0]) == self.selection
+		return self.window_count == 1 and (
+			int(self.dataset.pos.Y), int(self.dataset.pos.Y + self.dataset.shape.Y)
+		) == self.selection
 
 	def record(self) -> dict[str, Any]:
-		return {
+		"""Serialize derived plan geometry for the run manifest."""
+
+		record = {
 			"selection": list(self.selection),
 			"window_rows": self.window_rows,
 			"required_pad": self.required_pad.as_dict(),
@@ -72,39 +73,19 @@ class StreamingPlan:
 			"whole_volume": self.whole_volume,
 			"center_prepass": self.center_prepass,
 			"warnings": list(self.warnings),
-			"windows": [{
-				"index": index,
-				"core": list(_y_bounds(window)),
-				"source": list(_y_bounds(window.with_pad(["Y"]))),
-				"interior": list(_y_bounds(window.internal)),
-				"transition": {
-					"adjacent": transition.adjacent,
-					"retained": transition.retained,
-					"fresh": transition.fresh,
-					"prefix_valid": transition.prefix_valid,
-				},
-			} for index, (window, transition) in enumerate(
-				zip(self.windows, self.transitions, strict=True)
-			)],
+			"windows": [],
 		}
-
-
-def _y_bounds(window: TomoWindow) -> tuple[int, int]:
-	start = int(window.pos.Y)
-	return start, start + int(window.shape.Y)
-
-
-def _fresh_regions(
-	start: int, stop: int, retained: tuple[int, int] | None,
-) -> tuple[tuple[int, int], ...]:
-	if retained is None:
-		return ((start, stop),)
-	regions = []
-	if start < retained[0]:
-		regions.append((start, retained[0]))
-	if retained[1] < stop:
-		regions.append((retained[1], stop))
-	return tuple(regions)
+		for index, window in enumerate(self):
+			core = window.index[1]
+			source = window.with_pad(["Y"]).index[1]
+			interior = window.internal.index[1]
+			record["windows"].append({
+				"index": index,
+				"core": [core.start, core.stop],
+				"source": [source.start, source.stop],
+				"interior": [interior.start, interior.stop],
+			})
+		return record
 
 
 def resolve_streaming_plan(
@@ -161,29 +142,6 @@ def resolve_streaming_plan(
 		ProjOrder(theta_count, rows, columns),
 		Y.drange(selection_start, selection_stop, window_rows),
 	)
-	windows = tuple(dataset.iter_with(
-		wsize=Y(window_rows),
-		pad=ProjOrder(effective.theta, effective.y, effective.x),
-	))
-	transitions = []
-	previous: TomoWindow | None = None
-	for window in windows:
-		core_start, core_stop = _y_bounds(window)
-		source_start, source_stop = _y_bounds(window.with_pad(["Y"]))
-		retained = None
-		if previous is not None:
-			previous_source_start, previous_source_stop = _y_bounds(previous.with_pad(["Y"]))
-			start = max(previous_source_start, source_start)
-			stop = min(previous_source_stop, source_stop)
-			retained = (start, stop) if start < stop else None
-		transitions.append(RetainedFreshRegion(
-			adjacent=previous is not None and _y_bounds(previous)[1] == core_start,
-			retained=retained,
-			fresh=_fresh_regions(source_start, source_stop, retained),
-			# #180 may make this true after it proves retained prefix state.
-			prefix_valid=False,
-		))
-		previous = window
 	center_prepass = (
 		"replay_processed_prefix_per_window"
 		if any(stage.name.startswith("center.") and stage.name != "center.manual" for stage in stages)
@@ -192,45 +150,6 @@ def resolve_streaming_plan(
 	return StreamingPlan(
 		selection=(selection_start, selection_stop), window_rows=window_rows,
 		required_pad=required, extra_pad=config.extra_pad,
-		effective_pad=effective, dataset=dataset, windows=windows,
-		transitions=tuple(transitions),
+		effective_pad=effective, dataset=dataset,
 		warnings=tuple(warnings), center_prepass=center_prepass,
 	)
-
-
-def crop_reconstruction_to_interior(
-	state: PipelineState, window: TomoWindow, plan: StreamingPlan, *, index: int | None = None,
-) -> PipelineState:
-	"""Publish the core reconstruction rows and global source coordinates."""
-
-	interior_start, interior_stop = _y_bounds(window.internal)
-	working = state.working_array
-	view = working[
-		interior_start:interior_stop, :, :
-	] if isinstance(working, ManagedBuffer) else np.asarray(working)[
-		interior_start:interior_stop, :, :
-	]
-	result = state.with_array(view)
-	source = state.source_window
-	if source is not None:
-		shape = ProjOrder(source.shape.Theta, window.shape.Y, source.shape.X)
-		zero = ProjOrder(0, 0, 0)
-		position = ProjOrder(source.pos.Theta, window.pos.Y, source.pos.X)
-		step = ProjOrder(source.step.Theta, 1, source.step.X)
-		result.source_window = TomoWindow(
-			shape, zero, position, step, source.dtype, np.float32,
-		)
-	core_start, core_stop = _y_bounds(window)
-	if index is None:
-		index = next(i for i, planned in enumerate(plan.windows) if planned is window)
-	result.artifacts["streaming_window"] = {
-		"index": index,
-		"core_start": core_start,
-		"core_stop": core_stop,
-		"output_start": core_start - plan.selection[0],
-		"output_stop": core_stop - plan.selection[0],
-		"total_rows": plan.selection[1] - plan.selection[0],
-		"first": index == 0,
-		"last": index == len(plan.windows) - 1,
-	}
-	return result

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
 from pathlib import Path
 
 from natsort import natsorted
@@ -198,16 +197,14 @@ def _bind_source_state(
 		planned_source = planned.with_pad(["Y"])
 		if (planned_source.pos.Y, planned_source.pos.Y + planned_source.shape.Y) != (y_start, y_stop):
 			raise ValueError("read selection does not match the planned canonical window")
-		pad_before = replace(zero, **asdict(planned.pad_before))
-		pad_after = replace(zero, **asdict(planned.pad_after))
 		source_window = TomoWindow(
 			ProjOrder(Theta=theta_stop - theta_start, Y=planned.shape.Y, X=full_shape.X),
-			pad_before,
+			planned.pad_before,
 			ProjOrder(Theta=theta_start, Y=planned.pos.Y, X=0),
 			ProjOrder(Theta=theta_stride, Y=1, X=1),
 			dtype,
 			np.float32,
-			pad_after=pad_after,
+			pad_after=planned.pad_after,
 		)
 	result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
 	result.dataset = dataset

@@ -89,18 +89,17 @@ def test_full_axis_contract_rejects_silent_window_degradation():
 		], _scan(), WindowConfig(rows=4))
 
 
-def test_retained_fresh_transition_is_explicit_but_prefix_is_not_retained():
+def test_streaming_plan_reiterates_the_canonical_dataset_without_a_window_cache():
 	plan = resolve_streaming_plan(
 		[BilateralFilterStage(diameter=5)], _scan(rows=10), WindowConfig(rows=3),
 	)
-	assert all(isinstance(window, TomoWindow) for window in plan.windows)
-	first, second = plan.transitions[:2]
-	assert first.retained is None
-	assert first.fresh == ((0, 5),)
-	assert second.adjacent
-	assert second.retained == (1, 5)
-	assert second.fresh == ((5, 8),)
-	assert second.prefix_valid is False
+	first_pass = tuple(plan)
+	second_pass = tuple(plan)
+	assert plan.window_count == 4
+	assert all(isinstance(window, TomoWindow) for window in first_pass)
+	assert [window.index for window in first_pass] == [
+		window.index for window in second_pass
+	]
 
 
 def test_streaming_windows_read_physical_neighbors_outside_selection():
@@ -113,26 +112,18 @@ def test_streaming_windows_read_physical_neighbors_outside_selection():
 
 	assert plan.dataset.physical_shape == ProjOrder(Theta=4, Y=12, X=8)
 	assert plan.dataset.frange == Y.drange(2, 10, 4)
-	assert [window.index[1] for window in plan.windows] == [
+	assert [window.index[1] for window in plan] == [
 		slice(2, 6, 1), slice(6, 10, 1),
 	]
-	assert [window.with_pad(["Y"]).index[1] for window in plan.windows] == [
+	assert [window.with_pad(["Y"]).index[1] for window in plan] == [
 		slice(0, 8, 1), slice(4, 12, 1),
 	]
 	assert plan.record()["windows"] == [
 		{
 			"index": 0, "core": [2, 6], "source": [0, 8], "interior": [2, 6],
-			"transition": {
-				"adjacent": False, "retained": None, "fresh": ((0, 8),),
-				"prefix_valid": False,
-			},
 		},
 		{
 			"index": 1, "core": [6, 10], "source": [4, 12], "interior": [2, 6],
-			"transition": {
-				"adjacent": True, "retained": (4, 8), "fresh": ((8, 12),),
-				"prefix_valid": False,
-			},
 		},
 	]
 
@@ -181,8 +172,15 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 	import tomopy
 
 	monkeypatch.setattr(tomopy, "find_center_pc", lambda *args, **kwargs: 2.0)
-	monkeypatch.setattr(tomopy, "recon", lambda data, *args, **kwargs:
-		np.repeat(np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1))
+	reconstruction_inputs = []
+
+	def reconstruct(data, *args, **kwargs):
+		reconstruction_inputs.append(tuple(data.shape))
+		return np.repeat(
+			np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1,
+		)
+
+	monkeypatch.setattr(tomopy, "recon", reconstruct)
 	whole_output = tmp_path / "whole"
 	window_output = tmp_path / "windowed"
 	whole = run_reconstruction(pipeline_path, scan_path, whole_output)[0]
@@ -190,6 +188,9 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 		pipeline_path, scan_path, window_output,
 		window_config=WindowConfig(rows=2),
 	)[0]
+	assert reconstruction_inputs == [(theta, rows, columns)] + [
+		(theta, 2, columns), (theta, 2, columns), (theta, 2, columns),
+	]
 
 	for row in range(rows):
 		np.testing.assert_allclose(

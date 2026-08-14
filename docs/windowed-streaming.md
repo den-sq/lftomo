@@ -24,11 +24,11 @@ core/source interval are written to `recon_run.yaml`. Those serialized
 intervals are derived from the plan's canonical `TomoWindow` objects; they are
 records, not a second geometry authority.
 
-`StreamingPlan.windows` contains the `TomoWindow` sequence created by the
-physical `TomoDataSet`. Retained/fresh transition metadata is stored separately
-and derives its intervals from adjacent padded windows. Every iteration reads
-`window.with_pad()` from the physical source, runs the normal managed Pipeline,
-and exposes `window.internal` reconstruction rows to writers. TIFF
+`StreamingPlan` reiterates the `TomoWindow` sequence from its physical
+`TomoDataSet`; it does not cache a second window collection. Every iteration
+reads `window.with_pad()` from the physical source, runs the normal managed Pipeline,
+uses `window.internal` to discard source-context rows before reconstruction,
+and exposes only the requested rows to writers. TIFF
 names use global detector Y; HDF5 and Neuroglancer writers place each interior
 block at its output-row offset. Shared storage reserves the largest planned
 window capacity and reuses the same named physical roles, so edge-window sizes
@@ -43,10 +43,9 @@ Manual centers remain ordinary metadata Stages and need no pre-pass.
 
 A Stage may declare `requires_full_axes=("Y", ...)`. A multi-window plan then
 fails before allocation with the Stage and axis named; there is no silent local
-substitute. Whole-volume mode remains valid. Each logical window transition
-also records adjacency, retained and fresh global intervals, and a
-`prefix_valid` marker. The marker is always false in this issue: retention and
-prefetch consume this seam in #180 and #181 but are not implemented here.
+substitute. Whole-volume mode remains valid. Retention and prefetch remain
+separate work in #180 and #181; this implementation carries no unused
+transition model for those future features.
 
 Paganin and BAC are FFT-extent-sensitive. A windowed plan names them in a
 warning. Their parity oracle is the same fixed window and padding: first
