@@ -64,6 +64,18 @@ from lftomo.pipeline.streaming import (
 	WindowPlanError,
 	resolve_streaming_plan,
 )
+from lftomo.pipeline.telemetry import (
+	ExecutionSpan,
+	ExecutionSpanEvent,
+	ExecutionSpanObserver,
+	ExecutionSpanPhase,
+	LogicalStageMember,
+	ManagedAllocationChange,
+	MemberTiming,
+	ObservationAttribution,
+	ResourceObservation,
+	WorkerTimingAggregate,
+)
 from lftomo.util.shapes import Y
 
 __all__ = [
@@ -89,6 +101,16 @@ __all__ = [
 	"BufferAction",
 	"BufferScheduleEvent",
 	"ExecutionKind",
+	"ExecutionSpan",
+	"ExecutionSpanEvent",
+	"ExecutionSpanObserver",
+	"ExecutionSpanPhase",
+	"LogicalStageMember",
+	"ManagedAllocationChange",
+	"MemberTiming",
+	"ObservationAttribution",
+	"ResourceObservation",
+	"WorkerTimingAggregate",
 	"PipelinePlan",
 	"PlanSegment",
 	"PlanStep",

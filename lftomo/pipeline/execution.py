@@ -9,6 +9,7 @@ import multiprocessing
 import os
 import signal
 import threading
+import time
 from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
@@ -116,7 +117,8 @@ def run_sinogram_chain_kernel(
 	index: int,
 	stages: tuple[Stage, ...],
 	payload: _WorkerState,
-) -> None:
+	collect_timings: bool = False,
+) -> tuple[float, ...]:
 	"""Gather/process/scatter one row for a complete bounded Stage chain."""
 
 	data = np.asarray(_worker_state(buffer, payload).working_array)
@@ -128,12 +130,17 @@ def run_sinogram_chain_kernel(
 	from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
 
 	state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
+	timings = []
 	for stage in stages:
+		started = time.perf_counter() if collect_timings else None
 		result = stage.run_sinogram(working, state)
+		if started is not None:
+			timings.append(time.perf_counter() - started)
 		if result is not None and result is not working:
 			working = np.asarray(result)
 	if layout is ProjOrder:
 		sinogram_view(data, layout, index)[:] = working
+	return tuple(timings)
 
 
 def _prepare_vo_work(
@@ -635,6 +642,7 @@ def run_bounded_sinogram_segment(
 	*,
 	max_workers: int = 1,
 	failure_observer: Callable[[Stage, BaseException], None] | None = None,
+	timing_observer: Callable[[tuple[tuple[float, ...], ...]], None] | None = None,
 	checkpoint: Callable[[], None] | None = None,
 	executor: PipelineExecutor | None = None,
 ) -> PipelineState:
@@ -658,36 +666,50 @@ def run_bounded_sinogram_segment(
 		if state.layout is ProjOrder else (data.shape[1], data.shape[2])
 	)
 	allocated = _prepare_vo_work(state, stages, row_count, sinogram_shape)
+	member_samples: list[list[float]] = [[] for _stage in stages]
 	try:
 		if isinstance(state.working_array, ManagedBuffer) and executor is not None:
 			if checkpoint is not None:
 				checkpoint()
 			try:
-				executor.submit_all(run_sinogram_chain_kernel, (
-					(state.working_array, state.layout, index, tuple(stages), _payload(state))
+				rows = executor.submit_all(run_sinogram_chain_kernel, (
+					(
+						state.working_array, state.layout, index, tuple(stages),
+						_payload(state), timing_observer is not None,
+					)
 					for index in range(row_count)
 				))
 			except BaseException as error:
 				if failure_observer is not None:
 					failure_observer(stages[0], error)
 				raise
-			return state
+			if timing_observer is not None:
+				for row in rows:
+					if len(row) != len(stages):
+						raise RuntimeError("bounded worker returned incomplete member timing data")
+					for member_index, elapsed in enumerate(row):
+						member_samples[member_index].append(elapsed)
+		else:
+			# ndarray-only hermetic execution is deliberately serial.
+			from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
 
-		# ndarray-only hermetic execution is deliberately serial.
-		from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
-
-		for index in range(row_count):
-			state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
-			working = sinogram_scratch(data, state.layout, index) if state.layout is ProjOrder else sinogram_view(data, state.layout, index)
-			for stage in stages:
-				if checkpoint is not None:
-					checkpoint()
-				result = stage.run_sinogram(working, state)
-				if result is not None and result is not working:
-					working = np.asarray(result)
-			if state.layout is ProjOrder:
-				sinogram_view(data, state.layout, index)[:] = working
-		state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
+			for index in range(row_count):
+				state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
+				working = sinogram_scratch(data, state.layout, index) if state.layout is ProjOrder else sinogram_view(data, state.layout, index)
+				for member_index, stage in enumerate(stages):
+					if checkpoint is not None:
+						checkpoint()
+					started = time.perf_counter() if timing_observer is not None else None
+					result = stage.run_sinogram(working, state)
+					if started is not None:
+						member_samples[member_index].append(time.perf_counter() - started)
+					if result is not None and result is not working:
+						working = np.asarray(result)
+				if state.layout is ProjOrder:
+					sinogram_view(data, state.layout, index)[:] = working
+			state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
 	finally:
 		_release_vo_work(state, allocated)
+	if timing_observer is not None:
+		timing_observer(tuple(tuple(samples) for samples in member_samples))
 	return state
