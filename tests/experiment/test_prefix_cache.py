@@ -1,7 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
+import inspect
 import json
 import multiprocessing
 import os
+from pathlib import Path
 import signal
 import threading
 import time
@@ -266,6 +268,13 @@ def planned_pair(tmp_path, values=None, *, policy=None):
 def _segment_exists(name):
 	from multiprocessing.shared_memory import SharedMemory
 
+	shared_memory_path = Path("/dev/shm") / name.lstrip("/")
+	if shared_memory_path.parent.is_dir():
+		return shared_memory_path.exists()
+	if "track" not in inspect.signature(SharedMemory).parameters:
+		raise RuntimeError(
+			"safe shared-memory inspection requires /dev/shm or Python 3.13+"
+		)
 	try:
 		segment = SharedMemory(name, track=False)
 	except FileNotFoundError:
