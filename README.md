@@ -95,6 +95,16 @@ capability. On other hosts those tests remain skipped unless
 `LFTOMO_RUN_INTEGRATION=1` is set explicitly. The default test run keeps those
 checks skipped so a clean checkout can run without lab-local files.
 
+The separate [full scientific suite](.github/workflows/full-suite.yml) is an
+informational workflow, not a required pull-request check. It runs the default
+non-integration suite after relevant pushes to `master`, and can also be
+dispatched manually. Its job summary records environment setup, source install,
+test duration, and installed size; the micromamba setup log records cache and
+cold-download behavior, while an artifact retains the resolved package list.
+Pull requests continue to use the lightweight checks in
+[CI](.github/workflows/ci.yml). Lab-data integration and Tier-2 reference checks
+remain separate and opt-in.
+
 Self-hosted runner architecture, service operations, storage prerequisites, and
 recovery procedures are documented in
 [`docs/recon-data-runner.md`](docs/recon-data-runner.md).
