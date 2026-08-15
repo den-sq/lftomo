@@ -74,7 +74,10 @@ jobs:
           set +e
           python -m pip install --no-build-isolation --no-deps -e .
           install_status=$?
-          set -e
+          # Do NOT re-enable errexit before the explicit exit. Under the
+          # setup-micromamba `bash -leo pipefail` login shell, an errexit-active
+          # `exit 0` is flipped to a step failure at shell teardown. The step
+          # already captures and propagates its own status, so stay under set +e.
           echo "LFTOMO_INSTALL_SECONDS=$(( $(date +%s) - started ))" >> "$GITHUB_ENV"
           exit "$install_status"
 
@@ -84,7 +87,9 @@ jobs:
           set +e
           python -m pytest -q
           test_status=$?
-          set -e
+          # Do NOT re-enable errexit before the explicit exit (see the install
+          # step): the micromamba login shell flips an errexit-active exit 0
+          # into a step failure at teardown.
           echo "LFTOMO_TEST_SECONDS=$(( $(date +%s) - started ))" >> "$GITHUB_ENV"
           exit "$test_status"
 
