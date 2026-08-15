@@ -7,7 +7,6 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import traceback
 from typing import Any
 
 import click
@@ -15,7 +14,7 @@ import numpy as np
 
 from lftomo.config import Recon
 from lftomo.pipeline import NumpyBackend, Pipeline, validate_pipeline
-from lftomo.pipeline.stages import create_stage
+from lftomo.pipeline.stages import create_stage, dispatch_for_stage
 from lftomo.runner import load_scan, run_reconstruction
 
 from .models import (
@@ -63,7 +62,11 @@ from .runtime import (
 	require_runtime_compatibility,
 )
 from .resources import PathContextRoots, PathResourceRequest
-from .events import ProgressInfrastructureError, current_execution_context
+from .events import (
+	ProgressInfrastructureError,
+	StageProgressMember,
+	current_execution_context,
+)
 from .lifecycle import ExperimentLifecycle, load_experiment, validate_experiment
 from .store import ResumePolicy
 
@@ -260,13 +263,36 @@ class PipelineTrialExecutor:
 		}
 
 	@staticmethod
-	def _publish_prefix_cache_progress(active, event) -> None:
+	def _publish_prefix_cache_progress(active, event, configs, stages) -> None:
 		"""Publish cache observability as infrastructure, never candidate science."""
 
+		if active is None:
+			return
 		try:
 			cache_event, cache_bytes, details = event.progress_projection()
+			cached_members = ()
+			if event.status == "hit":
+				cached_members = tuple(StageProgressMember(
+					authored_index=index,
+					position=index + 1,
+					total=len(configs),
+					occurrence_id=(
+						getattr(config, "id", None)
+						or f"{getattr(config, 'kind', stage.name)}[{index}]"
+					),
+					algorithm=getattr(config, "algorithm", None) or stage.name,
+					stage_name=stage.name,
+					stage_type=f"{type(stage).__module__}.{type(stage).__qualname__}",
+					dispatch_kind=dispatch_for_stage(stage).kind.name.lower(),
+					cache_state="cached",
+				) for index, (config, stage) in enumerate(
+					zip(configs[:event.stage_count], stages[:event.stage_count])
+				))
 			active.cache_event(
-				cache_event, cache_bytes=cache_bytes, details=details,
+				cache_event,
+				cache_bytes=cache_bytes,
+				cached_members=cached_members,
+				details=details,
 			)
 			if event.verified:
 				active.cache_event(
@@ -336,38 +362,15 @@ class PipelineTrialExecutor:
 		return plan
 
 	@staticmethod
-	def _stage_observer(configs):
-		by_stage = {}
+	def _execution_observer(configs, *, cache_state="executing"):
 		context = current_execution_context()
 
-		def bind(stages):
-			by_stage.update({id(stage): config for stage, config in zip(stages, configs)})
-
-		def observe(phase, index, stage, error):
-			if context is None:
-				return
-			config = by_stage.get(id(stage))
-			occurrence_id = (
-				getattr(config, "id", None)
-				or f"{getattr(config, 'kind', stage.name)}[{index}]"
+		return (
+			None if context is None else
+			lambda event: context.execution_span(
+				event, configs, cache_state=cache_state,
 			)
-			algorithm = getattr(config, "algorithm", None) or stage.name
-			if phase == "started":
-				context.stage_started(
-					occurrence_id, algorithm, position=index + 1, total=len(configs),
-				)
-			elif phase == "completed":
-				context.stage_completed(
-					occurrence_id, algorithm, position=index + 1, total=len(configs),
-				)
-			else:
-				assert error is not None
-				context.stage_failed(
-					occurrence_id, algorithm, error, traceback.format_exc(),
-					position=index + 1, total=len(configs),
-				)
-
-		return bind, observe
+		)
 
 	def __call__(self, identity, output_root: Path) -> TrialExecution:
 		output_root.mkdir(parents=True, exist_ok=True)
@@ -395,8 +398,7 @@ class PipelineTrialExecutor:
 					self._prefix_candidate_id(identity, window)
 				)
 			def execute_state(state, stages, configs, *, _decision=decision, _window=window):
-				bind_stages, observer = self._stage_observer(configs)
-				bind_stages(stages)
+				observer = self._execution_observer(configs)
 				if _decision is not None and _decision.action == "cache":
 					result, event = self.prefix_executor.execute(
 						_decision,
@@ -404,19 +406,25 @@ class PipelineTrialExecutor:
 						stages,
 						configs,
 						runtime_identity=self._prefix_runtime_identity(identity, _window),
-						observer=observer,
+						execution_observer=observer,
+						cache_build_execution_observer=self._execution_observer(
+							configs, cache_state="cache_build",
+						),
+						cache_verify_execution_observer=self._execution_observer(
+							configs, cache_state="cache_verify",
+						),
+						cache_observer=lambda cache_event: self._publish_prefix_cache_progress(
+							current_execution_context(), cache_event, configs, stages,
+						),
 						checkpoint=None if context is None else context.checkpoint,
 					)
 					result.artifacts["prefix_cache"] = event.model_dump(mode="json")
-					active = current_execution_context()
-					if active is not None:
-						self._publish_prefix_cache_progress(active, event)
 					return result
 				return Pipeline(
 					list(stages),
 					backend=state.backend,
 					validation_mode="complete",
-					observer=observer,
+					execution_observer=observer,
 					checkpoint=None if context is None else context.checkpoint,
 				).run(state)
 			if context is None and (decision is None or decision.action != "cache"):

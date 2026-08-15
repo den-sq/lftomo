@@ -351,15 +351,11 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 	assert any(stage.kind == "write" for stage in final.pipeline)
 
 
-def test_pipeline_stage_observer_reports_resolved_variant_positions(tmp_path):
+def test_pipeline_span_observer_reports_resolved_variant_positions(tmp_path):
 	executor = PipelineTrialExecutor(experiment(values=(0.01,)), "scan.yaml")
 	configs = (
 		SimpleNamespace(id="stripe", kind="stripe", algorithm="vo_sort"),
 		SimpleNamespace(id="reconstruct", kind="recon", algorithm="gridrec"),
-	)
-	stages = (
-		SimpleNamespace(name="stripe.vo_sort"),
-		SimpleNamespace(name="recon.gridrec"),
 	)
 	writer = ProgressEventWriter(tmp_path, "experiment", durable=True)
 	context = ExecutionContext(
@@ -372,22 +368,37 @@ def test_pipeline_stage_observer_reports_resolved_variant_positions(tmp_path):
 			state="started", updated_at=datetime.now(timezone.utc),
 		),
 	)
+	from lftomo.pipeline import (
+		DispatchKind,
+		ExecutionKind,
+		ExecutionSpan,
+		ExecutionSpanEvent,
+		ExecutionSpanPhase,
+		LogicalStageMember,
+	)
+	members = (
+		LogicalStageMember(0, "stripe.vo_sort", "tests.Stripe", DispatchKind.PROCESS),
+		LogicalStageMember(1, "recon.gridrec", "tests.Recon", DispatchKind.ENGINE),
+	)
+	span = ExecutionSpan(
+		"run", "run:0", 0, 1, ExecutionKind.BOUNDED_SINOGRAM, 0, 2, members,
+	)
 	with bind_execution_context(context):
-		bind, observe = executor._stage_observer(configs)
-		bind(stages)
-		# Bounded segments announce all starts before their completion callbacks.
-		observe("started", 0, stages[0], None)
-		observe("started", 1, stages[1], None)
-		observe("completed", 0, stages[0], None)
-		observe("completed", 1, stages[1], None)
+		observe = executor._execution_observer(configs)
+		observe(ExecutionSpanEvent(ExecutionSpanPhase.STARTED, span))
+		observe(ExecutionSpanEvent(
+			ExecutionSpanPhase.COMPLETED, span, coordinator_wall_seconds=0.25,
+		))
 	events = read_progress_events(tmp_path / "progress.jsonl")
 	assert [
-		(event.stage_occurrence_id, event.stage_position, event.stage_total)
+		[(member.occurrence_id, member.position, member.total) for member in event.segment_members]
 		for event in events
 	] == [
-		("stripe", 1, 2), ("reconstruct", 2, 2),
-		("stripe", 1, 2), ("reconstruct", 2, 2),
+		[("stripe", 1, 2), ("reconstruct", 2, 2)],
+		[("stripe", 1, 2), ("reconstruct", 2, 2)],
 	]
+	assert all(event.stage_occurrence_id is None for event in events)
+	assert events[-1].segment_coordinator_wall_seconds == 0.25
 
 
 def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp_path):

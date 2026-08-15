@@ -473,6 +473,7 @@ class FailureRecord(ConfigModel):
 	message: str = Field(min_length=1)
 	stage_id: str | None = None
 	stage_algorithm: str | None = None
+	segment_id: str | None = None
 	window_id: str | None = None
 	traceback: str | None = None
 	details: dict[str, JsonValue] = Field(default_factory=dict)

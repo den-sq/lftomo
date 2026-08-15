@@ -23,7 +23,13 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from lftomo.config import ConfigModel, StageConfig
-from lftomo.pipeline import Pipeline, PipelineState, Stage, StageObserver
+from lftomo.pipeline import (
+	ExecutionSpanObserver,
+	Pipeline,
+	PipelineState,
+	Stage,
+	StageObserver,
+)
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 
 from .models import canonical_json
@@ -460,6 +466,9 @@ def _run_stages(
 	stages: Sequence[Stage],
 	observer: StageObserver | None = None,
 	checkpoint: Callable[[], None] | None = None,
+	*,
+	execution_observer: ExecutionSpanObserver | None = None,
+	stage_index_offset: int = 0,
 ) -> PipelineState:
 	if not stages:
 		return state
@@ -470,6 +479,8 @@ def _run_stages(
 		initial_layout=state.layout,
 		initial_domain=state.domain,
 		observer=observer,
+		execution_observer=execution_observer,
+		stage_indices=tuple(range(stage_index_offset, stage_index_offset + len(stages))),
 		checkpoint=checkpoint,
 	).run(state)
 
@@ -899,26 +910,43 @@ class PrefixCacheStore:
 		*,
 		runtime_identity: Any,
 		observer: StageObserver | None = None,
+		execution_observer: ExecutionSpanObserver | None = None,
+		cache_build_execution_observer: ExecutionSpanObserver | None = None,
+		cache_verify_execution_observer: ExecutionSpanObserver | None = None,
+		cache_observer: Callable[[PrefixCacheEvent], None] | None = None,
 		checkpoint: Callable[[], None] | None = None,
 	) -> tuple[PipelineState, PrefixCacheEvent]:
 		"""Load/build one prefix, isolate a fork, then execute the suffix."""
 
+		def publish(event: PrefixCacheEvent) -> PrefixCacheEvent:
+			if cache_observer is not None:
+				cache_observer(event)
+			return event
+
 		if decision.action != "cache" or decision.stage_count == 0:
-			result = _run_stages(state, stages, observer, checkpoint)
-			return result, PrefixCacheEvent(
+			event = publish(PrefixCacheEvent(
 				status="independent" if decision.action == "independent" else "bypass",
 				stage_count=decision.stage_count,
 				fork_strategy="independent",
 				reason=decision.reason,
+			))
+			result = _run_stages(
+				state, stages, observer, checkpoint,
+				execution_observer=execution_observer,
 			)
+			return result, event
 		if state.backend.name != "numpy":
-			result = _run_stages(state, stages, observer, checkpoint)
-			return result, PrefixCacheEvent(
+			event = publish(PrefixCacheEvent(
 				status="bypass",
 				stage_count=decision.stage_count,
 				fork_strategy="independent",
 				reason=f"backend {state.backend.name!r} lacks a prefix snapshot contract",
+			))
+			result = _run_stages(
+				state, stages, observer, checkpoint,
+				execution_observer=execution_observer,
 			)
+			return result, event
 		prefix_stages = tuple(stages[:decision.stage_count])
 		suffix_stages = tuple(stages[decision.stage_count:])
 		prefix_configs = tuple(configs[:decision.stage_count])
@@ -928,13 +956,17 @@ class PrefixCacheStore:
 		if len(prefix_stages) != decision.stage_count or any(
 			not _cacheable(stage) for stage in prefix_stages
 		):
-			result = _run_stages(state, stages, observer, checkpoint)
-			return result, PrefixCacheEvent(
+			event = publish(PrefixCacheEvent(
 				status="bypass",
 				stage_count=decision.stage_count,
 				fork_strategy="independent",
 				reason="runtime pipeline no longer matches a safe planned prefix",
+			))
+			result = _run_stages(
+				state, stages, observer, checkpoint,
+				execution_observer=execution_observer,
 			)
+			return result, event
 		requires_copy = any(stage.contract.mutates_input for stage in suffix_stages)
 		try:
 			stage_identity = [
@@ -958,13 +990,17 @@ class PrefixCacheStore:
 		except Exception as error:
 			if self.policy.on_error == "fail":
 				raise PrefixCacheError(f"cache identity is insufficient: {error}") from error
-			result = _run_stages(state, stages, observer, checkpoint)
-			return result, PrefixCacheEvent(
+			event = publish(PrefixCacheEvent(
 				status="bypass",
 				stage_count=decision.stage_count,
 				fork_strategy="independent",
 				reason=f"cache identity is insufficient: {error}",
+			))
+			result = _run_stages(
+				state, stages, observer, checkpoint,
+				execution_observer=execution_observer,
 			)
+			return result, event
 		entry = self._entry(prefix_id, cache_key)
 		build_seconds = 0.0
 		load_seconds = 0.0
@@ -1005,6 +1041,9 @@ class PrefixCacheStore:
 					):
 						built = _run_stages(
 							_clone_initial_state(state), prefix_stages, observer, checkpoint,
+							execution_observer=(
+								cache_build_execution_observer or execution_observer
+							),
 						)
 						build_seconds = time.perf_counter() - started
 						with _pinned_state(
@@ -1022,8 +1061,7 @@ class PrefixCacheStore:
 		except PrefixCacheError as error:
 			if self.policy.on_error == "fail":
 				raise
-			result = _run_stages(state, stages, observer, checkpoint)
-			return result, PrefixCacheEvent(
+			event = publish(PrefixCacheEvent(
 				status="bypass",
 				prefix_id=prefix_id,
 				cache_key=cache_key,
@@ -1032,13 +1070,21 @@ class PrefixCacheStore:
 				invalidation_fields=invalidation,
 				recovered_partials=recovered,
 				reason=str(error),
+			))
+			result = _run_stages(
+				state, stages, observer, checkpoint,
+				execution_observer=execution_observer,
 			)
+			return result, event
 		if cache_hit and self._sampled(decision.candidate_id):
 			with _pinned_state(
 				state, owner=f"cache-verify:{prefix_id}:{uuid4().hex}",
 			):
 				check = _run_stages(
 					_clone_initial_state(state), prefix_stages, observer, checkpoint,
+					execution_observer=(
+						cache_verify_execution_observer or execution_observer
+					),
 				)
 			if not (
 				_equivalent(
@@ -1057,9 +1103,7 @@ class PrefixCacheStore:
 					raise PrefixCacheIntegrityError(
 						"sampled independent prefix differs from cached snapshot"
 					)
-				return _run_stages(
-					check, suffix_stages, observer, checkpoint,
-				), PrefixCacheEvent(
+				event = publish(PrefixCacheEvent(
 					status="bypass",
 					prefix_id=prefix_id,
 					cache_key=cache_key,
@@ -1069,11 +1113,14 @@ class PrefixCacheStore:
 					read_bytes=manifest.snapshot_bytes,
 					cache_bytes_after=cache_bytes_after,
 					reason="sampled independent prefix differs from cached snapshot",
-				)
+				))
+				return _run_stages(
+					check, suffix_stages, observer, checkpoint,
+					execution_observer=execution_observer,
+					stage_index_offset=decision.stage_count,
+				), event
 			verified = True
-		return _run_stages(
-			fork, suffix_stages, observer, checkpoint,
-		), PrefixCacheEvent(
+		event = publish(PrefixCacheEvent(
 			status=status,
 			prefix_id=prefix_id,
 			cache_key=cache_key,
@@ -1089,7 +1136,12 @@ class PrefixCacheStore:
 			written_bytes=0 if cache_hit else manifest.snapshot_bytes,
 			cache_bytes_after=cache_bytes_after,
 			verified=verified,
-		)
+		))
+		return _run_stages(
+			fork, suffix_stages, observer, checkpoint,
+			execution_observer=execution_observer,
+			stage_index_offset=decision.stage_count,
+		), event
 
 	def _sampled(self, candidate_id: str) -> bool:
 		if self.policy.verify_fraction <= 0:
@@ -1114,18 +1166,32 @@ class PrefixCachingPipelineExecutor:
 		*,
 		runtime_identity: Any,
 		observer: StageObserver | None = None,
+		execution_observer: ExecutionSpanObserver | None = None,
+		cache_build_execution_observer: ExecutionSpanObserver | None = None,
+		cache_verify_execution_observer: ExecutionSpanObserver | None = None,
+		cache_observer: Callable[[PrefixCacheEvent], None] | None = None,
 		checkpoint: Callable[[], None] | None = None,
 	) -> tuple[PipelineState, PrefixCacheEvent]:
 		if self.store is None:
-			result = _run_stages(state, stages, observer, checkpoint)
-			return result, PrefixCacheEvent(
+			event = PrefixCacheEvent(
 				status="independent",
 				stage_count=decision.stage_count,
 				fork_strategy="independent",
 				reason=decision.reason,
 			)
+			if cache_observer is not None:
+				cache_observer(event)
+			result = _run_stages(
+				state, stages, observer, checkpoint,
+				execution_observer=execution_observer,
+			)
+			return result, event
 		return self.store.execute(
 			decision, state, stages, configs, runtime_identity=runtime_identity,
 			observer=observer,
+			execution_observer=execution_observer,
+			cache_build_execution_observer=cache_build_execution_observer,
+			cache_verify_execution_observer=cache_verify_execution_observer,
+			cache_observer=cache_observer,
 			checkpoint=checkpoint,
 		)

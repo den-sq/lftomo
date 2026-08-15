@@ -221,14 +221,37 @@ def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failure
 	api, _executor = _lifecycle(tmp_path, monkeypatch)
 	summary = api.run()
 	assert all(attempt.status == "succeeded" for attempt in summary.attempts)
+	all_events = read_progress_events(api.root / "progress.jsonl")
 	cache_events = [
-		event for event in read_progress_events(api.root / "progress.jsonl")
+		event for event in all_events
 		if event.kind in ("cache.miss", "cache.hit")
 	]
 	assert [event.kind for event in cache_events] == ["cache.miss", "cache.hit"]
 	assert all("status" not in event.details for event in cache_events)
 	assert [event.details["cache_status"] for event in cache_events] == ["miss", "hit"]
 	assert all(event.cache_bytes and event.cache_bytes > 0 for event in cache_events)
+	hit = cache_events[1]
+	assert hit.cached_stage_count == 2
+	assert [member.occurrence_id for member in hit.cached_stage_members] == [
+		"read", "normalize",
+	]
+	assert all(member.cache_state == "cached" for member in hit.cached_stage_members)
+	next_segment = next(
+		event for event in all_events
+		if event.sequence > hit.sequence and event.kind == "segment.started"
+		and event.trial_id == hit.trial_id
+	)
+	assert next_segment.cached_stage_count == 2
+	assert next_segment.segment_members[0].position == 3
+	assert next_segment.segment_members[0].total == 6
+	build_events = [
+		event for event in all_events
+		if event.kind.startswith("segment.")
+		and any(member.cache_state == "cache_build" for member in event.segment_members)
+	]
+	assert build_events
+	assert build_events[0].segment_members[0].position == 1
+	assert build_events[0].segment_members[0].total == 6
 
 	retry_root = tmp_path / "retry-case"
 	retry_root.mkdir()

@@ -315,6 +315,7 @@ class PersistedExperimentStore:
 				window_id=attempt.failure.window_id,
 				stage_occurrence_id=attempt.failure.stage_id,
 				stage_algorithm=attempt.failure.stage_algorithm,
+				segment_id=attempt.failure.segment_id,
 			)
 		return AttemptProgress(
 			experiment_id=self._load_metadata().experiment_id,

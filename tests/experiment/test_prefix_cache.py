@@ -347,7 +347,7 @@ def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
 	shared = candidates[0].configs[0]
 	values = np.arange(24, dtype=np.float32).reshape(2, 3, 4) + 1
 
-	def run(candidate_id, factor, failure=None):
+	def run(candidate_id, factor, failure=None, **callbacks):
 		configs = (shared, config("tail", "multiply", factor=factor))
 		return executor.execute(
 			decisions[candidate_id],
@@ -355,6 +355,7 @@ def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
 			(SourceStage(values, calls), MutatingTailStage(factor, failure=failure)),
 			configs,
 			runtime_identity={"dataset": {"content_hash": "a" * 64}},
+			**callbacks,
 		)
 
 	with ThreadPoolExecutor(max_workers=4) as pool:
@@ -376,10 +377,21 @@ def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
 		assert result.recon.metadata["nested"]["history"] == ["source", factor]
 		assert event.fork_strategy == "explicit_copy"
 
-	with pytest.raises(RuntimeError, match="downstream failure"):
-		run("left", 2, "failed")
-	with pytest.raises(InterruptedError, match="downstream cancellation"):
-		run("right", 3, "interrupted")
+	for failure, exception, terminal in (
+		("failed", RuntimeError, "failed"),
+		("interrupted", InterruptedError, "interrupted"),
+	):
+		span_events = []
+		cache_events = []
+		with pytest.raises(exception):
+			run(
+				"left", 2, failure,
+				execution_observer=span_events.append,
+				cache_observer=cache_events.append,
+			)
+		assert cache_events[0].status == "hit"
+		assert span_events[-1].phase.value == terminal
+		assert [member.index for member in span_events[-1].span.members] == [1]
 	clean, event = run("left", 2)
 	assert event.status == "hit"
 	np.testing.assert_array_equal(clean.working_array, values * 2)
@@ -409,15 +421,25 @@ def test_nonmutating_suffix_uses_read_only_map_and_unknown_identity_bypasses(tmp
 
 	unsafe_state = state(configs)
 	unsafe_state.artifacts["uncontracted"] = object()
+	timeline = []
 	result, event = executor.execute(
 		decision,
 		unsafe_state,
 		(SourceStage(values), MutatingTailStage(2)),
 		configs,
 		runtime_identity={"dataset": "unsafe-artifact"},
+		execution_observer=lambda span: timeline.append((
+			"span", span.phase.value,
+			tuple(member.index for member in span.span.members),
+		)),
+		cache_observer=lambda item: timeline.append(("cache", item.status, ())),
 	)
 	assert event.status == "bypass"
 	assert "lacks a cache identity contract" in event.reason
+	assert timeline[0] == ("cache", "bypass", ())
+	assert [item[2] for item in timeline if item[0] == "span" and item[1] == "started"] == [
+		(0,), (1,),
+	]
 	np.testing.assert_array_equal(result.working_array, values * 2)
 
 
@@ -632,18 +654,39 @@ def test_invalidation_corruption_recovery_eviction_and_sampled_verification(tmp_
 	calls = {"count": 0, "lock": threading.Lock()}
 
 	def execute(content_hash):
-		return executor.execute(
+		timeline = []
+		def observe(label):
+			return lambda span: timeline.append((
+				label, span.phase.value,
+				tuple(member.index for member in span.span.members),
+			))
+		result = executor.execute(
 			decision,
 			state(configs),
 			(SourceStage(values, calls), MutatingTailStage(2)),
 			configs,
 			runtime_identity={"dataset": {"content_hash": content_hash}},
+			execution_observer=observe("suffix"),
+			cache_build_execution_observer=observe("build"),
+			cache_verify_execution_observer=observe("verify"),
+			cache_observer=lambda event: timeline.append(("cache", event.status, ())),
 		)
+		return result[0], result[1], timeline
 
-	_first, event = execute("a" * 64)
+	_first, event, timeline = execute("a" * 64)
 	assert event.status == "miss"
-	_second, event = execute("a" * 64)
+	assert timeline == [
+		("build", "started", (0,)), ("build", "completed", (0,)),
+		("cache", "miss", ()),
+		("suffix", "started", (1,)), ("suffix", "completed", (1,)),
+	]
+	_second, event, timeline = execute("a" * 64)
 	assert event.status == "hit" and event.verified
+	assert timeline == [
+		("verify", "started", (0,)), ("verify", "completed", (0,)),
+		("cache", "hit", ()),
+		("suffix", "started", (1,)), ("suffix", "completed", (1,)),
+	]
 	assert calls["count"] == 2  # one build plus one sampled independent verification
 
 	_partial = policy.scratch / "builds" / "abandoned"
@@ -656,12 +699,16 @@ def test_invalidation_corruption_recovery_eviction_and_sampled_verification(tmp_
 	with working_path.open("r+b") as stream:
 		stream.seek(-1, 2)
 		stream.write(b"x")
-	_rebuilt, event = execute("a" * 64)
+	_rebuilt, event, timeline = execute("a" * 64)
 	assert event.status == "rebuilt"
+	assert timeline[0:2] == [
+		("build", "started", (0,)), ("build", "completed", (0,)),
+	]
+	assert ("cache", "rebuilt", ()) in timeline
 	assert event.recovered_partials >= 2
 	assert any((policy.scratch / "quarantine" / "corrupt").iterdir())
 
-	_changed, event = execute("b" * 64)
+	_changed, event, _timeline = execute("b" * 64)
 	assert event.status == "miss"
 	assert "runtime.dataset.content_hash" in event.invalidation_fields
 	assert event.evicted_keys
