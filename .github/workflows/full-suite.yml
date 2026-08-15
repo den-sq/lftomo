@@ -32,6 +32,11 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          # Full history so hatch-vcs can reach the release tag; otherwise the
+          # shallow, tagless clone resolves the editable install to a 0.0.0
+          # fallback version. Does not change which commit is tested.
+          fetch-depth: 0
 
       - name: Start environment timer
         run: echo "LFTOMO_ENVIRONMENT_STARTED=$(date +%s)" >> "$GITHUB_ENV"
