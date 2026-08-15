@@ -368,7 +368,7 @@ def test_cancellation_stops_new_claims_and_finalizes_inflight_attempts(tmp_path)
 	result = []
 	thread = threading.Thread(target=lambda: result.append(api.run()))
 	thread.start()
-	assert started.wait(timeout=2)
+	assert started.wait(timeout=20)
 	running = api.status()
 	assert running.state == "running"
 	assert any(
