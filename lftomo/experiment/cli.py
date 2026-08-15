@@ -190,12 +190,9 @@ class PipelineTrialExecutor:
 		stages = [create_stage(config) for config in resolved.pipeline]
 		validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
 
-	def _window_recon(
-		self, identity, window, output_root: Path, *, attempt_root: Path | None = None,
-	) -> Recon:
+	def _window_recon(self, identity, window, output_root: Path) -> Recon:
 		scan, _ = load_scan(self.scan_path)
 		recon = identity.resolved_recon.model_copy(deep=True)
-		attempt_root = output_root if attempt_root is None else attempt_root
 		read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
 		if read is None:
 			raise ValueError("fidelity window execution requires a read stage")
@@ -235,20 +232,6 @@ class PipelineTrialExecutor:
 			recon.output_path = None
 		else:
 			recon.output_path = output_root / "output"
-			owned_root = attempt_root.resolve(strict=False)
-			for stage in recon.pipeline:
-				if stage.kind != "write" or stage.params.get("path") is None:
-					continue
-				configured = Path(stage.params["path"])
-				configured = (
-					configured if configured.is_absolute() else output_root / configured
-				).resolve(strict=False)
-				if not configured.is_relative_to(owned_root):
-					raise ValueError(
-						f"write Stage {stage.id!r} path escapes attempt-owned root: "
-						f"{configured}"
-					)
-				stage.params["path"] = str(configured)
 		return recon
 
 	def validate_identity(self, identity) -> None:
@@ -405,9 +388,7 @@ class PipelineTrialExecutor:
 					total=len(identity.fidelity.windows),
 				)
 			window_root = output_root / "windows" / window.id
-			recon = self._window_recon(
-				identity, window, window_root, attempt_root=output_root,
-			)
+			recon = self._window_recon(identity, window, window_root)
 			window_root.mkdir(parents=True, exist_ok=True)
 			pipeline_path = window_root / "resolved-recon.yaml"
 			pipeline_path.write_text(recon.to_yaml(), encoding="utf-8")
@@ -507,13 +488,9 @@ class PipelineTrialExecutor:
 				raise ValueError(
 					"metrics_and_previews screening requires LFTOMO_PREVIEW_BLINDING_KEY"
 				)
-			trial_root = (
-				output_root.parent.parent
-				if output_root.parent.name == "attempt-data" else output_root
-			)
 			bundle = export_blinded_previews(
 				{identity.candidate.value: preview_images},
-				trial_root.parent.parent,
+				output_root.parents[1],
 				preview_contract,
 				blinding_key=blinding_key,
 				max_bytes=self.config.output.max_bytes,

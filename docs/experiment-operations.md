@@ -85,7 +85,7 @@ progress.jsonl
 trials/<trial-id>/identity.json
 trials/<trial-id>/attempts/<attempt-id>.json
 trials/<trial-id>/progress/<attempt-id>.json
-trials/<trial-id>/attempt-data/<attempt-id>/windows/<window-id>/...
+trials/<trial-id>/windows/<window-id>/output/...
 invocation/replay-bundle.json
 invocation/normalized-experiment.yaml
 invocation/normalized-scan.yaml
@@ -108,15 +108,11 @@ slice rule. Keep the entire `private/` tree access-controlled and share only `pr
 during blinded review. Screening strips writer stages. Only promoted trials at
 `final_fidelity_id` regain the configured full writer.
 
-Each execution attempt owns its `attempt-data/<attempt-id>/` tree. Relative explicit
-writer paths are resolved inside its window directory; explicit paths that escape the
-attempt tree are rejected. Success publishes the small attempt record referencing those
-files without copying the reconstruction. A failed, interrupted, or timed-out attempt is
-quarantined by a same-filesystem directory rename after its process tree has stopped, so
-a retry cannot overwrite or delete output retained by an earlier successful attempt.
-The experiment-global blinded-preview bundle remains under `previews/` and `private/`;
-its existing lock and atomic file/mapping publication contract is separate from writer
-Stage output.
+Trial output remains directly under `trials/<trial-id>/windows/`. A failed, interrupted,
+or timed-out trial has no successful result record; after its process tree has stopped,
+its partial `windows/` tree is quarantined by a same-filesystem rename. An explicitly
+authorized retry clears any remaining partial tree and recreates the same locations under
+the same trial contract. Successful trials are reused rather than made retry-eligible.
 
 ## Inspect, resume, and rerun
 

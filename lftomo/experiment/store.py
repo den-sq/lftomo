@@ -230,15 +230,15 @@ class PersistedExperimentStore:
 		os.replace(path, destination)
 		return destination
 
-	def quarantine_attempt_output(
-		self, identity: TrialIdentity, attempt_id: str, reason: str,
-	) -> Path | None:
-		"""Atomically quarantine one attempt-owned output tree, if it exists."""
+	def quarantine_partial_outputs(
+		self,
+		identity: TrialIdentity,
+		*,
+		include_windows: bool = False,
+		reason: str = "partial",
+	) -> tuple[Path, ...]:
+		"""Quarantine known partial state and, when requested, trial window output."""
 
-		path = self._trial_root(identity) / "attempt-data" / attempt_id
-		return None if not path.exists() else self._quarantine(path, reason)
-
-	def quarantine_partial_outputs(self, identity: TrialIdentity) -> tuple[Path, ...]:
 		trial_root = self._trial_root(identity)
 		paths = []
 		partial = trial_root / "partial"
@@ -249,15 +249,9 @@ class PersistedExperimentStore:
 			for path in sorted(attempts.iterdir()):
 				if path.name.startswith(".") or path.suffix != ".json":
 					paths.append(self._quarantine(path, "partial"))
-		attempt_data = trial_root / "attempt-data"
-		if attempt_data.exists():
-			successful = {
-				attempt.attempt_id for attempt in self.load_attempts(identity)
-				if attempt.status == "succeeded"
-			}
-			for path in sorted(attempt_data.iterdir()):
-				if path.name not in successful:
-					paths.append(self._quarantine(path, "partial"))
+		windows = trial_root / "windows"
+		if include_windows and windows.exists():
+			paths.append(self._quarantine(windows, reason))
 		return tuple(paths)
 
 	def load_attempts(
@@ -766,8 +760,30 @@ class PersistedExperimentRunner:
 						lifecycle_state="skipped",
 					)
 				return _CoordinatedAttempt(attempt, "skipped")
-			attempt = self.runner._execute(self.store.allocate(trial))
+			prior_status = (
+				None if decision.prior_attempt is None else decision.prior_attempt.status
+			)
+			if prior_status in ("failed", "interrupted", "running", "pending"):
+				self.store.quarantine_partial_outputs(
+					trial.identity, include_windows=True, reason="retry",
+				)
+			try:
+				attempt = self.runner._execute(self.store.allocate(trial))
+			except Exception:
+				self.store.quarantine_partial_outputs(
+					trial.identity, include_windows=True, reason="infrastructure",
+				)
+				raise
 			assert attempt.status in ("succeeded", "failed", "interrupted")
+			if attempt.status in ("failed", "interrupted"):
+				reason = (
+					"timeout" if attempt.failure is not None
+					and attempt.failure.type == "TrialTimeoutError"
+					else attempt.status
+				)
+				self.store.quarantine_partial_outputs(
+					trial.identity, include_windows=True, reason=reason,
+				)
 			return _CoordinatedAttempt(attempt, attempt.status)
 
 	@staticmethod

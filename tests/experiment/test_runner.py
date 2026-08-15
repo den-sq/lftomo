@@ -29,12 +29,12 @@ from lftomo.experiment.runner import (
 )
 import lftomo.experiment.runner as runner_module
 from lftomo.experiment.selection import select_candidates
+from lftomo.experiment.store import PersistedExperimentRunner
 from lftomo.experiment.cli import main
 from tests.experiment.process_helpers import (
 	AlphaExecutor,
 	CrashOneExecutor,
 	DisabledCacheExecutor,
-	EscapingOutputExecutor,
 	HangingManagedExecutor,
 	HangingProcessTreeExecutor,
 	TimeoutOneExecutor,
@@ -325,28 +325,14 @@ def test_timeout_is_recorded_execution_policy_not_trial_identity(tmp_path):
 	assert short_config.experiment_id != long_config.experiment_id
 
 
-def test_success_cannot_publish_output_outside_attempt_owned_root(tmp_path):
-	escaped = tmp_path / "escaped-output.tif"
-	attempt = IndependentExperimentRunner(
-		experiment_config(candidate=candidate_space((0.01,)), concurrency=1),
-		inputs(), tmp_path / "results", EscapingOutputExecutor(escaped),
-	).run().attempts[0]
-
-	assert escaped.is_file()
-	assert attempt.status == "failed"
-	assert attempt.failure.type == "ValueError"
-	assert "escapes attempt-owned root" in attempt.failure.message
-	assert attempt.result is None
-
-
 def test_timeout_is_attempt_local_structured_and_quarantines_partial_output(tmp_path):
 	# Include spawned-interpreter startup in the contract while leaving enough
 	# room for the fixture to publish its last-known execution context first.
 	config = experiment_config(timeout=2.0)
 	writer = ProgressEventWriter(tmp_path, config.experiment_id, durable=True)
-	summary = IndependentExperimentRunner(
+	summary = PersistedExperimentRunner(IndependentExperimentRunner(
 		config, inputs(), tmp_path, TimeoutOneExecutor(), event_writer=writer,
-	).run()
+	)).run()
 	by_alpha = {alpha(attempt.identity): attempt for attempt in summary.attempts}
 	timed_out = by_alpha[0.01]
 	succeeded = by_alpha[0.02]
@@ -363,22 +349,23 @@ def test_timeout_is_attempt_local_structured_and_quarantines_partial_output(tmp_
 	assert details["last_stage_algorithm"] == "blocking-output"
 	assert details["termination"]["confirmed_process_exit"] is True
 	assert details["termination"]["remaining_descendant_pids"] == []
-	assert Path(details["quarantined_attempt_output"]).is_dir()
-	assert not (
-		tmp_path / "trials" / timed_out.trial_id.value
-		/ "attempt-data" / timed_out.attempt_id
-	).exists()
+	timed_out_root = tmp_path / "trials" / timed_out.trial_id.value
+	assert not (timed_out_root / "windows").exists()
+	quarantined = next(
+		(tmp_path / "quarantine" / "trials" / timed_out.trial_id.value).glob(
+			"windows.timeout-*"
+		)
+	)
+	assert (quarantined / "timeout-window" / "output" / "partial-output.txt").is_file()
 
 	assert succeeded.status == "succeeded"
 	assert succeeded.result.metrics == {"quality": 0.02}
 	assert (
 		tmp_path / "trials" / succeeded.trial_id.value
-		/ "attempt-data" / succeeded.attempt_id / "completed.txt"
+		/ "windows" / "completed" / "output" / "completed.txt"
 	).is_file()
 
-	process_file = next(Path(details["quarantined_attempt_output"]).rglob(
-		"timeout-process-tree.json"
-	))
+	process_file = timed_out_root / "timeout-process-tree.json"
 	pids = json.loads(process_file.read_text(encoding="utf-8"))
 	deadline = time.monotonic() + 5
 	while any(psutil.pid_exists(pid) for pid in pids.values()) and time.monotonic() < deadline:
@@ -416,7 +403,7 @@ def test_cancellation_terminates_noncooperative_trial_process_tree(
 	process_file = None
 	deadline = time.monotonic() + 10
 	while process_file is None and time.monotonic() < deadline:
-		process_file = next(tmp_path.glob("trials/*/attempt-data/*/process-tree.json"), None)
+		process_file = next(tmp_path.glob("trials/*/process-tree.json"), None)
 		time.sleep(0.01)
 	assert process_file is not None
 	pids = json.loads(process_file.read_text(encoding="utf-8"))
@@ -449,9 +436,7 @@ def test_cancellation_allows_managed_trial_to_unlink_shared_segments(tmp_path):
 	process_file = None
 	deadline = time.monotonic() + 10
 	while process_file is None and time.monotonic() < deadline:
-		process_file = next(
-			tmp_path.glob("trials/*/attempt-data/*/managed-process-tree.json"), None,
-		)
+		process_file = next(tmp_path.glob("trials/*/managed-process-tree.json"), None)
 		time.sleep(0.01)
 	assert process_file is not None
 	segment_name = json.loads(process_file.read_text(encoding="utf-8"))["segment_name"]

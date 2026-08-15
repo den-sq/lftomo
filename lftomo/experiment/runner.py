@@ -355,13 +355,6 @@ class PreparedTrial:
 	sequence: int = 0
 	previous_attempt_id: str | None = None
 
-	@property
-	def attempt_output_root(self) -> Path:
-		"""Return the directory owned exclusively by this logical attempt."""
-
-		return self.output_root / "attempt-data" / self.attempt_id
-
-
 @dataclass(frozen=True)
 class _SupervisedTrialExecution:
 	execution: TrialExecution
@@ -705,34 +698,6 @@ class IndependentExperimentRunner:
 	def _attempt_path(self, trial: PreparedTrial) -> Path:
 		return trial.output_root / "attempts" / f"{trial.attempt_id}.json"
 
-	@staticmethod
-	def _validate_attempt_outputs(
-		execution: TrialExecution, attempt_output_root: Path,
-	) -> None:
-		owned_root = attempt_output_root.resolve(strict=False)
-		for output in execution.outputs:
-			# Blinded previews are published by the existing experiment-global,
-			# lock-serialized preview bundle rather than a writer Stage. Its files and
-			# private mapping deliberately live outside individual trial trees.
-			if output.role == "blinded_preview":
-				continue
-			path = output.path.expanduser().resolve(strict=False)
-			if not path.is_relative_to(owned_root):
-				raise ValueError(
-					f"trial output {output.path} escapes attempt-owned root {owned_root}"
-				)
-
-	def _quarantine_attempt_output(
-		self, trial: PreparedTrial, reason: str,
-	) -> Path | None:
-		# PersistedExperimentStore owns result-tree quarantine and uses a
-		# same-filesystem rename; import locally to avoid the runner/store cycle.
-		from .store import PersistedExperimentStore
-
-		return PersistedExperimentStore(self.root).quarantine_attempt_output(
-			trial.identity, trial.attempt_id, reason,
-		)
-
 	def _progress_path(self, progress: AttemptProgress) -> Path:
 		return (
 			self.root / "trials" / progress.trial_id / "progress"
@@ -1009,12 +974,11 @@ class IndependentExperimentRunner:
 			# another logical candidate or the recorded identity.
 			execution_identity = trial.identity.model_copy(deep=True)
 			supervised = self._execute_in_process(
-				execution_identity, trial.attempt_output_root, context,
+				execution_identity, trial.output_root, context,
 				trial.timeout_seconds,
 			)
 			execution = supervised.execution
 			execution_elapsed_seconds = supervised.execution_elapsed_seconds
-			self._validate_attempt_outputs(execution, trial.attempt_output_root)
 			finished = _finish_timestamp(started)
 			elapsed = time.perf_counter() - clock
 			result = FinalResult(
@@ -1077,13 +1041,6 @@ class IndependentExperimentRunner:
 					traceback=clean_traceback,
 				),
 			)
-			quarantined = self._quarantine_attempt_output(trial, "infrastructure")
-			if quarantined is not None and attempt.failure is not None:
-				attempt = attempt.model_copy(update={
-					"failure": attempt.failure.model_copy(update={
-						"details": {"quarantined_attempt_output": str(quarantined)},
-					}),
-				})
 			atomic_write_model(self._attempt_path(trial), attempt)
 			progress = context.progress.model_copy(update={
 				"state": "interrupted",
@@ -1165,19 +1122,6 @@ class IndependentExperimentRunner:
 					details=failure_details,
 				),
 			)
-			quarantined = self._quarantine_attempt_output(
-				trial,
-				"timeout" if failure_type == "TrialTimeoutError" else attempt.status,
-			)
-			if quarantined is not None and attempt.failure is not None:
-				attempt = attempt.model_copy(update={
-					"failure": attempt.failure.model_copy(update={
-						"details": {
-							**attempt.failure.details,
-							"quarantined_attempt_output": str(quarantined),
-						},
-					}),
-				})
 		atomic_write_model(self._attempt_path(trial), attempt)
 		final_state = attempt.status
 		assert final_state in ("succeeded", "failed", "interrupted")

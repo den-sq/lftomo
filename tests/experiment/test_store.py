@@ -147,6 +147,12 @@ def test_timeout_failure_requires_retry_and_tighter_policy_rechecks_success(tmp_
 		tmp_path, AlphaExecutor(), values=(0.01,), timeout=2.0,
 	)).run().attempts[0]
 	assert skipped.status == "skipped"
+	stale_output = (
+		tmp_path / "trials" / timed_out.trial_id.value
+		/ "windows" / "stale" / "output" / "partial.tif"
+	)
+	stale_output.parent.mkdir(parents=True)
+	stale_output.write_bytes(b"partial")
 	retried = PersistedExperimentRunner(
 		runner(
 			tmp_path, TimeoutOneExecutor(hang_on=999),
@@ -158,18 +164,17 @@ def test_timeout_failure_requires_retry_and_tighter_policy_rechecks_success(tmp_
 	assert retried.trial_id == timed_out.trial_id
 	assert retried.sequence == 2
 	success_output = (
-		tmp_path / "trials" / retried.trial_id.value / "attempt-data"
-		/ retried.attempt_id / "completed.txt"
+		tmp_path / "trials" / retried.trial_id.value
+		/ "windows" / "completed" / "output" / "completed.txt"
 	)
 	assert success_output.is_file()
-
-	forced_timeout = PersistedExperimentRunner(
-		runner(tmp_path, TimeoutOneExecutor(), values=(0.01,), timeout=2.0),
-		policy=ResumePolicy(force=True),
-	).run().attempts[0]
-	assert forced_timeout.status == "failed"
-	assert forced_timeout.failure.type == "TrialTimeoutError"
-	assert success_output.is_file()
+	assert not stale_output.exists()
+	assert any(
+		path.name.startswith("windows.retry-")
+		for path in (
+			tmp_path / "quarantine" / "trials" / retried.trial_id.value
+		).iterdir()
+	)
 
 	prepared = runner(
 		tmp_path, AlphaExecutor(), values=(0.01,), timeout=1e-9,
