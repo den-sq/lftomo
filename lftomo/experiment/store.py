@@ -230,6 +230,14 @@ class PersistedExperimentStore:
 		os.replace(path, destination)
 		return destination
 
+	def quarantine_attempt_output(
+		self, identity: TrialIdentity, attempt_id: str, reason: str,
+	) -> Path | None:
+		"""Atomically quarantine one attempt-owned output tree, if it exists."""
+
+		path = self._trial_root(identity) / "attempt-data" / attempt_id
+		return None if not path.exists() else self._quarantine(path, reason)
+
 	def quarantine_partial_outputs(self, identity: TrialIdentity) -> tuple[Path, ...]:
 		trial_root = self._trial_root(identity)
 		paths = []
@@ -240,6 +248,15 @@ class PersistedExperimentStore:
 		if attempts.exists():
 			for path in sorted(attempts.iterdir()):
 				if path.name.startswith(".") or path.suffix != ".json":
+					paths.append(self._quarantine(path, "partial"))
+		attempt_data = trial_root / "attempt-data"
+		if attempt_data.exists():
+			successful = {
+				attempt.attempt_id for attempt in self.load_attempts(identity)
+				if attempt.status == "succeeded"
+			}
+			for path in sorted(attempt_data.iterdir()):
+				if path.name not in successful:
 					paths.append(self._quarantine(path, "partial"))
 		return tuple(paths)
 
@@ -409,7 +426,13 @@ class PersistedExperimentStore:
 			history.identity.trial_id.value,
 		))
 
-	def decide(self, identity: TrialIdentity, policy: ResumePolicy) -> ResumeDecision:
+	def decide(
+		self,
+		identity: TrialIdentity,
+		policy: ResumePolicy,
+		*,
+		timeout_seconds: float | None = None,
+	) -> ResumeDecision:
 		attempts = self.load_attempts(identity)
 		if policy.force:
 			return ResumeDecision(action="execute", reason="forced rerun")
@@ -425,11 +448,28 @@ class PersistedExperimentStore:
 				action="reuse", reason="reuse recorded incompatibility",
 				prior_attempt=attempts[-1],
 			)
-		for attempt in reversed(attempts):
-			if attempt.status == "succeeded":
+		successes = [attempt for attempt in attempts if attempt.status == "succeeded"]
+		for attempt in reversed(successes):
+			if (
+				timeout_seconds is None
+				or (
+					attempt.execution_elapsed_seconds is not None
+					and attempt.execution_elapsed_seconds < timeout_seconds
+				)
+			):
 				return ResumeDecision(
 					action="reuse", reason="compatible successful result", prior_attempt=attempt,
 				)
+		if successes:
+			return ResumeDecision(
+				action="execute",
+				reason=(
+					"prior success lacks execution duration required by timeout policy"
+					if successes[-1].execution_elapsed_seconds is None
+					else "prior success exceeded the current timeout policy"
+				),
+				prior_attempt=successes[-1],
+			)
 		for attempt in reversed(attempts):
 			if attempt.status == "failed":
 				return ResumeDecision(
@@ -477,6 +517,7 @@ class PersistedExperimentStore:
 			output_root=trial.output_root,
 			attempt_id=f"attempt-{trial.identity.trial_id.value[:12]}-{sequence:04d}",
 			sampler_total=trial.sampler_total,
+			timeout_seconds=trial.timeout_seconds,
 			sequence=sequence,
 			previous_attempt_id=None if prior is None else prior.attempt_id,
 		)
@@ -689,7 +730,9 @@ class PersistedExperimentRunner:
 				lifecycle_state="planned",
 			)
 		with self.store.claim(trial.identity, self.policy):
-			decision = self.store.decide(trial.identity, self.policy)
+			decision = self.store.decide(
+				trial.identity, self.policy, timeout_seconds=trial.timeout_seconds,
+			)
 			if decision.action == "reuse":
 				assert decision.prior_attempt is not None
 				if self.event_writer is not None:

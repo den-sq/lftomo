@@ -306,7 +306,9 @@ def test_level_specific_memory_and_output_guards_apply_during_preflight(tmp_path
 	assert overridden.prepare()[0].max_concurrency == 1
 
 
-def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monkeypatch):
+def test_fidelity_window_injection_enforces_projection_and_finalist_writer(
+		monkeypatch, tmp_path,
+):
 	config = experiment(values=(0.01,))
 	executor = PipelineTrialExecutor(config, "scan.yaml")
 	scan = SimpleNamespace(
@@ -331,9 +333,11 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 			id="screen", projection_limit=10, projection_stride=4,
 		),
 	)
-	screen = executor._window_recon(SimpleNamespace(**base), window, SimpleNamespace(
-		__truediv__=lambda self, value: self,
-	))
+	screen_root = tmp_path / "screen-attempt" / "windows" / "tune-a"
+	screen = executor._window_recon(
+		SimpleNamespace(**base), window, screen_root,
+		attempt_root=tmp_path / "screen-attempt",
+	)
 	read = screen.pipeline[0]
 	assert read.params == {
 		"y_start": 1, "y_stop": 5, "theta_start": 5, "theta_stop": 45,
@@ -347,8 +351,38 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 	base["fidelity"] = SimpleNamespace(
 		id="final", projection_limit=None, projection_stride=1,
 	)
-	final = executor._window_recon(SimpleNamespace(**base), window, Path("final-window"))
+	attempt_root = tmp_path / "final-attempt"
+	window_root = attempt_root / "windows" / "tune-a"
+	final = executor._window_recon(
+		SimpleNamespace(**base), window, window_root, attempt_root=attempt_root,
+	)
 	assert any(stage.kind == "write" for stage in final.pipeline)
+	assert final.output_path == window_root / "output"
+	relative = recon.model_copy(deep=True)
+	relative_writer = next(stage for stage in relative.pipeline if stage.kind == "write")
+	relative_writer.algorithm = "hdf5_volume"
+	relative_writer.params["path"] = "explicit-volume.h5"
+	relative_final = executor._window_recon(
+		SimpleNamespace(**{**base, "resolved_recon": relative}),
+		window,
+		window_root,
+		attempt_root=attempt_root,
+	)
+	assert Path(next(
+		stage for stage in relative_final.pipeline if stage.kind == "write"
+	).params["path"]) == window_root / "explicit-volume.h5"
+
+	escaping = recon.model_copy(deep=True)
+	escaping_writer = next(stage for stage in escaping.pipeline if stage.kind == "write")
+	escaping_writer.algorithm = "hdf5_volume"
+	escaping_writer.params["path"] = str(tmp_path / "outside-attempt.h5")
+	with pytest.raises(ValueError, match="escapes attempt-owned root"):
+		executor._window_recon(
+			SimpleNamespace(**{**base, "resolved_recon": escaping}),
+			window,
+			window_root,
+			attempt_root=attempt_root,
+		)
 
 
 def test_pipeline_span_observer_reports_resolved_variant_positions(tmp_path):

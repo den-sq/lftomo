@@ -41,6 +41,13 @@ waits for in-flight executors to reach checkpoints between windows and Stages. I
 each affected attempt as explicitly resumable, flushes events, and returns structured
 `CancellationDetails`. Compatible successes remain reusable.
 
+Fidelity timeouts are enforced independently at each spawned candidate-process boundary,
+including non-cooperative native work. The deadline ends at confirmed process exit;
+durable coordinator finalization is infrastructure work. Timeout emits a structured
+`trial.timeout` event before `trial.finalized`, and the terminal attempt retains the
+configured limit, elapsed/overshoot values, termination result, and last window/Stage
+context.
+
 ## Replay bundle
 
 After preflight succeeds and before the first claim, the result root receives:

@@ -24,13 +24,13 @@ from lftomo.experiment.store import (
 	PersistedExperimentStore,
 	ResumePolicy,
 )
-from tests.experiment.process_helpers import AlphaExecutor
+from tests.experiment.process_helpers import AlphaExecutor, TimeoutOneExecutor
 
 
 HASHES = [f"{index:064x}" for index in range(1, 10)]
 
 
-def config(values=(0.01, 0.02)):
+def config(values=(0.01, 0.02), *, timeout=None):
 	return ExperimentConfig.model_validate({
 		"name": "persistent-test",
 		"candidate_space": {
@@ -47,7 +47,10 @@ def config(values=(0.01, 0.02)):
 		}],
 		"objectives": [{"metric_id": "quality"}],
 		"windows": [{"id": "screen", "y_start": 0, "y_stop": 4}],
-		"fidelities": [{"id": "screen", "windows": ["screen"]}],
+		"fidelities": [{
+			"id": "screen", "windows": ["screen"],
+			**({"timeout_seconds": timeout} if timeout is not None else {}),
+		}],
 		"aggregation": {"metric_ids": ["quality"]},
 	})
 
@@ -63,9 +66,11 @@ def inputs(content_hash=HASHES[0]):
 	)
 
 
-def runner(root, executor, *, experiment_inputs=None, values=(0.01, 0.02)):
+def runner(
+	root, executor, *, experiment_inputs=None, values=(0.01, 0.02), timeout=None,
+):
 	return IndependentExperimentRunner(
-		config(values), experiment_inputs or inputs(), root, executor,
+		config(values, timeout=timeout), experiment_inputs or inputs(), root, executor,
 	)
 
 
@@ -129,6 +134,52 @@ def test_failed_and_interrupted_attempts_require_explicit_retry(tmp_path):
 		policy=ResumePolicy(retry_interrupted=True),
 	).run().attempts[0]
 	assert resumed.status == "succeeded"
+
+
+def test_timeout_failure_requires_retry_and_tighter_policy_rechecks_success(tmp_path):
+	timed_out = PersistedExperimentRunner(runner(
+		tmp_path, TimeoutOneExecutor(), values=(0.01,), timeout=2.0,
+	)).run().attempts[0]
+	assert timed_out.status == "failed"
+	assert timed_out.failure.type == "TrialTimeoutError"
+
+	skipped = PersistedExperimentRunner(runner(
+		tmp_path, AlphaExecutor(), values=(0.01,), timeout=2.0,
+	)).run().attempts[0]
+	assert skipped.status == "skipped"
+	retried = PersistedExperimentRunner(
+		runner(
+			tmp_path, TimeoutOneExecutor(hang_on=999),
+			values=(0.01,), timeout=2.0,
+		),
+		policy=ResumePolicy(retry_failed=True),
+	).run().attempts[0]
+	assert retried.status == "succeeded"
+	assert retried.trial_id == timed_out.trial_id
+	assert retried.sequence == 2
+	success_output = (
+		tmp_path / "trials" / retried.trial_id.value / "attempt-data"
+		/ retried.attempt_id / "completed.txt"
+	)
+	assert success_output.is_file()
+
+	forced_timeout = PersistedExperimentRunner(
+		runner(tmp_path, TimeoutOneExecutor(), values=(0.01,), timeout=2.0),
+		policy=ResumePolicy(force=True),
+	).run().attempts[0]
+	assert forced_timeout.status == "failed"
+	assert forced_timeout.failure.type == "TrialTimeoutError"
+	assert success_output.is_file()
+
+	prepared = runner(
+		tmp_path, AlphaExecutor(), values=(0.01,), timeout=1e-9,
+	).prepare()[1][0]
+	decision = PersistedExperimentStore(tmp_path).decide(
+		prepared.identity, ResumePolicy(), timeout_seconds=prepared.timeout_seconds,
+	)
+	assert decision.action == "execute"
+	assert decision.prior_attempt.attempt_id == retried.attempt_id
+	assert "exceeded the current timeout policy" in decision.reason
 
 
 def test_identity_mismatch_has_fail_skip_and_rerun_policies(tmp_path):

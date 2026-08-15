@@ -19,6 +19,8 @@ from lftomo.experiment import (
 	EnvironmentIdentity,
 	ExperimentConfig,
 	PathResourceError,
+	ProgressEventWriter,
+	read_progress_events,
 )
 from lftomo.experiment.runner import (
 	ExperimentInputs,
@@ -32,8 +34,10 @@ from tests.experiment.process_helpers import (
 	AlphaExecutor,
 	CrashOneExecutor,
 	DisabledCacheExecutor,
+	EscapingOutputExecutor,
 	HangingManagedExecutor,
 	HangingProcessTreeExecutor,
+	TimeoutOneExecutor,
 )
 
 
@@ -51,7 +55,9 @@ def candidate_space(values=(0.01, 0.02)):
 	})
 
 
-def experiment_config(*, candidate=None, sampler=None, concurrency=2, output_limit=None):
+def experiment_config(
+	*, candidate=None, sampler=None, concurrency=2, output_limit=None, timeout=None,
+):
 	return ExperimentConfig.model_validate({
 		"name": "runner-test",
 		"candidate_space": (candidate or candidate_space()).model_dump(mode="json"),
@@ -66,7 +72,10 @@ def experiment_config(*, candidate=None, sampler=None, concurrency=2, output_lim
 		}],
 		"objectives": [{"metric_id": "quality"}],
 		"windows": [{"id": "screen", "y_start": 0, "y_stop": 4}],
-		"fidelities": [{"id": "screen", "windows": ["screen"]}],
+		"fidelities": [{
+			"id": "screen", "windows": ["screen"],
+			**({"timeout_seconds": timeout} if timeout is not None else {}),
+		}],
 		"aggregation": {"metric_ids": ["quality"]},
 		"output": {"screening": "metrics_only"},
 	})
@@ -288,6 +297,108 @@ def test_native_process_crash_is_isolated_to_its_candidate(tmp_path):
 	assert by_status["succeeded"].result.metrics == {"quality": 0.02}
 
 
+def test_deadline_boundary_is_strict_at_configured_limit():
+	assert not runner_module._deadline_expired(10.0, 10.999999, 1.0)
+	assert runner_module._deadline_expired(10.0, 11.0, 1.0)
+	assert runner_module._deadline_expired(10.0, 11.000001, 1.0)
+	assert not runner_module._deadline_expired(10.0, 100.0, None)
+
+
+def test_timeout_is_recorded_execution_policy_not_trial_identity(tmp_path):
+	short_config = experiment_config(
+		candidate=candidate_space((0.01,)), concurrency=1, timeout=30,
+	)
+	long_config = experiment_config(
+		candidate=candidate_space((0.01,)), concurrency=1, timeout=300,
+	)
+	short = IndependentExperimentRunner(
+		short_config, inputs(), tmp_path / "short", AlphaExecutor(),
+	).prepare()[1][0]
+	long = IndependentExperimentRunner(
+		long_config, inputs(), tmp_path / "long", AlphaExecutor(),
+	).prepare()[1][0]
+
+	assert short.timeout_seconds == 30
+	assert long.timeout_seconds == 300
+	assert short.identity.trial_id == long.identity.trial_id
+	assert "timeout_seconds" not in type(short.identity.fidelity).model_fields
+	assert short_config.experiment_id != long_config.experiment_id
+
+
+def test_success_cannot_publish_output_outside_attempt_owned_root(tmp_path):
+	escaped = tmp_path / "escaped-output.tif"
+	attempt = IndependentExperimentRunner(
+		experiment_config(candidate=candidate_space((0.01,)), concurrency=1),
+		inputs(), tmp_path / "results", EscapingOutputExecutor(escaped),
+	).run().attempts[0]
+
+	assert escaped.is_file()
+	assert attempt.status == "failed"
+	assert attempt.failure.type == "ValueError"
+	assert "escapes attempt-owned root" in attempt.failure.message
+	assert attempt.result is None
+
+
+def test_timeout_is_attempt_local_structured_and_quarantines_partial_output(tmp_path):
+	# Include spawned-interpreter startup in the contract while leaving enough
+	# room for the fixture to publish its last-known execution context first.
+	config = experiment_config(timeout=2.0)
+	writer = ProgressEventWriter(tmp_path, config.experiment_id, durable=True)
+	summary = IndependentExperimentRunner(
+		config, inputs(), tmp_path, TimeoutOneExecutor(), event_writer=writer,
+	).run()
+	by_alpha = {alpha(attempt.identity): attempt for attempt in summary.attempts}
+	timed_out = by_alpha[0.01]
+	succeeded = by_alpha[0.02]
+
+	assert timed_out.status == "failed"
+	assert timed_out.failure.type == "TrialTimeoutError"
+	assert timed_out.execution_elapsed_seconds >= 2.0
+	details = timed_out.failure.details
+	assert details["timeout_seconds"] == 2.0
+	assert details["execution_elapsed_seconds"] == timed_out.execution_elapsed_seconds
+	assert details["overshoot_seconds"] >= 0
+	assert details["last_window_id"] == "timeout-window"
+	assert details["last_stage_id"] == "timeout-stage"
+	assert details["last_stage_algorithm"] == "blocking-output"
+	assert details["termination"]["confirmed_process_exit"] is True
+	assert details["termination"]["remaining_descendant_pids"] == []
+	assert Path(details["quarantined_attempt_output"]).is_dir()
+	assert not (
+		tmp_path / "trials" / timed_out.trial_id.value
+		/ "attempt-data" / timed_out.attempt_id
+	).exists()
+
+	assert succeeded.status == "succeeded"
+	assert succeeded.result.metrics == {"quality": 0.02}
+	assert (
+		tmp_path / "trials" / succeeded.trial_id.value
+		/ "attempt-data" / succeeded.attempt_id / "completed.txt"
+	).is_file()
+
+	process_file = next(Path(details["quarantined_attempt_output"]).rglob(
+		"timeout-process-tree.json"
+	))
+	pids = json.loads(process_file.read_text(encoding="utf-8"))
+	deadline = time.monotonic() + 5
+	while any(psutil.pid_exists(pid) for pid in pids.values()) and time.monotonic() < deadline:
+		time.sleep(0.05)
+	assert not any(psutil.pid_exists(pid) for pid in pids.values())
+
+	events = read_progress_events(tmp_path / "progress.jsonl")
+	timeout_event = next(
+		event for event in events
+		if event.kind == "trial.timeout" and event.attempt_id == timed_out.attempt_id
+	)
+	finalized = next(
+		event for event in events
+		if event.kind == "trial.finalized" and event.attempt_id == timed_out.attempt_id
+	)
+	assert timeout_event.sequence < finalized.sequence
+	assert timeout_event.details == details
+	assert timeout_event.failure_type == "TrialTimeoutError"
+
+
 @pytest.mark.parametrize("detached_descendant", [False, True])
 def test_cancellation_terminates_noncooperative_trial_process_tree(
 		tmp_path, detached_descendant,
@@ -305,7 +416,7 @@ def test_cancellation_terminates_noncooperative_trial_process_tree(
 	process_file = None
 	deadline = time.monotonic() + 10
 	while process_file is None and time.monotonic() < deadline:
-		process_file = next(tmp_path.glob("trials/*/process-tree.json"), None)
+		process_file = next(tmp_path.glob("trials/*/attempt-data/*/process-tree.json"), None)
 		time.sleep(0.01)
 	assert process_file is not None
 	pids = json.loads(process_file.read_text(encoding="utf-8"))
@@ -338,7 +449,9 @@ def test_cancellation_allows_managed_trial_to_unlink_shared_segments(tmp_path):
 	process_file = None
 	deadline = time.monotonic() + 10
 	while process_file is None and time.monotonic() < deadline:
-		process_file = next(tmp_path.glob("trials/*/managed-process-tree.json"), None)
+		process_file = next(
+			tmp_path.glob("trials/*/attempt-data/*/managed-process-tree.json"), None,
+		)
 		time.sleep(0.01)
 	assert process_file is not None
 	segment_name = json.loads(process_file.read_text(encoding="utf-8"))["segment_name"]

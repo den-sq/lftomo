@@ -323,7 +323,7 @@ class WindowIdentity(ConfigModel):
 
 
 class FidelityIdentity(ConfigModel):
-	"""Exact fidelity/window set used for this trial."""
+	"""Exact comparison-bearing fidelity/window set used for this trial."""
 
 	id: StableName
 	windows: tuple[WindowIdentity, ...] = Field(min_length=1)
@@ -332,7 +332,6 @@ class FidelityIdentity(ConfigModel):
 	resource_fraction: float = Field(default=1.0, gt=0, le=1)
 	memory_gb: float | None = Field(default=None, gt=0)
 	max_output_bytes: int | None = Field(default=None, gt=0)
-	timeout_seconds: float | None = Field(default=None, gt=0)
 
 
 class MetricProtocolIdentity(ConfigModel):
@@ -540,6 +539,7 @@ class TrialAttemptRecord(ConfigModel):
 	started_at: datetime | None = None
 	finished_at: datetime | None = None
 	elapsed_seconds: float | None = Field(default=None, ge=0)
+	execution_elapsed_seconds: float | None = Field(default=None, ge=0)
 	peak_memory_bytes: int | None = Field(default=None, ge=0)
 	observations: dict[str, JsonValue] = Field(default_factory=dict)
 	pareto: ParetoRecord = Field(default_factory=ParetoRecord)
@@ -552,11 +552,15 @@ class TrialAttemptRecord(ConfigModel):
 			raise ValueError("trial_id does not match identity-bearing inputs")
 		if self.status == "pending":
 			if any(value is not None for value in (
-				self.started_at, self.finished_at, self.failure, self.result,
+				self.started_at, self.finished_at, self.execution_elapsed_seconds,
+				self.failure, self.result,
 			)):
 				raise ValueError("pending attempts cannot contain execution/final state")
 		elif self.status == "running":
-			if self.started_at is None or self.finished_at is not None or self.result is not None:
+			if (
+				self.started_at is None or self.finished_at is not None
+				or self.execution_elapsed_seconds is not None or self.result is not None
+			):
 				raise ValueError("running attempts require started_at and no final state")
 		elif self.status == "succeeded":
 			if self.started_at is None or self.finished_at is None or self.result is None:

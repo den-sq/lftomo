@@ -3,8 +3,18 @@
 Multi-fidelity experiments screen every candidate on small, representative windows and
 promote only recorded winners to more expensive levels. Fidelity is part of `TrialId`:
 window coordinates, halo, projection bounds and stride, projection limit, resource
-fraction, memory/output limits, and timeout are comparison-bearing facts rather than
-informal runner flags.
+fraction, and memory/output limits are comparison-bearing facts rather than informal
+runner flags. `timeout_seconds` is recorded execution policy: it does not change
+`TrialId`, because a trial that finishes within either of two deadlines has identical
+scientific output.
+
+The timeout is a strict wall-clock limit from candidate-process launch through confirmed
+process exit. It includes spawned-interpreter startup and output writing performed by the
+candidate. It does not include the coordinator's subsequent durable record finalization;
+failures there are infrastructure failures, not candidate timeouts. At the boundary
+(`elapsed >= timeout_seconds`) the candidate and its descendants are terminated before a
+failed attempt is recorded. The timeout record and `trial.timeout` event include elapsed
+time, overshoot, termination outcome, and the last reported window and Stage context.
 
 ## Tuning and held-out windows
 

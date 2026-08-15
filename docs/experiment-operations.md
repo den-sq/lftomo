@@ -85,6 +85,7 @@ progress.jsonl
 trials/<trial-id>/identity.json
 trials/<trial-id>/attempts/<attempt-id>.json
 trials/<trial-id>/progress/<attempt-id>.json
+trials/<trial-id>/attempt-data/<attempt-id>/windows/<window-id>/...
 invocation/replay-bundle.json
 invocation/normalized-experiment.yaml
 invocation/normalized-scan.yaml
@@ -107,6 +108,16 @@ slice rule. Keep the entire `private/` tree access-controlled and share only `pr
 during blinded review. Screening strips writer stages. Only promoted trials at
 `final_fidelity_id` regain the configured full writer.
 
+Each execution attempt owns its `attempt-data/<attempt-id>/` tree. Relative explicit
+writer paths are resolved inside its window directory; explicit paths that escape the
+attempt tree are rejected. Success publishes the small attempt record referencing those
+files without copying the reconstruction. A failed, interrupted, or timed-out attempt is
+quarantined by a same-filesystem directory rename after its process tree has stopped, so
+a retry cannot overwrite or delete output retained by an earlier successful attempt.
+The experiment-global blinded-preview bundle remains under `previews/` and `private/`;
+its existing lock and atomic file/mapping publication contract is separate from writer
+Stage output.
+
 ## Inspect, resume, and rerun
 
 ```console
@@ -122,6 +133,11 @@ execution. Identity mismatches default to failure with field-level diagnostics. 
 `--mismatch skip` to retain an incompatible terminal record, or `--mismatch rerun` to run
 under the new identity. Failed/interrupted attempts require their explicit retry flags;
 `rerun` always allocates a new attempt and preserves prior history.
+
+`timeout_seconds` is execution policy rather than trial identity. A prior success is
+reusable under a timeout only when its recorded candidate-execution duration is strictly
+less than the current limit. A tighter limit re-executes when the prior duration is
+missing or reaches that limit; a timed-out failure still requires `--retry-failed`.
 
 Live claim files prevent duplicate execution. A stale claim is not automatically stale
 work: verify its host/PID first, then use `--recover-stale --stale-after SECONDS` together

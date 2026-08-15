@@ -12,7 +12,9 @@ from uuid import uuid4
 
 import numpy as np
 
+from lftomo.experiment.models import OutputRecord
 from lftomo.experiment.runner import TrialExecution
+from lftomo.experiment.events import current_execution_context
 from lftomo.pipeline import PipelineRunContext
 
 
@@ -144,3 +146,47 @@ class HangingManagedExecutor:
 			}), encoding="utf-8")
 			while True:
 				time.sleep(1)
+
+
+@dataclass
+class TimeoutOneExecutor:
+	"""Hang one candidate after publishing context and partial attempt output."""
+
+	hang_on: float = 0.01
+	detached_descendant: bool = True
+
+	def __call__(self, identity, output_root):
+		value = candidate_alpha(identity)
+		output_root.mkdir(parents=True, exist_ok=True)
+		if value != self.hang_on:
+			(output_root / "completed.txt").write_text("complete\n", encoding="utf-8")
+			return TrialExecution(metrics={"quality": value})
+		context = current_execution_context()
+		if context is not None:
+			context.window_started("timeout-window", position=1, total=1)
+			context.stage_started(
+				"timeout-stage", "blocking-output", position=2, total=3,
+			)
+		descendant = subprocess.Popen(
+			["sleep", "60"], start_new_session=self.detached_descendant,
+		)
+		(output_root / "partial-output.txt").write_text("partial\n", encoding="utf-8")
+		(output_root / "timeout-process-tree.json").write_text(json.dumps({
+			"trial_pid": os.getpid(),
+			"descendant_pid": descendant.pid,
+		}), encoding="utf-8")
+		while True:
+			time.sleep(1)
+
+
+@dataclass
+class EscapingOutputExecutor:
+	"""Return an output record outside the attempt root for boundary testing."""
+
+	path: Path
+
+	def __call__(self, _identity, _output_root):
+		self.path.write_text("outside\n", encoding="utf-8")
+		return TrialExecution(outputs=(OutputRecord(
+			role="finalist_output", path=self.path, bytes=self.path.stat().st_size,
+		),))
