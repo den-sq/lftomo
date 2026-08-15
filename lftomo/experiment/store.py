@@ -230,7 +230,15 @@ class PersistedExperimentStore:
 		os.replace(path, destination)
 		return destination
 
-	def quarantine_partial_outputs(self, identity: TrialIdentity) -> tuple[Path, ...]:
+	def quarantine_partial_outputs(
+		self,
+		identity: TrialIdentity,
+		*,
+		include_windows: bool = False,
+		reason: str = "partial",
+	) -> tuple[Path, ...]:
+		"""Quarantine known partial state and, when requested, trial window output."""
+
 		trial_root = self._trial_root(identity)
 		paths = []
 		partial = trial_root / "partial"
@@ -241,6 +249,9 @@ class PersistedExperimentStore:
 			for path in sorted(attempts.iterdir()):
 				if path.name.startswith(".") or path.suffix != ".json":
 					paths.append(self._quarantine(path, "partial"))
+		windows = trial_root / "windows"
+		if include_windows and windows.exists():
+			paths.append(self._quarantine(windows, reason))
 		return tuple(paths)
 
 	def load_attempts(
@@ -409,7 +420,13 @@ class PersistedExperimentStore:
 			history.identity.trial_id.value,
 		))
 
-	def decide(self, identity: TrialIdentity, policy: ResumePolicy) -> ResumeDecision:
+	def decide(
+		self,
+		identity: TrialIdentity,
+		policy: ResumePolicy,
+		*,
+		timeout_seconds: float | None = None,
+	) -> ResumeDecision:
 		attempts = self.load_attempts(identity)
 		if policy.force:
 			return ResumeDecision(action="execute", reason="forced rerun")
@@ -425,11 +442,28 @@ class PersistedExperimentStore:
 				action="reuse", reason="reuse recorded incompatibility",
 				prior_attempt=attempts[-1],
 			)
-		for attempt in reversed(attempts):
-			if attempt.status == "succeeded":
+		successes = [attempt for attempt in attempts if attempt.status == "succeeded"]
+		for attempt in reversed(successes):
+			if (
+				timeout_seconds is None
+				or (
+					attempt.execution_elapsed_seconds is not None
+					and attempt.execution_elapsed_seconds < timeout_seconds
+				)
+			):
 				return ResumeDecision(
 					action="reuse", reason="compatible successful result", prior_attempt=attempt,
 				)
+		if successes:
+			return ResumeDecision(
+				action="execute",
+				reason=(
+					"prior success lacks execution duration required by timeout policy"
+					if successes[-1].execution_elapsed_seconds is None
+					else "prior success exceeded the current timeout policy"
+				),
+				prior_attempt=successes[-1],
+			)
 		for attempt in reversed(attempts):
 			if attempt.status == "failed":
 				return ResumeDecision(
@@ -477,6 +511,7 @@ class PersistedExperimentStore:
 			output_root=trial.output_root,
 			attempt_id=f"attempt-{trial.identity.trial_id.value[:12]}-{sequence:04d}",
 			sampler_total=trial.sampler_total,
+			timeout_seconds=trial.timeout_seconds,
 			sequence=sequence,
 			previous_attempt_id=None if prior is None else prior.attempt_id,
 		)
@@ -689,7 +724,9 @@ class PersistedExperimentRunner:
 				lifecycle_state="planned",
 			)
 		with self.store.claim(trial.identity, self.policy):
-			decision = self.store.decide(trial.identity, self.policy)
+			decision = self.store.decide(
+				trial.identity, self.policy, timeout_seconds=trial.timeout_seconds,
+			)
 			if decision.action == "reuse":
 				assert decision.prior_attempt is not None
 				if self.event_writer is not None:
@@ -723,8 +760,30 @@ class PersistedExperimentRunner:
 						lifecycle_state="skipped",
 					)
 				return _CoordinatedAttempt(attempt, "skipped")
-			attempt = self.runner._execute(self.store.allocate(trial))
+			prior_status = (
+				None if decision.prior_attempt is None else decision.prior_attempt.status
+			)
+			if prior_status in ("failed", "interrupted", "running", "pending"):
+				self.store.quarantine_partial_outputs(
+					trial.identity, include_windows=True, reason="retry",
+				)
+			try:
+				attempt = self.runner._execute(self.store.allocate(trial))
+			except Exception:
+				self.store.quarantine_partial_outputs(
+					trial.identity, include_windows=True, reason="infrastructure",
+				)
+				raise
 			assert attempt.status in ("succeeded", "failed", "interrupted")
+			if attempt.status in ("failed", "interrupted"):
+				reason = (
+					"timeout" if attempt.failure is not None
+					and attempt.failure.type == "TrialTimeoutError"
+					else attempt.status
+				)
+				self.store.quarantine_partial_outputs(
+					trial.identity, include_windows=True, reason=reason,
+				)
 			return _CoordinatedAttempt(attempt, attempt.status)
 
 	@staticmethod

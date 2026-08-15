@@ -242,6 +242,7 @@ def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_
 	plan_path = tmp_path / "tier2-plan.json"
 	write_tier2_plan(plan_path, plan)
 	assert Tier2ExperimentPlan.model_validate_json(plan_path.read_text()) == plan
+	assert plan.timeout_seconds_by_fidelity == {"final": None, "screen": None}
 	tampered = plan.model_copy(update={"blinding_key_id": "different-key"})
 	with pytest.raises(ValueError, match="content-addressed payload"):
 		write_tier2_plan(tmp_path / "tampered-plan.json", tampered)

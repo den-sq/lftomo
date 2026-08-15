@@ -91,6 +91,17 @@ def _finish_timestamp(started_at: datetime) -> datetime:
 	return max(_utcnow(), started_at)
 
 
+def _deadline_expired(
+	started_monotonic: float, observed_monotonic: float, timeout_seconds: float | None,
+) -> bool:
+	"""Return whether candidate execution reached its strict wall-clock deadline."""
+
+	return (
+		timeout_seconds is not None
+		and observed_monotonic - started_monotonic >= timeout_seconds
+	)
+
+
 def json_value(value: Any) -> JsonValue:
 	"""Convert runtime artifacts to the experiment record's JSON value contract."""
 
@@ -253,11 +264,15 @@ class TrialProcessError(RuntimeError):
 	"""Serializable child failure re-raised at the coordinator boundary."""
 
 	def __init__(self, failure_type: str, message: str, traceback_text: str | None,
-			peak_memory_bytes: int | None = None):
+			peak_memory_bytes: int | None = None, *,
+			details: dict[str, JsonValue] | None = None,
+			execution_elapsed_seconds: float | None = None):
 		super().__init__(message)
 		self.failure_type = failure_type
 		self.traceback_text = traceback_text
 		self.peak_memory_bytes = peak_memory_bytes
+		self.details = details or {}
+		self.execution_elapsed_seconds = execution_elapsed_seconds
 
 
 def _trial_process_main(
@@ -336,8 +351,14 @@ class PreparedTrial:
 	output_root: Path
 	attempt_id: str
 	sampler_total: int
+	timeout_seconds: float | None = None
 	sequence: int = 0
 	previous_attempt_id: str | None = None
+
+@dataclass(frozen=True)
+class _SupervisedTrialExecution:
+	execution: TrialExecution
+	execution_elapsed_seconds: float
 
 
 TrialExecutor = Callable[[TrialIdentity, Path], TrialExecution]
@@ -351,15 +372,18 @@ def _peak_memory_bytes() -> int:
 	return int(usage if os.uname().sysname == "Darwin" else usage * 1024)
 
 
-def _terminate_trial_process(process: multiprocessing.Process) -> None:
-	"""Terminate one trial and every descendant it created, then reap it."""
+def _terminate_trial_process(process: multiprocessing.Process) -> dict[str, JsonValue]:
+	"""Terminate one trial process tree, reap it, and report escalation outcome."""
 
 	# Runtime installations declare psutil, but importing it only on this failure
 	# path keeps lightweight configuration/model tooling dependency-minimal.
 	import psutil
 
 	if process.pid is None:
-		return
+		return {
+			"required": True, "descendant_count": 0, "kill_escalated": False,
+			"confirmed_process_exit": True, "remaining_descendant_pids": [],
+		}
 	try:
 		root = psutil.Process(process.pid)
 		descendants = root.children(recursive=True)
@@ -385,6 +409,7 @@ def _terminate_trial_process(process: multiprocessing.Process) -> None:
 				alive.append(child)
 		except psutil.NoSuchProcess:
 			pass
+	kill_escalated = bool(alive) or process.is_alive()
 	for child in alive:
 		try:
 			child.kill()
@@ -399,6 +424,21 @@ def _terminate_trial_process(process: multiprocessing.Process) -> None:
 		except ProcessLookupError:
 			pass
 		process.join(timeout=2)
+	remaining = []
+	for child in descendants:
+		try:
+			if child.is_running() and child.status() != psutil.STATUS_ZOMBIE:
+				remaining.append(child.pid)
+		except psutil.NoSuchProcess:
+			pass
+	return {
+		"required": True,
+		"descendant_count": len(descendants),
+		"kill_escalated": kill_escalated,
+		"confirmed_process_exit": not process.is_alive(),
+		"process_exitcode": process.exitcode,
+		"remaining_descendant_pids": remaining,
+	}
 
 
 class IndependentExperimentRunner:
@@ -459,7 +499,12 @@ class IndependentExperimentRunner:
 			resource_fraction=reference.resource_fraction,
 			memory_gb=reference.memory_gb,
 			max_output_bytes=reference.max_output_bytes,
-			timeout_seconds=reference.timeout_seconds,
+		)
+
+	def _timeout_seconds(self) -> float | None:
+		return next(
+			item.timeout_seconds for item in self.config.fidelities
+			if item.id == self.fidelity_id
 		)
 
 	def _identity(self, selected: SelectedCandidate) -> TrialIdentity:
@@ -578,6 +623,7 @@ class IndependentExperimentRunner:
 				output_root=trial_root,
 				attempt_id=f"attempt-{identity.trial_id.value[:12]}-0000",
 				sampler_total=requested,
+				timeout_seconds=self._timeout_seconds(),
 			))
 		estimated = self.policy.estimated_output_bytes_per_trial
 		total_output = None if estimated is None else estimated * len(prepared)
@@ -758,8 +804,8 @@ class IndependentExperimentRunner:
 
 	def _execute_in_process(
 			self, identity: TrialIdentity, output_root: Path,
-			context: ExecutionContext,
-	) -> TrialExecution:
+			context: ExecutionContext, timeout: float | None,
+	) -> _SupervisedTrialExecution:
 		"""Execute candidate code in a spawned process; keep records in this process."""
 
 		mp_context = multiprocessing.get_context("spawn")
@@ -790,14 +836,28 @@ class IndependentExperimentRunner:
 					raise ExperimentCancelled(
 						self.cancellation.reason or "experiment cancellation requested"
 					)
-				timeout = identity.fidelity.timeout_seconds
-				if timeout is not None and time.monotonic() - started > timeout:
+				if _deadline_expired(started, time.monotonic(), timeout):
 					cancellation_event.set()
-					_terminate_trial_process(process)
+					termination = _terminate_trial_process(process)
+					if (
+						not termination["confirmed_process_exit"]
+						or termination["remaining_descendant_pids"]
+					):
+						raise ProgressInfrastructureError(
+							"timed-out trial process tree could not be terminated"
+						)
+					elapsed = max(0.0, time.monotonic() - started)
 					raise TrialProcessError(
 						"TrialTimeoutError",
 						f"trial exceeded its {timeout:g}-second fidelity timeout",
 						None,
+						details={
+							"timeout_seconds": timeout,
+							"execution_elapsed_seconds": elapsed,
+							"overshoot_seconds": max(0.0, elapsed - timeout),
+							"termination": termination,
+						},
+						execution_elapsed_seconds=elapsed,
 					)
 				if not parent_connection.poll(0.05):
 					continue
@@ -810,6 +870,7 @@ class IndependentExperimentRunner:
 					result = message
 				elif isinstance(message, TrialProcessError):
 					failure = message
+			confirmed_exit = time.monotonic()
 			while parent_connection.poll():
 				try:
 					kind, payload = parent_connection.recv()
@@ -821,7 +882,26 @@ class IndependentExperimentRunner:
 				elif isinstance(message, TrialProcessError):
 					failure = message
 			process.join(timeout=2)
+			execution_elapsed = max(0.0, confirmed_exit - started)
+			if _deadline_expired(started, confirmed_exit, timeout):
+				raise TrialProcessError(
+					"TrialTimeoutError",
+					f"trial exceeded its {timeout:g}-second fidelity timeout",
+					None,
+					details={
+						"timeout_seconds": timeout,
+						"execution_elapsed_seconds": execution_elapsed,
+						"overshoot_seconds": max(0.0, execution_elapsed - timeout),
+						"termination": {
+							"required": False,
+							"confirmed_process_exit": not process.is_alive(),
+							"process_exitcode": process.exitcode,
+						},
+					},
+					execution_elapsed_seconds=execution_elapsed,
+				)
 			if failure is not None:
+				failure.execution_elapsed_seconds = execution_elapsed
 				if failure.failure_type == "ProgressInfrastructureError":
 					infrastructure_error = ProgressInfrastructureError(str(failure))
 					if failure.traceback_text:
@@ -835,6 +915,7 @@ class IndependentExperimentRunner:
 					"TrialProcessExitError",
 					f"trial process exited with code {process.exitcode} without a result",
 					None,
+					execution_elapsed_seconds=execution_elapsed,
 				)
 			if process.exitcode != 0:
 				raise TrialProcessError(
@@ -842,8 +923,9 @@ class IndependentExperimentRunner:
 					f"trial process exited with code {process.exitcode}",
 					None,
 					result.peak_memory_bytes,
+					execution_elapsed_seconds=execution_elapsed,
 				)
-			return result
+			return _SupervisedTrialExecution(result, execution_elapsed)
 		except BaseException:
 			if process.is_alive():
 				cancellation_event.set()
@@ -885,14 +967,18 @@ class IndependentExperimentRunner:
 			progress=progress,
 			clock_started=clock,
 		)
+		execution_elapsed_seconds = None
 		try:
 			self.cancellation.raise_if_requested()
 			# The deep copy is deliberate: executor mutation can never leak into
 			# another logical candidate or the recorded identity.
 			execution_identity = trial.identity.model_copy(deep=True)
-			execution = self._execute_in_process(
+			supervised = self._execute_in_process(
 				execution_identity, trial.output_root, context,
+				trial.timeout_seconds,
 			)
+			execution = supervised.execution
+			execution_elapsed_seconds = supervised.execution_elapsed_seconds
 			finished = _finish_timestamp(started)
 			elapsed = time.perf_counter() - clock
 			result = FinalResult(
@@ -910,11 +996,16 @@ class IndependentExperimentRunner:
 				started_at=started,
 				finished_at=finished,
 				elapsed_seconds=elapsed,
+				execution_elapsed_seconds=execution_elapsed_seconds,
 				peak_memory_bytes=execution.peak_memory_bytes,
 				observations={
 					"metrics": json_value(execution.metrics),
 					"artifacts": json_value(execution.artifacts),
 					"window_metrics": json_value(execution.window_metrics),
+					"execution_policy": {
+						"timeout_seconds": trial.timeout_seconds,
+						"execution_elapsed_seconds": execution_elapsed_seconds,
+					},
 				},
 				result=result,
 			)
@@ -938,6 +1029,7 @@ class IndependentExperimentRunner:
 				started_at=started,
 				finished_at=finished,
 				elapsed_seconds=time.perf_counter() - clock,
+				execution_elapsed_seconds=execution_elapsed_seconds,
 				peak_memory_bytes=None,
 				failure=FailureRecord(
 					type=type(error).__name__,
@@ -1000,12 +1092,22 @@ class IndependentExperimentRunner:
 					"KeyboardInterrupt", "InterruptedError", "ExperimentCancelled",
 				}
 			)
+			if isinstance(error, TrialProcessError):
+				execution_elapsed_seconds = error.execution_elapsed_seconds
+			failure_details = dict(error.details) if isinstance(error, TrialProcessError) else {}
+			if failure_type == "TrialTimeoutError":
+				failure_details.update({
+					"last_window_id": context.progress.window_id,
+					"last_stage_id": context.progress.stage_occurrence_id,
+					"last_stage_algorithm": context.progress.stage_algorithm,
+				})
 			attempt = TrialAttemptRecord(
 				**base,
 				status="interrupted" if interrupted else "failed",
 				started_at=started,
 				finished_at=finished,
 				elapsed_seconds=time.perf_counter() - clock,
+				execution_elapsed_seconds=execution_elapsed_seconds,
 				peak_memory_bytes=(
 					error.peak_memory_bytes if isinstance(error, TrialProcessError) else None
 				),
@@ -1017,6 +1119,7 @@ class IndependentExperimentRunner:
 					segment_id=context.progress.segment_id,
 					window_id=context.progress.window_id,
 					traceback=clean_traceback,
+					details=failure_details,
 				),
 			)
 		atomic_write_model(self._attempt_path(trial), attempt)
@@ -1046,6 +1149,16 @@ class IndependentExperimentRunner:
 			"output_bytes": output_bytes,
 			"failure": failure,
 		})
+		if attempt.failure is not None and attempt.failure.type == "TrialTimeoutError":
+			self._emit_attempt(
+				"trial.timeout",
+				attempt.failure.message,
+				progress,
+				severity="error",
+				failure_type=attempt.failure.type,
+				failure_message=attempt.failure.message,
+				details=attempt.failure.details,
+			)
 		self._emit_attempt(
 			"trial.finalized",
 			f"trial attempt {final_state}",

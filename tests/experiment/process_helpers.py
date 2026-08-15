@@ -13,6 +13,7 @@ from uuid import uuid4
 import numpy as np
 
 from lftomo.experiment.runner import TrialExecution
+from lftomo.experiment.events import current_execution_context
 from lftomo.pipeline import PipelineRunContext
 
 
@@ -144,3 +145,38 @@ class HangingManagedExecutor:
 			}), encoding="utf-8")
 			while True:
 				time.sleep(1)
+
+
+@dataclass
+class TimeoutOneExecutor:
+	"""Hang one candidate after publishing context and partial attempt output."""
+
+	hang_on: float = 0.01
+	detached_descendant: bool = True
+
+	def __call__(self, identity, output_root):
+		value = candidate_alpha(identity)
+		output_root.mkdir(parents=True, exist_ok=True)
+		if value != self.hang_on:
+			completed = output_root / "windows" / "completed" / "output"
+			completed.mkdir(parents=True, exist_ok=True)
+			(completed / "completed.txt").write_text("complete\n", encoding="utf-8")
+			return TrialExecution(metrics={"quality": value})
+		context = current_execution_context()
+		if context is not None:
+			context.window_started("timeout-window", position=1, total=1)
+			context.stage_started(
+				"timeout-stage", "blocking-output", position=2, total=3,
+			)
+		descendant = subprocess.Popen(
+			["sleep", "60"], start_new_session=self.detached_descendant,
+		)
+		partial = output_root / "windows" / "timeout-window" / "output"
+		partial.mkdir(parents=True, exist_ok=True)
+		(partial / "partial-output.txt").write_text("partial\n", encoding="utf-8")
+		(output_root / "timeout-process-tree.json").write_text(json.dumps({
+			"trial_pid": os.getpid(),
+			"descendant_pid": descendant.pid,
+		}), encoding="utf-8")
+		while True:
+			time.sleep(1)

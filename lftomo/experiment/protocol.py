@@ -61,6 +61,7 @@ class Tier2ExperimentPlan(ConfigModel):
 	projection_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 	metric_protocols: tuple[MetricProtocolIdentity, ...]
 	fidelities: tuple[FidelityIdentity, ...]
+	timeout_seconds_by_fidelity: dict[str, float | None]
 	tuning_window_ids: tuple[str, ...]
 	held_out_window_ids: tuple[str, ...]
 	raw_metric_ids: tuple[str, ...]
@@ -152,7 +153,6 @@ def build_tier2_plan(
 			resource_fraction=fidelity.resource_fraction,
 			memory_gb=fidelity.memory_gb,
 			max_output_bytes=fidelity.max_output_bytes,
-			timeout_seconds=fidelity.timeout_seconds,
 		))
 	protocols = tuple(MetricProtocolIdentity(
 		metric_id=metric.id,
@@ -171,6 +171,9 @@ def build_tier2_plan(
 		"projection_manifest_hash": projection_manifest_hash,
 		"metric_protocols": protocols,
 		"fidelities": identities,
+		"timeout_seconds_by_fidelity": dict(sorted(
+			(fidelity.id, fidelity.timeout_seconds) for fidelity in config.fidelities
+		)),
 		"tuning_window_ids": tuning,
 		"held_out_window_ids": held_out,
 		"raw_metric_ids": tuple(sorted(metric.id for metric in config.metrics)),
