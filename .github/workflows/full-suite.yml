@@ -1,0 +1,112 @@
+name: Full scientific suite
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - "lftomo/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "environment.yml"
+      - ".github/ci/full-suite-environment.yml"
+      - ".github/workflows/full-suite.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-suite-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-suite:
+    name: Full non-integration suite (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash -leo pipefail {0}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Start environment timer
+        run: echo "LFTOMO_ENVIRONMENT_STARTED=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Set up scientific environment
+        id: micromamba
+        uses: mamba-org/setup-micromamba@v3
+        with:
+          environment-file: .github/ci/full-suite-environment.yml
+          cache-environment: true
+          cache-downloads: true
+          init-shell: bash
+          log-level: info
+
+      - name: Record environment setup
+        env:
+          LFTOMO_ENVIRONMENT_PATH: ${{ steps.micromamba.outputs.environment-path }}
+        run: |
+          setup_seconds=$(( $(date +%s) - LFTOMO_ENVIRONMENT_STARTED ))
+          environment_bytes=$(du -sb "$LFTOMO_ENVIRONMENT_PATH" | cut -f1)
+          environment_size=$(du -sh "$LFTOMO_ENVIRONMENT_PATH" | cut -f1)
+
+          echo "LFTOMO_ENVIRONMENT_SECONDS=$setup_seconds" >> "$GITHUB_ENV"
+          echo "LFTOMO_ENVIRONMENT_BYTES=$environment_bytes" >> "$GITHUB_ENV"
+          echo "LFTOMO_ENVIRONMENT_SIZE=$environment_size" >> "$GITHUB_ENV"
+
+          micromamba list --explicit > full-suite-environment-explicit.txt
+          micromamba list > full-suite-environment.txt
+          echo "Environment setup: ${setup_seconds}s; installed size: ${environment_size}."
+          echo "Cache outcome and cold-run download size are reported above by setup-micromamba."
+
+      - name: Install source checkout
+        run: |
+          started=$(date +%s)
+          set +e
+          python -m pip install --no-build-isolation --no-deps -e .
+          install_status=$?
+          set -e
+          echo "LFTOMO_INSTALL_SECONDS=$(( $(date +%s) - started ))" >> "$GITHUB_ENV"
+          exit "$install_status"
+
+      - name: Run default non-integration suite
+        run: |
+          started=$(date +%s)
+          set +e
+          python -m pytest -q
+          test_status=$?
+          set -e
+          echo "LFTOMO_TEST_SECONDS=$(( $(date +%s) - started ))" >> "$GITHUB_ENV"
+          exit "$test_status"
+
+      - name: Summarize environment and timing
+        if: always()
+        run: |
+          {
+            echo "## Full scientific suite"
+            echo
+            echo "This is an informational post-merge/manual workflow, not a pull-request gate."
+            echo
+            echo "| Measurement | Value |"
+            echo "| --- | ---: |"
+            echo "| Environment setup | ${LFTOMO_ENVIRONMENT_SECONDS:-unavailable} s |"
+            echo "| Source install | ${LFTOMO_INSTALL_SECONDS:-unavailable} s |"
+            echo "| Default test suite | ${LFTOMO_TEST_SECONDS:-unavailable} s |"
+            echo "| Installed environment | ${LFTOMO_ENVIRONMENT_SIZE:-unavailable} (${LFTOMO_ENVIRONMENT_BYTES:-unavailable} bytes) |"
+            echo
+            echo "The **Set up scientific environment** log records the cache restore/save outcome and, on a cold solve, the package download footprint. Compare its duration here across cold and cached runs."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload resolved environment manifest
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: full-suite-environment-${{ github.run_id }}
+          path: |
+            full-suite-environment-explicit.txt
+            full-suite-environment.txt
+          if-no-files-found: warn
