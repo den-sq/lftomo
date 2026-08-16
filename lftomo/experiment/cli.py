@@ -15,6 +15,7 @@ import numpy as np
 from lftomo.config import Recon
 from lftomo.pipeline import NumpyBackend, Pipeline, validate_pipeline
 from lftomo.pipeline.stages import create_stage, dispatch_for_stage
+from lftomo.review import CandidateReport, ExperimentCandidateResolver
 from lftomo.runner import load_scan, run_reconstruction
 
 from .models import (
@@ -755,6 +756,110 @@ def status_command(root: Path) -> None:
 
 	status = ExperimentLifecycle.status_root(root)
 	click.echo(json.dumps(status.model_dump(mode="json"), sort_keys=True, indent=2))
+
+
+def _format_candidate(report: CandidateReport) -> str:
+	lines = [
+		f"candidate: {report.candidate_key}",
+		f"blind id: {report.blind_id or '-'}",
+		f"matched by: {report.matched_namespace} {report.matched_id}",
+		"algorithm chain: " + " -> ".join(
+			f"{stage.kind}.{stage.algorithm}" if stage.algorithm else stage.kind
+			for stage in report.algorithm_chain
+		),
+		"varied parameters:",
+	]
+	if report.variations:
+		for variation in report.variations:
+			lines.append("  " + json.dumps(
+				variation.model_dump(mode="json"), sort_keys=True,
+			))
+	else:
+		lines.append("  {}")
+	lines.append("trials:")
+	for trial in report.trials:
+		lines.append(f"  - {trial.trial_id} ({trial.fidelity_id})")
+		lines.append(f"    attempts: {', '.join(trial.attempt_ids) or '-'}")
+		attempt = trial.latest_attempt
+		if attempt is None:
+			lines.append("    latest: no attempt")
+			continue
+		lines.extend([
+			f"    latest: {attempt.attempt_id} [{attempt.status}]",
+			f"    rank: {attempt.pareto.rank if attempt.pareto.rank is not None else '-'}",
+			f"    elapsed seconds: "
+			f"{attempt.elapsed_seconds if attempt.elapsed_seconds is not None else '-'}",
+			f"    execution seconds: "
+			f"{attempt.execution_elapsed_seconds if attempt.execution_elapsed_seconds is not None else '-'}",
+			f"    peak memory bytes: "
+			f"{attempt.peak_memory_bytes if attempt.peak_memory_bytes is not None else '-'}",
+			"    metrics: " + json.dumps(attempt.metrics, sort_keys=True),
+			"    promotion: " + (
+				"-" if attempt.promotion is None else json.dumps(
+					attempt.promotion.model_dump(mode="json"), sort_keys=True,
+				)
+			),
+		])
+		for output in attempt.outputs:
+			lines.append(f"    output [{output.role}]: {output.path}")
+	if report.preview_paths:
+		lines.append("previews:")
+		lines.extend(f"  - {path}" for path in report.preview_paths)
+	lines.extend(["resolved pipeline:", report.resolved_recon.to_yaml().rstrip()])
+	return "\n".join(lines)
+
+
+@main.command("candidate")
+@click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("identifier")
+@click.option("--json", "json_output", is_flag=True, help="Emit structured JSON.")
+@click.option("--yaml", "yaml_output", is_flag=True, help="Emit structured YAML.")
+def candidate_command(
+	root: Path,
+	identifier: str,
+	json_output: bool,
+	yaml_output: bool,
+) -> None:
+	"""Deliberately unblind one candidate selected by blind/candidate/trial ID."""
+
+	if json_output and yaml_output:
+		raise click.UsageError("choose only one of --json or --yaml")
+	try:
+		report = ExperimentCandidateResolver(root).resolve(identifier)
+	except (OSError, ValueError) as error:
+		raise click.ClickException(str(error)) from error
+	if json_output:
+		click.echo(json.dumps(report.model_dump(mode="json"), sort_keys=True, indent=2))
+	elif yaml_output:
+		click.echo(report.to_yaml(), nl=False)
+	else:
+		click.echo(_format_candidate(report))
+
+
+@main.command("candidates")
+@click.argument("root", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--json", "json_output", is_flag=True, help="Emit structured JSON.")
+def candidates_command(root: Path, json_output: bool) -> None:
+	"""Deliberately unblind a compact inventory of every stored candidate."""
+
+	try:
+		inventory = ExperimentCandidateResolver(root).inventory()
+	except (OSError, ValueError) as error:
+		raise click.ClickException(str(error)) from error
+	if json_output:
+		click.echo(json.dumps([
+			item.model_dump(mode="json") for item in inventory
+		], sort_keys=True, indent=2))
+		return
+	click.echo("blind_id\tcandidate_key\tfidelities\tstatuses\talgorithm_chain")
+	for item in inventory:
+		click.echo("\t".join((
+			item.blind_id or "-",
+			item.candidate_key,
+			",".join(item.fidelity_ids),
+			",".join(item.latest_statuses),
+			" -> ".join(item.algorithm_chain),
+		)))
 
 
 @main.command("tier2-plan")
