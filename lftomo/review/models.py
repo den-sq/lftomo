@@ -143,6 +143,70 @@ class PairwiseVote(ConfigModel):
 		return self
 
 
+class PairScheduleConfig(ConfigModel):
+	"""Reproducible policy for selecting pairwise review comparisons."""
+
+	schema_version: SchemaVersion = 1
+	policy_version: Literal["1"] = "1"
+	round_robin_max: int = Field(default=12, gt=1)
+	swiss_extra_rounds: int = Field(default=2, ge=0)
+	seed: int = 0
+
+
+class ScheduledPair(ConfigModel):
+	"""One scheduled comparison in its required display order."""
+
+	left_blind_id: BlindId
+	right_blind_id: BlindId
+	round_number: int = Field(gt=0)
+
+	@model_validator(mode="after")
+	def _candidates_are_distinct(self):
+		if self.left_blind_id == self.right_blind_id:
+			raise ValueError("scheduled pairs require two different candidates")
+		return self
+
+
+class PairSchedule(ConfigModel):
+	"""Deterministic schedule progress derived from candidates and raw votes."""
+
+	schema_version: SchemaVersion = 1
+	policy: Literal["round_robin", "swiss"]
+	protocol: ReviewProtocol
+	config: PairScheduleConfig
+	candidate_set_hash: HashValue
+	pairs_total: int = Field(ge=0)
+	pairs_consumed: int = Field(ge=0)
+	remaining: tuple[ScheduledPair, ...] = ()
+	complete: bool
+
+	@model_validator(mode="after")
+	def _progress_is_consistent(self):
+		if self.pairs_consumed > self.pairs_total:
+			raise ValueError("consumed pair count exceeds the schedule total")
+		if self.complete != (self.pairs_consumed == self.pairs_total):
+			raise ValueError("schedule completion differs from pair progress")
+		if self.pairs_consumed + len(self.remaining) > self.pairs_total:
+			raise ValueError("remaining pairs exceed the schedule total")
+		if self.complete and self.remaining:
+			raise ValueError("a complete schedule cannot have remaining pairs")
+		if not self.complete and not self.remaining:
+			raise ValueError("an incomplete schedule requires a next pair")
+		keys = [
+			tuple(sorted((pair.left_blind_id, pair.right_blind_id)))
+			for pair in self.remaining
+		]
+		if len(keys) != len(set(keys)):
+			raise ValueError("remaining schedule contains duplicate pairs")
+		return self
+
+	@property
+	def next_pair(self) -> ScheduledPair | None:
+		"""Return the next required display pair, if review is incomplete."""
+
+		return self.remaining[0] if self.remaining else None
+
+
 class UnblindEvent(ConfigModel):
 	"""Explicit audit record authorizing an unblinded operation."""
 
