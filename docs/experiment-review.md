@@ -32,6 +32,18 @@ identity and a fingerprint of the resolved results-root location, and copies
 the `PreviewContract` so scaling/crop drift is detected when the session is
 reopened.
 
+Opening or reopening a review session requires read access to
+`private/preview-mapping/`. The session copies its `PreviewContract` from that
+mapping, and the resolver keeps the blind-ID-to-candidate join in process
+memory while blinded observations are recorded. Blinding is therefore a
+durable-record boundary, enforced by the secret-leak checks, rather than a
+filesystem or process-isolation boundary: the reviewer process may read the
+mapping, but the append-only blinded records must not disclose it. The
+`LFTOMO_PREVIEW_BLINDING_KEY` fallback can recover blind IDs for lookup, but it
+does not supply the missing preview contract needed to open a session. A
+review station that must not be able to read the private mapping needs a
+separately published public preview contract; that is outside this contract.
+
 Each triage judgment, pairwise vote, and unblind event is a separate immutable
 JSON fragment. A session lock assigns one global monotonic sequence, and the
 existing atomic-write helper publishes each fragment with write-temp-then-
@@ -120,7 +132,10 @@ The ranking record includes the exact order-independent vote-set hash,
 candidate-set hash, numerical configuration, strengths, missing comparison
 pairs, excluded-vote count, convergence state, and incomplete-data flag.
 `ReviewStore.derive_ranking` appends the versioned record under `rankings/` and
-never changes raw votes.
+never changes raw votes. Ranking is strict over the complete candidate set
+referenced by the recorded pairwise votes; re-shortlisting after voting is not
+part of this contract. Derive and persist the full voted-set ranking, then
+select any smaller presentation or confirmation subset downstream.
 
 ## Anchors, controls, and confirmation reruns
 
