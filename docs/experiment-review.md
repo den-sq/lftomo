@@ -84,6 +84,55 @@ The protocol version is stamped onto the session and every raw observation.
 Vocabulary changes require a protocol-version change rather than a UI-local
 interpretation.
 
+## Pair scheduling
+
+`derive_pair_schedule(votes, candidates, config)` is the I/O-free scheduling
+contract consumed by review clients. `PairScheduleConfig` records policy
+version, the round-robin threshold (default `12`), the bounded Swiss-round
+extension (default `2`), and the seed. Candidate ordering and every final
+tiebreak use canonical SHA-256 keys over that configuration; scheduling does
+not depend on input order, wall-clock state, or a language-runtime RNG.
+
+At or below the threshold, the seed-keyed circle method emits every unordered
+pair exactly once. It owns the explicit left/right display assignment and
+balances each candidate's complete schedule to within one appearance per
+side. `remaining` contains the full unconsumed round-robin tail. Above the
+threshold, the schedule uses
+`ceil(log2(candidate_count)) + swiss_extra_rounds` rounds, with one comparison
+per candidate per round except for an odd-set bye. Custom Swiss configurations
+that request more rounds than candidates are rejected so no candidate receives
+a second bye.
+
+Swiss round one pairs the seed-keyed order adjacently. Later rounds sort by
+standings from fully completed scheduled rounds: wins contribute one point,
+ties contribute one half-point to each candidate under the review protocol,
+and `cannot_judge` contributes no score. Adjacent rematches are repaired by
+splitting the ordered standings into alternating sides and matching each side
+to its nearest available standing through deterministic augmenting paths. A
+rematch is accepted only when that fixed partition has no complete
+rematch-free matching. An odd-set bye goes to the lowest-standing candidate
+without a prior bye, using the same hash order as the final tiebreak. Only the
+current Swiss round is exposed in `remaining`; later rounds are derived after
+it is consumed.
+
+Any stored vote consumes its unordered pair, including `cannot_judge`. The
+earliest vote by monotonic sequence is the scheduling observation; later
+re-reviews remain available to ranking but neither change standings nor advance
+progress again. A vote on a pair not yet emitted has no immediate scheduling
+effect, but consumes that pair if it appears in a later round. A last-resort
+Swiss rematch is therefore already consumed by the prior vote and is not
+rescored. Votes referencing candidates outside the locked set and votes with a
+different protocol version are errors.
+
+Resume requires no schedule record: replaying the same candidates, raw votes,
+and config reconstructs the same completed rounds, current remainder, and next
+left/right assignment. `pairs_consumed`, `pairs_total`, `complete`, and
+`next_pair` provide client progress. Fewer than two candidates yield an empty,
+complete round-robin schedule. Pair scheduling treats `cannot_judge` as a
+completed presentation; the downstream `RankingRecord.missing_pairs` and
+`incomplete` fields still report that the pair supplied no judgeable ranking
+observation.
+
 ## Candidate lookup and deliberate unblinding
 
 The read-only `ExperimentCandidateResolver` joins the existing
