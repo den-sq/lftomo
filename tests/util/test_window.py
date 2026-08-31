@@ -339,6 +339,8 @@ def test_data_ref_fields():
 	assert df.step == Y(1)
 	assert df.dtype == np.int16
 	assert df.itemsize == 2
+	assert df.nbytes() == 1900 * 24 * 2048 * 2
+	assert df.axis_slice("Y") == df.index[ProjOrder.axis_of("Y")]
 	assert str(df) == f"{ProjOrder(Theta=1900, Y=24, X=2048)} ({np.int16}) at {Y(1024)} stepping by {Y(1)}"
 	assert df.step_shape == ProjOrder(Theta=1900, Y=1, X=2048)
 	assert df.stride == ProjOrder(Theta=98304, Y=4096, X=2)

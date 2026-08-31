@@ -3,29 +3,76 @@ Module containing shapes of data.
 """
 from abc import ABC, abstractmethod
 from collections import namedtuple
-from dataclasses import dataclass, asdict, replace, fields, astuple, make_dataclass, Field, InitVar
+from dataclasses import dataclass, replace, make_dataclass, Field, InitVar
 from functools import cached_property, reduce
 import operator
 import sys
-from typing import Self, Sequence, Union
+from typing import ClassVar, Self, Sequence, Union
 
 import numpy as np
 
 
 class DataShape(ABC):
+	__slots__ = ()
+	names: ClassVar[tuple[str, ...]] = ()
+
+	@classmethod
+	def _install_accessors(cls, names: Sequence[str]) -> None:
+		cls.names = tuple(names)
+		getter = operator.attrgetter(*cls.names)
+		if len(cls.names) == 1:
+			cls.as_tuple = lambda self, _getter=getter: (_getter(self),)
+		else:
+			cls.as_tuple = lambda self, _getter=getter: _getter(self)
+
+	def __init_subclass__(cls, **kwargs):
+		super().__init_subclass__(**kwargs)
+		annotations = cls.__dict__.get("__annotations__", {})
+		if isinstance(annotations, dict) and annotations:
+			names = tuple(annotations)
+		elif "__dataclass_fields__" in cls.__dict__:
+			names = tuple(cls.__dataclass_fields__)
+		else:
+			names = ()
+		if names:
+			cls._install_accessors(names)
+
+	@classmethod
+	def axis_of(cls, name: str) -> int:
+		return cls.names.index(name)
+
+	@classmethod
+	def point_index(cls, **indices: int) -> tuple[int | slice, ...]:
+		for name in indices:
+			cls.axis_of(name)
+		return tuple(indices.get(name, slice(None)) for name in cls.names)
+
+	def as_dict(self) -> dict[str, int]:
+		return dict(zip(self.names, self.as_tuple()))
+
+	def as_tuple(self) -> tuple[int, ...]:
+		return tuple(getattr(self, name) for name in self.names)
+
+	@staticmethod
+	def _shape_type(target):
+		shape_type = target if isinstance(target, type) else type(target)
+		if not issubclass(shape_type, DataShape):
+			raise TypeError(f"{shape_type!r} is not a DataShape type")
+		return shape_type
+
 	def to(self, target: type | Self) -> Self:
 		try:
-			dec = target if isinstance(target, type) else type(target)
-			return dec(**asdict(self))
+			dec = self._shape_type(target)
+			return dec(**self.as_dict())
 		except TypeError as te:
 			te.add_note(f"{sys._getframe(0).f_code.co_name}: Must target another DataShape or Datashape Type.")
 			raise te
 
 	def extract(self, target: type | Self) -> Self:
 		try:
-			dec = target if isinstance(target, type) else type(target)
-			source = asdict(self)
-			return dec(**{field.name: source[field.name] for field in fields(target)})
+			dec = self._shape_type(target)
+			source = self.as_dict()
+			return dec(**{name: source[name] for name in dec.names})
 		except TypeError as te:
 			te.add_note(f"{sys._getframe(0).f_code.co_name}: Must target another Datashape or Datashape Type.")
 			raise te
@@ -35,9 +82,10 @@ class DataShape(ABC):
 
 	def cut(self, target: type | Self) -> Self:
 		try:
-			target_fields = [field.name for field in fields(target)]
-			dec = self.gen([field for field in fields(self) if field.name not in target_fields])
-			source = asdict(self)
+			target_type = self._shape_type(target)
+			target_fields = target_type.names
+			dec = self.gen([name for name in self.names if name not in target_fields])
+			source = self.as_dict()
 			return dec(**{k: v for k, v in source.items() if k not in target_fields})
 		except TypeError as te:
 			te.add_note(f"{sys._getframe(0).f_code.co_name}: Must target another Datashape or Datashape Type.")
@@ -47,49 +95,65 @@ class DataShape(ABC):
 			raise ie
 
 	def merge(self, *targets: type | Self, retain=True) -> Self:
-		merge_data = [asdict(target) for target in targets]
+		merge_data = [target.as_dict() for target in targets]
 		if retain:
-			merge_data += [asdict(self)]
+			merge_data += [self.as_dict()]
 		else:
-			merge_data = [asdict(self)] + merge_data
+			merge_data = [self.as_dict()] + merge_data
 		new = reduce(operator.or_, merge_data)
 		return self.gen(list(new))(**new)
 
-	def transpose(self, target: type | Self) -> tuple:
+	def transpose(self, target: type | Self) -> list[int]:
 		""" Generates transpose matrix for compatiable with np.transpose and the like."""
 		try:
-			if len(fields(self)) != len(fields(target)):
+			dec = self._shape_type(target)
+			if len(self.names) != len(dec.names):
 				raise ValueError(f"{sys._getframe(0).f_code.co_name}: Source and Target must have same number of fields.")
 
-			dec = target if isinstance(target, type) else type(target)
-			source = asdict(self)
-			dest = dec(**source)
-			return [list(source).index(key) for key in asdict(dest).keys()]
+			dest = dec(**self.as_dict())
+			return [self.axis_of(name) for name in dest.names]
 		except TypeError as te:
 			te.add_note(f"{sys._getframe(0).f_code.co_name}: Target must be a datashape or datashape type with the same fields.")
 			raise te
 
+	def transposed_view(self, array: np.ndarray, target: type | Self) -> np.ndarray:
+		return np.transpose(array, self.transpose(target))
+
+	def prod(self) -> int:
+		return int(np.prod(self.as_tuple(), dtype=np.float64))
+
+	def max_field(self) -> int:
+		return max(self.as_tuple())
+
+	def nbytes(self, dtype: type | np.dtype) -> int:
+		return self.prod() * np.dtype(dtype).itemsize
+
 	def is_sub(self, target: type | Self) -> Self:
-		return all([field.name in [field.name for field in fields(target)] for field in fields(self)])
+		target_type = self._shape_type(target)
+		return set(self.names).issubset(target_type.names)
 
 	def __mop(self, other: Self, op) -> Self:
 		""" Operator function for operators where order does not matter (add, mult). """
-		try:
-			return replace(self, **{f.name: op(getattr(self, f.name), getattr(other, f.name)) for f in fields(other)})
-		except AttributeError:
-			return replace(self, **{f.name: op(getattr(self, f.name), getattr(other, f.name)) for f in fields(self)})
+		if type(self) is type(other):
+			return type(self)(*map(op, self.as_tuple(), other.as_tuple()))
+		names = other.names if other.is_sub(self) else self.names
+		return replace(self, **{name: op(getattr(self, name), getattr(other, name)) for name in names})
 
 	def __op(self, other: Self, op) -> Self:
 		""" Operator function for operators where order does matter (sub, div, mod). """
 		try:
-			return replace(self, **{f.name: op(getattr(self, f.name), getattr(other, f.name)) for f in fields(other)})
+			if type(self) is type(other):
+				return type(self)(*map(op, self.as_tuple(), other.as_tuple()))
+			return replace(self, **{name: op(getattr(self, name), getattr(other, name)) for name in other.names})
 		except AttributeError as ae:
 			ae.add_note(f"{op} Failed - Fields of other parameter must be in first.")
 			raise ae
 
 	def __cp(self, other: Self, cp) -> Self:
 		try:
-			return all([cp(getattr(self, f.name), getattr(other, f.name)) for f in fields(other)])
+			if type(self) is type(other):
+				return all(map(cp, self.as_tuple(), other.as_tuple()))
+			return all(cp(getattr(self, name), getattr(other, name)) for name in other.names)
 		except AttributeError as ae:
 			ae.add_note(f"{cp} Failed - Fields of other parameter must be in first.")
 			raise ae
@@ -122,17 +186,17 @@ class DataShape(ABC):
 		return self.__cp(other, operator.ge)
 
 	def __neg__(self) -> Self:
-		return type(self)(**{f.name: -getattr(self, f.name) for f in fields(self)})
+		return type(self)(*map(operator.neg, self.as_tuple()))
 
 	def __bool__(self) -> Self:
-		return any(asdict(self).values())
+		return any(self.as_tuple())
 
 	@classmethod
 	def __param_op(cls, op, *shapes: Self) -> Self:
-		fields_dict = [[f.name for f in fields(shape)] for shape in shapes]
+		fields_dict = [shape.names for shape in shapes]
 		try:
-			return cls(**{f.name: op([getattr(shapes[i], f.name) for i in range(len(fields_dict)) if f.name in fields_dict[i]])
-									for f in fields(cls)})
+			return cls(**{name: op([getattr(shapes[i], name) for i in range(len(fields_dict)) if name in fields_dict[i]])
+									for name in cls.names})
 		except ValueError as ve:
 			ve.add_note(f"{op} Failed - All fields of {cls} must be in at least one argument.")
 			raise ve
@@ -148,15 +212,17 @@ class DataShape(ABC):
 	@staticmethod
 	def gen(fields: list[Field] | list[str]) -> Self:
 		try:
-			names = fields if type(fields[0]) is str else [field.name for field in fields]
-			return make_dataclass("_cg_" + "_".join(names), names, bases=(DataShape,))
+			names = fields if isinstance(fields[0], str) else [field.name for field in fields]
+			shape_type = make_dataclass("_cg_" + "_".join(names), names, bases=(DataShape,))
+			shape_type._install_accessors(names)
+			return shape_type
 		except IndexError as ie:
 			ie.add_note(f"{sys._getframe(0).f_code.co_name}: Must leave at least 1 field.")
 			raise ie
 
 	@classmethod
 	def make_with(cls, val: int) -> Self:
-		return cls(*([val] * len(fields(cls))))
+		return cls(*([val] * len(cls.names)))
 
 	@classmethod
 	def drange(cls, start: Self | int | Sequence[int],
@@ -178,17 +244,17 @@ class DataShape(ABC):
 		return DataRange(istart, istop, istep)
 
 
-@dataclass
+@dataclass(slots=True)
 class ProjOrder(DataShape): Theta: int; Y: int; X: int 	 # noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class SinoOrder(DataShape): Y: int; Theta: int; X: int 	 # noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class ReverseSinoOrder(DataShape): X: int; Theta: int; Y: int 	 # noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class ImageStack(DataShape): Z: int; Y: int; X: int 	 # noqa: E701,E702
 
 
-@dataclass
+@dataclass(slots=True)
 class ReconOrder(DataShape):
 	Y: int; Z: int; X: int 	 # noqa: E701,E702
 
@@ -201,33 +267,33 @@ class ReconOrder(DataShape):
 			raise ae
 
 
-@dataclass
+@dataclass(slots=True)
 class ReverseReconOrder(DataShape): X: int; Z: int; Y: int 	 # noqa: E701,E702
 
 
-@dataclass
+@dataclass(slots=True)
 class ImgSlice(DataShape): Y: int; X: int 	 	# noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class Proj(DataShape): Y: int; X: int 	 		# noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class YSlice(DataShape): Theta: int; X: int 	# noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class XSlice(DataShape): Theta: int; Y: int 	# noqa: E701,E702
 
 
-@dataclass
+@dataclass(slots=True)
 class Y(DataShape): Y: int 	 # noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class X(DataShape): X: int 	 # noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class Theta(DataShape): Theta: int 	 # noqa: E701,E702
-@dataclass
+@dataclass(slots=True)
 class Z(DataShape): Z: int 	 # noqa: E701,E702
 
 
 # If we don't actually know the dimensions of a 3D array.
 # Avoids X/Y/Z to prevent being used where it shouldn't.
-@dataclass
+@dataclass(slots=True)
 class GenericOrder(DataShape): A: int; B: int; C: int 	 # noqa: E701,E702
 
 
@@ -244,15 +310,8 @@ class DataRange(object):
 		if not (self.step.is_sub(self.stop) and self.stop.is_sub(self.start)):
 			raise ValueError("Step and Stop fields must be in Start.")
 
-# 		for key, val in asdict(self.step).items():
-# 			if val == 0:
-# 				raise ValueError(f"Field {key} has a 0 step and would not progress.")
-
 	def get_iter(self, conv: 'TFIter' = None):
-		self.iter_conv = conv
-		fetched_iter = self.__iter__()
-		del self.iter_conv
-		return fetched_iter
+		return _DataRangeIter(self.start, self.stop, self.step, conv)
 
 	@cached_property
 	def shape(self) -> DataShape:
@@ -266,13 +325,10 @@ class DataRange(object):
 
 	def __len__(self) -> int:
 		""" Total number of steps in the iteration. """
-		s_len = self.length
-		# print(s_len)
-		return int(np.ravel_multi_index(astuple(s_len - s_len.make_with(1)), astuple(s_len))) + 1
+		return self.length.prod()
 
 	def __iter__(self) -> '_DataRangeIter':
-		return _DataRangeIter(self.start, self.stop, self.step,
-							None if not hasattr(self, "iter_conv") else self.iter_conv)
+		return _DataRangeIter(self.start, self.stop, self.step)
 
 
 @dataclass
@@ -280,17 +336,15 @@ class _DataRangeIter(DataRange):
 	conv: InitVar[callable] = None
 
 	def __post_init__(self, conv: callable):
-		self.__it = np.ndindex(astuple(self.length)) 			# nditerator
+		self.__it = np.ndindex(self.length.as_tuple()) 			# nditerator
 		if conv is not None:
 			self.conv = conv(self)
 		else:
 			self.conv = self.__pos
 
-		# Need to make math quicker.
-		# Probably a sign DataShape design is off!
-		self.__step_start = astuple(self.start.extract(self.step))
-		self.__step = astuple(self.step)
-		self.__step_f = [f.name for f in fields(self.step)]
+		self.__step_start = self.start.extract(self.step).as_tuple()
+		self.__step = self.step.as_tuple()
+		self.__step_f = self.step.names
 
 	def __iter__(self):
 		return self
@@ -318,7 +372,7 @@ class IntIter(TFIter):
 	def __init__(self, dr: DataRange):
 		# Increment the first field by 1 to enable clean finishes.
 		# increment
-		self.__extended_block = astuple(dr.length + dr.start)
+		self.__extended_block = (dr.length + dr.start).as_tuple()
 
 	def __call__(self, pos) -> int:
 		return np.ravel_multi_index(pos, self.__extended_block)
@@ -326,16 +380,16 @@ class IntIter(TFIter):
 
 class ContigMemIter(TFIter):
 	def __init__(self, dr: DataRange, offset: int, shape: DataShape, stride: DataShape,
-					jump: list[Union[str, fields]]):
+					jump: list[Union[str, Field]]):
 		# increment
 		self.offset = offset
 		self.stride = stride
 
-		self.__drshape = asdict(dr.shape)
-		self.__drstep = asdict(dr.step)
-		self.__shape = asdict(shape)
+		self.__drshape = dr.shape.as_dict()
+		self.__drstep = dr.step.as_dict()
+		self.__shape = shape.as_dict()
 
-		self.__step_stride = astuple(stride.extract(dr.step))
+		self.__step_stride = stride.extract(dr.step).as_tuple()
 		self.__step_per_addr, self.__contig_volume = self.__contig_calc(jump)
 		self.__counter = 0
 		self.__cached_val = None
@@ -345,7 +399,7 @@ class ContigMemIter(TFIter):
 		return self.__contig_volume
 
 	def __contig_calc(self, break_fields):
-		stride_dict = asdict(self.stride)
+		stride_dict = self.stride.as_dict()
 		stride_keys = list(stride_dict.keys())
 
 		break_fields = [f if not isinstance(f, Field) else f.name for f in break_fields]
@@ -391,11 +445,9 @@ class ContigMemIter(TFIter):
 class MemAddressIter(TFIter):
 	def __init__(self, dr: DataRange, offset: int, stride: DataShape):
 		# Increment the first field by 1 to enable clean finishes.
-		# Do we need this here? don't think so  increment = DataShape.gen([fields(dr.len))[0]])(1)
-		# increment
 		self.offset = offset
 		self.stride = stride
-		self.__step_stride = astuple(stride.extract(dr.step))
+		self.__step_stride = stride.extract(dr.step).as_tuple()
 
 	def __call__(self, step_pos) -> int:
 		# Break Fields offset issue?
@@ -404,8 +456,8 @@ class MemAddressIter(TFIter):
 
 class SliceIter(TFIter):
 	def __init__(self, dr: DataRange, shape: DataShape):
-		self.__base = {field.name: slice(None, None, None) for field in fields(shape)}
-		self.__step_f = [f.name for f in fields(dr.step)]
+		self.__base = {name: slice(None, None, None) for name in shape.names}
+		self.__step_f = dr.step.names
 
 	def __call__(self, pos) -> tuple:
 		# print(f"{val}|{self.__base.keys()}")

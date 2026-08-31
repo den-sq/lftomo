@@ -4,6 +4,8 @@ import numpy as np
 
 from dataclasses import astuple, asdict
 from functools import partial
+from timeit import repeat
+import lftomo.util.shapes as shape_module
 from lftomo.util.shapes import ImageStack, ProjOrder, ReverseReconOrder, ReverseSinoOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
 from lftomo.util.shapes import IntIter, ContigMemIter, MemAddressIter, SliceIter
 
@@ -51,6 +53,40 @@ def test_image_stack_has_spatial_xyz_fields():
 def test_reverse_orders_reverse_their_forward_twins():
 	assert SinoOrder(Y=5, Theta=7, X=11).transpose(ReverseSinoOrder) == [2, 1, 0]
 	assert ReconOrder(Y=5, Z=7, X=11).transpose(ReverseReconOrder) == [2, 1, 0]
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, ProjOrder(Theta=2, Y=3, X=4)])
+def test_named_axis_accessors_work_on_shape_classes_and_instances(layout):
+	assert layout.names == ("Theta", "Y", "X")
+	assert layout.axis_of("Y") == 1
+	assert layout.point_index(Theta=1, X=2) == (1, slice(None), 2)
+	with pytest.raises(ValueError):
+		layout.axis_of("Z")
+
+
+def test_shape_aggregates_and_transposed_view_share_the_named_axis_model():
+	shape = ProjOrder(Theta=2, Y=3, X=4)
+	array = np.arange(shape.prod()).reshape(shape.as_tuple())
+	view = shape.transposed_view(array, SinoOrder)
+
+	assert shape.as_dict() == {"Theta": 2, "Y": 3, "X": 4}
+	assert shape.max_field() == 4
+	assert shape.nbytes(np.float32) == 96
+	assert view.shape == SinoOrder(Y=3, Theta=2, X=4).as_tuple()
+	assert np.shares_memory(array, view)
+	assert not hasattr(shape, "__dict__")
+	assert hasattr(DataRange(Y(0), Y(1), Y(1)), "__dict__")
+
+
+def test_shape_shallow_tuple_and_same_class_operator_fast_paths(monkeypatch):
+	shape = ProjOrder(Theta=2, Y=3, X=4)
+	globals_ = {"shape": shape, "astuple": astuple}
+	shallow = min(repeat("shape.as_tuple()", globals=globals_, number=100_000, repeat=5))
+	deep = min(repeat("astuple(shape)", globals=globals_, number=100_000, repeat=5))
+	assert deep >= shallow * 10
+
+	monkeypatch.setattr(shape_module, "replace", lambda *_args, **_kwargs: pytest.fail("slow mixed-shape path"))
+	assert shape + ProjOrder(Theta=5, Y=7, X=11) == ProjOrder(Theta=7, Y=10, X=15)
 
 
 def test_cast_errors():

@@ -76,6 +76,12 @@ class DataRef(object):
 	def itemsize(self) -> int:
 		return np.dtype(self.dtype).itemsize
 
+	def axis_slice(self, name: str) -> slice:
+		return self.index[self.shape.axis_of(name)]
+
+	def nbytes(self) -> int:
+		return self.shape.nbytes(self.dtype)
+
 	@property
 	def step_shape(self) -> DataShape:
 		ss = replace(self.shape, **asdict(self.step))
