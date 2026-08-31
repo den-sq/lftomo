@@ -28,11 +28,14 @@ identifiers from the breakout; they do not imply order — the waves do.
 - **Wave D** — experiment subsystem: B23 → B24
 - **Wave E** — optional tail: B26, B27
 
-Waves 0, A, and B are filed; later waves are filed as their predecessors
-near completion. One GitHub milestone per wave.
+Waves 0, A, B, and Track C-early are filed; later waves are filed as their
+predecessors near completion. One GitHub milestone per wave. **B8 (ChunkGrid)
+is deliberately held back from C-early pending a scope decision** — its only
+consumers (B20/B22) land in Wave C-late, so it is a candidate to build with
+them rather than ahead of them.
 
-Filed so far (2026-08-31; Wave B same day, post-Wave-A merge — its
-briefings are grounded against `670eca8`, not `8fff4b7`):
+Filed so far (2026-08-31; Wave B briefings grounded against `670eca8`, Track
+C-early briefings against `f0e4e89` — re-grounded per wave, not copied):
 
 | B-id | issue | milestone |
 |---|---|---|
@@ -51,6 +54,9 @@ briefings are grounded against `670eca8`, not `8fff4b7`):
 | B16 | #265 | Wave B |
 | B17 | #266 | Wave B |
 | B18 | #267 | Wave B |
+| B7 | #277 | Wave C-early |
+| B9 | #278 | Wave C-early |
+| B25 | #279 | Wave C-early |
 
 ```
 B1,B2,B3 (parallel, alongside Wave A)
