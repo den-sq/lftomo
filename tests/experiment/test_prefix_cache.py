@@ -43,7 +43,7 @@ from lftomo.util.shapes import ProjOrder, X
 class SourceStage(Stage):
 	name = "test.source"
 	contract = StageContract(
-		produced_output=ProjOrder,
+		produces=ProjOrder,
 		produces_domain=DataDomain.TRANSMISSION,
 		produces_artifacts=("nested",),
 		cacheable_prefix=True,
@@ -126,7 +126,7 @@ class ReadOnlyTailStage(Stage):
 class InputScaleStage(Stage):
 	name = "test.input_scale"
 	contract = StageContract(
-		produced_output=ProjOrder,
+		produces=ProjOrder,
 		mutates_input=True,
 		cacheable_prefix=True,
 	)
@@ -142,7 +142,7 @@ class InputScaleStage(Stage):
 class ManagedArtifactSourceStage(Stage):
 	name = "test.managed_artifact_source"
 	contract = StageContract(
-		produced_output=ProjOrder,
+		produces=ProjOrder,
 		produces_domain=DataDomain.TRANSMISSION,
 		produces_artifacts=("large_mask", "center", "qc"),
 		managed_artifacts=("large_mask",),

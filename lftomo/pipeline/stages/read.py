@@ -38,7 +38,7 @@ def _output_contract(order: str, *, required_metadata: tuple[str, ...],
 		raise ValueError("read order must be 'projection' or 'sinogram'")
 	angle_artifacts = ("angles", "acquisition_indices", "angle_provenance")
 	return StageContract(
-		produced_output=ProjOrder if order == "projection" else SinoOrder,
+		produces=ProjOrder if order == "projection" else SinoOrder,
 		cacheable_prefix=True,
 		produces_domain=DataDomain.RAW,
 		window_axes=("Theta", "Y"),

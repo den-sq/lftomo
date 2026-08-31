@@ -66,7 +66,7 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	result = _run(_state(path, count, size, config), stage)
 
 	assert "read.hdf5_dxchange" in STAGE_REGISTRY
-	assert stage.contract.produced_output is SinoOrder
+	assert stage.contract.produces is SinoOrder
 	np.testing.assert_array_equal(result.working_array, np.transpose(data[1:3, 2:5, :], (1, 0, 2)))
 	assert result.artifacts["white_fields"].shape == GenericOrder(2, 3, size)
 	assert result.artifacts["dark_fields"].shape == GenericOrder(2, 3, size)

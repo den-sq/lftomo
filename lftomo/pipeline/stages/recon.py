@@ -70,8 +70,6 @@ class GridrecStage(Stage):
 		self.output_width = output_width
 		self.angle_endpoint = angle_endpoint
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=ReconOrder,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=SinoOrder,
 			produces=ReconOrder,
@@ -274,8 +272,6 @@ class AstraCudaStage(GridrecStage):
 		self.proj_type = proj_type
 		self.extra_options = extra_options or {}
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=ReconOrder,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=SinoOrder,
 			produces=ReconOrder,

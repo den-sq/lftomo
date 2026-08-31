@@ -27,8 +27,6 @@ LOGGER = logging.getLogger(__name__)
 
 def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
 	return StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts=(SinoOrder,), prefers=SinoOrder,
 		bounded_views_from=(ProjOrder,), locality=Locality.SINOGRAM,
@@ -97,7 +95,7 @@ class ManualCenterStage(Stage):
 		if center_samples_per_job is not None and center_samples_per_job < 1:
 			raise ValueError("center_samples_per_job must be positive")
 		self.contract = StageContract(
-			expected_input=SinoOrder, produced_output=SinoOrder, window_axes=("Y",),
+			window_axes=("Y",),
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			accepts_domain=(DataDomain.ATTENUATION,),
@@ -546,7 +544,6 @@ class PhaseCorrelationCenterStage(Stage):
 		self.tol = tol
 		self.rotc_guess = rotc_guess
 		self.contract = StageContract(
-			expected_input=SinoOrder, produced_output=SinoOrder,
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.ATTENUATION,), produces_domain=PRESERVE,
 			locality=Locality.PROJECTION, produces_artifacts=("center",),

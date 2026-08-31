@@ -165,9 +165,8 @@ def validate_pipeline(
 			and current_layout not in contract.bounded_views_from
 		):
 			expected = ", ".join(item.__name__ for item in accepted)
-			field = "accepts" if contract.accepts is not None else "expected_input"
 			raise ShapeCompatibilityError(
-				stage=stage_name, field=field,
+				stage=stage_name, field="accepts",
 				message=f"accepts ({expected}), got {_layout_name(current_layout)}; add an explicit layout.convert",
 			)
 

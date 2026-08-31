@@ -20,7 +20,7 @@ from lftomo.util.window import TomoWindow
 
 
 class PassThroughStage(Stage):
-	contract = StageContract(expected_input=SinoOrder, produced_output=SinoOrder)
+	contract = StageContract(accepts=(SinoOrder,), produces=SinoOrder)
 
 	def __init__(self, name):
 		self.name = name

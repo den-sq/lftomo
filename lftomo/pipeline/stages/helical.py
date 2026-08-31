@@ -23,11 +23,6 @@ class HelicalIndexRemapStage(Stage):
 	"""
 
 	name = "helical_correct.index_remap"
-	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
-		window_axes=("Y", "Theta"),
-	)
 
 	def __init__(self, pitch_px_per_projection: float | None = None,
 				enabled: bool = True, going_up: bool = False,
@@ -40,7 +35,6 @@ class HelicalIndexRemapStage(Stage):
 		if projection_start < 0:
 			raise ValueError("helical projection_start cannot be negative")
 		self.contract = StageContract(
-			expected_input=SinoOrder, produced_output=SinoOrder,
 			window_axes=("Y", "Theta"),
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,

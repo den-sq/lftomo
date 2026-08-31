@@ -24,12 +24,6 @@ class BilateralFilterStage(Stage):
 	"""
 
 	name = "filter.bilateral"
-	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
-		mutates_input=True,
-		window_axes=("Y", "Theta"),
-	)
 
 	def __init__(self, diameter: int = 3, sigma_color: float = 1,
 				sigma_space: float = 1, enabled: bool = True,
@@ -39,7 +33,7 @@ class BilateralFilterStage(Stage):
 		if sigma_color <= 0 or sigma_space <= 0:
 			raise ValueError("bilateral sigma values must be positive")
 		self.contract = StageContract(
-			expected_input=SinoOrder, produced_output=SinoOrder, mutates_input=enabled,
+			mutates_input=enabled,
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.PROJECTION,

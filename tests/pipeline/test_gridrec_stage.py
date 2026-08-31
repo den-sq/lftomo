@@ -50,8 +50,8 @@ def test_gridrec_is_registered_and_uses_center_artifact(monkeypatch):
 	))
 
 	assert STAGE_REGISTRY["recon.gridrec"] is GridrecStage
-	assert stage.contract.expected_input is SinoOrder
-	assert stage.contract.produced_output is ReconOrder
+	assert stage.contract.accepted_layouts == (ProjOrder, SinoOrder)
+	assert stage.contract.produces is ReconOrder
 	assert calls["recon"][2]["algorithm"] == "gridrec"
 	assert calls["recon"][2]["sinogram_order"] is True
 	assert calls["recon"][2]["center"] == pytest.approx(2.5)

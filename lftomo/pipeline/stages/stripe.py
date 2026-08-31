@@ -63,8 +63,6 @@ def _vo_work_planes(
 
 def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
 	return StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
 		accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 		produces_domain=PRESERVE, locality=Locality.SINOGRAM,
@@ -252,7 +250,7 @@ class FourierWaveletStripeStage(Stage):
 		if sigma <= 0:
 			raise ValueError("Fourier-wavelet sigma must be positive")
 		self.contract = StageContract(
-			expected_input=SinoOrder, produced_output=SinoOrder, mutates_input=True,
+			mutates_input=True,
 			cacheable_prefix=True,
 			accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
@@ -304,7 +302,6 @@ class AllOfTheStripeStage(Stage):
 		self.ncore = ncore
 		self.nchunk = nchunk
 		self.contract = StageContract(
-			expected_input=SinoOrder, produced_output=SinoOrder,
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.SINOGRAM,

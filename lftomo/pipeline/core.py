@@ -105,15 +105,14 @@ class PadRequirement:
 class StageContract:
 	"""Behavioral contract advertised by a Stage before it runs.
 
-	``expected_input`` and ``produced_output`` are shape classes, usually from
-	``lftomo.util.shapes`` such as ``ProjOrder``, ``SinoOrder``, or
-	``ReconOrder``. These contract fields are consumed by the Pipeline validator
-	defined by issue #18 / PR #42. ``runtime_requirements`` declares invariant
-	optional dependencies and bounded post-import API probes for preflight.
+	``accepts`` declares the input layout capabilities and ``produces`` declares
+	the output layout or ``PRESERVE`` effect consumed by the Pipeline validator.
+	Layout classes usually come from ``lftomo.util.shapes``, such as
+	``ProjOrder``, ``SinoOrder``, or ``ReconOrder``. ``runtime_requirements``
+	declares invariant optional dependencies and bounded post-import API probes
+	for preflight.
 	"""
 
-	expected_input: type[Any] | None = None
-	produced_output: type[Any] | None = None
 	mutates_input: bool = False
 	# Prefix caching is fail-closed: a Stage must explicitly promise that its
 	# output is deterministic and fully represented by its config, contract,
@@ -153,13 +152,9 @@ class StageContract:
 
 	@property
 	def accepted_layouts(self) -> tuple[type[Any], ...] | None:
-		"""Return explicit capabilities or the legacy expected shape."""
+		"""Return the explicitly declared input layout capabilities."""
 
-		if self.accepts is not None:
-			return self.accepts
-		if self.expected_input is not None:
-			return (self.expected_input,)
-		return None
+		return self.accepts
 
 	@property
 	def preferred_layout(self) -> type[Any] | None:
@@ -173,7 +168,7 @@ class StageContract:
 	def output_layout(self, input_layout: type[Any] | None) -> type[Any] | None:
 		"""Resolve the concrete output layout for ``input_layout``."""
 
-		effect = self.produced_output if self.produces is None else self.produces
+		effect = self.produces
 		if effect is PRESERVE:
 			return input_layout
 		return effect

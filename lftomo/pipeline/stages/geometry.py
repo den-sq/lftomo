@@ -19,8 +19,6 @@ from lftomo.util.window import TomoWindow
 def _contract(*, resamples_detector: bool = False, mutates_input: bool = True,
 		required_pad: PadRequirement = PadRequirement()) -> StageContract:
 	return StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts=(ProjOrder, SinoOrder),
 		prefers=ProjOrder,
@@ -265,7 +263,6 @@ class AffineSkewMovementStage(Stage):
 		else:
 			source = SinoOrder if target is ProjOrder else ProjOrder
 			self.contract = StageContract(
-				expected_input=source, produced_output=target,
 				accepts=(source,), prefers=source, produces=target,
 				accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 				produces_domain=PRESERVE, locality=Locality.VOLUME,

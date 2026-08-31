@@ -25,7 +25,9 @@ def recon_config():
 
 class EchoStage(Stage):
 	name = "echo"
-	contract = StageContract(expected_input=ProjOrder, produced_output=ProjOrder, produces_artifacts=("echo",))
+	contract = StageContract(
+		accepts=(ProjOrder,), produces=ProjOrder, produces_artifacts=("echo",),
+	)
 
 	def run(self, state):
 		state.artifacts["echo"] = True

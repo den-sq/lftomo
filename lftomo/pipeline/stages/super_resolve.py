@@ -43,8 +43,8 @@ def _contract(
 	runtime_requirements: tuple[RuntimeRequirement, ...] = (),
 ) -> StageContract:
 	return StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
+		accepts=(SinoOrder,),
+		produces=SinoOrder,
 		window_axes=("Y", "Theta"),
 		produces_artifacts=("super_resolution",),
 		runtime_requirements=runtime_requirements,

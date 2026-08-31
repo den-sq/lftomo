@@ -57,7 +57,7 @@ class ContractStage(Stage):
 def complete_stages(*middle):
 	return [
 		ContractStage("read.test", StageContract(
-			produced_output=ProjOrder, produces_domain=DataDomain.RAW,
+			produces=ProjOrder, produces_domain=DataDomain.RAW,
 		)),
 		ContractStage("normalize.test", StageContract(
 			accepts=(ProjOrder,), produces=PRESERVE,
@@ -75,8 +75,8 @@ def complete_stages(*middle):
 	]
 
 
-def test_legacy_shape_fields_derive_layout_contract_defaults():
-	contract = StageContract(expected_input=ProjOrder, produced_output=SinoOrder)
+def test_layout_contract_resolves_canonical_declarations():
+	contract = StageContract(accepts=(ProjOrder,), produces=SinoOrder)
 
 	assert contract.accepted_layouts == (ProjOrder,)
 	assert contract.preferred_layout is ProjOrder

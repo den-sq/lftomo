@@ -85,8 +85,6 @@ class WeightedNormalizeStage(Stage):
 
 	name = "normalize.weighted"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.RAW,),
 		produces_domain=DataDomain.TRANSMISSION,
@@ -547,8 +545,6 @@ class ThetaSwitchNormalizeStage(Stage):
 
 	name = "normalize.theta_switch"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts=(ProjOrder, SinoOrder),
 		prefers=ProjOrder,

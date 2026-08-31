@@ -33,9 +33,7 @@ layout-transition stages declare the layout they create.
 
 ## 2. Two contract axes
 
-Each Stage declares two orthogonal properties, both backward-compatible with the
-existing `expected_input`/`produced_output` fields (defaults derive from them, so
-current contracts keep their meaning unchanged).
+Each Stage declares two orthogonal properties.
 
 ### 2.1 Layout axis
 
@@ -58,9 +56,9 @@ class Locality(Enum):
 @dataclass(frozen=True)
 class StageContract:
     # ... existing fields unchanged ...
-    accepts: tuple[type, ...] | None = None   # consumable layouts; None -> (expected_input,)
+    accepts: tuple[type, ...] | None = None   # consumable layouts; None -> unconstrained
     prefers: type | None = None               # planner tiebreak; None -> accepts[0]
-    produces: type | ContractEffect | None = None  # shape class | PRESERVE | None(=produced_output)
+    produces: type | ContractEffect | None = None  # shape class | PRESERVE | None(unknown)
     locality: Locality | None = None
     bounded_views_from: tuple[type, ...] = ()      # full-volume layouts supporting bounded locality views
     fused_transition: bool = False            # rewrite already touches every voxel; layout change rides free

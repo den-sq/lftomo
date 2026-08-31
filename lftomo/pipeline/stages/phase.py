@@ -179,8 +179,6 @@ class PaganinFilterStage(Stage):
 		self.alpha = alpha
 		self.enabled = enabled
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -240,8 +238,6 @@ class NegativeLogStage(Stage):
 		self.enabled = enabled
 		self.invert = invert
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -284,8 +280,6 @@ class BetaScaleStage(Stage):
 	def __init__(self, enabled: bool = True):
 		self.enabled = enabled
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -321,8 +315,6 @@ class PaganinStage(Stage):
 
 	name = "phase.paganin"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
@@ -347,8 +339,6 @@ class PaganinStage(Stage):
 		self.enabled = enabled
 		self.pad_y = pad_y
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -396,8 +386,6 @@ class PaganinPhaseAbsorptionStage(Stage):
 
 	name = "phase.paganin_phase_absorption"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
@@ -419,8 +407,6 @@ class PaganinPhaseAbsorptionStage(Stage):
 		self.alpha = alpha
 		self.epsilon = epsilon
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -479,8 +465,6 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 		if processes < 1:
 			raise ValueError("BAC processes must be positive")
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -542,8 +526,6 @@ class BronnikovAidedCorrectionStage(Stage):
 
 	name = "phase.bac"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		mutates_input=True,
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
@@ -560,8 +542,6 @@ class BronnikovAidedCorrectionStage(Stage):
 		if processes < 1:
 			raise ValueError("BAC processes must be positive")
 		self.contract = StageContract(
-			expected_input=SinoOrder,
-			produced_output=SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,

@@ -27,7 +27,7 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 
 class NoopStage(Stage):
 	name = "noop"
-	contract = StageContract(expected_input=SinoOrder, produced_output=SinoOrder)
+	contract = StageContract(accepts=(SinoOrder,), produces=SinoOrder)
 
 	def run(self, state):
 		return state
@@ -117,7 +117,7 @@ def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path)
 	result = _run(_state(projection_dir, count, size, config), stage, NoopStage())
 
 	assert "read.tiff_stack" in STAGE_REGISTRY
-	assert stage.contract.produced_output is SinoOrder
+	assert stage.contract.produces is SinoOrder
 	np.testing.assert_array_equal(result.working_array, np.transpose(stack, (1, 0, 2)))
 	assert result.dataset.shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=0)
