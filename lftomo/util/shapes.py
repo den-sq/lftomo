@@ -74,11 +74,13 @@ class DataShape(ABC):
 
 		targets = (cls,) if cls is not DataShape else tuple(descendants(DataShape))
 		target = next((item for item in targets if item.__name__ == type_name), None)
-		if target is None and cls is DataShape and type_name == "_cg_" + "_".join(values):
-			target = cls.gen(list(values))
+		if target is None and cls is DataShape and type_name.startswith("_cg_"):
+			names = type_name.removeprefix("_cg_").split("_")
+			if set(names) == set(values):
+				target = cls.gen(names)
 		if target is None:
 			raise ValueError(f"unknown or incompatible DataShape type {type_name!r}")
-		if tuple(values) != target.names or any(type(value) is not int for value in values.values()):
+		if set(values) != set(target.names) or any(type(value) is not int for value in values.values()):
 			raise ValueError(f"fields do not match {type_name}")
 		return target(**values)
 

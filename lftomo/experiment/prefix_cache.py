@@ -9,10 +9,10 @@ from datetime import datetime, timezone
 from enum import Enum
 import fcntl
 import hashlib
+from importlib import import_module
 import json
 import os
 from pathlib import Path
-import pickle
 import shutil
 import threading
 import time
@@ -31,7 +31,15 @@ from lftomo.pipeline import (
 	Stage,
 	StageObserver,
 )
+from lftomo.pipeline.domains import DataDomain
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
+from lftomo.util.shapes import DataShape
+from lftomo.util.window import (
+	TomoDataSet,
+	TomoWindow,
+	_array_from_document,
+	_array_to_document,
+)
 
 from .models import canonical_json
 
@@ -127,18 +135,86 @@ def _hash_document(value: Any) -> str:
 	return _sha256_bytes(canonical_json(_fingerprint(value)).encode("utf-8"))
 
 
-def _snapshot_value(value: Any) -> Any:
-	"""Detach run-scoped managed artifacts before persisting a prefix."""
+def _state_value_to_document(value: Any) -> Any:
+	"""Encode an ordinary snapshot value without persisting an object graph."""
 
-	if isinstance(value, ManagedBuffer):
-		return np.array(buffer_view(value), copy=True)
+	if isinstance(value, np.ndarray):
+		return {"kind": "ndarray", "value": _array_to_document(value)}
+	if isinstance(value, np.generic):
+		return _state_value_to_document(value.item())
+	if isinstance(value, Path):
+		return {"kind": "path", "value": str(value)}
+	if isinstance(value, Enum):
+		return {
+			"kind": "enum", "module": type(value).__module__,
+			"qualname": type(value).__qualname__, "name": value.name,
+		}
+	if hasattr(value, "model_dump"):
+		return {
+			"kind": "model", "module": type(value).__module__,
+			"qualname": type(value).__qualname__,
+			"value": _state_value_to_document(value.model_dump(mode="python")),
+		}
 	if isinstance(value, dict):
-		return {key: _snapshot_value(item) for key, item in value.items()}
+		if any(not isinstance(key, str) for key in value):
+			raise TypeError("snapshot document dictionaries require string keys")
+		return {
+			"kind": "dict",
+			"items": {key: _state_value_to_document(item) for key, item in value.items()},
+		}
 	if isinstance(value, list):
-		return [_snapshot_value(item) for item in value]
+		return {"kind": "list", "items": [_state_value_to_document(item) for item in value]}
 	if isinstance(value, tuple):
-		return tuple(_snapshot_value(item) for item in value)
-	return copy.deepcopy(value)
+		return {"kind": "tuple", "items": [_state_value_to_document(item) for item in value]}
+	if value is None or isinstance(value, (str, int, float, bool)):
+		return value
+	raise TypeError(f"{type(value).__module__}.{type(value).__qualname__} is not documentable")
+
+
+def _document_type(module_name: str, qualname: str) -> type:
+	if not module_name.startswith("lftomo.") or "<locals>" in qualname:
+		raise TypeError(f"snapshot document type {module_name}.{qualname} is not allowed")
+	value = import_module(module_name)
+	for name in qualname.split("."):
+		value = getattr(value, name)
+	if not isinstance(value, type):
+		raise TypeError(f"snapshot document target {module_name}.{qualname} is not a type")
+	return value
+
+
+def _state_value_from_document(document: Any) -> Any:
+	if document is None or isinstance(document, (str, int, float, bool)):
+		return document
+	if not isinstance(document, dict) or not isinstance(document.get("kind"), str):
+		raise TypeError("snapshot value document is invalid")
+	kind = document["kind"]
+	if kind == "ndarray":
+		return _array_from_document(document["value"])
+	if kind == "path":
+		return Path(document["value"])
+	if kind in {"enum", "model"}:
+		target = _document_type(document["module"], document["qualname"])
+		if kind == "enum":
+			return target[document["name"]]
+		return target.model_validate(_state_value_from_document(document["value"]))
+	if kind == "dict":
+		return {key: _state_value_from_document(item) for key, item in document["items"].items()}
+	if kind in {"list", "tuple"}:
+		items = [_state_value_from_document(item) for item in document["items"]]
+		return items if kind == "list" else tuple(items)
+	raise ValueError(f"unknown snapshot value document kind {kind!r}")
+
+
+def _buffer_spec_to_document(value: BufferSpec | None) -> dict[str, Any] | None:
+	return None if value is None else {
+		"shape": value.shape.to_document(), "dtype": value.dtype.str,
+	}
+
+
+def _buffer_spec_from_document(document: dict[str, Any] | None) -> BufferSpec | None:
+	return None if document is None else BufferSpec(
+		DataShape.from_document(document["shape"]), np.dtype(document["dtype"]),
+	)
 
 
 def _clone_state_value(value: Any) -> Any:
@@ -152,6 +228,8 @@ def _clone_state_value(value: Any) -> Any:
 		return [_clone_state_value(item) for item in value]
 	if isinstance(value, tuple):
 		return tuple(_clone_state_value(item) for item in value)
+	if hasattr(value, "to_document") or isinstance(value, BufferSpec):
+		return value
 	return copy.deepcopy(value)
 
 
@@ -516,9 +594,9 @@ def _clone_initial_state(state: PipelineState) -> PipelineState:
 		artifacts=_clone_state_value(state.artifacts),
 		backend=state.backend,
 		storage=state.storage,
-		dataset=copy.deepcopy(state.dataset),
-		source_window=copy.deepcopy(state.source_window),
-		buffer_spec=copy.deepcopy(state.buffer_spec),
+		dataset=state.dataset,
+		source_window=state.source_window,
+		buffer_spec=state.buffer_spec,
 		domain=state.domain,
 	)
 
@@ -633,7 +711,7 @@ class PrefixCacheStore:
 		except Exception as error:
 			raise PrefixCacheIntegrityError(f"invalid snapshot manifest: {error}") from error
 		array_path = entry / "working.npy"
-		state_path = entry / "state.pkl"
+		state_path = entry / "state.json"
 		try:
 			array_bytes = array_path.stat().st_size
 			state_bytes = state_path.stat().st_size
@@ -684,8 +762,7 @@ class PrefixCacheStore:
 			)
 		try:
 			mapped = FileBackedNPArray(entry / "working.npy")
-			with (entry / "state.pkl").open("rb") as stream:
-				payload = pickle.load(stream)
+			payload = json.loads((entry / "state.json").read_text(encoding="utf-8"))
 		except Exception as error:
 			raise PrefixCacheIntegrityError(f"snapshot cannot be loaded: {error}") from error
 		if not isinstance(payload, dict) or not {
@@ -697,18 +774,20 @@ class PrefixCacheStore:
 			working = (
 				np.array(mapped.array(), copy=True) if current.storage is None else
 				current.storage.fork(
-					mapped, shape=payload["buffer_spec"].shape,
+					mapped, shape=_buffer_spec_from_document(payload["buffer_spec"]).shape,
 					label="experiment.cache-fork",
 				)
 			)
 			mapped.close()
 		else:
 			working = mapped
-		artifacts = copy.deepcopy(payload["artifacts"])
+		artifacts = _state_value_from_document(payload["artifacts"])
 		for name, relative in manifest.artifact_files.items():
 			artifact_map = FileBackedNPArray(entry / relative)
 			if requires_copy:
-				artifact_spec = payload["managed_artifact_specs"][name]
+				artifact_spec = _buffer_spec_from_document(
+					payload["managed_artifact_specs"][name]
+				)
 				artifacts[name] = (
 					np.array(artifact_map.array(), copy=True) if current.storage is None else
 					current.storage.fork(
@@ -720,18 +799,22 @@ class PrefixCacheStore:
 			else:
 				artifacts[name] = artifact_map
 		recon = current.recon.model_copy(deep=True)
-		recon.metadata = copy.deepcopy(payload["recon_metadata"])
+		recon.metadata = _state_value_from_document(payload["recon_metadata"])
 		state = PipelineState(
 			working_array=working,
-			scan=copy.deepcopy(payload["scan"]),
+			scan=type(current.scan).model_validate(
+				_state_value_from_document(payload["scan"])
+			),
 			recon=recon,
 			artifacts=artifacts,
 			backend=current.backend,
 			storage=current.storage,
-			dataset=copy.deepcopy(payload.get("dataset")),
-			source_window=copy.deepcopy(payload.get("source_window")),
-			buffer_spec=copy.deepcopy(payload.get("buffer_spec")),
-			domain=payload["domain"],
+			dataset=(None if payload.get("dataset") is None else
+				TomoDataSet.from_document(payload["dataset"])),
+			source_window=(None if payload.get("source_window") is None else
+				TomoWindow.from_document(payload["source_window"])),
+			buffer_spec=_buffer_spec_from_document(payload.get("buffer_spec")),
+			domain=None if payload["domain"] is None else DataDomain[payload["domain"]],
 		)
 		return state, manifest, time.perf_counter() - started
 
@@ -788,21 +871,25 @@ class PrefixCacheStore:
 						for value in uncontracted
 					})),
 				)
-			state_path = build / "state.pkl"
+			state_path = build / "state.json"
 			managed_artifact_specs = {
-				name: BufferSpec(state.artifacts[name].shape, state.artifacts[name].dtype)
+				name: _buffer_spec_to_document(BufferSpec(
+					state.artifacts[name].shape, state.artifacts[name].dtype,
+				))
 				for name in managed_artifacts
 			}
-			_write_bytes(state_path, pickle.dumps({
-				"artifacts": _snapshot_value(ordinary_artifacts),
-				"scan": state.scan.model_copy(deep=True),
-				"recon_metadata": copy.deepcopy(state.recon.metadata),
-				"dataset": copy.deepcopy(state.dataset),
-				"source_window": copy.deepcopy(state.source_window),
-				"buffer_spec": copy.deepcopy(state.buffer_spec),
+			_write_json(state_path, {
+				"artifacts": _state_value_to_document(ordinary_artifacts),
+				"scan": _state_value_to_document(state.scan.model_dump(mode="python")),
+				"recon_metadata": _state_value_to_document(state.recon.metadata),
+				"dataset": None if state.dataset is None else state.dataset.to_document(),
+				"source_window": (
+					None if state.source_window is None else state.source_window.to_document()
+				),
+				"buffer_spec": _buffer_spec_to_document(state.buffer_spec),
 				"managed_artifact_specs": managed_artifact_specs,
-				"domain": state.domain,
-			}, protocol=pickle.HIGHEST_PROTOCOL))
+				"domain": None if state.domain is None else state.domain.name,
+			})
 			array_bytes = array_path.stat().st_size
 			state_bytes = state_path.stat().st_size
 			manifest = PrefixSnapshotManifest(

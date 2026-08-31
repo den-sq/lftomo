@@ -39,7 +39,7 @@ from lftomo.experiment.prefix_cache import _fingerprint, _hash_document
 from lftomo.pipeline import BufferSpec, Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
-from lftomo.util.shapes import ProjOrder, X
+from lftomo.util.shapes import ProjOrder, X, Y
 from lftomo.util.window import CTFov, TomoDataSet
 
 
@@ -383,12 +383,19 @@ def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
 	decisions = {item.candidate_id: item for item in plan.decisions}
 	shared = candidates[0].configs[0]
 	values = np.arange(24, dtype=np.float32).reshape(2, 3, 4) + 1
+	dataset = TomoDataSet(
+		CTFov(2, 180, 1), ProjOrder(*values.shape), Y(3),
+		angles=np.array([0, 1], dtype=np.float32),
+	)
+	source_window = dataset.full_window()
 
 	def run(candidate_id, factor, failure=None, **callbacks):
 		configs = (shared, config("tail", "multiply", factor=factor))
+		initial = state(configs)
+		initial.dataset, initial.source_window = dataset, source_window
 		return executor.execute(
 			decisions[candidate_id],
-			state(configs),
+			initial,
 			(SourceStage(values, calls), MutatingTailStage(factor, failure=failure)),
 			configs,
 			runtime_identity={"dataset": {"content_hash": "a" * 64}},
@@ -412,6 +419,8 @@ def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
 		)
 		assert result.scan.metadata["nested"]["history"] == ["source", factor]
 		assert result.recon.metadata["nested"]["history"] == ["source", factor]
+		assert result.dataset.to_document() == dataset.to_document()
+		assert result.source_window.to_document() == source_window.to_document()
 		assert event.fork_strategy == "explicit_copy"
 
 	for failure, exception, terminal in (
@@ -436,6 +445,8 @@ def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
 
 	working_path = next((policy.scratch / "entries").glob("*/*/working.npy"))
 	np.testing.assert_array_equal(np.load(working_path), values)
+	assert (working_path.parent / "state.json").is_file()
+	assert not (working_path.parent / "state.pkl").exists()
 
 
 def test_nonmutating_suffix_uses_read_only_map_and_unknown_identity_bypasses(tmp_path):
@@ -728,6 +739,12 @@ def test_invalidation_corruption_recovery_eviction_and_sampled_verification(tmp_
 		("suffix", "started", (1,)), ("suffix", "completed", (1,)),
 	]
 	assert calls["count"] == 2  # one build plus one sampled independent verification
+	manifest_path = next((policy.scratch / "entries").glob("*/*/manifest.json"))
+	legacy = json.loads(manifest_path.read_text(encoding="utf-8"))
+	legacy["schema_version"] = 1
+	manifest_path.write_text(json.dumps(legacy, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+	_version_rebuilt, event, _timeline = execute("a" * 64)
+	assert event.status == "rebuilt"
 
 	_partial = policy.scratch / "builds" / "abandoned"
 	_partial.mkdir(parents=True)
