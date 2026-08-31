@@ -4,7 +4,7 @@ import numpy as np
 
 from lftomo.prep.flat import weighted_normalize
 from lftomo.prep.phase import _phase_pad, _phase_retrieval, filter_create
-from lftomo.prep import stripe
+from lftomo.prep import flat, stripe
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import GenericOrder, ImgSlice, SinoOrder, Y
 from lftomo.util.window import TomoWindow
@@ -41,6 +41,14 @@ def test_weighted_normalize_uses_current_memory_and_window_api():
 		output.shutdown()
 		source.shutdown()
 		flats.shutdown()
+
+
+def test_calculate_shift_reshapes_for_asymmetric_scope(tmp_path, monkeypatch):
+	flats = np.ones((len(flat.FLAT), 8, 10), dtype=np.float32)
+	flats[flat.FLAT.POSTGAIN.index] = 2.0
+	monkeypatch.chdir(tmp_path)
+	monkeypatch.setattr(flat.tf, "imwrite", lambda *_args, **_kwargs: None)
+	flat.calculate_shift(flats, scope=ImgSlice(Y=2, X=3), interval=1, presub=True)
 
 
 def test_phase_filter_uses_current_shape_and_memory_api():
