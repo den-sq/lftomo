@@ -213,7 +213,7 @@ class GridrecStage(Stage):
 		kwargs = {"filter_name": self.filter_name}
 		if self.filter_parameters is not None:
 			kwargs["filter_par"] = self.filter_parameters
-		output, target = self._allocate_reconstruction(state, data, layout)
+		output, target, _buffer_spec = self._allocate_reconstruction(state, data, layout)
 		reconstruction = tomopy.recon(
 			data,
 			angles,
@@ -312,7 +312,7 @@ class AstraCudaStage(GridrecStage):
 		kwargs = {"filter_name": self.filter_name}
 		if self.filter_parameters is not None:
 			kwargs["filter_par"] = self.filter_parameters
-		output, target = self._allocate_reconstruction(state, data, layout)
+		output, target, _buffer_spec = self._allocate_reconstruction(state, data, layout)
 		reconstruction = tomopy.recon(
 			data,
 			angles,

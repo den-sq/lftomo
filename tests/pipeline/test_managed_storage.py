@@ -11,7 +11,9 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import PipelineState, Stage, StageContract
+from lftomo.pipeline import (
+	BufferSpec, PipelineState, Stage, StageContract, allocate_output, commit_output,
+)
 from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
 from lftomo.util.mem import FileBackedNPArray, SharedNPArray, SharedNPManager
 from lftomo.util.shapes import ImgSlice, ProjOrder
@@ -182,6 +184,29 @@ def test_managed_buffers_expose_an_honest_no_copy_numpy_protocol(tmp_path):
 def test_plain_ndarray_boundary_conversion_is_identity():
 	working = np.arange(6, dtype=np.float32).reshape(2, 3)
 	assert np.asarray(working) is working
+
+
+def test_allocate_output_returns_the_spec_committed_in_both_storage_modes():
+	shape = ProjOrder(Theta=2, Y=3, X=4)
+	with PipelineRunContext() as context:
+		for storage in (None, context.storage):
+			source = (
+				np.zeros(shape.as_tuple(), dtype=np.uint16) if storage is None
+				else storage.allocate(shape, np.uint16, role="raw_staging")
+			)
+			state = PipelineState(
+				source, _scan(), _recon(), storage=storage,
+				buffer_spec=BufferSpec(shape, np.uint16),
+			)
+			output, _view, buffer_spec = allocate_output(
+				state, shape, np.float32, role="normalized",
+			)
+			result = commit_output(
+				state, output, retire_as="raw_staging", buffer_spec=buffer_spec,
+			)
+
+			assert result.buffer_spec is buffer_spec
+			assert buffer_spec == BufferSpec(shape, np.float32)
 
 
 def test_real_stage_kernel_in_child_mutates_manager_buffer_in_parent():

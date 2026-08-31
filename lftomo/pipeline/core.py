@@ -254,6 +254,14 @@ class BufferSpec:
 		return type(self.shape)
 
 
+def _buffer_dtype(buffer: Any) -> np.dtype | None:
+	dtype = getattr(buffer, "dtype", None)
+	if dtype is None:
+		view = getattr(buffer, "array", buffer)
+		dtype = getattr(buffer_view(buffer if callable(view) else view), "dtype", None)
+	return None if dtype is None else np.dtype(dtype)
+
+
 def _buffer_spec(buffer: Any) -> BufferSpec | None:
 	shape = getattr(buffer, "shape", None)
 	if shape is None:
@@ -267,11 +275,8 @@ def _buffer_spec(buffer: Any) -> BufferSpec | None:
 			return None
 	except TypeError:
 		return None
-	dtype = getattr(buffer, "dtype", None)
-	if dtype is None and hasattr(buffer, "array"):
-		view = buffer.array
-		dtype = getattr(view() if callable(view) else view, "dtype", None)
-	return None if dtype is None else BufferSpec(shape, np.dtype(dtype))
+	dtype = _buffer_dtype(buffer)
+	return None if dtype is None else BufferSpec(shape, dtype)
 
 
 @dataclass
@@ -301,11 +306,8 @@ class PipelineState:
 		actual_shape = actual.as_tuple() if isinstance(actual, DataShape) else tuple(actual)
 		if actual_shape != self.buffer_spec.shape.as_tuple():
 			raise ValueError("working array shape disagrees with BufferSpec.shape")
-		actual_dtype = getattr(self.working_array, "dtype", None)
-		if actual_dtype is None and hasattr(self.working_array, "array"):
-			view = self.working_array.array
-			actual_dtype = getattr(view() if callable(view) else view, "dtype", None)
-		if actual_dtype is None or np.dtype(actual_dtype) != self.buffer_spec.dtype:
+		actual_dtype = _buffer_dtype(self.working_array)
+		if actual_dtype is None or actual_dtype != self.buffer_spec.dtype:
 			raise ValueError("working array dtype disagrees with BufferSpec.dtype")
 
 	@property
@@ -347,18 +349,19 @@ def allocate_output(
 	reuse_from: tuple[str, ...] = (),
 	alias_from_current: bool = False,
 	proof: str | None = None,
-) -> tuple[Any, np.ndarray]:
-	"""Allocate a prospective output without changing or retiring current state."""
+) -> tuple[Any, np.ndarray, BufferSpec]:
+	"""Return an output handle, local view, and their canonical BufferSpec."""
 
+	buffer_spec = BufferSpec(shape, dtype)
 	if state.storage is None:
-		array = np.empty(shape.as_tuple(), dtype=dtype)
-		return array, array
+		array = np.empty(buffer_spec.shape.as_tuple(), dtype=buffer_spec.dtype)
+		return array, array, buffer_spec
 	alias_from = state.working_array if alias_from_current and hasattr(state.working_array, "name") else None
 	buffer = state.storage.allocate(
-		shape, np.dtype(dtype), role=role, reuse_from=reuse_from,
+		buffer_spec.shape, buffer_spec.dtype, role=role, reuse_from=reuse_from,
 		alias_from=alias_from, proof=proof,
 	)
-	return buffer, buffer_view(buffer)
+	return buffer, buffer_view(buffer), buffer_spec
 
 
 def commit_output(

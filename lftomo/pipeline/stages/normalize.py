@@ -32,25 +32,28 @@ from lftomo.storage import buffer_view
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
 
 
-def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
-	"""Return a float32 prospective output while the raw input remains live."""
+def _normalization_output(
+	state: PipelineState,
+) -> tuple[object, np.ndarray, BufferSpec]:
+	"""Return a float32 output, local view, and spec while raw input stays live."""
 
 	source = np.asarray(state.working_array)
 	# Float32 arrays can be normalized in place; other dtypes require promotion.
 	if state.storage is None and source.dtype == np.dtype(np.float32):
-		return state.working_array, source
-	output, data = allocate_output(
+		return state.working_array, source, state.buffer_spec
+	output, data, buffer_spec = allocate_output(
 		state, state.buffer_spec.shape, np.float32, role="normalized",
 		reuse_from=("normalized", "reconstruction"),
 	)
 	data[...] = source
-	return output, data
+	return output, data, buffer_spec
 
 
-def _finish_normalization(state: PipelineState, output: object) -> PipelineState:
+def _finish_normalization(
+	state: PipelineState, output: object, buffer_spec: BufferSpec,
+) -> PipelineState:
 	return commit_output(
-		state, output, retire_as="raw_staging",
-		buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(np.float32)),
+		state, output, retire_as="raw_staging", buffer_spec=buffer_spec,
 	)
 
 
@@ -108,7 +111,7 @@ class WeightedNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("WeightedNormalizeStage currently requires the NumPy backend")
 
-		output, working = _normalization_output(state)
+		output, working, buffer_spec = _normalization_output(state)
 		flats = _managed_flat_fields(state)
 		layout = type(state.buffer_spec.shape)
 		if working.ndim != 3:
@@ -133,7 +136,7 @@ class WeightedNormalizeStage(Stage):
 				self.pre_sub,
 				projection_index=projection_start + projection,
 			)
-		return _finish_normalization(state, output)
+		return _finish_normalization(state, output, buffer_spec)
 
 
 def _flat_fields(state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
@@ -229,7 +232,7 @@ class BeamTrackingNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BeamTrackingNormalizeStage currently requires the NumPy backend")
-		output, data = _normalization_output(state)
+		output, data, buffer_spec = _normalization_output(state)
 		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_tracking expects a three-dimensional array")
@@ -286,7 +289,7 @@ class BeamTrackingNormalizeStage(Stage):
 			},
 			"projection_start": projection_start, "projection_count": projection_count,
 		}
-		return _finish_normalization(state, output)
+		return _finish_normalization(state, output, buffer_spec)
 
 
 class BeamKeyframesNormalizeStage(Stage):
@@ -313,7 +316,7 @@ class BeamKeyframesNormalizeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		output, data = _normalization_output(state)
+		output, data, buffer_spec = _normalization_output(state)
 		layout = type(state.buffer_spec.shape)
 		y_size = data.shape[layout.axis_of("Y")]
 		start, stop = _calibration_y_window(state, y_size)
@@ -365,7 +368,7 @@ class BeamKeyframesNormalizeStage(Stage):
 			"projection_start": projection_start, "projection_count": projection_count,
 			"observability": "events wholly inside a keyframe gap cannot be recovered",
 		}
-		return _finish_normalization(state, output)
+		return _finish_normalization(state, output, buffer_spec)
 
 
 class BeamBasisFitNormalizeStage(Stage):
@@ -446,7 +449,7 @@ class BeamBasisFitNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BeamBasisFitNormalizeStage currently requires the NumPy backend")
-		output, data = _normalization_output(state)
+		output, data, buffer_spec = _normalization_output(state)
 		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_basis_fit expects a three-dimensional array")
@@ -537,7 +540,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		}
 		state.artifacts["_beam_basis_coefficients"] = coefficient_array
 		state.artifacts["_beam_basis_violations"] = violations
-		return _finish_normalization(state, output)
+		return _finish_normalization(state, output, buffer_spec)
 
 
 class ThetaSwitchNormalizeStage(Stage):
@@ -582,7 +585,7 @@ class ThetaSwitchNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("ThetaSwitchNormalizeStage currently requires the NumPy backend")
-		output, data = _normalization_output(state)
+		output, data, buffer_spec = _normalization_output(state)
 		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("normalize.theta_switch expects a three-dimensional tomography array")
@@ -606,7 +609,7 @@ class ThetaSwitchNormalizeStage(Stage):
 				image, gain, dark, self.pre_subtracted,
 				self.floor_nonpositive, self.floor_value,
 			)
-		return _finish_normalization(state, output)
+		return _finish_normalization(state, output, buffer_spec)
 
 
 class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):

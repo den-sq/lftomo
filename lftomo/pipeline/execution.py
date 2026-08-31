@@ -462,11 +462,11 @@ class PipelineExecutor:
 				prepare_normalization_dispatch,
 			)
 
-			output, _values = _normalization_output(state)
+			output, _values, output_spec = _normalization_output(state)
 			if "flat_fields" in state.scan.metadata:
 				_managed_flat_fields(state)
 			working_state = state.with_array(
-				output, buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(np.float32)),
+				output, buffer_spec=output_spec,
 			)
 			air_mask_key = getattr(stage, "air_mask_artifact", "air_mask")
 			air_mask = working_state.artifacts.get(air_mask_key)
@@ -504,7 +504,7 @@ class PipelineExecutor:
 			merge_normalization_dispatch(stage, working_state, results)
 			result = commit_output(
 				original, output, retire_as="raw_staging",
-				buffer_spec=BufferSpec(original.buffer_spec.shape, np.dtype(np.float32)),
+				buffer_spec=output_spec,
 			)
 			result.artifacts.update(working_state.artifacts)
 			return result
@@ -526,7 +526,7 @@ class PipelineExecutor:
 			if state.layout is stage.target:
 				raise ValueError("layout.convert target is already the current layout")
 			shape = state.buffer_spec.shape.to(stage.target)
-			output, _target = allocate_output(
+			output, _target, buffer_spec = allocate_output(
 				state, shape, data.dtype, role=f"layout:{stage.target.__name__}",
 			)
 			count = state.buffer_spec.shape.Theta
@@ -535,7 +535,7 @@ class PipelineExecutor:
 				for index in range(count)
 			))
 			return commit_output(
-				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+				state, output, retire_as=None, buffer_spec=buffer_spec,
 			)
 
 		if isinstance(stage, AffineSkewMovementStage):
@@ -557,7 +557,7 @@ class PipelineExecutor:
 			projection_count = state.buffer_spec.shape.Theta
 			row_count = state.buffer_spec.shape.Y
 			shape = stage.output_shape(state.buffer_spec.shape)
-			output, _target = allocate_output(
+			output, _target, buffer_spec = allocate_output(
 				state, shape, data.dtype, role="fused_geometry",
 			)
 			self.submit_all(run_affine_fill_kernel, (
@@ -568,7 +568,7 @@ class PipelineExecutor:
 				for index in range(projection_count)
 			))
 			result = commit_output(
-				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+				state, output, retire_as=None, buffer_spec=buffer_spec,
 			)
 			if state.source_window is not None:
 				result.source_window = stage.output_window(state.source_window)
@@ -587,7 +587,7 @@ class PipelineExecutor:
 			shape, shifts, start, stop = stage.output_geometry(
 				source_shape, stage._pitch(state),
 			)
-			output, target = allocate_output(
+			output, target, buffer_spec = allocate_output(
 				state, shape, data.dtype, role="helical_remap",
 			)
 			if not stage.crop_valid:
@@ -600,7 +600,7 @@ class PipelineExecutor:
 				for index in range(count)
 			))
 			result = commit_output(
-				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+				state, output, retire_as=None, buffer_spec=buffer_spec,
 			)
 			result.artifacts["helical_row_shifts"] = shifts
 			return result

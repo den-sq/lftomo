@@ -6,7 +6,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	BufferSpec, Locality, PipelineState, Stage, StageContract,
+	Locality, PipelineState, Stage, StageContract,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -99,7 +99,7 @@ class HelicalIndexRemapStage(Stage):
 
 		if self.crop_valid:
 			output_rows = np.arange(start, stop)
-			output, remapped = allocate_output(
+			output, remapped, buffer_spec = allocate_output(
 				state, shape, data.dtype, role="helical_remap",
 			)
 			for projection, shift_px in enumerate(shifts):
@@ -107,7 +107,7 @@ class HelicalIndexRemapStage(Stage):
 					data[layout.point_index(Theta=projection)][output_rows + shift_px]
 				)
 		else:
-			output, remapped = allocate_output(
+			output, remapped, buffer_spec = allocate_output(
 				state, source_shape, data.dtype, role="helical_remap",
 			)
 			remapped.fill(self.fill_value)
@@ -119,7 +119,7 @@ class HelicalIndexRemapStage(Stage):
 					data[layout.point_index(Theta=projection)][source[valid]]
 				)
 		result = commit_output(
-			state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+			state, output, retire_as=None, buffer_spec=buffer_spec,
 		)
 		result.artifacts["helical_row_shifts"] = shifts
 		return result

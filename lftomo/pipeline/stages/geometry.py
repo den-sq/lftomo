@@ -8,7 +8,7 @@ from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	BufferSpec, Locality, PadRequirement, PipelineState, Stage, StageContract,
+	Locality, PadRequirement, PipelineState, Stage, StageContract,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -306,7 +306,7 @@ class AffineSkewMovementStage(Stage):
 		projection_count = source_shape.Theta
 		row_count = source_shape.Y
 		shape = self.output_shape(source_shape)
-		output_buffer, output = allocate_output(
+		output_buffer, output, buffer_spec = allocate_output(
 			state, shape, data.dtype, role="fused_geometry",
 		)
 		for projection in range(projection_count):
@@ -317,8 +317,7 @@ class AffineSkewMovementStage(Stage):
 				)
 			)
 		result = commit_output(
-			state, output_buffer, retire_as=None,
-			buffer_spec=BufferSpec(shape, data.dtype),
+			state, output_buffer, retire_as=None, buffer_spec=buffer_spec,
 		)
 		if state.source_window is not None:
 			result.source_window = self.output_window(state.source_window)
