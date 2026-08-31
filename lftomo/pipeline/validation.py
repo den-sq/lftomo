@@ -20,6 +20,7 @@ from lftomo.pipeline.planning import (
 	stage_allocation_spec,
 	stage_output_spec,
 )
+from lftomo.util.window import TomoDataSet, TomoWindow
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -124,6 +125,8 @@ def validate_pipeline(
 	enable_aliasing: bool = True,
 	enable_engine_aliasing: bool = True,
 	external_pins: tuple[str, ...] = (),
+	dataset: TomoDataSet | None = None,
+	source_window: TomoWindow | None = None,
 ) -> PipelinePlan:
 	"""Validate a Stage sequence and return its resolved execution plan."""
 
@@ -148,6 +151,7 @@ def validate_pipeline(
 	steps: list[PlanStep] = []
 	warnings: list[str] = []
 	current_buffer = None
+	current_window = source_window
 
 	for index, stage in enumerate(stages):
 		occurrence = getattr(stage, "occurrence_id", None)
@@ -271,8 +275,12 @@ def validate_pipeline(
 				hidden=True,
 			))
 
-		output_buffer = stage_output_spec(stage, input_buffer, scan)
-		allocation_buffer = stage_allocation_spec(stage, input_buffer, output_buffer)
+		output_buffer = stage_output_spec(
+			stage, input_buffer, scan, dataset=dataset, source_window=current_window,
+		)
+		allocation_buffer = stage_allocation_spec(
+			stage, input_buffer, output_buffer, source_window=current_window,
+		)
 		output_role, retires_role = _transition_role(stage)
 		steps.append(PlanStep(
 			index=index, stage_name=stage.name,
@@ -289,6 +297,8 @@ def validate_pipeline(
 		current_layout = output_layout
 		current_domain = output_domain
 		current_buffer = output_buffer
+		if current_window is not None and output_layout in (ProjOrder, SinoOrder):
+			current_window = stage.output_window(current_window)
 
 	if mode is ValidationMode.COMPLETE:
 		if normalize_transitions != 1:

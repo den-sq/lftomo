@@ -63,7 +63,9 @@ def _dense_inputs(state: PipelineState) -> tuple[np.ndarray, np.ndarray, np.ndar
 		mask = np.broadcast_to(mask[:, None, None], volume.shape)
 	else:
 		mask = np.broadcast_to(mask, volume.shape)
-	angles = state.artifacts.get("angles")
+	angles = None
+	if state.dataset is not None and state.source_window is not None:
+		angles = state.dataset.angles[state.source_window.axis_slice("Theta")]
 	if angles is None:
 		angles = np.linspace(
 			state.scan.acquisition.rotation_start_deg,
@@ -108,7 +110,9 @@ def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> P
 		and state.storage is not None
 		and state.executor is not None
 	):
-		from lftomo.pipeline.execution import run_layout_fill_kernel
+		from lftomo.pipeline.execution import (
+			_buffer_units, _unit_handle, run_layout_fill_kernel,
+		)
 
 		source = state.storage.allocate(
 			ProjOrder(*values.shape), np.float32, role="super_resolution_assembly",
@@ -116,8 +120,8 @@ def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> P
 		try:
 			source.array()[...] = values
 			state.executor.submit_all(run_layout_fill_kernel, (
-				(source, output, ProjOrder, SinoOrder, index)
-				for index in range(values.shape[0])
+				(_unit_handle(source, unit), _unit_handle(output, unit))
+				for unit in _buffer_units(state, "Theta", shape=source.shape)
 			))
 		finally:
 			state.storage.retire(source, role=None)

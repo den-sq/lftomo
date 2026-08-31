@@ -10,7 +10,7 @@ import os
 import signal
 import threading
 import time
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Iterator, Sequence
 
 import numpy as np
 
@@ -24,6 +24,7 @@ from lftomo.pipeline.core import (
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.window import DataRef, TomoWindow
 
 
 class WorkerTimeoutError(TimeoutError):
@@ -54,9 +55,9 @@ def _worker_initializer() -> None:
 
 
 def _worker_state(
-	buffer: ManagedBuffer, payload: _WorkerState, shape=None,
+	buffer: ManagedBuffer, payload: _WorkerState,
 ) -> PipelineState:
-	buffer_spec = BufferSpec(shape or payload.buffer_spec.shape, payload.buffer_spec.dtype)
+	buffer_spec = BufferSpec(payload.source_window.shape, payload.source_window.dtype)
 	return PipelineState(
 		working_array=buffer,
 		scan=payload.scan,
@@ -71,43 +72,67 @@ def _worker_state(
 	)
 
 
-def _projection_handle(buffer: ManagedBuffer, layout: type[Any], index: int) -> ManagedBuffer:
-	if layout is ProjOrder:
-		return buffer[index:index + 1, :, :]
-	if layout is SinoOrder:
-		return buffer[:, index:index + 1, :]
-	raise ValueError("projection dispatch requires ProjOrder or SinoOrder")
+def _buffer_ref(state: PipelineState, shape=None) -> DataRef:
+	"""Bind current buffer extents to the source window's global coordinates."""
+
+	shape = state.buffer_spec.shape if shape is None else shape
+	position = shape.make_with(0)
+	step = shape.make_with(1)
+	if state.source_window is not None:
+		source_position = state.source_window.with_pad().pos.as_dict()
+		source_step = state.source_window.step.as_dict()
+		position = type(shape)(**{
+			name: source_position.get(name, value)
+			for name, value in position.as_dict().items()
+		})
+		step = type(shape)(**{
+			name: source_step.get(name, value)
+			for name, value in step.as_dict().items()
+		})
+	if isinstance(state.source_window, TomoWindow):
+		return TomoWindow(
+			shape, shape.make_with(0), position, step, state.buffer_spec.dtype,
+			state.source_window.internal.dtype,
+		)
+	return DataRef(shape, shape.make_with(0), position, step, state.buffer_spec.dtype)
+
+
+def _buffer_units(state: PipelineState, axis: str, shape=None) -> Iterator[DataRef]:
+	return _buffer_ref(state, shape).units(axis)
+
+
+def _unit_index(unit: DataRef, shape) -> tuple[slice, ...]:
+	by_name = dict(zip(unit.shape.names, unit.index, strict=True))
+	return type(shape).point_index(**{
+		name: by_name[name] for name in shape.names if name in by_name
+	})
+
+
+def _unit_handle(buffer: ManagedBuffer, unit: DataRef) -> ManagedBuffer:
+	return buffer[_unit_index(unit, buffer.shape)]
 
 
 def run_projection_kernel(
-	buffer: ManagedBuffer,
-	layout: type[Any],
-	index: int,
+	handle: ManagedBuffer,
 	stage: Stage,
 	payload: _WorkerState,
-	projection_count: int,
 ) -> dict[str, Any]:
 	"""Module-level adapter that mutates one shared projection view."""
 
-	handle = _projection_handle(buffer, layout, index)
-	shape = payload.buffer_spec.shape
-	projection_shape = type(shape)(**{**shape.as_dict(), "Theta": 1})
-	state = _worker_state(handle, payload, projection_shape)
-	base = int(payload.artifacts.get("projection_start", 0))
-	total = int(payload.artifacts.get("projection_count", projection_count))
-	state.artifacts["projection_start"] = base + index
-	state.artifacts["projection_count"] = total
+	state = _worker_state(handle, payload)
+	unit = payload.source_window
+	index = unit.axis_slice("Theta").start
 	projection_times = state.artifacts.get("projection_times")
 	if isinstance(projection_times, ManagedBuffer):
 		projection_times = projection_times.array()
-	if projection_times is not None and len(projection_times) == projection_count:
+	if projection_times is not None and len(projection_times) == payload.buffer_spec.shape.Theta:
 		state.artifacts["projection_times"] = np.asarray(
 			projection_times[index:index + 1],
 		)
 	air_mask_key = getattr(stage, "air_mask_artifact", "air_mask")
 	air_mask = state.artifacts.get(air_mask_key)
 	if isinstance(air_mask, ManagedBuffer) and air_mask.array().ndim == 3:
-		state.artifacts[air_mask_key] = _projection_handle(air_mask, layout, index)
+		state.artifacts[air_mask_key] = _unit_handle(air_mask, unit)
 	before = set(state.artifacts)
 	result = stage.run(state)
 	return {
@@ -117,24 +142,17 @@ def run_projection_kernel(
 
 
 def run_sinogram_chain_kernel(
-	buffer: ManagedBuffer,
-	layout: type[Any],
-	index: int,
+	handle: ManagedBuffer,
 	stages: tuple[Stage, ...],
 	payload: _WorkerState,
 	collect_timings: bool = False,
 ) -> tuple[float, ...]:
-	"""Gather/process/scatter one row for a complete bounded Stage chain."""
+	"""Process one unit-shaped row through a complete bounded Stage chain."""
 
-	data = np.asarray(_worker_state(buffer, payload).working_array)
-	if layout is ProjOrder:
-		working = np.ascontiguousarray(data[layout.point_index(Y=index)])
-	else:
-		working = data[layout.point_index(Y=index)]
-	state = _worker_state(buffer, payload)
-	from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
-
-	state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
+	state = _worker_state(handle, payload)
+	data = np.asarray(state.working_array)
+	layout = state.layout
+	working = data[layout.point_index(Y=0)]
 	timings = []
 	for stage in stages:
 		started = time.perf_counter() if collect_timings else None
@@ -142,9 +160,7 @@ def run_sinogram_chain_kernel(
 		if started is not None:
 			timings.append(time.perf_counter() - started)
 		if result is not None and result is not working:
-			working = np.asarray(result)
-	if layout is ProjOrder:
-		data[layout.point_index(Y=index)] = working
+			working[...] = result
 	return tuple(timings)
 
 
@@ -231,7 +247,7 @@ def _prepare_vo_work(
 		"median_pad_bytes": median_pad_bytes,
 		"managed_bytes": float_bytes + index_bytes + median_pad_bytes,
 		"allocation_count": 2 + int(median_pad_work is not None),
-		"indexing": "source_window_row",
+		"indexing": "source_window_unit_index",
 	}
 	state.artifacts.setdefault("vo_scratch_allocations", []).append(report)
 	return tuple(allocated)
@@ -242,9 +258,6 @@ def _release_vo_work(
 ) -> None:
 	"""Retire temporary Vo planes after all dispatched rows have completed."""
 
-	from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
-
-	state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
 	if not allocated:
 		return
 	from lftomo.pipeline.stages.stripe import (
@@ -262,7 +275,7 @@ def _release_vo_work(
 
 
 def write_tiff_slice_kernel(
-	buffer: ManagedBuffer, index: int, path: Any, dtype: np.dtype,
+	handle: ManagedBuffer, path: Any, dtype: np.dtype,
 ) -> None:
 	"""Write one slice from a reopenable handle; no ndarray crosses IPC."""
 
@@ -271,35 +284,25 @@ def write_tiff_slice_kernel(
 	# Keep the sliced handle alive for the full write.  Its ``array`` view does
 	# not own the reopened shared-memory mapping and becomes invalid when the
 	# temporary handle is finalized.
-	slice_buffer = buffer[index]
-	_write_array_slice(slice_buffer.array(), path, dtype)
+	values = handle.array()
+	_write_array_slice(values[0], path, dtype)
 
 
 def run_layout_fill_kernel(
-	source: ManagedBuffer,
-	target: ManagedBuffer,
-	source_layout: type[Any],
-	target_layout: type[Any],
-	projection: int,
+	source: ManagedBuffer, target: ManagedBuffer,
 ) -> None:
 	"""Copy one projection between manager-owned layout buffers."""
 
 	source_values = source.array()
 	target_values = target.array()
-	target_values[target_layout.point_index(Theta=projection)] = (
-		source_values[source_layout.point_index(Theta=projection)]
-	)
+	target_values[...] = source.shape.transposed_view(source_values, target.shape)
 
 
 def run_affine_fill_kernel(
 	source: ManagedBuffer,
 	target: ManagedBuffer,
-	source_layout: type[Any],
-	target_layout: type[Any],
-	projection: int,
-	projection_count: int,
-	row_count: int,
 	stage: Stage,
+	payload: _WorkerState,
 ) -> None:
 	"""Transform one projection into a manager-owned fused output."""
 
@@ -307,19 +310,17 @@ def run_affine_fill_kernel(
 
 	source_values = source.array()
 	target_values = target.array()
-	image = source_values[source_layout.point_index(Theta=projection)]
-	target_values[target_layout.point_index(Theta=projection)] = (
-		transform_affine_projection(
-			stage, image, projection, projection_count, row_count,
-		)
+	row_count = payload.buffer_spec.shape.Y
+	image = source_values[type(source.shape).point_index(Theta=0)]
+	transform_affine_projection(
+		stage, image, payload.source_window, 0, payload.dataset.physical_shape, row_count,
+		target=target_values[type(target.shape).point_index(Theta=0)],
 	)
 
 
 def run_helical_fill_kernel(
 	source: ManagedBuffer,
 	target: ManagedBuffer,
-	layout: type[Any],
-	projection: int,
 	shift_px: int,
 	row_start: int,
 	row_stop: int,
@@ -329,8 +330,8 @@ def run_helical_fill_kernel(
 
 	source_values = source.array()
 	target_values = target.array()
-	source_image = source_values[layout.point_index(Theta=projection)]
-	target_image = target_values[layout.point_index(Theta=projection)]
+	source_image = source_values[type(source.shape).point_index(Theta=0)]
+	target_image = target_values[type(target.shape).point_index(Theta=0)]
 	if crop_valid:
 		target_image[:] = source_image[row_start + shift_px:row_stop + shift_px]
 		return
@@ -340,7 +341,7 @@ def run_helical_fill_kernel(
 	target_image[valid] = source_image[source_rows[valid]]
 
 
-def _payload(state: PipelineState) -> _WorkerState:
+def _payload(state: PipelineState, source_window: DataRef) -> _WorkerState:
 	scan = state.scan
 	if isinstance(state.artifacts.get("flat_fields"), ManagedBuffer):
 		metadata = dict(scan.metadata)
@@ -352,7 +353,7 @@ def _payload(state: PipelineState) -> _WorkerState:
 		artifacts=dict(state.artifacts),
 		backend=state.backend,
 		dataset=state.dataset,
-		source_window=state.source_window,
+		source_window=source_window,
 		buffer_spec=state.buffer_spec,
 		domain=state.domain,
 	)
@@ -466,7 +467,7 @@ class PipelineExecutor:
 			if "flat_fields" in state.scan.metadata:
 				_managed_flat_fields(state)
 			working_state = state.with_array(
-				output, buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(np.float32)),
+				output, buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(output.dtype)),
 			)
 			air_mask_key = getattr(stage, "air_mask_artifact", "air_mask")
 			air_mask = working_state.artifacts.get(air_mask_key)
@@ -489,14 +490,14 @@ class PipelineExecutor:
 			from lftomo.pipeline.stages.phase import prepare_phase_filter
 
 			prepare_phase_filter(stage, working_state)
-		data = np.asarray(working_state.working_array)
-		layout = working_state.layout
-		if layout not in (ProjOrder, SinoOrder):
+		if working_state.layout not in (ProjOrder, SinoOrder):
 			return stage.run(state)
-		count = data.shape[layout.axis_of("Theta")]
 		results = self.submit_all(run_projection_kernel, (
-			(working_state.working_array, layout, index, stage, _payload(working_state), count)
-			for index in range(count)
+			(
+				_unit_handle(working_state.working_array, unit), stage,
+				_payload(working_state, unit),
+			)
+			for unit in _buffer_units(working_state, "Theta")
 		))
 		if stage.name.startswith("normalize."):
 			from lftomo.pipeline.stages.normalize import merge_normalization_dispatch
@@ -504,7 +505,7 @@ class PipelineExecutor:
 			merge_normalization_dispatch(stage, working_state, results)
 			result = commit_output(
 				original, output, retire_as="raw_staging",
-				buffer_spec=BufferSpec(original.buffer_spec.shape, np.dtype(np.float32)),
+				buffer_spec=BufferSpec(original.buffer_spec.shape, np.dtype(output.dtype)),
 			)
 			result.artifacts.update(working_state.artifacts)
 			return result
@@ -529,10 +530,9 @@ class PipelineExecutor:
 			output, _target = allocate_output(
 				state, shape, data.dtype, role=f"layout:{stage.target.__name__}",
 			)
-			count = state.buffer_spec.shape.Theta
 			self.submit_all(run_layout_fill_kernel, (
-				(state.working_array, output, state.layout, stage.target, index)
-				for index in range(count)
+				(_unit_handle(state.working_array, unit), _unit_handle(output, unit))
+				for unit in _buffer_units(state, "Theta")
 			))
 			return commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
@@ -543,10 +543,12 @@ class PipelineExecutor:
 				layout = state.layout
 				if layout not in (ProjOrder, SinoOrder):
 					return stage.run(state)
-				count = data.shape[layout.axis_of("Theta")]
 				self.submit_all(run_projection_kernel, (
-					(state.working_array, layout, index, stage, _payload(state), count)
-					for index in range(count)
+					(
+						_unit_handle(state.working_array, unit), stage,
+						_payload(state, unit),
+					)
+					for unit in _buffer_units(state, "Theta")
 				))
 				return state
 			input_layout = state.layout
@@ -554,18 +556,16 @@ class PipelineExecutor:
 				raise ValueError("fused affine transition requires a known tomography layout")
 			if input_layout is stage.target_layout:
 				raise ValueError("fused affine transition must change layout")
-			projection_count = state.buffer_spec.shape.Theta
-			row_count = state.buffer_spec.shape.Y
 			shape = stage.output_shape(state.buffer_spec.shape)
 			output, _target = allocate_output(
 				state, shape, data.dtype, role="fused_geometry",
 			)
 			self.submit_all(run_affine_fill_kernel, (
 				(
-					state.working_array, output, input_layout, stage.target_layout,
-					index, projection_count, row_count, stage,
+					_unit_handle(state.working_array, unit),
+					_unit_handle(output, unit), stage, _payload(state, unit),
 				)
-				for index in range(projection_count)
+				for unit in _buffer_units(state, "Theta")
 			))
 			result = commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
@@ -581,23 +581,26 @@ class PipelineExecutor:
 		if isinstance(stage, HelicalIndexRemapStage):
 			if not stage.enabled:
 				return state
-			layout = type(state.buffer_spec.shape)
 			source_shape = state.buffer_spec.shape
-			count = source_shape.Theta
+			if state.source_window is None:
+				raise RuntimeError("helical remap requires PipelineState.source_window")
 			shape, shifts, start, stop = stage.output_geometry(
-				source_shape, stage._pitch(state),
+				source_shape, stage._pitch(state), state.source_window,
 			)
 			output, target = allocate_output(
 				state, shape, data.dtype, role="helical_remap",
 			)
 			if not stage.crop_valid:
 				target.fill(stage.fill_value)
+			units = _buffer_units(state, "Theta")
 			self.submit_all(run_helical_fill_kernel, (
 				(
-					state.working_array, output, layout, index, int(shifts[index]),
+					_unit_handle(state.working_array, unit),
+					_unit_handle(output, unit),
+					int(shifts[index]),
 					start, stop, stage.crop_valid,
 				)
-				for index in range(count)
+				for index, unit in enumerate(units)
 			))
 			result = commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
@@ -659,8 +662,8 @@ def run_bounded_sinogram_segment(
 	for stage in stages:
 		if not callable(getattr(stage, "run_sinogram", None)):
 			raise TypeError(f"{stage.name} declares bounded views but has no run_sinogram kernel")
-	row_count = data.shape[state.layout.axis_of("Y")]
 	shape = state.buffer_spec.shape
+	row_count = shape.Y
 	sinogram_shape = (shape.Theta, shape.X)
 	allocated = _prepare_vo_work(state, stages, row_count, sinogram_shape)
 	member_samples: list[list[float]] = [[] for _stage in stages]
@@ -671,10 +674,10 @@ def run_bounded_sinogram_segment(
 			try:
 				rows = executor.submit_all(run_sinogram_chain_kernel, (
 					(
-						state.working_array, state.layout, index, tuple(stages),
-						_payload(state), timing_observer is not None,
+						_unit_handle(state.working_array, unit), tuple(stages),
+						_payload(state, unit), timing_observer is not None,
 					)
-					for index in range(row_count)
+					for unit in _buffer_units(state, "Y")
 				))
 			except BaseException as error:
 				if failure_observer is not None:
@@ -688,25 +691,23 @@ def run_bounded_sinogram_segment(
 						member_samples[member_index].append(elapsed)
 		else:
 			# ndarray-only hermetic execution is deliberately serial.
-			from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
-
-			for index in range(row_count):
-				state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
-				working = data[state.layout.point_index(Y=index)]
-				if state.layout is ProjOrder:
-					working = np.ascontiguousarray(working)
+			for unit in _buffer_units(state, "Y"):
+				row_data = data[unit.index]
+				row_state = state.with_array(
+					row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
+				)
+				row_state.artifacts = state.artifacts
+				row_state.source_window = unit
+				working = row_data[state.layout.point_index(Y=0)]
 				for member_index, stage in enumerate(stages):
 					if checkpoint is not None:
 						checkpoint()
 					started = time.perf_counter() if timing_observer is not None else None
-					result = stage.run_sinogram(working, state)
+					result = stage.run_sinogram(working, row_state)
 					if started is not None:
 						member_samples[member_index].append(time.perf_counter() - started)
 					if result is not None and result is not working:
-						working = np.asarray(result)
-				if state.layout is ProjOrder:
-					data[state.layout.point_index(Y=index)] = working
-			state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
+						working[...] = result
 	finally:
 		_release_vo_work(state, allocated)
 	if timing_observer is not None:

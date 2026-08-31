@@ -18,6 +18,7 @@ from lftomo.pipeline import (
 	PipelineState,
 	Stage,
 	StageContract,
+	resolve_streaming_plan,
 )
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.pipeline.domains import DataDomain
@@ -93,6 +94,10 @@ def _write_irregular_fixture(tmp_path, size=4):
 
 
 def _run(state, *stages):
+	if state.dataset is None:
+		plan = resolve_streaming_plan(stages, state.scan)
+		state.dataset = plan.dataset
+		state.source_window = next(iter(plan))
 	with PipelineRunContext() as context:
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
@@ -119,7 +124,7 @@ def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path)
 	assert "read.tiff_stack" in STAGE_REGISTRY
 	assert stage.contract.produces is SinoOrder
 	np.testing.assert_array_equal(result.working_array, np.transpose(stack, (1, 0, 2)))
-	assert result.dataset.shape == ProjOrder(Theta=count, Y=size, X=size)
+	assert result.dataset.physical_shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=0)
 	assert result.buffer_spec.layout is SinoOrder
 
@@ -184,7 +189,10 @@ def test_tiff_stack_stage_reads_strided_theta_window_with_matching_angles(tmp_pa
 	result = _run(_state(projection_dir, count, size, config), create_stage(config))
 
 	np.testing.assert_array_equal(result.working_array, stack[1:6:2])
-	np.testing.assert_allclose(result.artifacts["angles"], np.deg2rad([30, 90, 150]))
+	np.testing.assert_allclose(
+		result.dataset.angles[result.source_window.axis_slice("Theta")],
+		np.deg2rad([30, 90, 150]),
+	)
 	assert result.source_window.shape.Theta == 5
 	assert result.working_array.shape[0] == 3
 	assert result.source_window.step == ProjOrder(Theta=2, Y=1, X=1)
@@ -204,14 +212,14 @@ def test_irregular_indices_and_angles_share_theta_selection_and_stride(tmp_path)
 	)
 
 	np.testing.assert_array_equal(result.working_array, stack[1:5:2])
-	np.testing.assert_array_equal(result.artifacts["acquisition_indices"], [1, 4])
-	np.testing.assert_allclose(np.rad2deg(result.artifacts["angles"]), [30, 120])
 	np.testing.assert_array_equal(result.dataset.acquisition_indices, [0, 1, 3, 4, 5])
 	np.testing.assert_allclose(
 		np.rad2deg(result.dataset.angles), [0, 30, 90, 120, 150], atol=2e-5,
 	)
-	assert result.artifacts["angle_provenance"]["planned_slot_count"] == 6
-	assert result.artifacts["angle_provenance"]["recorded_projection_count"] == 5
+	np.testing.assert_allclose(
+		np.rad2deg(result.dataset.angles[result.source_window.axis_slice("Theta")]),
+		[30, 120], atol=2e-5,
+	)
 
 
 def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch):
@@ -229,9 +237,13 @@ def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch)
 	)
 	seen_angles = []
 
-	def recon(data, angles, **_kwargs):
+	def recon(data, angles, **kwargs):
 		seen_angles.append(np.asarray(angles).copy())
-		return np.ones((data.shape[0], data.shape[2], data.shape[2]), dtype=np.float32)
+		target = kwargs.get("init_recon")
+		if target is None:
+			return np.ones((data.shape[0], data.shape[2], data.shape[2]), dtype=np.float32)
+		target.fill(1)
+		return target
 
 	monkeypatch.setattr("tomopy.recon", recon)
 	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
@@ -239,6 +251,9 @@ def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch)
 		state = _irregular_state(
 			projection_dir, scanlog, 4, [read_config, center_config, recon_config],
 		)
+		plan = resolve_streaming_plan([create_stage(read_config)], state.scan)
+		state.dataset = plan.dataset
+		state.source_window = next(iter(plan))
 		state.storage = context.storage
 		state = Pipeline([create_stage(read_config)], backend=NumpyBackend()).run(state)
 		state.domain = DataDomain.ATTENUATION

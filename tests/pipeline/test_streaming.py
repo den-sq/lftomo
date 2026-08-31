@@ -135,13 +135,19 @@ def test_streaming_plan_reiterates_the_canonical_dataset_without_a_window_cache(
 	]
 
 
-def test_streaming_windows_read_physical_neighbors_outside_selection():
+def test_streaming_windows_read_physical_neighbors_outside_selection(tmp_path):
+	projection_dir = tmp_path / "projections"
+	projection_dir.mkdir()
+	for index in range(4):
+		tf.imwrite(projection_dir / f"projection_{index}.tif", np.zeros((12, 8), dtype=np.uint16))
+	scan = _scan(rows=12)
+	scan.projections.path = projection_dir
 	read = StageConfig(
-		kind="read", algorithm="hdf5_dxchange",
+		kind="read", algorithm="tiff_stack",
 		params={"y_start": 2, "y_stop": 10},
 	)
 	stages = [create_stage(read), BilateralFilterStage(diameter=5)]
-	plan = resolve_streaming_plan(stages, _scan(rows=12), WindowConfig(rows=4))
+	plan = resolve_streaming_plan(stages, scan, WindowConfig(rows=4))
 
 	assert plan.dataset.physical_shape == ProjOrder(Theta=4, Y=12, X=8)
 	assert plan.dataset.frange == Y.drange(2, 10, 4)
@@ -168,6 +174,17 @@ def _write_yaml(path: Path, value):
 def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 	tmp_path, monkeypatch,
 ):
+	import lftomo.pipeline.stages.read as read_module
+
+	bound_datasets = []
+	original_bind = read_module._bind_source_state
+
+	def record_bind(state, working, read_window):
+		result = original_bind(state, working, read_window)
+		bound_datasets.append((state.dataset, result.dataset))
+		return result
+
+	monkeypatch.setattr(read_module, "_bind_source_state", record_bind)
 	data_path = tmp_path / "scan.h5"
 	rows, theta, columns = 6, 3, 6
 	projections = 20 + 20 * projection_stack(size=rows, n_projections=theta)
@@ -209,18 +226,23 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 
 	def reconstruct(data, *args, **kwargs):
 		reconstruction_inputs.append(tuple(data.shape))
-		return np.repeat(
+		kwargs["init_recon"][...] = np.repeat(
 			np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1,
 		)
+		return kwargs["init_recon"]
 
 	monkeypatch.setattr(tomopy, "recon", reconstruct)
 	whole_output = tmp_path / "whole"
 	window_output = tmp_path / "windowed"
 	whole = run_reconstruction(pipeline_path, scan_path, whole_output)[0]
+	bound_datasets.clear()
 	windowed = run_reconstruction(
 		pipeline_path, scan_path, window_output,
 		window_config=WindowConfig(rows=2),
 	)[0]
+	assert len(bound_datasets) == 6
+	assert len({id(before) for before, _after in bound_datasets}) == 1
+	assert all(before is after for before, after in bound_datasets)
 	assert reconstruction_inputs == [(theta, rows, columns)] + [
 		(theta, 2, columns), (theta, 2, columns), (theta, 2, columns),
 	]

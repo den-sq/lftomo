@@ -12,23 +12,25 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
 from lftomo.util.window import TomoWindow
+from tests.sample_data import attach_source_geometry
 
 
 def _state(array, config, layout=SinoOrder):
-	return PipelineState(
+	shape = layout(*array.shape)
+	return attach_source_geometry(PipelineState(
 		working_array=array,
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
-			n_projections=array.shape[1],
+			n_projections=shape.Theta,
 			degrees_per_fov=180,
 			detector=Detector(pixel_size_um=1),
-			acquisition=Acquisition(n_projections=array.shape[1], rotation_end_deg=180),
+			acquisition=Acquisition(n_projections=shape.Theta, rotation_end_deg=180),
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
-	)
+		buffer_spec=BufferSpec(shape, array.dtype),
+	))
 
 
 def test_skew_stage_rotates_each_projection(monkeypatch):
@@ -41,7 +43,7 @@ def test_skew_stage_rotates_each_projection(monkeypatch):
 	calls = []
 	monkeypatch.setattr("cv2.getRotationMatrix2D", lambda center, degrees, scale: (center, degrees, scale))
 
-	def warp(image, matrix, size, flags):
+	def warp(image, matrix, size, flags, **_kwargs):
 		calls.append((matrix, size, flags))
 		return image + 1
 
@@ -154,7 +156,7 @@ def test_nonzero_fused_transition_resamples_once_per_projection(monkeypatch):
 	calls = []
 	monkeypatch.setattr("cv2.getRotationMatrix2D", lambda center, degrees, scale:
 		(center, degrees, scale))
-	def warp(image, matrix, size, flags):
+	def warp(image, matrix, size, flags, **_kwargs):
 		calls.append((image.shape, matrix, size, flags))
 		return image
 	monkeypatch.setattr("cv2.warpAffine", warp)

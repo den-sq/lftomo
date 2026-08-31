@@ -16,10 +16,11 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
 from lftomo.util.window import TomoWindow
+from tests.sample_data import attach_source_geometry
 
 
 def _state(array, configs):
-	return PipelineState(
+	return attach_source_geometry(PipelineState(
 		working_array=array,
 		scan=Scan(
 			energy_keV=20,
@@ -32,7 +33,7 @@ def _state(array, configs):
 		),
 		recon=Recon(pipeline=configs),
 		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
-	)
+	))
 
 
 def test_all_center_algorithms_are_registered():
@@ -89,13 +90,13 @@ def test_vo_center_transposes_data_and_fits_tilt(monkeypatch):
 	calls = []
 
 	def find_center_vo(data, **kwargs):
-		calls.append((data.shape, kwargs))
+		calls.append((data.shape, kwargs, np.shares_memory(data, working)))
 		return 4 + 0.2 * (len(calls) - 1)
 
 	monkeypatch.setattr("tomopy.find_center_vo", find_center_vo)
 	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
 
-	assert all(call[0] == (3, 8) for call in calls)
+	assert all(call[0] == (3, 8) and call[2] for call in calls)
 	np.testing.assert_allclose(result.artifacts["center"], 4 + 0.1 * np.arange(5), rtol=1e-6)
 	assert result.artifacts["center_fit"]["coefficients"].shape == (2,)
 	assert result.artifacts["center_fit"]["qc_status"] == "accepted"
@@ -229,7 +230,7 @@ def test_entropy_local_selects_lowest_entropy_candidate(monkeypatch):
 	calls = []
 
 	def recon(data, angles, center, **kwargs):
-		calls.append((data.shape, angles, center, kwargs))
+		calls.append((data.shape, angles, center, kwargs, np.shares_memory(data, working)))
 		return np.full((1, 8, 8), center, dtype=np.float32)
 
 	monkeypatch.setattr("tomopy.recon", recon)
@@ -242,6 +243,7 @@ def test_entropy_local_selects_lowest_entropy_candidate(monkeypatch):
 
 	assert [call[2] for call in calls] == [3, 4, 5]
 	assert all(call[0] == (1, 4, 8) for call in calls)
+	assert all(call[4] for call in calls)
 	assert result.artifacts["center"] == pytest.approx(4)
 	np.testing.assert_array_equal(result.artifacts["center_entropy"]["entropies"], [1, 0, 1])
 	assert result.artifacts["center_entropy"]["termination"] == "converged"

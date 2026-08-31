@@ -35,6 +35,7 @@ from lftomo.experiment.runner import (
 	ExperimentRunPolicy,
 	IndependentExperimentRunner,
 )
+from lftomo.util.shapes import ProjOrder
 from tests.experiment.process_helpers import AlphaExecutor, WindowedAlphaExecutor
 
 
@@ -312,6 +313,8 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 	scan = SimpleNamespace(
 		detector=SimpleNamespace(rows=20),
 		n_projections=100,
+		metadata={},
+		projection_shape=lambda: ProjOrder(100, 20, 8),
 	)
 	monkeypatch.setattr("lftomo.experiment.cli.load_scan", lambda _path: (scan, _path))
 	recon = Recon.model_validate({
@@ -406,7 +409,10 @@ def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp
 	document["output"]["screening"] = "metrics_and_previews"
 	config = ExperimentConfig.model_validate(document)
 	executor = PipelineTrialExecutor(config, "scan.yaml")
-	scan = SimpleNamespace(detector=SimpleNamespace(rows=20), n_projections=100)
+	scan = SimpleNamespace(
+		detector=SimpleNamespace(rows=20), n_projections=100, metadata={},
+		projection_shape=lambda: ProjOrder(100, 20, 8),
+	)
 	monkeypatch.setattr("lftomo.experiment.cli.load_scan", lambda _path: (scan, _path))
 	monkeypatch.setenv("LFTOMO_PREVIEW_BLINDING_KEY", "test-private-key")
 	recon = Recon.model_validate({

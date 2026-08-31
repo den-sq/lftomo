@@ -9,7 +9,18 @@ from typing import Any, Self
 
 import numpy as np
 
-from lftomo.util.shapes import DataShape
+from lftomo.util.shapes import DataShape, Proj, Theta, X, XSlice, Y, YSlice, Z
+
+
+_VIEW_SHAPES = {
+	("Y", "X"): Proj,
+	("Theta", "X"): YSlice,
+	("Theta", "Y"): XSlice,
+	("Theta",): Theta,
+	("Y",): Y,
+	("X",): X,
+	("Z",): Z,
+}
 
 
 class ManagedBuffer(ABC):
@@ -48,19 +59,59 @@ def is_advanced_index(index: Any) -> bool:
 	return isinstance(index, (list, np.ndarray)) and not isinstance(index, slice)
 
 
+def basic_view_shape(shape: DataShape, views: list[Any]) -> DataShape:
+	"""Apply basic array views while retaining the canonical named axes."""
+
+	names = list(shape.names)
+	values = list(shape.as_tuple())
+	for view in views:
+		indices = view if isinstance(view, tuple) else (view,)
+		if Ellipsis in indices:
+			position = indices.index(Ellipsis)
+			missing = len(values) - (len(indices) - 1)
+			indices = indices[:position] + (slice(None),) * missing + indices[position + 1:]
+		indices += (slice(None),) * (len(values) - len(indices))
+		if len(indices) != len(values) or any(index is None for index in indices):
+			raise TypeError("new-axis ManagedBuffer views have no canonical DataShape")
+		selected = [
+			(name, len(range(*index.indices(size))))
+			for name, size, index in zip(names, values, indices, strict=True)
+			if not isinstance(index, (int, np.integer))
+		]
+		names = [name for name, _value in selected]
+		values = [value for _name, value in selected]
+	shape_type = type(shape) if tuple(names) == shape.names else _VIEW_SHAPES.get(tuple(names))
+	if shape_type is None:
+		raise TypeError(f"no canonical DataShape for basic view axes {tuple(names)!r}")
+	return shape_type(*values)
+
+
 class FileBackedNPArray(ManagedBuffer):
 	"""Reopenable, read-only ``.npy`` mapping suitable for worker processes."""
 
-	def __init__(self, path: str | Path, views: list[Any] | None = None):
+	def __init__(self, path: str | Path, shape: DataShape | None = None,
+			views: list[Any] | None = None):
 		self.__path = Path(path)
 		self.__views = [] if views is None else views
+		self.__base_shape = shape
 		self.__mapping = None
 		probe = np.load(self.__path, mmap_mode="r", allow_pickle=False)
 		try:
+			if shape is not None:
+				if len(shape.as_tuple()) != probe.ndim:
+					raise ValueError(
+						"FileBackedNPArray DataShape rank disagrees with the NPY header"
+					)
+				if shape.as_tuple() != probe.shape:
+					raise ValueError(
+						"FileBackedNPArray DataShape extents disagree with the NPY header"
+					)
 			view = probe
 			for index in self.__views:
 				view = view[index]
-			self.__shape = view.shape
+			self.__shape = (
+				view.shape if shape is None else basic_view_shape(shape, self.__views)
+			)
 			self.__dtype = view.dtype
 		finally:
 			mmap = getattr(probe, "_mmap", None)
@@ -72,7 +123,7 @@ class FileBackedNPArray(ManagedBuffer):
 		return self.__path
 
 	@property
-	def shape(self) -> tuple[int, ...]:
+	def shape(self) -> DataShape | tuple[int, ...]:
 		return self.__shape
 
 	@property
@@ -105,7 +156,7 @@ class FileBackedNPArray(ManagedBuffer):
 			raise IndexError(
 				"This would be an advanced index and create copies, so should not be used here."
 			)
-		return type(self)(self.__path, self.__views + [view])
+		return type(self)(self.__path, self.__base_shape, self.__views + [view])
 
 	def close(self) -> None:
 		if self.__mapping is not None:
@@ -123,7 +174,7 @@ class FileBackedNPArray(ManagedBuffer):
 		self.close()
 
 	def __reduce__(self):
-		return type(self), (self.__path, self.__views)
+		return type(self), (self.__path, self.__base_shape, self.__views)
 
 
 class StorageBackend(ABC):

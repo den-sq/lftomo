@@ -4,10 +4,12 @@ import pytest
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import GridrecStage, STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder, X
+from lftomo.util.window import TomoWindow
 
 
 def _state(array, config, artifacts=None, layout=ProjOrder):
+	shape = layout(*array.shape)
 	return PipelineState(
 		working_array=array,
 		scan=Scan(
@@ -21,7 +23,8 @@ def _state(array, config, artifacts=None, layout=ProjOrder):
 		),
 		recon=Recon(pipeline=[config]),
 		artifacts={} if artifacts is None else artifacts,
-		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
+		buffer_spec=BufferSpec(shape, array.dtype),
+		source_window=TomoWindow.from_bounds(shape.to(ProjOrder), dtype=array.dtype),
 	)
 
 
@@ -36,11 +39,13 @@ def test_gridrec_is_registered_and_uses_center_artifact(monkeypatch):
 
 	def recon(data, angles, **kwargs):
 		calls["recon"] = (data, angles, kwargs)
-		return np.full((2, 5, 5), 3, dtype=np.float64)
+		kwargs["init_recon"].fill(3)
+		return kwargs["init_recon"]
 
 	def circ_mask(data, **kwargs):
 		calls["mask"] = kwargs
-		return data + 1
+		data += 1
+		return data
 
 	monkeypatch.setattr("tomopy.recon", recon)
 	monkeypatch.setattr("tomopy.circ_mask", circ_mask)
@@ -84,7 +89,8 @@ def test_gridrec_projection_order_accepts_center_param_and_crops(monkeypatch):
 	def recon(data, _angles, **kwargs):
 		calls["data_shape"] = data.shape
 		calls.update(kwargs)
-		return np.arange(18, dtype=np.float32).reshape(2, 3, 3)
+		kwargs["init_recon"][...] = np.arange(18, dtype=np.float32).reshape(2, 3, 3)
+		return kwargs["init_recon"]
 
 	monkeypatch.setattr("tomopy.recon", recon)
 	stage = create_stage(config)
@@ -106,15 +112,21 @@ def test_gridrec_edge_buffers_crop_output_by_default(monkeypatch):
 		params={"center": 2.0, "circle_mask": False,
 			"edge_buffer_left": 1, "edge_buffer_right": 1},
 	)
-	working = np.ones((3, 2, 5), dtype=np.float32)
+	working = np.ones((3, 2, 7), dtype=np.float32)
 	calls = {}
 
-	def recon(data, _angles, **_kwargs):
+	def recon(data, _angles, **kwargs):
 		calls["data_shape"] = data.shape
-		return np.ones((2, 5, 5), dtype=np.float32)
+		kwargs["init_recon"].fill(1)
+		return kwargs["init_recon"]
 
 	monkeypatch.setattr("tomopy.recon", recon)
-	result = create_stage(config).run(_state(working, config))
+	state = _state(working, config)
+	state.source_window = TomoWindow(
+		ProjOrder(3, 2, 5), X(1), X(1), X(1), np.float32, np.float32,
+		pad_after=X(1),
+	)
+	result = create_stage(config).run(state)
 
 	assert calls["data_shape"] == (3, 2, 5)
 	assert result.working_array.shape == (2, 5, 3)

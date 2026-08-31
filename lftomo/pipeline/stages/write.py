@@ -105,20 +105,22 @@ class TIFFSlicesWriteStage(Stage):
 		output = Path(state.recon.output_path)
 		output.mkdir(parents=True, exist_ok=True)
 		sample_id = self._sample_id(state)
-		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
+		from lftomo.pipeline.execution import _buffer_units
+
+		units = list(_buffer_units(state, "Y"))
 		paths = []
-		for local_index in range(working.shape[0]):
-			slice_index = self.slice_start + source_y + local_index
+		for unit in units:
+			slice_index = self.slice_start + int(unit.pos.Y)
 			name = self.naming_template.format(sample_id=sample_id, slice=slice_index)
 			paths.append(output / (name if name.lower().endswith((".tif", ".tiff")) else f"{name}.tif"))
 
 		executor = state.executor or getattr(state.storage, "pipeline_executor", None)
 		if isinstance(state.working_array, ManagedBuffer):
-			from lftomo.pipeline.execution import write_tiff_slice_kernel
+			from lftomo.pipeline.execution import _unit_handle, write_tiff_slice_kernel
 
 			calls = [
-				(state.working_array, index, path, self.dtype)
-				for index, path in enumerate(paths)
+				(_unit_handle(state.working_array, unit), path, self.dtype)
+				for unit, path in zip(units, paths, strict=True)
 			]
 			if self.processes > 1 and executor is not None:
 				executor.submit_all(write_tiff_slice_kernel, calls)
@@ -127,8 +129,8 @@ class TIFFSlicesWriteStage(Stage):
 					write_tiff_slice_kernel(*call)
 		else:
 			# ndarray-only hermetic tests remain serial; slices are never pickled.
-			for index, path in enumerate(paths):
-				_write_array_slice(working[index], path, self.dtype)
+			for unit, path in zip(units, paths, strict=True):
+				_write_array_slice(working[unit.index][0], path, self.dtype)
 		_record_outputs(state, paths)
 		return state
 

@@ -19,6 +19,7 @@ from lftomo.pipeline.stages import (
 	create_stage,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from tests.sample_data import attach_source_geometry
 
 
 def _scan(flats, count=9):
@@ -76,35 +77,35 @@ def test_beam_tracking_preserves_layout_and_removes_nonlinear_drift(layout):
 			"transport_sigma": 3, "schedule": schedule.__dict__,
 		}},
 	]})
-	state = PipelineState(
+	state = attach_source_geometry(PipelineState(
 		data, _scan(flats), recon, backend=NumpyBackend(),
 		buffer_spec=BufferSpec(layout(*data.shape), data.dtype), domain=DataDomain.RAW,
-	)
+	))
 	result = BeamTrackingNormalizeStage(
 		transport_sigma=3, schedule=schedule.__dict__,
 	).run(state)
 	assert result.layout is layout
 	assert np.std(np.asarray(result.working_array) - 1) < 2e-6
-	assert result.artifacts["beam_tracking_qc"]["projection_count"] == 9
+	assert "projection_count" not in result.artifacts["beam_tracking_qc"]
 
 
 def test_tracking_beats_weighted_normalization():
 	projections, flats, schedule = _fixture()
 	tracked = projections.copy()
-	tracked_state = PipelineState(
+	tracked_state = attach_source_geometry(PipelineState(
 		tracked, _scan(flats), Recon.model_validate({"pipeline": []}),
 		backend=NumpyBackend(),
 		buffer_spec=BufferSpec(ProjOrder(*tracked.shape), tracked.dtype),
 		domain=DataDomain.RAW,
-	)
+	))
 	BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__).run(tracked_state)
 	weighted = projections.copy()
-	weighted_state = PipelineState(
+	weighted_state = attach_source_geometry(PipelineState(
 		weighted, _scan(flats), Recon.model_validate({"pipeline": []}),
 		backend=NumpyBackend(),
 		buffer_spec=BufferSpec(ProjOrder(*weighted.shape), weighted.dtype),
 		domain=DataDomain.RAW,
-	)
+	))
 	WeightedNormalizeStage().run(weighted_state)
 	assert np.std(tracked - 1) < np.std(weighted - 1) / 20
 
@@ -114,28 +115,27 @@ def test_stage_reads_four_maps_from_bundle_at_runtime(tmp_path):
 	scan = _scan(flats)
 	scan.metadata.pop("flat_fields")
 	data = projections.copy()
-	state = PipelineState(
+	state = attach_source_geometry(PipelineState(
 		data, scan, Recon.model_validate({"pipeline": []}), backend=NumpyBackend(),
 		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype), domain=DataDomain.RAW,
 		artifacts={"calibration_bundle": _bundle(tmp_path, flats)},
-	)
+	))
 	BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__).run(state)
 	assert np.std(np.asarray(state.working_array) - 1) < 2e-6
 
 
-def test_theta_window_requires_global_projection_coordinates():
+def test_strided_theta_window_uses_global_projection_coordinates():
 	projections, flats, schedule = _fixture()
-	data = projections[3:6].copy()
-	state = PipelineState(
+	data = projections[2:7:2].copy()
+	state = attach_source_geometry(PipelineState(
 		data, _scan(flats), Recon.model_validate({"pipeline": []}), backend=NumpyBackend(),
 		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype), domain=DataDomain.RAW,
-	)
+	), theta_start=2, theta_stride=2, physical_theta=9)
 	stage = BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__)
-	with pytest.raises(ValueError, match="projection_start and projection_count"):
-		stage.run(state)
-	state.artifacts.update(projection_start=3, projection_count=9)
 	stage.run(state)
-	assert state.artifacts["beam_tracking_qc"]["projection_start"] == 3
+	assert np.std(data - 1) < 2e-6
+	assert "projection_start" not in state.artifacts
+	assert "projection_count" not in state.artifacts
 
 
 def test_extrapolated_schedule_clamps_dark_fields_to_measured_endpoints():
@@ -150,11 +150,11 @@ def test_extrapolated_schedule_clamps_dark_fields_to_measured_endpoints():
 		(post_gain - post_dark) * 0.5 + post_dark,
 	]).astype(np.float32)
 	schedule = BeamSchedule(alpha=-1, beta=3)
-	state = PipelineState(
+	state = attach_source_geometry(PipelineState(
 		data, _scan(flats, count=2), Recon.model_validate({"pipeline": []}),
 		backend=NumpyBackend(),
 		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype), domain=DataDomain.RAW,
-	)
+	))
 	BeamTrackingNormalizeStage(schedule=schedule.__dict__).run(state)
 	np.testing.assert_allclose(data, 0.5, atol=1e-6)
 

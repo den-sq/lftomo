@@ -8,6 +8,8 @@ from typing import Annotated, Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
+from lftomo.util.shapes import Proj, ProjOrder
+
 
 class ConfigModel(BaseModel):
 	"""Base class for YAML-friendly lftomo configuration models."""
@@ -52,6 +54,13 @@ class Detector(ConfigModel):
 	rows: int | None = Field(default=None, gt=0, description="Detector image height in pixels.")
 	columns: int | None = Field(default=None, gt=0, description="Detector image width in pixels.")
 	name: str | None = Field(default=None, description="Detector or camera model/name.")
+
+	def projection_shape(self) -> Proj:
+		"""Return canonical detector image geometry once metadata is concrete."""
+
+		if self.rows is None or self.columns is None:
+			raise ValueError("window planning requires detector rows and columns")
+		return Proj(Y=self.rows, X=self.columns)
 
 
 class Helical(ConfigModel):
@@ -160,6 +169,12 @@ class Scan(ConfigModel):
 	acquisition: Acquisition = Field(description="Projection-count and angle metadata.")
 	projections: ProjectionSource = Field(description="Projection storage description.")
 	metadata: dict[str, Any] = Field(default_factory=dict, description="Additional lineage-specific metadata.")
+
+	def projection_shape(self) -> ProjOrder:
+		"""Return canonical recorded-projection geometry for this scan."""
+
+		detector = self.detector.projection_shape()
+		return ProjOrder(Theta=self.n_projections, Y=detector.Y, X=detector.X)
 
 	@field_validator("acquisition")
 	@classmethod

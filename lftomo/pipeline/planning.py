@@ -11,6 +11,7 @@ import numpy as np
 from lftomo.pipeline.core import BufferSpec, Stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+from lftomo.util.window import TomoDataSet, TomoWindow
 
 
 class MaterializationKind(Enum):
@@ -107,24 +108,35 @@ def _nbytes(spec: BufferSpec | None) -> int:
 	return spec.shape.nbytes(spec.dtype)
 
 
-def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
-	rows = scan.detector.rows
-	columns = scan.detector.columns
-	if rows is None or columns is None:
-		return None
-	theta_stop = scan.n_projections if getattr(stage, "theta_stop", None) is None else stage.theta_stop
-	theta_start = getattr(stage, "theta_start", 0)
-	theta_stride = getattr(stage, "theta_stride", 1)
-	count = len(range(theta_start, theta_stop, theta_stride))
-	y_start = getattr(stage, "y_start", 0)
-	y_stop = rows if getattr(stage, "y_stop", None) is None else stage.y_stop
+def _read_spec(
+	stage: Stage,
+	scan: Any,
+	dataset: TomoDataSet | None = None,
+	source_window: TomoWindow | None = None,
+) -> BufferSpec | None:
+	if (dataset is None) != (source_window is None):
+		raise ValueError("read planning requires dataset and source_window together")
+	if source_window is None:
+		physical_shape = scan.projection_shape()
+		window = TomoWindow.from_bounds(
+			physical_shape,
+			y=(
+				getattr(stage, "y_start", 0),
+				physical_shape.Y if getattr(stage, "y_stop", None) is None else stage.y_stop,
+			),
+			theta=(
+				getattr(stage, "theta_start", 0),
+				physical_shape.Theta
+				if getattr(stage, "theta_stop", None) is None else stage.theta_stop,
+				getattr(stage, "theta_stride", 1),
+			),
+		)
+	else:
+		window = source_window.with_pad(["Y"])
 	layout = ProjOrder if getattr(stage, "order", "projection") == "projection" else SinoOrder
-	shape = (
-		ProjOrder(Theta=count, Y=y_stop - y_start, X=columns)
-		if layout is ProjOrder else
-		SinoOrder(Y=y_stop - y_start, Theta=count, X=columns)
-	)
-	dtype = scan.metadata.get("raw_dtype")
+	shape = window.frange.length.to(layout)
+	dtype = None if dataset is None else dataset.dtype
+	dtype = scan.metadata.get("raw_dtype") if dtype is None else dtype
 	if dtype is None:
 		source = scan.projections
 		path = source.path
@@ -146,18 +158,29 @@ def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
 	return BufferSpec(shape, dtype)
 
 
-def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) -> BufferSpec | None:
+def stage_output_spec(
+	stage: Stage,
+	input_spec: BufferSpec | None,
+	scan: Any,
+	*,
+	dataset: TomoDataSet | None = None,
+	source_window: TomoWindow | None = None,
+) -> BufferSpec | None:
 	"""Resolve the concrete BufferSpec transition for one known Stage."""
 
 	if stage.name.startswith("read."):
-		return _read_spec(stage, scan)
+		return _read_spec(stage, scan, dataset, source_window)
 	if input_spec is None:
 		return None
 	shape = input_spec.shape
 	layout = stage.contract.output_layout(input_spec.layout)
 	dtype = input_spec.dtype
 	if stage.name.startswith("normalize.") or stage.name == "weighted-normalize":
-		dtype = np.dtype(np.float32)
+		# Fragment validation has no run geometry; the canonical run path derives
+		# this dtype from the source window rather than storing a parallel setting.
+		dtype = np.dtype(
+			np.float32 if source_window is None else source_window.internal.dtype
+		)
 	elif stage.name == "layout.convert":
 		shape = shape.to(layout)
 	elif stage.name == "geometry.affine_skew_movement" and getattr(stage, "target_layout", None) is not None:
@@ -167,18 +190,17 @@ def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) ->
 		if pitch is None and scan.helical.pitch_um_per_projection is not None:
 			pitch = scan.helical.pitch_um_per_projection / scan.pixel_size_um
 		if pitch is not None:
-			shape, _shifts, _start, _stop = stage.output_geometry(shape, pitch)
+			if source_window is None:
+				raise RuntimeError("helical planning requires the canonical source window")
+			shape, _shifts, _start, _stop = stage.output_geometry(
+				shape, pitch, source_window,
+			)
 	elif stage.name.startswith("recon."):
-		slices = shape.Y
-		base_width = shape.X
-		if getattr(stage, "edge_buffer_input", False):
-			base_width -= stage.edge_buffer_left + stage.edge_buffer_right
-		output_width = base_width
-		if not getattr(stage, "edge_buffer_input", False):
-			output_width -= stage.edge_buffer_left + stage.edge_buffer_right
-		if stage.output_width is not None:
-			output_width = stage.output_width
-		shape = ReconOrder(Y=slices, Z=base_width, X=output_width)
+		geometry = getattr(stage, "output_geometry", None)
+		shape = (
+			ReconOrder.of(shape) if geometry is None
+			else geometry(shape, source_window)[1]
+		)
 		dtype = np.dtype(np.float32)
 	elif stage.name.startswith("super_resolve."):
 		dtype = np.dtype(np.float32)
@@ -187,18 +209,18 @@ def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) ->
 
 def stage_allocation_spec(
 	stage: Stage, input_spec: BufferSpec | None, output_spec: BufferSpec | None,
+	*, source_window: TomoWindow | None = None,
 ) -> BufferSpec | None:
 	"""Return the physical allocation spec when the published output is a view."""
 
 	if input_spec is None or output_spec is None or not stage.name.startswith("recon."):
 		return output_spec
-	slices = input_spec.shape.Y
-	width = input_spec.shape.X
-	if getattr(stage, "edge_buffer_input", False):
-		width -= stage.edge_buffer_left + stage.edge_buffer_right
-	return BufferSpec(
-		ReconOrder(Y=slices, Z=width, X=width), np.dtype(np.float32),
+	geometry = getattr(stage, "output_geometry", None)
+	shape = (
+		ReconOrder.of(input_spec.shape) if geometry is None
+		else geometry(input_spec.shape, source_window)[0]
 	)
+	return BufferSpec(shape, np.dtype(np.float32))
 
 
 def _transition_role(stage: Stage) -> tuple[str | None, str | None]:

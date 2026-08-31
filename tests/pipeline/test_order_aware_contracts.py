@@ -35,7 +35,7 @@ def scan_config():
 		pixel_size_um=1.3,
 		n_projections=3,
 		degrees_per_fov=180,
-		detector=Detector(pixel_size_um=1.3),
+		detector=Detector(pixel_size_um=1.3, rows=2, columns=4),
 		acquisition=Acquisition(n_projections=3, rotation_end_deg=180),
 		projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 	)
@@ -49,6 +49,11 @@ class ContractStage(Stage):
 	def __init__(self, name, contract):
 		self.name = name
 		self.contract = contract
+		if name.startswith("recon."):
+			self.edge_buffer_input = False
+			self.edge_buffer_left = 0
+			self.edge_buffer_right = 0
+			self.output_width = None
 
 	def run(self, state):
 		return state

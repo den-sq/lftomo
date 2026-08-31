@@ -8,23 +8,25 @@ from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFS
 from lftomo.pipeline import BufferSpec, DataDomain, PRESERVE, Pipeline, PipelineState
 from lftomo.pipeline.stages import BronnikovAidedCorrectionStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from tests.sample_data import attach_source_geometry
 
 
 def _state(array, config, layout=SinoOrder):
-	return PipelineState(
+	shape = layout(*array.shape)
+	return attach_source_geometry(PipelineState(
 		working_array=array,
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
-			n_projections=array.shape[1],
+			n_projections=shape.Theta,
 			degrees_per_fov=180,
 			detector=Detector(pixel_size_um=1),
-			acquisition=Acquisition(n_projections=array.shape[1], rotation_end_deg=180),
+			acquisition=Acquisition(n_projections=shape.Theta, rotation_end_deg=180),
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
-	)
+		buffer_spec=BufferSpec(shape, array.dtype),
+	))
 
 
 @pytest.fixture
@@ -54,6 +56,7 @@ def test_bac_aliases_are_registered_and_process_each_projection(monkeypatch, hot
 			calls.append((shape, alpha, gamma, device))
 
 		def __call__(self, image):
+			assert np.shares_memory(image, working)
 			return image + 2
 
 	monkeypatch.setattr(hotopy_holo, "BronnikovAidedCorrection", FakeBAC, raising=False)
@@ -113,7 +116,6 @@ def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch
 
 	monkeypatch.setattr(hotopy_holo, "BronnikovAidedCorrection", FakeBAC, raising=False)
 	state = _state(working, config, ProjOrder)
-	state.scan.n_projections = working.shape[0]
 	stage = create_stage(config)
 
 	result = stage.run(state)

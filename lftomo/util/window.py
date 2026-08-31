@@ -5,10 +5,11 @@ from functools import partial
 from os import PathLike
 from pathlib import Path
 from typing import Self, Sequence, Iterator
+import warnings
 
 import numpy as np
 
-from .shapes import DataShape, DataRange, IntIter, ReconOrder, SliceIter, TFIter
+from .shapes import DataShape, DataRange, IntIter, ReconOrder, SliceIter, TFIter, Y
 
 # Field of view during data acquisition.
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
@@ -25,9 +26,12 @@ class DataRef(object):
 		self.__step = step
 		self.__dtype = dtype
 		self.__offset = offset
+		self.__memory_index = None
 
 	@property
 	def index(self) -> tuple[slice]:
+		if self.__memory_index is not None:
+			return self.__memory_index
 		start = list(asdict(self.pos.merge(self.shape.make_with(0))).values())
 		stop = list(asdict(self.shape + self.pos).values())
 		step = list(asdict(self.step.merge(self.shape.make_with(1))).values())
@@ -118,7 +122,10 @@ class DataRef(object):
 		new_ref = copy(self)
 
 		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape
-		new_pos = replace(self.pos, **asdict(pos)) if pos is not None else self.pos
+		new_pos = (
+			pos if pos is not None and set(self.pos.names) < set(pos.names)
+			else replace(self.pos, **asdict(pos)) if pos is not None else self.pos
+		)
 		new_dtype = dtype if dtype is not None else self.dtype
 
 		if pad is not None:
@@ -152,6 +159,20 @@ class DataRef(object):
 			shape=self.shape + expansion + expansion,
 		)
 
+	def with_crop(self, before: DataShape, after: DataShape) -> Self:
+		"""Return the positive interval left after an asymmetric axis crop."""
+
+		zero = self.shape.make_with(0)
+		before = replace(zero, **asdict(before))
+		after = replace(zero, **asdict(after))
+		if any(value < 0 for value in (*before.as_tuple(), *after.as_tuple())):
+			raise ValueError("crop extents cannot be negative")
+		shape = self.shape - before - after
+		if any(value < 1 for value in shape.as_tuple()):
+			raise ValueError("crop must retain a positive extent on every axis")
+		position = self.pos + before.extract(self.pos)
+		return self.rescope(pos=position, shape=shape)
+
 	def int_iter(self) -> Iterator:
 		return self.frange.get_iter(conv=IntIter)
 
@@ -161,12 +182,103 @@ class DataRef(object):
 	def slice_iter(self) -> Iterator:
 		return self.frange.get_iter(conv=partial(SliceIter, shape=self.shape))
 
+	def units(self, axis: str) -> Iterator[Self]:
+		"""Yield one-sample refs with local memory indices and global positions."""
+
+		axis_index = self.shape.axis_of(axis)
+		position = self.pos.as_dict()
+		step = self.step.as_dict().get(axis, 1)
+		start = position.get(axis, 0)
+		for memory_position in range(getattr(self.shape, axis)):
+			unit_position = replace(
+				self.shape.make_with(0),
+				**{**position, axis: start + memory_position * step},
+			)
+			unit = self.rescope(
+				pos=unit_position,
+				shape=replace(self.shape, **{axis: 1}),
+			)
+			index = [slice(None)] * len(self.shape.names)
+			index[axis_index] = slice(memory_position, memory_position + 1)
+			unit.__memory_index = tuple(index)
+			yield unit
+
 
 class TomoWindow(DataRef):
 	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape, step: DataShape,
-					dtype: type, work_dtype: type, *, pad_after: DataShape = None):
+				dtype: type, work_dtype: type, *, pad_after: DataShape = None):
 		super().__init__(shape, pad, pos, step, dtype, pad_after=pad_after)
 		self.__work_dtype = work_dtype
+
+	@classmethod
+	def from_bounds(
+		cls,
+		physical_shape: DataShape,
+		*,
+		y: tuple[int, int] | slice | None = None,
+		theta: tuple[int, int] | tuple[int, int, int] | slice | None = None,
+		halo: int | DataShape | tuple[int | DataShape, int | DataShape] = 0,
+		dtype: type = None,
+		work_dtype: type = np.float32,
+	) -> Self:
+		"""Construct a source-coordinate window and record its realized halo.
+
+		``shape`` records the covered source-coordinate span while ``step``
+		records sampling within it.  Consequently a strided Theta selection has
+		``shape.Theta == stop - start`` even though ``frange.length.Theta`` is
+		the number of samples allocated in memory.  A two-item ``halo`` supplies
+		independent before/after requirements for streaming boundaries.
+		"""
+
+		def bounds(value, size: int, name: str, *, stride: bool) -> tuple[int, int, int]:
+			if value is None:
+				start, stop, step = 0, size, 1
+			elif isinstance(value, slice):
+				start = 0 if value.start is None else value.start
+				stop = size if value.stop is None else value.stop
+				step = 1 if value.step is None else value.step
+			else:
+				if len(value) not in ((2, 3) if stride else (2,)):
+					raise ValueError(f"{name} bounds must contain start/stop" + ("[/stride]" if stride else ""))
+				start, stop = value[:2]
+				step = value[2] if len(value) == 3 else 1
+			if not 0 <= start < stop <= size or step < 1 or (not stride and step != 1):
+				raise ValueError(f"invalid {name} bounds [{start}, {stop}) with stride {step}")
+			return int(start), int(stop), int(step)
+
+		theta_start, theta_stop, theta_step = bounds(
+			theta, physical_shape.Theta, "Theta", stride=True,
+		)
+		y_start, y_stop, _ = bounds(y, physical_shape.Y, "Y", stride=False)
+		shape = type(physical_shape)(
+			Theta=theta_stop - theta_start, Y=y_stop - y_start, X=physical_shape.X,
+		)
+		pos = type(physical_shape)(Theta=theta_start, Y=y_start, X=0)
+		step = type(physical_shape)(Theta=theta_step, Y=1, X=1)
+		def canonical_halo(value: int | DataShape) -> DataShape:
+			return replace(
+				physical_shape.make_with(0),
+				**(Y(value).as_dict() if isinstance(value, int) else value.as_dict()),
+			)
+
+		if isinstance(halo, tuple):
+			if len(halo) != 2:
+				raise ValueError("window halo pair must contain before and after values")
+			requested_before, requested_after = map(canonical_halo, halo)
+		else:
+			requested_before = requested_after = canonical_halo(halo)
+		if any(
+			value < 0
+			for requested in (requested_before, requested_after)
+			for value in requested.as_tuple()
+		):
+			raise ValueError("window halo cannot be negative")
+		pad_before, pad_after = _resolved_padding(
+			pos, shape, requested_before, requested_after, physical_shape,
+		)
+		return cls(
+			shape, pad_before, pos, step, dtype, work_dtype, pad_after=pad_after,
+		)
 
 	@property
 	def internal(self):
@@ -285,6 +397,11 @@ class TomoDataSet(DataRef):
 				raise ValueError("one source angle is required for every projection")
 			self.__angles = np.asarray(angles, dtype=np.float32)
 		elif angle_steps is None:
+			warnings.warn(
+				"TomoDataSet FOV angle synthesis is deprecated; pass acquisition-model angles",
+				DeprecationWarning,
+				stacklevel=2,
+			)
 			if shape.Theta == fov.Theta * fov.Count:
 				self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
 			else:
@@ -296,8 +413,8 @@ class TomoDataSet(DataRef):
 		if len(acquisition_indices) != shape.Theta:
 			raise ValueError("one acquisition index is required for every projection")
 		self.__acquisition_indices = np.asarray(acquisition_indices, dtype=np.int64)
-		# Geometry copies share these arrays, so construction makes the convention
-		# they rely on enforceable instead of cloning full angle vectors per rescope.
+		# Geometry copies share these arrays, so construction makes their
+		# immutability convention enforceable instead of cloning them per rescope.
 		self.__angles.setflags(write=False)
 		self.__acquisition_indices.setflags(write=False)
 

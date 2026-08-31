@@ -13,6 +13,7 @@ from typing import TextIO
 import numpy as np
 
 from lftomo.storage import (
+	basic_view_shape,
 	FileBackedNPArray,
 	ManagedBuffer,
 	StorageBackend,
@@ -20,21 +21,10 @@ from lftomo.storage import (
 	is_advanced_index,
 )
 
-from .shapes import DataShape, Proj, Theta, X, XSlice, Y, YSlice, Z
+from .shapes import DataShape
 from .log import log, LOG
 
 MEM_INTERVAL_TIMER = 1.0
-
-_VIEW_SHAPES = {
-	("Y", "X"): Proj,
-	("Theta", "X"): YSlice,
-	("Theta", "Y"): XSlice,
-	("Theta",): Theta,
-	("Y",): Y,
-	("X",): X,
-	("Z",): Z,
-}
-
 
 class SharedNPManager(SharedMemoryManager, StorageBackend):
 	""" Manages shared memory numpy arrays. """
@@ -387,31 +377,7 @@ class SharedNPArray(ManagedBuffer):
 	def __view_shape(self) -> DataShape:
 		"""Apply basic views using only declared named shape classes."""
 
-		names = list(self.__shape.names)
-		values = list(self.__shape.as_tuple())
-		for view in self.__views:
-			indices = view if isinstance(view, tuple) else (view,)
-			if Ellipsis in indices:
-				position = indices.index(Ellipsis)
-				missing = len(values) - (len(indices) - 1)
-				indices = indices[:position] + (slice(None),) * missing + indices[position + 1:]
-			indices += (slice(None),) * (len(values) - len(indices))
-			if len(indices) != len(values) or any(index is None for index in indices):
-				raise TypeError("new-axis ManagedBuffer views have no canonical DataShape")
-			selected = [
-				(name, len(range(*index.indices(size))))
-				for name, size, index in zip(names, values, indices, strict=True)
-				if not isinstance(index, (int, np.integer))
-			]
-			names = [name for name, _value in selected]
-			values = [value for _name, value in selected]
-		shape_type = (
-			type(self.__shape)
-			if tuple(names) == self.__shape.names else _VIEW_SHAPES.get(tuple(names))
-		)
-		if shape_type is None:
-			raise TypeError(f"no canonical DataShape for basic view axes {tuple(names)!r}")
-		return shape_type(*values)
+		return basic_view_shape(self.__shape, self.__views)
 
 	@cached_property
 	def has_views(self):

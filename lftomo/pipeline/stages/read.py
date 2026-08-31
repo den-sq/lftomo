@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from natsort import natsorted
@@ -28,22 +29,21 @@ from lftomo.config import (
 from lftomo.pipeline.core import PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
-from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
-from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
+from lftomo.util.window import TomoWindow
 
 
 def _output_contract(order: str, *, required_metadata: tuple[str, ...],
 		produces_artifacts: tuple[str, ...] = ()) -> StageContract:
 	if order not in ("projection", "sinogram"):
 		raise ValueError("read order must be 'projection' or 'sinogram'")
-	angle_artifacts = ("angles", "acquisition_indices", "angle_provenance")
 	return StageContract(
 		produces=ProjOrder if order == "projection" else SinoOrder,
 		cacheable_prefix=True,
 		produces_domain=DataDomain.RAW,
 		window_axes=("Theta", "Y"),
 		required_metadata=required_metadata,
-		produces_artifacts=angle_artifacts + produces_artifacts,
+		produces_artifacts=produces_artifacts,
 		managed_artifacts=produces_artifacts,
 	)
 
@@ -54,26 +54,24 @@ def _storage(state: PipelineState):
 	return state.storage
 
 
-def _source_angle_metadata(
-	state: PipelineState,
+def _source_angles(
+	scan,
 	count: int,
 	*,
 	hdf5_handle=None,
-) -> tuple[np.ndarray, np.ndarray, dict]:
-	acquisition = state.scan.acquisition
+) -> tuple[np.ndarray, np.ndarray]:
+	acquisition = scan.acquisition
 	planned = acquisition.n_projections
 	source = acquisition.angle_source
 	angles = None
 	if isinstance(source, UniformAngleSource):
 		indices = np.arange(count, dtype=np.int64)
-		provenance = {"kind": "uniform"}
 	elif isinstance(source, ExplicitAngleSource):
 		indices = source.acquisition_indices
 		angles = (
 			None if source.angles_degrees is None
 			else np.deg2rad(np.asarray(source.angles_degrees, dtype=np.float64))
 		)
-		provenance = {"kind": "explicit"}
 	elif isinstance(source, HardwareTimestampAngleSource):
 		timestamps = hardware_timestamps(
 			source.path,
@@ -84,15 +82,6 @@ def _source_angle_metadata(
 		indices = indices_from_hardware_timestamps(
 			timestamps, recorded_count=count, planned_count=planned,
 		)
-		provenance = {
-			"kind": "hardware_timestamps",
-			"path": str(source.path),
-			"timestamp_column": source.timestamp_column,
-			"nominal_interval": (
-				float(timestamps[-1] - timestamps[0]) / (planned - 1)
-				if planned > 1 else None
-			),
-		}
 	elif isinstance(source, HDF5AngleSource):
 		if hdf5_handle is None:
 			raise ValueError("hdf5 angle source requires an HDF5 projection source")
@@ -102,11 +91,6 @@ def _source_angle_metadata(
 		if source.units == "degrees":
 			angles = np.deg2rad(angles)
 		indices = None
-		provenance = {
-			"kind": "hdf5",
-			"path": source.path,
-			"source_units": source.units,
-		}
 	else:  # pragma: no cover - discriminated config union is exhaustive
 		raise TypeError(f"unsupported angle source: {type(source).__name__}")
 
@@ -143,71 +127,130 @@ def _source_angle_metadata(
 		resolved_angles = np.asarray(angles, dtype=np.float32)
 	else:
 		resolved_angles = expected_angles
-	provenance.update({
-		"recorded_projection_count": count,
-		"planned_slot_count": planned,
-		"rotation_start_deg": acquisition.rotation_start_deg,
-		"rotation_end_deg": acquisition.rotation_end_deg,
-		"endpoint": False,
-	})
-	return indices, resolved_angles, provenance
+	return indices, resolved_angles
+
+
+@dataclass(frozen=True)
+class SourceMetadata:
+	"""One source-header probe, ready to become the run's TomoDataSet."""
+
+	physical_shape: ProjOrder
+	dtype: np.dtype
+	angles: np.ndarray
+	acquisition_indices: np.ndarray
+
+
+def _validated_source_metadata(
+	scan,
+	stage: Stage,
+	*,
+	shape,
+	dtype,
+	hdf5_handle=None,
+) -> SourceMetadata:
+	if len(shape) != 3:
+		raise ValueError("projection source must have (Theta, Y, X) dimensions")
+	physical_shape = ProjOrder(*map(int, shape))
+	declared = scan.projection_shape()
+	if physical_shape != declared:
+		if physical_shape.Theta != declared.Theta:
+			raise ValueError(
+				f"scan declares {declared.Theta} projections but source contains "
+				f"{physical_shape.Theta}"
+			)
+		raise ValueError(
+			f"scan declares projection shape {declared} but source header contains {physical_shape}"
+		)
+	if (
+		isinstance(stage, TIFFStackReadStage)
+		and stage.projection_count is not None
+		and physical_shape.Theta != stage.projection_count
+	):
+		raise ValueError(
+			f"read stage declares {stage.projection_count} projections but TIFF source "
+			f"contains {physical_shape.Theta}"
+		)
+	indices, angles = _source_angles(
+		scan, physical_shape.Theta, hdf5_handle=hdf5_handle,
+	)
+	return SourceMetadata(
+		physical_shape=physical_shape,
+		dtype=np.dtype(dtype),
+		angles=angles,
+		acquisition_indices=indices,
+	)
+
+
+def probe_source_metadata(scan, stage: Stage) -> SourceMetadata:
+	"""Open one source file once and resolve the complete acquisition metadata."""
+
+	source = scan.projections
+	if isinstance(stage, HDF5DxchangeReadStage):
+		if not isinstance(source, HDF5DxchangeProjections):
+			raise TypeError("read.hdf5_dxchange requires HDF5DxchangeProjections scan metadata")
+		with h5py.File(source.path, "r") as handle:
+			if source.data_path not in handle:
+				raise ValueError(
+					f"dxchange projection dataset {source.data_path!r} is missing from {source.path}"
+				)
+			data = handle[source.data_path]
+			return _validated_source_metadata(
+				scan, stage, shape=data.shape, dtype=data.dtype, hdf5_handle=handle,
+			)
+	if isinstance(stage, TIFFStackReadStage):
+		if not isinstance(source, TIFFStackProjections):
+			raise TypeError("read.tiff_stack requires TIFFStackProjections scan metadata")
+		files = stage._source_files(source)
+		with tf.TiffFile(files[0]) as handle:
+			page = handle.pages[0]
+			count = len(files) if len(files) > 1 else len(handle.pages)
+			return _validated_source_metadata(
+				scan, stage, shape=(count, *page.shape), dtype=page.dtype,
+			)
+	raise TypeError(f"unsupported read stage for source probing: {stage.name}")
+
+
+def _read_window(state: PipelineState, stage: Stage) -> TomoWindow:
+	if state.dataset is None or state.source_window is None:
+		raise RuntimeError("read stages require the plan-time dataset and source window")
+	dataset = state.dataset
+	planned_source = state.source_window.with_pad(["Y"])
+	theta_stop = (
+		dataset.physical_shape.Theta
+		if getattr(stage, "theta_stop", None) is None else stage.theta_stop
+	)
+	y_stop = (
+		dataset.physical_shape.Y
+		if getattr(stage, "y_stop", None) is None else stage.y_stop
+	)
+	expected = TomoWindow.from_bounds(
+		dataset.physical_shape,
+		y=(getattr(stage, "y_start", 0), y_stop),
+		theta=(
+			getattr(stage, "theta_start", 0), theta_stop,
+			getattr(stage, "theta_stride", 1),
+		),
+		dtype=dataset.dtype,
+		work_dtype=np.float32,
+	)
+	if planned_source.index != expected.index:
+		raise ValueError("read selection does not match the planned canonical window")
+	return planned_source
 
 
 def _bind_source_state(
 	state: PipelineState,
 	working,
-	*,
-	full_shape: ProjOrder,
-	dtype,
-	theta_start: int,
-	theta_stop: int,
-	theta_stride: int,
-	y_start: int,
-	y_stop: int,
-	angles: np.ndarray,
-	acquisition_indices: np.ndarray,
+	read_window: TomoWindow,
 ) -> PipelineState:
-	output_range = state.dataset.frange if state.dataset is not None else Y(1)
-	dataset = TomoDataSet(
-		CTFov(full_shape.Theta, state.scan.degrees_per_fov, 1),
-		full_shape,
-		output_range,
-		dtype=dtype,
-		work_dtype=np.float32,
-		angles=angles,
-		acquisition_indices=acquisition_indices,
-	)
-	zero = ProjOrder(Theta=0, Y=0, X=0)
-	# A TomoWindow describes the covered source-coordinate span.  With a
-	# strided Theta selection its shape is therefore ``stop - start`` while the
-	# working buffer contains ``len(range(start, stop, stride))`` samples; step
-	# carries the mapping between those two extents.
-	planned = state.source_window
-	if planned is None:
-		source_window = TomoWindow(
-			ProjOrder(Theta=theta_stop - theta_start, Y=y_stop - y_start, X=full_shape.X),
-			zero,
-			ProjOrder(Theta=theta_start, Y=y_start, X=0),
-			ProjOrder(Theta=theta_stride, Y=1, X=1),
-			dtype,
-			np.float32,
-		)
-	else:
-		planned_source = planned.with_pad(["Y"])
-		if (planned_source.pos.Y, planned_source.pos.Y + planned_source.shape.Y) != (y_start, y_stop):
-			raise ValueError("read selection does not match the planned canonical window")
-		source_window = TomoWindow(
-			ProjOrder(Theta=theta_stop - theta_start, Y=planned.shape.Y, X=full_shape.X),
-			planned.pad_before,
-			ProjOrder(Theta=theta_start, Y=planned.pos.Y, X=0),
-			ProjOrder(Theta=theta_stride, Y=1, X=1),
-			dtype,
-			np.float32,
-			pad_after=planned.pad_after,
-		)
+	if state.dataset is None or state.source_window is None:
+		raise RuntimeError("read stages require the plan-time dataset and source window")
+	shape = read_window.frange.length.to(type(working.shape))
+	if working.shape != shape or np.dtype(working.dtype) != np.dtype(state.dataset.dtype):
+		raise ValueError("read allocation disagrees with the planned source window")
 	result = state.with_array(working, domain=DataDomain.RAW)
-	result.dataset = dataset
-	result.source_window = source_window
+	if result.dataset is not state.dataset or result.source_window is not state.source_window:
+		raise AssertionError("read replaced canonical plan geometry")
 	return result
 
 
@@ -253,6 +296,10 @@ class HDF5DxchangeReadStage(Stage):
 		source = state.scan.projections
 		if not isinstance(source, HDF5DxchangeProjections):
 			raise TypeError("read.hdf5_dxchange requires HDF5DxchangeProjections scan metadata")
+		read_window = _read_window(state, self)
+		dataset = state.dataset
+		layout = ProjOrder if self.order == "projection" else SinoOrder
+		shape = read_window.frange.length.to(layout)
 
 		with h5py.File(source.path, "r") as handle:
 			if source.data_path not in handle:
@@ -262,50 +309,37 @@ class HDF5DxchangeReadStage(Stage):
 			data = handle[source.data_path]
 			if data.ndim != 3:
 				raise ValueError(f"{source.data_path!r} must have (Theta, Y, X) dimensions")
-			theta_count, rows, columns = data.shape
-			dtype = data.dtype
-			if theta_count != state.scan.n_projections:
+			if ProjOrder(*data.shape) != dataset.physical_shape:
 				raise ValueError(
-					f"scan declares {state.scan.n_projections} projections but HDF5 contains {theta_count}"
+					"HDF5 source shape changed after the plan-time metadata probe"
 				)
-			all_indices, all_angles, angle_provenance = _source_angle_metadata(
-				state, theta_count, hdf5_handle=handle,
-			)
-			theta_stop = theta_count if self.theta_stop is None else self.theta_stop
-			y_stop = rows if self.y_stop is None else self.y_stop
-			if not 0 <= self.theta_start < theta_stop <= theta_count:
-				raise ValueError("invalid HDF5 Theta window")
-			if not 0 <= self.y_start < y_stop <= rows:
-				raise ValueError("invalid HDF5 Y window")
-			selected_count = len(range(self.theta_start, theta_stop, self.theta_stride))
-			layout = ProjOrder if self.order == "projection" else SinoOrder
-			shape = (
-				ProjOrder(Theta=selected_count, Y=y_stop - self.y_start, X=columns)
-				if layout is ProjOrder else
-				SinoOrder(Y=y_stop - self.y_start, Theta=selected_count, X=columns)
-			)
+			if np.dtype(data.dtype) != np.dtype(dataset.dtype):
+				raise ValueError("HDF5 source dtype changed after the plan-time metadata probe")
 			memory = _storage(state).allocate(
-				shape, dtype, role="raw_staging",
+				shape, dataset.dtype, role="raw_staging",
 				reuse_from=("raw_staging", "reconstruction"),
 			)
 			target = memory.array()
-			selection = np.s_[
-				self.theta_start:theta_stop:self.theta_stride, self.y_start:y_stop, :,
-			]
+			selection = read_window.index
 			if layout is ProjOrder and data.chunks is None and data.compression is None:
 				data.read_direct(target, source_sel=selection)
 				read_strategy = "direct"
 			else:
 				read_strategy = "bounded_scratch"
+				selected_count = shape.Theta
 				chunk = min(32, selected_count)
+				theta_slice = read_window.axis_slice("Theta")
+				y_slice = read_window.axis_slice("Y")
 				for offset in range(0, selected_count, chunk):
 					count = min(chunk, selected_count - offset)
-					start = self.theta_start + offset * self.theta_stride
-					stop = start + count * self.theta_stride
-					scratch = np.empty((count, y_stop - self.y_start, columns), dtype=dtype)
+					start = theta_slice.start + offset * theta_slice.step
+					stop = start + count * theta_slice.step
+					scratch = np.empty(
+						(count, shape.Y, dataset.physical_shape.X), dtype=dataset.dtype,
+					)
 					data.read_direct(
 						scratch,
-						source_sel=np.s_[start:stop:self.theta_stride, self.y_start:y_stop, :],
+						source_sel=np.s_[start:stop:theta_slice.step, y_slice, :],
 					)
 					if layout is ProjOrder:
 						target[offset:offset + count] = scratch
@@ -314,17 +348,6 @@ class HDF5DxchangeReadStage(Stage):
 
 			artifacts = dict(state.artifacts)
 			artifacts["hdf5_read_strategy"] = read_strategy
-			angle_selection = slice(self.theta_start, theta_stop, self.theta_stride)
-			artifacts["acquisition_indices"] = all_indices[angle_selection]
-			artifacts["angles"] = all_angles[angle_selection]
-			artifacts["angle_provenance"] = {
-				**angle_provenance,
-				"selection": {
-					"start": self.theta_start,
-					"stop": theta_stop,
-					"stride": self.theta_stride,
-				},
-			}
 			if self.calibration_policy != "ignore":
 				missing = [
 					path for path in (source.white_path, source.dark_path) if path not in handle
@@ -334,34 +357,23 @@ class HDF5DxchangeReadStage(Stage):
 						"dxchange calibration dataset(s) missing: " + ", ".join(missing)
 					)
 				if not missing:
+					y_slice = read_window.axis_slice("Y")
 					for artifact_name, path in (
 						("white_fields", source.white_path), ("dark_fields", source.dark_path),
 					):
-						dataset = handle[path]
+						calibration = handle[path]
 						artifact_shape = GenericOrder(
-							dataset.shape[0], y_stop - self.y_start, dataset.shape[2],
+							calibration.shape[0], shape.Y, calibration.shape[2],
 						)
 						artifact = _storage(state).allocate(
-							artifact_shape, dataset.dtype, role=artifact_name,
+							artifact_shape, calibration.dtype, role=artifact_name,
 						)
-						dataset.read_direct(
+						calibration.read_direct(
 							artifact.array(),
-							source_sel=np.s_[:, self.y_start:y_stop, :],
+							source_sel=np.s_[:, y_slice, :],
 						)
 						artifacts[artifact_name] = artifact
-		result = _bind_source_state(
-			state,
-			memory,
-			full_shape=ProjOrder(Theta=theta_count, Y=rows, X=columns),
-			dtype=dtype,
-			theta_start=self.theta_start,
-			theta_stop=theta_stop,
-			theta_stride=self.theta_stride,
-			y_start=self.y_start,
-			y_stop=y_stop,
-			angles=all_angles,
-			acquisition_indices=all_indices,
-		)
+		result = _bind_source_state(state, memory, read_window)
 		result.artifacts = artifacts
 		return result
 
@@ -416,86 +428,17 @@ class TIFFStackReadStage(Stage):
 			raise TypeError("read.tiff_stack requires TIFFStackProjections scan metadata")
 
 		files = self._source_files(state.scan.projections)
-		with tf.TiffFile(files[0]) as tif:
-			page = tif.pages[0]
-			dtype = page.dtype
-			rows, columns = page.shape
-			count = len(files) if len(files) > 1 else len(tif.pages)
-		if count != state.scan.n_projections:
-			raise ValueError(
-				f"scan declares {state.scan.n_projections} projections but TIFF source contains {count}"
-			)
-		if self.projection_count is not None and count != self.projection_count:
-			raise ValueError(
-				f"read stage declares {self.projection_count} projections but TIFF source contains {count}"
-			)
-		all_indices, all_angles, angle_provenance = _source_angle_metadata(state, count)
-
-		stop = rows if self.y_stop is None else self.y_stop
-		if not 0 <= self.y_start < stop <= rows:
-			raise ValueError(f"invalid TIFF Y window [{self.y_start}, {stop}) for {rows} rows")
-		theta_stop = count if self.theta_stop is None else self.theta_stop
-		if not 0 <= self.theta_start < theta_stop <= count:
-			raise ValueError(
-				f"invalid TIFF Theta window [{self.theta_start}, {theta_stop}) for {count} projections"
-			)
-		selected_files = files[self.theta_start:theta_stop:self.theta_stride]
-		if len(files) == 1 and (
-			self.theta_start != 0 or theta_stop != count or self.theta_stride != 1
-		):
-			raise ValueError(
-				"Theta-windowed or strided TIFF reads currently require one file per projection"
-			)
-		selected_count = count if len(files) == 1 else len(selected_files)
+		read_window = _read_window(state, self)
+		dataset = state.dataset
 		layout = ProjOrder if self.order == "projection" else SinoOrder
-		shape = (
-			ProjOrder(Theta=selected_count, Y=stop - self.y_start, X=columns)
-			if layout is ProjOrder else
-			SinoOrder(Y=stop - self.y_start, Theta=selected_count, X=columns)
-		)
+		shape = read_window.frange.length.to(layout)
 		memory = _storage(state).allocate(
-			shape, dtype, role="raw_staging",
+			shape, dataset.dtype, role="raw_staging",
 			reuse_from=("raw_staging", "reconstruction"),
 		)
 		kwargs = {} if self.threads is None else {"thread_max": self.threads}
 		if layout is ProjOrder:
-			distribute_tiff_read(
-				selected_files, memory, y_start=self.y_start, y_stop=stop, **kwargs
-			)
+			distribute_tiff_read(files, memory, read_window, **kwargs)
 		else:
-			distribute_tiff_sinogram_read(
-				files,
-				memory,
-				y_start=self.y_start,
-				y_stop=stop,
-				theta_start=self.theta_start,
-				theta_stop=theta_stop,
-				theta_stride=self.theta_stride,
-				**kwargs,
-			)
-		result = _bind_source_state(
-			state,
-			memory,
-			full_shape=ProjOrder(Theta=count, Y=rows, X=columns),
-			dtype=dtype,
-			theta_start=self.theta_start,
-			theta_stop=theta_stop,
-			theta_stride=self.theta_stride,
-			y_start=self.y_start,
-			y_stop=stop,
-			angles=all_angles,
-			acquisition_indices=all_indices,
-		)
-		angle_selection = slice(self.theta_start, theta_stop, self.theta_stride)
-		result.artifacts = dict(result.artifacts)
-		result.artifacts["acquisition_indices"] = all_indices[angle_selection]
-		result.artifacts["angles"] = all_angles[angle_selection]
-		result.artifacts["angle_provenance"] = {
-			**angle_provenance,
-			"selection": {
-				"start": self.theta_start,
-				"stop": theta_stop,
-				"stride": self.theta_stride,
-			},
-		}
-		return result
+			distribute_tiff_sinogram_read(files, memory, read_window, **kwargs)
+		return _bind_source_state(state, memory, read_window)

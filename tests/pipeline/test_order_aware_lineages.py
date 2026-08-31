@@ -44,7 +44,7 @@ def test_recon_minimal_canonical_pins_fused_sino_to_projection_boundary():
 def test_aaa523_keeps_nonzero_warp_in_projection_order_before_stripe():
 	recon, _ = load_recon(ROOT / "lftomo" / "pipelines" / "phase-contrast-canonical.yaml")
 	stages = [create_stage(config) for config in recon.pipeline]
-	plan = validate_pipeline(stages, scan_config(), mode="complete")
+	plan = validate_pipeline(stages, scan_config(columns=5008), mode="complete")
 	skew_index = next(index for index, stage in enumerate(stages) if stage.name == "skew_correct.cv2_affine")
 	recon_step = next(step for step in plan.steps if step.stage_name == "recon.gridrec")
 

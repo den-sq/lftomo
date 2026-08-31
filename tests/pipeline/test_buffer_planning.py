@@ -22,8 +22,10 @@ from lftomo.pipeline.stages import (
 	TIFFStackReadStage,
 	WeightedNormalizeStage,
 )
+from lftomo.pipeline.planning import _read_spec
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import ProjOrder, SinoOrder, X
+from tests.sample_data import attach_source_geometry
 
 
 def _scan(*, projections: int = 10, rows: int = 2, columns: int = 4) -> Scan:
@@ -60,10 +62,10 @@ def test_retirement_occurs_only_after_normalization_handoff():
 			ProjOrder(Theta=10, Y=2, X=4), np.uint16, role="raw_staging",
 		)
 		raw.array()[...] = 10
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			raw, _scan(), _recon(), storage=context.storage,
 			domain=DataDomain.RAW,
-		)
+		))
 		result = WeightedNormalizeStage().run(state)
 
 		assert isinstance(result.working_array, ManagedBuffer)
@@ -81,7 +83,9 @@ def test_failed_normalization_does_not_retire_current_input():
 		raw = context.storage.allocate(
 			ProjOrder(Theta=10, Y=2, X=4), np.uint16, role="raw_staging",
 		)
-		state = PipelineState(raw, scan, _recon(), storage=context.storage)
+		state = attach_source_geometry(PipelineState(
+			raw, scan, _recon(), storage=context.storage,
+		))
 		with pytest.raises(ValueError, match="flat_fields"):
 			WeightedNormalizeStage().run(state)
 		assert not any(
@@ -113,10 +117,10 @@ def test_layout_and_super_resolution_outputs_are_manager_issued():
 			ProjOrder(Theta=3, Y=2, X=4), np.float32, role="normalized",
 		)
 		working.array()[...] = np.arange(24, dtype=np.float32).reshape(3, 2, 4)
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			working, _scan(projections=3), _recon(), storage=context.storage,
 			domain=DataDomain.TRANSMISSION,
-		)
+		))
 		converted = LayoutConvertStage("sinogram", "bounded sinogram kernels").run(state)
 		assert isinstance(converted.working_array, ManagedBuffer)
 		assert converted.working_array.name != working.name
@@ -132,10 +136,10 @@ def test_fused_geometry_and_helical_outputs_are_manager_issued():
 			ProjOrder(Theta=3, Y=2, X=4), np.float32, role="normalized",
 		)
 		working.array()[...] = np.arange(24, dtype=np.float32).reshape(3, 2, 4)
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			working, _scan(projections=3), _recon(), storage=context.storage,
 			domain=DataDomain.TRANSMISSION,
-		)
+		))
 		geometry = AffineSkewMovementStage(
 			transition_to="sinogram", pad_x=1,
 		).run(state)
@@ -214,6 +218,18 @@ def test_planner_emits_liveness_alias_and_managed_artifact_allocations():
 	assert fully_pinned_recon.action is BufferAction.ALLOCATE
 
 
+def test_read_planning_uses_canonical_strided_window_geometry():
+	spec = _read_spec(
+		TIFFStackReadStage(
+			order="sinogram", y_start=1, y_stop=5,
+			theta_start=1, theta_stop=10, theta_stride=3,
+		),
+		_scan(projections=10, rows=6, columns=4),
+	)
+
+	assert spec.shape == SinoOrder(Y=4, Theta=3, X=4)
+
+
 def test_reconstruction_crop_keeps_full_physical_allocation_in_plan():
 	scan = _scan()
 	stages = [
@@ -270,7 +286,6 @@ def test_engine_alias_is_refused_when_normalized_capacity_is_too_small():
 
 def _actual_gridrec(*, engine_aliasing: bool):
 	shape = ProjOrder(Theta=16, Y=1, X=8)
-	angles = np.linspace(0, np.pi, shape.Theta, endpoint=False, dtype=np.float32)
 	shape_tuple = (shape.Theta, shape.Y, shape.X)
 	input_values = np.exp(-np.linspace(0.05, 0.5, np.prod(shape_tuple), dtype=np.float32)).reshape(shape_tuple)
 	with PipelineRunContext(enable_engine_aliasing=engine_aliasing) as context:
@@ -280,7 +295,6 @@ def _actual_gridrec(*, engine_aliasing: bool):
 			working, _scan(projections=shape.Theta, rows=shape.Y, columns=shape.X),
 			_recon(engine_aliasing=engine_aliasing), storage=context.storage,
 			domain=DataDomain.ATTENUATION,
-			artifacts={"angles": angles},
 		)
 		result = GridrecStage(center=4, circle_mask=False, ncore=1).run(state)
 		return working.name, result.working_array.name, np.asarray(result.working_array).copy()
@@ -304,10 +318,10 @@ def _normalization_to_recon_pipeline(*, aliasing: bool):
 	) as context:
 		raw = context.storage.allocate(shape, np.uint16, role="raw_staging")
 		raw.array()[...] = 10
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			raw, scan, _recon(aliasing=aliasing, engine_aliasing=False),
 			storage=context.storage, domain=DataDomain.RAW,
-		)
+		))
 		state = WeightedNormalizeStage().run(state)
 		state.domain = DataDomain.TRANSMISSION
 		state = NegativeLogStage().run(state)

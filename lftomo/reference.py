@@ -20,12 +20,14 @@ from lftomo.pipeline import (
 	NumpyBackend,
 	PipelineRunContext,
 	PipelineState,
+	resolve_streaming_plan,
 	validate_pipeline,
 )
 from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
 from lftomo.util.shapes import ProjOrder
+from lftomo.util.window import TomoWindow
 
 
 class ReferenceNotReproducible(RuntimeError):
@@ -252,7 +254,11 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 		raise ValueError("Theta batch size must be positive")
 	configs = [config for config in recon.pipeline if config.kind != "write"]
 	stages = [create_stage(config) for config in configs]
-	validate_pipeline(stages, scan, NumpyBackend())
+	source_plan = resolve_streaming_plan(stages, scan)
+	validate_pipeline(
+		stages, scan, NumpyBackend(),
+		dataset=source_plan.dataset, source_window=source_plan.source_window,
+	)
 	stripe_index = next(
 		(index for index, config in enumerate(configs) if config.kind == "stripe")
 	)
@@ -272,11 +278,17 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 			theta_stop = min(theta_start + theta_batch_size, projection_count)
 			batch_read = read_config.model_copy(deep=True)
 			batch_read.params.update({"theta_start": theta_start, "theta_stop": theta_stop})
+			y = source_plan.source_window.axis_slice("Y")
+			window = TomoWindow.from_bounds(
+				source_plan.dataset.physical_shape,
+				y=(y.start, y.stop), theta=(theta_start, theta_stop),
+				dtype=source_plan.dataset.dtype, work_dtype=np.float32,
+			)
 			with PipelineRunContext() as run_context:
 				state = PipelineState(
 					working_array=np.empty((0,), dtype=np.float32), scan=scan, recon=recon,
-					artifacts={"projection_start": theta_start, "projection_count": projection_count},
 					backend=NumpyBackend(), storage=run_context.storage,
+					dataset=source_plan.dataset, source_window=window,
 				)
 				state = create_stage(batch_read).run(state)
 				for config in pre_configs:
@@ -297,6 +309,8 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 			working_array=volume, scan=scan, recon=recon, backend=NumpyBackend(),
 			buffer_spec=BufferSpec(ProjOrder(*volume.shape), volume.dtype),
 			domain=DataDomain.ATTENUATION,
+			dataset=source_plan.dataset,
+			source_window=source_plan.source_window.with_pad(["Y"]),
 		)
 		state = create_stage(stripe_config).run(state)
 		volume.flush()
@@ -360,7 +374,7 @@ def run_reference_archive(root: str | Path, producer: str,
 		chunk_size = int(read.params["sinogram_chunk_size"])
 		overlap = int(read.params.get("chunk_overlap", 0))
 		(window_start, window_stop), core_window = aligned_producer_window(
-			selected, int(scan.detector.rows), chunk_size, overlap,
+			selected, scan.detector.projection_shape().Y, chunk_size, overlap,
 		)
 		recon = _phase_contrast_configs(recon, (window_start, window_stop))
 		_resolve_flat_fields(scan, recon)
@@ -372,7 +386,9 @@ def run_reference_archive(root: str | Path, producer: str,
 	else:
 		halo = _processing_halo(recon)
 		window_start = max(0, min(selected) - halo)
-		window_stop = min(scan.detector.rows or max(selected) + halo + 1, max(selected) + halo + 1)
+		window_stop = min(
+			scan.detector.projection_shape().Y, max(selected) + halo + 1,
+		)
 		core_window = (min(selected), max(selected) + 1)
 		for config in recon.pipeline:
 			if config.kind == "read":

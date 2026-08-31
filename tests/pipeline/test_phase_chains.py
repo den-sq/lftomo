@@ -26,6 +26,7 @@ from lftomo.pipeline.stages import (
 	create_stage,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from tests.sample_data import attach_source_geometry
 
 
 def _scan():
@@ -50,13 +51,13 @@ def _fixture(layout):
 
 def _run(stages, data, layout):
 	config = StageConfig(kind="phase", algorithm="negative_log")
-	state = PipelineState(
+	state = attach_source_geometry(PipelineState(
 		working_array=data,
 		scan=_scan(),
 		recon=Recon(pipeline=[config]),
 		buffer_spec=BufferSpec(layout(*data.shape), data.dtype),
 		domain=DataDomain.TRANSMISSION,
-	)
+	))
 	return Pipeline(
 		stages,
 		initial_layout=layout,

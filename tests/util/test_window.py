@@ -2,9 +2,13 @@ from functools import partial
 import numpy as np
 import pytest
 
-from lftomo.util.shapes import ProjOrder, ReconOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
+from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
 from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, DataRef
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
+
+
+def _uniform_angles(count):
+	return np.linspace(0, np.pi, count, endpoint=False)
 
 
 @pytest.mark.integration
@@ -32,7 +36,10 @@ def test_creation():
 	dtype = np.int16
 	work_dtype = np.float32
 
-	tds = TomoDataSet(fov, shape, over, dtype=dtype, work_dtype=work_dtype)
+	tds = TomoDataSet(
+		fov, shape, over, dtype=dtype, work_dtype=work_dtype,
+		angles=_uniform_angles(shape.Theta),
+	)
 
 	assert tds.pos == Y(0)
 	assert tds.shape == ProjOrder(Theta=1501, Y=1048, X=2048)
@@ -51,8 +58,9 @@ def test_creation():
 	assert tw.internal.dtype == np.dtype(work_dtype)
 
 	# Missing angle steps
-	with pytest.raises(Exception):
-		tds = TomoDataSet(CTFov(1969, 180, 1), shape, over, dtype=dtype, work_dtype=work_dtype)
+	with pytest.warns(DeprecationWarning, match="FOV angle synthesis"):
+		with pytest.raises(Exception):
+			TomoDataSet(CTFov(1969, 180, 1), shape, over, dtype=dtype, work_dtype=work_dtype)
 
 	# Passing Angles
 	tds = TomoDataSet(fov, shape, over, angle_steps=np.arange(0, 1501, 2),
@@ -154,6 +162,50 @@ def test_tomo_window():
 	assert isinstance(twi, TomoWindow)
 
 
+@pytest.mark.parametrize(
+	("shape", "axis", "pos", "step", "positions", "indices"),
+	[
+		(
+			ProjOrder(3, 2, 4), "Theta", ProjOrder(5, 10, 0), ProjOrder(2, 1, 1),
+			[5, 7, 9], [np.s_[0:1, :, :], np.s_[1:2, :, :], np.s_[2:3, :, :]],
+		),
+		(
+			SinoOrder(2, 3, 4), "Y", SinoOrder(10, 5, 0), SinoOrder(3, 2, 1),
+			[10, 13], [np.s_[0:1, :, :], np.s_[1:2, :, :]],
+		),
+	],
+)
+def test_data_ref_units_pair_local_indices_with_global_strided_positions(
+	shape, axis, pos, step, positions, indices,
+):
+	units = list(DataRef(shape, shape.make_with(0), pos, step, np.float32).units(axis))
+
+	assert [getattr(unit.pos, axis) for unit in units] == positions
+	assert [unit.index for unit in units] == indices
+	assert all(unit.step == step and getattr(unit.shape, axis) == 1 for unit in units)
+
+
+def test_window_from_bounds_records_edge_clamped_halo_and_theta_stride():
+	physical = ProjOrder(12, 10, 8)
+	top = TomoWindow.from_bounds(
+		physical, y=(0, 4), theta=(2, 11, 3), halo=3,
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+	bottom = TomoWindow.from_bounds(
+		physical, y=(7, 10), theta=(0, 12), halo=4,
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+	full = TomoWindow.from_bounds(physical, y=(0, 10), halo=5)
+
+	assert (top.shape, top.pos, top.step) == (
+		ProjOrder(9, 4, 8), ProjOrder(2, 0, 0), ProjOrder(3, 1, 1),
+	)
+	assert (top.pad_before, top.pad_after) == (ProjOrder(0, 0, 0), ProjOrder(0, 3, 0))
+	assert (bottom.pad_before, bottom.pad_after) == (ProjOrder(0, 4, 0), ProjOrder(0, 0, 0))
+	assert (full.pad_before, full.pad_after) == (physical.make_with(0), physical.make_with(0))
+	assert top.frange.length == ProjOrder(3, 4, 8)
+
+
 def test_recon_shape_uses_unpadded_core_geometry():
 	window = TomoWindow(
 		ProjOrder(Theta=4, Y=10, X=12), Y(2), Y(5), Y(1),
@@ -193,12 +245,15 @@ def test_window_coordinate_operations_share_the_existing_dataref_model():
 	assert list(rescoped.int_iter()) == list(range(30, 70))
 	assert list(rescoped.slice_iter()) == [np.s_[:, y, :] for y in range(30, 70)]
 
+	cropped = window.with_crop(X(1), X(2))
+	assert cropped.shape.X == 3
+
 
 def test_nondivisible_selection_emits_a_short_final_unpadded_window():
 	selection = Y.drange(100, 1000, 400)
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
-		dtype=np.uint16, work_dtype=np.float32,
+		dtype=np.uint16, work_dtype=np.float32, angles=_uniform_angles(4),
 	)
 
 	windows = list(dataset)
@@ -256,7 +311,7 @@ def test_dataset_keeps_physical_shape_separate_from_output_range():
 	selection = Y.drange(100, 900, 400)
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
-		dtype=np.uint16, work_dtype=np.float32,
+		dtype=np.uint16, work_dtype=np.float32, angles=_uniform_angles(4),
 	)
 
 	assert dataset.physical_shape == ProjOrder(Theta=4, Y=1000, X=6)
@@ -277,6 +332,7 @@ def test_dataset_clips_padding_only_at_physical_boundaries():
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(0, 1000, 400), dtype=np.uint16, work_dtype=np.float32,
+		angles=_uniform_angles(4),
 	)
 
 	windows = list(dataset.iter_with(wsize=Y(400), pad=Y(10)))
@@ -301,6 +357,7 @@ def test_nondivisible_selected_edge_keeps_short_output_when_padding_clips():
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(100, 1000, 400), dtype=np.uint16, work_dtype=np.float32,
+		angles=_uniform_angles(4),
 	)
 
 	final = list(dataset.iter_with(wsize=Y(400), pad=Y(10)))[-1]
@@ -316,6 +373,7 @@ def test_dataset_resolves_explicit_asymmetric_padding():
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(100, 500, 400), dtype=np.uint16, work_dtype=np.float32,
+		angles=_uniform_angles(4),
 	)
 
 	window = next(dataset.iter_with(wsize=Y(400), pad=Y(20), pad_after=Y(5)))
@@ -330,6 +388,7 @@ def test_selected_range_must_fit_physical_source_shape():
 		TomoDataSet(
 			CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 			Y.drange(100, 1001, 400), dtype=np.uint16, work_dtype=np.float32,
+			angles=_uniform_angles(4),
 		)
 
 
@@ -339,10 +398,11 @@ def test_from_disk_retains_physical_shape_for_selected_output(tmp_path):
 	with h5py.File(source, "w") as h5:
 		h5.create_dataset("exchange/data", shape=(4, 10, 6), dtype=np.uint16)
 
-	dataset = TomoDataSet.from_disk(
-		source, CTFov(4, 180, 1), ProjOrder, Y.drange(2, 9, 3),
-		work_dtype=np.float32,
-	)
+	with pytest.warns(DeprecationWarning, match="FOV angle synthesis"):
+		dataset = TomoDataSet.from_disk(
+			source, CTFov(4, 180, 1), ProjOrder, Y.drange(2, 9, 3),
+			work_dtype=np.float32,
+		)
 
 	assert dataset.physical_shape == ProjOrder(Theta=4, Y=10, X=6)
 	assert dataset.shape == ProjOrder(Theta=4, Y=7, X=6)

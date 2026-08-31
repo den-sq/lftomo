@@ -36,6 +36,7 @@ def test_all_of_the_stripe_is_registered_and_transposes_for_tomopy(monkeypatch):
 	def remove_all_stripe(data, **kwargs):
 		calls["shape"] = data.shape
 		calls["kwargs"] = kwargs
+		calls["shares_input"] = np.shares_memory(data, working)
 		return data + 10
 
 	monkeypatch.setattr("tomopy.remove_all_stripe", remove_all_stripe)
@@ -52,5 +53,6 @@ def test_all_of_the_stripe_is_registered_and_transposes_for_tomopy(monkeypatch):
 		"ncore": 4,
 		"nchunk": None,
 	}
+	assert calls["shares_input"] is True
 	assert result.working_array is working
 	np.testing.assert_array_equal(working, before + 10)

@@ -284,8 +284,11 @@ def test_whole_volume_acceptance_proves_cache_isolation_end_to_end(tmp_path, mon
 
 	import tomopy
 
-	def reconstruct(data, *_args, **_kwargs):
-		return np.repeat(np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1)
+	def reconstruct(data, *_args, **kwargs):
+		kwargs["init_recon"][...] = np.repeat(
+			np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1,
+		)
+		return kwargs["init_recon"]
 
 	monkeypatch.setattr(tomopy, "recon", reconstruct)
 	monkeypatch.setattr(tomopy, "circ_mask", lambda data, **_kwargs: data)

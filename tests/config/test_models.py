@@ -19,6 +19,7 @@ from lftomo.config import (  # noqa: E402
 	SweepConfig,
 	TIFFStackProjections,
 )
+from lftomo.util.shapes import Proj, ProjOrder  # noqa: E402
 
 
 def roundtrip(model):
@@ -59,6 +60,13 @@ def test_scan_roundtrip(projections):
 	)
 
 	assert roundtrip(model) == model
+	assert model.detector.projection_shape() == Proj(2048, 2048)
+	assert model.projection_shape() == ProjOrder(1501, 2048, 2048)
+
+
+def test_detector_shape_bridge_requires_concrete_streaming_geometry():
+	with pytest.raises(ValueError, match="window planning requires detector rows and columns"):
+		Detector(pixel_size_um=1).projection_shape()
 
 
 def test_scan_rejects_projection_count_mismatch():

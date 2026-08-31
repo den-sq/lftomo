@@ -486,6 +486,8 @@ class Pipeline:
 				initial_domain=self.initial_domain,
 				enable_aliasing=state.recon.buffer_aliasing,
 				enable_engine_aliasing=state.recon.tomopy_input_aliasing,
+				dataset=state.dataset,
+				source_window=state.source_window,
 			)
 			self._validated = True
 		segments = () if self.plan is None else self.plan.segments

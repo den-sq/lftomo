@@ -11,6 +11,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.window import DataRef
 
 
 class HelicalIndexRemapStage(Stage):
@@ -26,14 +27,12 @@ class HelicalIndexRemapStage(Stage):
 
 	def __init__(self, pitch_px_per_projection: float | None = None,
 				enabled: bool = True, going_up: bool = False,
-				projection_start: int = 0, crop_valid: bool = True,
+				crop_valid: bool = True,
 				fill_value: float = 0.0, vertical_velocity_px: float | None = None):
 		if pitch_px_per_projection is not None and vertical_velocity_px is not None:
 			raise ValueError("provide pitch_px_per_projection or vertical_velocity_px, not both")
 		if vertical_velocity_px is not None:
 			pitch_px_per_projection = vertical_velocity_px
-		if projection_start < 0:
-			raise ValueError("helical projection_start cannot be negative")
 		self.contract = StageContract(
 			window_axes=("Y", "Theta"),
 			produces=PRESERVE,
@@ -47,7 +46,6 @@ class HelicalIndexRemapStage(Stage):
 		self.pitch_px_per_projection = pitch_px_per_projection
 		self.enabled = enabled
 		self.going_up = going_up
-		self.projection_start = projection_start
 		self.crop_valid = crop_valid
 		self.fill_value = fill_value
 
@@ -67,12 +65,17 @@ class HelicalIndexRemapStage(Stage):
 		return pitch_um / state.scan.pixel_size_um
 
 	def output_geometry(
-		self, source_shape: ProjOrder | SinoOrder, pitch: float,
+		self, source_shape: ProjOrder | SinoOrder, pitch: float, source_window: DataRef,
 	) -> tuple[ProjOrder | SinoOrder, np.ndarray, int, int]:
 		"""Return the canonical output shape, shifts, and valid source-row bounds."""
 
 		direction = -1 if self.going_up else 1
-		indices = self.projection_start + np.arange(source_shape.Theta)
+		start = int(source_window.pos.Theta)
+		covered = int(source_window.shape.Theta)
+		step = int(source_window.step.Theta)
+		indices = np.arange(start, start + covered, step, dtype=np.int64)
+		if len(indices) != source_shape.Theta:
+			raise ValueError("helical source window does not match the current Theta extent")
 		shifts = np.rint(direction * pitch * indices).astype(int)
 		if not self.crop_valid:
 			return source_shape, shifts, 0, source_shape.Y
@@ -95,7 +98,11 @@ class HelicalIndexRemapStage(Stage):
 		source_shape = state.buffer_spec.shape
 		count = source_shape.Theta
 		y_size = source_shape.Y
-		shape, shifts, start, stop = self.output_geometry(source_shape, self._pitch(state))
+		if state.source_window is None:
+			raise RuntimeError("helical remap requires PipelineState.source_window")
+		shape, shifts, start, stop = self.output_geometry(
+			source_shape, self._pitch(state), state.source_window,
+		)
 
 		if self.crop_valid:
 			output_rows = np.arange(start, stop)
