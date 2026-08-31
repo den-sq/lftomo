@@ -57,7 +57,7 @@ class SourceStage(Stage):
 		if self.calls is not None:
 			with self.calls["lock"]:
 				self.calls["count"] += 1
-		state.working_array = self.values.copy()
+		state = state.with_array(self.values.copy(), layout=ProjOrder)
 		state.artifacts["nested"] = {
 			"history": ["source"],
 			"array": np.arange(3, dtype=np.float32),

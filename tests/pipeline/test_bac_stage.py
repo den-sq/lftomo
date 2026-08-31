@@ -7,10 +7,10 @@ from types import ModuleType
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import DataDomain, PRESERVE, Pipeline, PipelineState
 from lftomo.pipeline.stages import BronnikovAidedCorrectionStage, STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import ProjOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
-def _state(array, config):
+def _state(array, config, layout=SinoOrder):
 	return PipelineState(
 		working_array=array,
 		scan=Scan(
@@ -23,6 +23,7 @@ def _state(array, config):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
+		layout=layout,
 	)
 
 
@@ -96,7 +97,7 @@ def test_disabled_bac_is_noop(monkeypatch, hotopy_holo):
 def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch, hotopy_holo):
 	config = StageConfig(
 		kind="phase", algorithm="bac",
-		params={"alpha": 2, "gamma": 1.25, "order": "projection"},
+		params={"alpha": 2, "gamma": 1.25},
 	)
 	working = np.arange(4 * 3 * 5, dtype=np.float32).reshape(4, 3, 5)
 	before = working.copy()
@@ -111,14 +112,13 @@ def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch
 			return image + 1
 
 	monkeypatch.setattr(hotopy_holo, "BronnikovAidedCorrection", FakeBAC, raising=False)
-	state = _state(np.transpose(working, (1, 0, 2)), config)
-	state.working_array = working
+	state = _state(working, config, ProjOrder)
 	state.scan.n_projections = working.shape[0]
 	stage = create_stage(config)
 
 	result = stage.run(state)
 
-	assert stage.contract.expected_input is ProjOrder
+	assert ProjOrder in stage.contract.accepted_layouts
 	assert shapes == [(3, 5)] * 4
 	np.testing.assert_array_equal(result.working_array, before + 1)
 

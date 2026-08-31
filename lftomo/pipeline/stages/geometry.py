@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
-
 import cv2
 import numpy as np
 from scipy.ndimage import shift
@@ -14,25 +12,15 @@ from lftomo.pipeline.core import (
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.layout import (
-	configured_layout,
-	n_projections,
-	n_rows,
-	projection_view,
-	resolve_layout,
-)
 from lftomo.util.shapes import Proj, ProjOrder, SinoOrder, X
 from lftomo.util.window import TomoWindow
 
 
-def _contract(order: str | None = None, *, resamples_detector: bool = False,
-		mutates_input: bool = True,
+def _contract(*, resamples_detector: bool = False, mutates_input: bool = True,
 		required_pad: PadRequirement = PadRequirement()) -> StageContract:
-	compatibility = configured_layout(order)
-	shape = compatibility or SinoOrder
 	return StageContract(
-		expected_input=shape,
-		produced_output=shape,
+		expected_input=SinoOrder,
+		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts=(ProjOrder, SinoOrder),
 		prefers=ProjOrder,
@@ -111,8 +99,7 @@ class SkewCorrectStage(Stage):
 
 	def __init__(self, degrees: float = 0.0, center_px: float | None = None,
 				interpolation: str = "cubic", enabled: bool = True,
-				skew_degrees: float | None = None, center_y_px: float | None = None,
-				order: str | None = None):
+				skew_degrees: float | None = None, center_y_px: float | None = None):
 		if skew_degrees is not None:
 			if degrees != 0:
 				raise ValueError("provide degrees or skew_degrees, not both")
@@ -125,10 +112,9 @@ class SkewCorrectStage(Stage):
 		self.center_px = center_px
 		self.center_y_px = center_y_px
 		self.enabled = enabled
-		self.order = order
 		active = enabled and degrees != 0
 		self.contract = _contract(
-			order, resamples_detector=active, mutates_input=active,
+			resamples_detector=active, mutates_input=active,
 		)
 
 	@classmethod
@@ -137,19 +123,19 @@ class SkewCorrectStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data = _array(state, self.name)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if not self.enabled or self.degrees == 0:
 			return state
-		height = n_rows(data, layout)
-		width = data.shape[2]
+		height = data.shape[layout.axis_of("Y")]
+		width = data.shape[layout.axis_of("X")]
 		center = (
 			width / 2 if self.center_px is None else self.center_px,
 			height / 2 if self.center_y_px is None else self.center_y_px,
 		)
 		matrix = cv2.getRotationMatrix2D(center, self.degrees, 1.0)
-		count = n_projections(data, layout)
+		count = data.shape[layout.axis_of("Theta")]
 		for projection in range(count):
-			image = projection_view(data, layout, projection)
+			image = data[layout.point_index(Theta=projection)]
 			image[:] = cv2.warpAffine(
 				image,
 				matrix,
@@ -167,8 +153,7 @@ class MovementCorrectStage(Stage):
 
 	def __init__(self, y: float = 0.0, x: float = 0.0, enabled: bool = True,
 				order: int = 3, mode: str = "constant", cval: float = 0.0,
-				movement_y: float | None = None, movement_x: float | None = None,
-				array_order: str | None = None):
+				movement_y: float | None = None, movement_x: float | None = None):
 		if movement_y is not None:
 			y = movement_y
 		if movement_x is not None:
@@ -181,10 +166,9 @@ class MovementCorrectStage(Stage):
 		self.order = order
 		self.mode = mode
 		self.cval = cval
-		self.array_order = array_order
 		active = enabled and (y != 0 or x != 0)
 		self.contract = _contract(
-			array_order, resamples_detector=active, mutates_input=active,
+			resamples_detector=active, mutates_input=active,
 			required_pad=PadRequirement(fixed=Proj(
 				Y=int(np.ceil(abs(y))) if active else 0,
 				X=int(np.ceil(abs(x))) if active else 0,
@@ -197,15 +181,15 @@ class MovementCorrectStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data = _array(state, self.name)
-		layout = resolve_layout(state, self.array_order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if not self.enabled or (self.y == 0 and self.x == 0):
 			return state
-		count = n_projections(data, layout)
+		count = data.shape[layout.axis_of("Theta")]
 		projection_start = int(state.artifacts.get("projection_start", 0))
 		projection_count = int(state.artifacts.get("projection_count", count))
 		for projection in range(count):
 			fraction = (projection_start + projection) / projection_count
-			image = projection_view(data, layout, projection)
+			image = data[layout.point_index(Theta=projection)]
 			image[:] = shift(
 				image,
 				(self.y * fraction, self.x * fraction),
@@ -237,8 +221,11 @@ class AffineSkewMovementStage(Stage):
 			raise ValueError("fused affine pad_x cannot be negative")
 		if pad_mode not in {"edge", "constant", "reflect", "symmetric"}:
 			raise ValueError("unsupported fused affine pad_mode")
-		target = configured_layout(transition_to)
-		if transition_to is not None and target is None:
+		try:
+			target = {None: None, "projection": ProjOrder, "sinogram": SinoOrder}[
+				transition_to
+			]
+		except KeyError as error:
 			raise ValueError("transition_to must be 'projection' or 'sinogram'")
 		self.skew_degrees = skew_degrees
 		self.movement_enabled = movement_enabled
@@ -303,7 +290,7 @@ class AffineSkewMovementStage(Stage):
 		"""Return the one canonical target-layout affine allocation shape."""
 
 		expanded = source_shape + X(self.pad_x) + X(self.pad_x)
-		return self.target_layout(**asdict(expanded))
+		return expanded.to(self.target_layout)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if self.target_layout is None:
@@ -318,15 +305,19 @@ class AffineSkewMovementStage(Stage):
 			raise ValueError("fused affine transition requires a known tomography layout")
 		if input_layout is self.target_layout:
 			raise ValueError("fused affine transition must change layout")
-		projection_count = n_projections(data, input_layout)
-		row_count = n_rows(data, input_layout)
-		shape = self.output_shape(input_layout(*data.shape))
+		source_shape = (
+			state.buffer_spec.shape
+			if state.buffer_spec is not None else input_layout(*data.shape)
+		)
+		projection_count = source_shape.Theta
+		row_count = source_shape.Y
+		shape = self.output_shape(source_shape)
 		output_buffer, output = allocate_output(
 			state, shape, data.dtype, role="fused_geometry",
 		)
 		for projection in range(projection_count):
-			image = projection_view(data, input_layout, projection)
-			projection_view(output, self.target_layout, projection)[:] = (
+			image = data[input_layout.point_index(Theta=projection)]
+			output[self.target_layout.point_index(Theta=projection)] = (
 				transform_affine_projection(
 					self, image, projection, projection_count, row_count,
 				)

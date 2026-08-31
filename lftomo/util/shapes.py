@@ -42,7 +42,7 @@ class DataShape(ABC):
 		return cls.names.index(name)
 
 	@classmethod
-	def point_index(cls, **indices: int) -> tuple[int | slice, ...]:
+	def point_index(cls, **indices: int | slice) -> tuple[int | slice, ...]:
 		for name in indices:
 			cls.axis_of(name)
 		return tuple(indices.get(name, slice(None)) for name in cls.names)

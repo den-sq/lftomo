@@ -19,14 +19,6 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.runtime import tomopy_requirement
-from lftomo.pipeline.layout import (
-	configured_layout,
-	n_projections,
-	n_rows,
-	projection_view,
-	resolve_layout,
-	sinogram_scratch,
-)
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -54,7 +46,7 @@ def _sinograms(state: PipelineState) -> tuple[np.ndarray, type]:
 	data = np.asarray(state.working_array)
 	if data.ndim != 3:
 		raise ValueError("center Stages expect a (Y, Theta, X) sinogram array")
-	return data, resolve_layout(state, None, "center")
+	return data, type(state.buffer_spec.shape)
 
 
 def _angles(state: PipelineState, theta_count: int) -> np.ndarray:
@@ -97,7 +89,6 @@ class ManualCenterStage(Stage):
 		vo_fallback: bool = False,
 		center_dump: bool = False,
 		center_samples_per_job: int | None = None,
-		order: str | None = None,
 	):
 		if tilt_radians is not None and tilt != 0:
 			raise ValueError("center.manual accepts either tilt or tilt_radians, not both")
@@ -105,10 +96,8 @@ class ManualCenterStage(Stage):
 			raise ValueError("automatic center finding must use a center.vo or center.pc Stage")
 		if center_samples_per_job is not None and center_samples_per_job < 1:
 			raise ValueError("center_samples_per_job must be positive")
-		compatibility = configured_layout(order)
-		shape = compatibility or SinoOrder
 		self.contract = StageContract(
-			expected_input=shape, produced_output=shape, window_axes=("Y",),
+			expected_input=SinoOrder, produced_output=SinoOrder, window_axes=("Y",),
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			accepts_domain=(DataDomain.ATTENUATION,),
@@ -119,7 +108,6 @@ class ManualCenterStage(Stage):
 		self.slope = np.tan(tilt_radians) if tilt_radians is not None else tilt
 		self.reference_y = reference_y
 		self.center_dump = center_dump
-		self.order = order
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "ManualCenterStage":
@@ -129,12 +117,12 @@ class ManualCenterStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("center.manual currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("center.manual expects a three-dimensional tomography array")
 		if self.slope == 0:
 			return _store_center(state, self.value_px)
-		y_size = n_rows(data, layout)
+		y_size = data.shape[layout.axis_of("Y")]
 		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
 		rows = source_y + np.arange(y_size, dtype=np.float32)
 		return _store_center(state, self.value_px + (rows - self.reference_y) * self.slope)
@@ -226,13 +214,13 @@ class EntropyLocalCenterStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data, layout = _sinograms(state)
-		row_count = n_rows(data, layout)
+		row_count = data.shape[layout.axis_of("Y")]
 		index = row_count // 2 if self.slice_index is None else self.slice_index
 		if not 0 <= index < row_count:
 			raise ValueError("center.entropy_local slice_index is outside the sinogram window")
-		current_start = data.shape[2] / 2 if self.start is None else self.start
-		angles = _angles(state, n_projections(data, layout))
-		sinogram = sinogram_scratch(data, layout, index)
+		current_start = data.shape[layout.axis_of("X")] / 2 if self.start is None else self.start
+		angles = _angles(state, data.shape[layout.axis_of("Theta")])
+		sinogram = np.ascontiguousarray(data[layout.point_index(Y=index)])
 		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
 		source_slice = source_y + index
 		diagnostic_root = self._diagnostic_root(state) if self.diagnostic_images else None
@@ -455,7 +443,7 @@ class VoCenterStage(Stage):
 		return coefficients, residuals, mask, iterations, clipping_limited
 
 	def _tilt_center(self, state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
-		row_count = n_rows(data, layout)
+		row_count = data.shape[layout.axis_of("Y")]
 		count = min(self.tilt_samples, row_count)
 		local_rows = np.unique(np.linspace(0, row_count - 1, count).round().astype(int))
 		if len(local_rows) <= self.fit_degree:
@@ -467,7 +455,8 @@ class VoCenterStage(Stage):
 			source_step = int(state.source_window.step.Y)
 		source_rows = source_start + local_rows * source_step
 		centers = np.asarray([
-			self._find(sinogram_scratch(data, layout, int(index))) for index in local_rows
+			self._find(np.ascontiguousarray(data[layout.point_index(Y=int(index))]))
+			for index in local_rows
 		], dtype=np.float64)
 		coefficients, residuals, inliers, iterations, clipping_limited = self._robust_fit(
 			source_rows.astype(np.float64), centers,
@@ -522,7 +511,7 @@ class VoCenterStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data, layout = _sinograms(state)
-		row_count = n_rows(data, layout)
+		row_count = data.shape[layout.axis_of("Y")]
 		try:
 			if self.tilt_fit == "polynomial":
 				center = self._tilt_center(state, data, layout)
@@ -530,7 +519,7 @@ class VoCenterStage(Stage):
 				index = row_count // 2 if self.ind is None else self.ind
 				if not 0 <= index < row_count:
 					raise ValueError("center.vo ind is outside the sinogram window")
-				center = self._find(sinogram_scratch(data, layout, index))
+				center = self._find(np.ascontiguousarray(data[layout.point_index(Y=index)]))
 		except (ValueError, RuntimeError, ArithmeticError) as error:
 			if self.fallback != "entropy_local":
 				raise
@@ -570,15 +559,15 @@ class PhaseCorrelationCenterStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data, layout = _sinograms(state)
-		projection_count = n_projections(data, layout)
+		projection_count = data.shape[layout.axis_of("Theta")]
 		if projection_count < 2:
 			raise ValueError("center.pc requires at least two projections")
 
 		import tomopy
 
 		center = tomopy.find_center_pc(
-			projection_view(data, layout, 0),
-			projection_view(data, layout, projection_count - 1),
+			data[layout.point_index(Theta=0)],
+			data[layout.point_index(Theta=projection_count - 1)],
 			tol=self.tol,
 			rotc_guess=self.rotc_guess,
 		)

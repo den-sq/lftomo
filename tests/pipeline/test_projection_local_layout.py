@@ -106,12 +106,6 @@ def test_state_layout_drives_paganin_without_constructor_order():
 	np.testing.assert_allclose(projection, sinogram.transpose(1, 0, 2), rtol=1e-6, atol=1e-6)
 
 
-def test_legacy_order_flag_is_checked_not_applied():
-	stage = ThetaSwitchNormalizeStage(order="sinogram")
-	with pytest.raises(ValueError, match="disagrees with PipelineState.layout"):
-		stage.run(state(np.ones((3, 2, 4), dtype=np.float32), ProjOrder))
-
-
 def test_phase_contrast_canonical_plans_projection_order_without_injection():
 	path = Path(__file__).parents[2] / "lftomo" / "pipelines" / "phase-contrast-canonical.yaml"
 	recon, _ = load_recon(path)

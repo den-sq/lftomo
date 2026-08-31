@@ -10,7 +10,6 @@ from lftomo.pipeline.core import (
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.layout import configured_layout, n_projections, n_rows, resolve_layout
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -33,18 +32,16 @@ class HelicalIndexRemapStage(Stage):
 	def __init__(self, pitch_px_per_projection: float | None = None,
 				enabled: bool = True, going_up: bool = False,
 				projection_start: int = 0, crop_valid: bool = True,
-				fill_value: float = 0.0, vertical_velocity_px: float | None = None,
-				order: str | None = None):
+				fill_value: float = 0.0, vertical_velocity_px: float | None = None):
 		if pitch_px_per_projection is not None and vertical_velocity_px is not None:
 			raise ValueError("provide pitch_px_per_projection or vertical_velocity_px, not both")
 		if vertical_velocity_px is not None:
 			pitch_px_per_projection = vertical_velocity_px
 		if projection_start < 0:
 			raise ValueError("helical projection_start cannot be negative")
-		compatibility = configured_layout(order)
-		shape = compatibility or SinoOrder
 		self.contract = StageContract(
-			expected_input=shape, produced_output=shape, window_axes=("Y", "Theta"),
+			expected_input=SinoOrder, produced_output=SinoOrder,
+			window_axes=("Y", "Theta"),
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
@@ -59,7 +56,6 @@ class HelicalIndexRemapStage(Stage):
 		self.projection_start = projection_start
 		self.crop_valid = crop_valid
 		self.fill_value = fill_value
-		self.order = order
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "HelicalIndexRemapStage":
@@ -80,15 +76,19 @@ class HelicalIndexRemapStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("HelicalIndexRemapStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("helical_correct.index_remap expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
+		source_shape = (
+			state.buffer_spec.shape
+			if state.buffer_spec is not None else layout(*data.shape)
+		)
 		pitch = self._pitch(state)
 		direction = -1 if self.going_up else 1
-		count = n_projections(data, layout)
-		y_size = n_rows(data, layout)
+		count = source_shape.Theta
+		y_size = source_shape.Y
 		projection_indices = self.projection_start + np.arange(count)
 		shifts = np.rint(direction * pitch * projection_indices).astype(int)
 
@@ -98,28 +98,28 @@ class HelicalIndexRemapStage(Stage):
 			if start >= stop:
 				raise ValueError("helical pitch leaves no detector rows valid across all projections")
 			output_rows = np.arange(start, stop)
-			shape = (count, len(output_rows), data.shape[2]) if layout is ProjOrder else (len(output_rows), count, data.shape[2])
+			shape = type(source_shape)(**{
+				**source_shape.as_dict(), "Y": len(output_rows),
+			})
 			output, remapped = allocate_output(
-				state, layout(*shape), data.dtype, role="helical_remap",
+				state, shape, data.dtype, role="helical_remap",
 			)
 			for projection, shift_px in enumerate(shifts):
-				if layout is ProjOrder:
-					remapped[projection, :, :] = data[projection, output_rows + shift_px, :]
-				else:
-					remapped[:, projection, :] = data[output_rows + shift_px, projection, :]
+				remapped[layout.point_index(Theta=projection)] = (
+					data[layout.point_index(Theta=projection)][output_rows + shift_px]
+				)
 		else:
 			output, remapped = allocate_output(
-				state, layout(*data.shape), data.dtype, role="helical_remap",
+				state, source_shape, data.dtype, role="helical_remap",
 			)
 			remapped.fill(self.fill_value)
 			rows = np.arange(y_size)
 			for projection, shift_px in enumerate(shifts):
 				source = rows + shift_px
 				valid = (source >= 0) & (source < y_size)
-				if layout is ProjOrder:
-					remapped[projection, valid, :] = data[projection, source[valid], :]
-				else:
-					remapped[valid, projection, :] = data[source[valid], projection, :]
+				remapped[layout.point_index(Theta=projection)][valid] = (
+					data[layout.point_index(Theta=projection)][source[valid]]
+				)
 		result = commit_output(state, output, retire_as=None)
 		result.artifacts["helical_row_shifts"] = shifts
 		return result

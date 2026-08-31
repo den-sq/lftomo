@@ -223,7 +223,7 @@ def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch)
 	)
 	recon_config = StageConfig(
 		kind="recon", algorithm="gridrec",
-		params={"sinogram_order": True, "circle_mask": False},
+		params={"circle_mask": False},
 	)
 	seen_angles = []
 

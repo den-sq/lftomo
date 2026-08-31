@@ -35,6 +35,7 @@ def _state(array, config):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
+		layout=SinoOrder,
 	)
 
 

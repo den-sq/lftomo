@@ -8,6 +8,7 @@ from lftomo.pipeline.stages import (
 	ThetaSwitchNormalizeStage,
 	create_stage,
 )
+from lftomo.util.shapes import SinoOrder
 
 
 def _state(array, config, flats):
@@ -24,6 +25,7 @@ def _state(array, config, flats):
 			metadata={"flat_fields": flats},
 		),
 		recon=Recon(pipeline=[config]),
+		layout=SinoOrder,
 	)
 
 

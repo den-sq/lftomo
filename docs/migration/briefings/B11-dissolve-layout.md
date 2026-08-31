@@ -21,7 +21,7 @@ the inline copies to the same calls, then deprecates the module.
 | `n_projections` | 21 call sites + 6 inline re-derivations (execution.py:489, 522, 534, 545, 575) |
 | `n_rows` | 14 call sites + 9 inline re-derivations (execution ×3, runner:498, normalize ×6) |
 | `sinogram_view` / `sinogram_scratch` | 14 sites (execution, stripe, center) |
-| `resolve_layout` / `configured_layout` | 50 sites — class-identity checks only, no axis math; these keep working unchanged |
+| `resolve_layout` / `configured_layout` | 50 sites — obsolete compatibility inputs; remove internal consumers and the shims |
 | third system | recon.py:216-219 & 315-318: `theta_axis = 1 if sinogram_order else 0` — layout collapsed to a bool before axis math; migrate to `axis_of` |
 
 ## Work items
@@ -39,9 +39,11 @@ the inline copies to the same calls, then deprecates the module.
 3. Migrate the 6 positional `.index[<literal>]` sites
    (streaming.py:91-93, runner.py:481/501, flat.py:48) to
    `axis_slice("Y")` — windows are in scope at all of them.
-4. Deprecate `pipeline/layout.py` (module-level deprecation, imports still
-   work during the wave; removal after Wave B when the last stage consumer
-   is gone).
+4. Remove processing-stage `order`, `array_order`, and `sinogram_order`
+	compatibility inputs. Readers retain their boundary layout declaration and
+	explicit conversion stages retain their target declaration. Deprecate
+	`pipeline/layout.py`; its named-axis view shims remain importable until
+	removal after Wave B.
 5. Delete `pipeline/stages/_layout.py` — the re-export shim has **zero
    importers** (verified in the sweep); dead code, delete outright.
 

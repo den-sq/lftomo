@@ -3,6 +3,7 @@ import numpy as np
 from lftomo.config import Acquisition, Detector, Helical, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import Pipeline, PipelineState
 from lftomo.pipeline.stages import HelicalIndexRemapStage, STAGE_REGISTRY, create_stage
+from lftomo.util.shapes import SinoOrder
 
 
 def _state(array, config, pitch_um=1):
@@ -19,6 +20,7 @@ def _state(array, config, pitch_um=1):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
+		layout=SinoOrder,
 	)
 
 

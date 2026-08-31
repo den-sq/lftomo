@@ -336,7 +336,6 @@ class PipelineState:
 		if self.buffer_spec is not None and self.buffer_spec.layout is not self.layout:
 			raise ValueError("PipelineState.layout disagrees with BufferSpec.shape")
 
-
 def allocate_output(
 	state: PipelineState,
 	shape: Any,

@@ -151,7 +151,7 @@ def _lifecycle(
 			},
 			{
 				"id": "reconstruct", "kind": "recon", "algorithm": "gridrec",
-				"params": {"sinogram_order": False, "circle_mask": False},
+				"params": {"circle_mask": False},
 			},
 			{
 				"id": "evaluate", "kind": "evaluate", "algorithm": "metrics",

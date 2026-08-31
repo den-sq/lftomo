@@ -47,7 +47,6 @@ def _tomopy_gridrec(data: np.ndarray, angles: np.ndarray, center: float, process
 	return tomopy.recon(
 		data,
 		angles,
-		sinogram_order=False,
 		center=center,
 		algorithm="gridrec",
 		ncore=processes,

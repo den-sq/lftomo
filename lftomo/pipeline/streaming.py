@@ -88,9 +88,9 @@ class StreamingPlan:
 			"windows": [],
 		}
 		for index, window in enumerate(self):
-			core = window.index[1]
-			source = window.with_pad(["Y"]).index[1]
-			interior = window.internal.index[1]
+			core = window.axis_slice("Y")
+			source = window.with_pad(["Y"]).axis_slice("Y")
+			interior = window.internal.axis_slice("Y")
 			record["windows"].append({
 				"index": index,
 				"core": [core.start, core.stop],

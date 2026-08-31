@@ -179,7 +179,7 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 
 		monkeypatch.setattr(context.executor, "submit_all", inspect)
 		result = context.executor.run_stage(
-			state, WeightedNormalizeStage(order="projection"),
+			state, WeightedNormalizeStage(),
 		)
 
 		assert all(isinstance(task[0], ManagedBuffer) for task in captured)
@@ -199,7 +199,7 @@ def test_process_phase_chain_matches_intentionally_coupled_stage():
 	values[:, :, 3:5] = 0.4
 	scan = _scan(theta=4)
 	expected = values.copy()
-	PaganinStage(alpha=0.06, order="projection").run(PipelineState(
+	PaganinStage(alpha=0.06).run(PipelineState(
 		expected, scan, _recon(), layout=ProjOrder, domain=DataDomain.TRANSMISSION,
 	))
 	with PipelineRunContext(max_workers=2) as context:
@@ -211,8 +211,8 @@ def test_process_phase_chain_matches_intentionally_coupled_stage():
 			working, scan, _recon(), storage=context.storage, executor=context.executor,
 			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
 		)
-		state = context.executor.run_stage(state, PaganinFilterStage(alpha=0.06, order="projection"))
-		state = context.executor.run_stage(state, NegativeLogStage(order="projection"))
+		state = context.executor.run_stage(state, PaganinFilterStage(alpha=0.06))
+		state = context.executor.run_stage(state, NegativeLogStage())
 		np.testing.assert_allclose(np.asarray(state.working_array), expected, rtol=1e-5, atol=1e-6)
 
 
@@ -296,7 +296,7 @@ def test_process_beam_tracking_matches_serial_and_merges_qc():
 		movement_enabled=True, movement_x=0.25,
 	),
 	HelicalIndexRemapStage(
-		pitch_px_per_projection=0.25, crop_valid=True, order="projection",
+		pitch_px_per_projection=0.25, crop_valid=True,
 	),
 ])
 def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypatch):

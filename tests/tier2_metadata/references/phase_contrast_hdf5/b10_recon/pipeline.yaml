@@ -23,7 +23,7 @@ pipeline:
     params: {value_px: 1282.75, tilt: 0.0}
   - kind: recon
     algorithm: gridrec
-    params: {ncore: 12, sinogram_order: false, circle_mask: false}
+    params: {ncore: 12, circle_mask: false}
   - kind: write
     algorithm: tiff_slices
     params: {dtype: float32, naming_template: "{slice:05d}.tif"}

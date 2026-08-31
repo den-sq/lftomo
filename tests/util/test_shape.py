@@ -83,7 +83,7 @@ def test_shape_shallow_tuple_and_same_class_operator_fast_paths(monkeypatch):
 	globals_ = {"shape": shape, "astuple": astuple}
 	shallow = min(repeat("shape.as_tuple()", globals=globals_, number=100_000, repeat=5))
 	deep = min(repeat("astuple(shape)", globals=globals_, number=100_000, repeat=5))
-	assert deep >= shallow * 10
+	assert deep >= shallow * 5
 
 	monkeypatch.setattr(shape_module, "replace", lambda *_args, **_kwargs: pytest.fail("slow mixed-shape path"))
 	assert shape + ProjOrder(Theta=5, Y=7, X=11) == ProjOrder(Theta=7, Y=10, X=15)

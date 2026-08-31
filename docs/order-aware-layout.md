@@ -25,20 +25,11 @@ frozen producers prove the efficient layout is producer-specific:
   there needlessly moves ~5.15 GiB and risks a numerically different partition
   being mistaken for an algorithm failure.
 
-Master no longer has one uniform behavior. #91 added working, per-instance
-`order`/`array_order` branches for theta-switch/taper normalization, BAC,
-bilateral, skew, movement, helical remap, Fourier-wavelet stripe removal,
-manual center, and both readers. The Tier-2 AAA523 runner uses those branches
-successfully in ProjOrder. Weighted normalization, both Paganin variants,
-Vo-family stripe removal, `all_of_the_stripe`, and the automatic center stages
-remain SinoOrder-only. Gridrec/ASTRA can be configured for either layout.
-
-Those ad-hoc flags solve individual algorithms but not the architectural
-problem: layout is not carried in `PipelineState`, contracts describe one
-constructor-selected layout rather than capabilities, the runner still rewrites
-producer configurations through `_make_executable`, and no plan records explicit
-or hidden conversions. This work replaces the flags as the source of truth while
-preserving them as compatibility inputs during migration.
+Processing stages no longer accept per-instance `order`, `array_order`, or
+`sinogram_order` inputs. Their contracts declare capabilities, and their
+runtime axes come exclusively from the shaped working buffer in
+`PipelineState`. Readers still declare the layout they produce, while explicit
+layout-transition stages declare the layout they create.
 
 ## 2. Two contract axes
 

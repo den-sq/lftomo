@@ -224,7 +224,7 @@ def test_generated_maps_run_through_legacy_weighted_pipeline(tmp_path, monkeypat
 		{"kind": "normalize", "algorithm": "weighted"},
 		{"kind": "phase", "algorithm": "paganin"},
 		{"kind": "center", "algorithm": "manual", "params": {"value_px": 2}},
-		{"kind": "recon", "algorithm": "gridrec", "params": {"sinogram_order": False, "circle_mask": False}},
+		{"kind": "recon", "algorithm": "gridrec", "params": {"circle_mask": False}},
 		{"kind": "write", "algorithm": "tiff_slices"},
 	]}, sort_keys=False), encoding="utf-8")
 	import tomopy

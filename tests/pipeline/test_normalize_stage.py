@@ -78,6 +78,7 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 		working_array=working,
 		scan=_scan(flats),
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
+		layout=SinoOrder,
 	)
 
 	result = Pipeline([
@@ -104,6 +105,7 @@ def test_weighted_normalize_promotes_integer_projections_to_float32():
 		working_array=working,
 		scan=_scan(flats),
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
+		layout=SinoOrder,
 	)
 
 	result = WeightedNormalizeStage().run(state)
@@ -153,11 +155,12 @@ def test_taper_normalize_projection_batch_uses_global_theta_weights():
 		scan=scan,
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
 		artifacts={"projection_start": 2, "projection_count": 4},
+		layout=ProjOrder,
 	)
-	stage = TaperBlendedNormalizeStage(order="projection")
+	stage = TaperBlendedNormalizeStage()
 
 	result = stage.run(state)
 
-	assert stage.contract.expected_input is ProjOrder
+	assert stage.contract.accepted_layouts == (ProjOrder, SinoOrder)
 	np.testing.assert_allclose(result.working_array[0], 10 / 30)
 	np.testing.assert_allclose(result.working_array[1], 10 / 35)

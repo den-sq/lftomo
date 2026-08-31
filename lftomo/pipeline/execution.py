@@ -15,13 +15,13 @@ from typing import Any, Callable, Iterable, Sequence
 import numpy as np
 
 from lftomo.pipeline.core import (
+	BufferSpec,
 	PipelineState,
 	Stage,
 	allocate_output,
 	commit_output,
 )
 from lftomo.pipeline.dispatch import DispatchKind
-from lftomo.pipeline.layout import n_rows, projection_view, sinogram_scratch, sinogram_view
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -38,7 +38,7 @@ class _WorkerState:
 	backend: Any
 	dataset: Any
 	source_window: Any
-	layout: type[Any] | None
+	buffer_spec: BufferSpec
 	domain: Any
 
 
@@ -53,7 +53,10 @@ def _worker_initializer() -> None:
 	signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-def _worker_state(buffer: ManagedBuffer, payload: _WorkerState) -> PipelineState:
+def _worker_state(
+	buffer: ManagedBuffer, payload: _WorkerState, shape=None,
+) -> PipelineState:
+	buffer_spec = BufferSpec(shape or payload.buffer_spec.shape, payload.buffer_spec.dtype)
 	return PipelineState(
 		working_array=buffer,
 		scan=payload.scan,
@@ -63,7 +66,8 @@ def _worker_state(buffer: ManagedBuffer, payload: _WorkerState) -> PipelineState
 		storage=None,
 		dataset=payload.dataset,
 		source_window=payload.source_window,
-		layout=payload.layout,
+		buffer_spec=buffer_spec,
+		layout=buffer_spec.layout,
 		domain=payload.domain,
 	)
 
@@ -87,7 +91,9 @@ def run_projection_kernel(
 	"""Module-level adapter that mutates one shared projection view."""
 
 	handle = _projection_handle(buffer, layout, index)
-	state = _worker_state(handle, payload)
+	shape = payload.buffer_spec.shape
+	projection_shape = type(shape)(**{**shape.as_dict(), "Theta": 1})
+	state = _worker_state(handle, payload, projection_shape)
 	base = int(payload.artifacts.get("projection_start", 0))
 	total = int(payload.artifacts.get("projection_count", projection_count))
 	state.artifacts["projection_start"] = base + index
@@ -123,9 +129,9 @@ def run_sinogram_chain_kernel(
 
 	data = np.asarray(_worker_state(buffer, payload).working_array)
 	if layout is ProjOrder:
-		working = sinogram_scratch(data, layout, index)
+		working = np.ascontiguousarray(data[layout.point_index(Y=index)])
 	else:
-		working = sinogram_view(data, layout, index)
+		working = data[layout.point_index(Y=index)]
 	state = _worker_state(buffer, payload)
 	from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
 
@@ -139,7 +145,7 @@ def run_sinogram_chain_kernel(
 		if result is not None and result is not working:
 			working = np.asarray(result)
 	if layout is ProjOrder:
-		sinogram_view(data, layout, index)[:] = working
+		data[layout.point_index(Y=index)] = working
 	return tuple(timings)
 
 
@@ -281,8 +287,8 @@ def run_layout_fill_kernel(
 
 	source_values = source.array()
 	target_values = target.array()
-	projection_view(target_values, target_layout, projection)[:] = projection_view(
-		source_values, source_layout, projection,
+	target_values[target_layout.point_index(Theta=projection)] = (
+		source_values[source_layout.point_index(Theta=projection)]
 	)
 
 
@@ -302,8 +308,8 @@ def run_affine_fill_kernel(
 
 	source_values = source.array()
 	target_values = target.array()
-	image = projection_view(source_values, source_layout, projection)
-	projection_view(target_values, target_layout, projection)[:] = (
+	image = source_values[source_layout.point_index(Theta=projection)]
+	target_values[target_layout.point_index(Theta=projection)] = (
 		transform_affine_projection(
 			stage, image, projection, projection_count, row_count,
 		)
@@ -324,8 +330,8 @@ def run_helical_fill_kernel(
 
 	source_values = source.array()
 	target_values = target.array()
-	source_image = projection_view(source_values, layout, projection)
-	target_image = projection_view(target_values, layout, projection)
+	source_image = source_values[layout.point_index(Theta=projection)]
+	target_image = target_values[layout.point_index(Theta=projection)]
 	if crop_valid:
 		target_image[:] = source_image[row_start + shift_px:row_stop + shift_px]
 		return
@@ -348,7 +354,7 @@ def _payload(state: PipelineState) -> _WorkerState:
 		backend=state.backend,
 		dataset=state.dataset,
 		source_window=state.source_window,
-		layout=state.layout,
+		buffer_spec=state.buffer_spec,
 		domain=state.domain,
 	)
 
@@ -486,7 +492,7 @@ class PipelineExecutor:
 		layout = working_state.layout
 		if layout not in (ProjOrder, SinoOrder):
 			return stage.run(state)
-		count = data.shape[0] if layout is ProjOrder else data.shape[1]
+		count = data.shape[layout.axis_of("Theta")]
 		results = self.submit_all(run_projection_kernel, (
 			(working_state.working_array, layout, index, stage, _payload(working_state), count)
 			for index in range(count)
@@ -515,11 +521,11 @@ class PipelineExecutor:
 				raise TypeError("layout.convert requires ProjOrder or SinoOrder input")
 			if state.layout is stage.target:
 				raise ValueError("layout.convert target is already the current layout")
-			shape = stage.target(data.shape[1], data.shape[0], data.shape[2])
+			shape = state.buffer_spec.shape.to(stage.target)
 			output, _target = allocate_output(
 				state, shape, data.dtype, role=f"layout:{stage.target.__name__}",
 			)
-			count = data.shape[0] if state.layout is ProjOrder else data.shape[1]
+			count = state.buffer_spec.shape.Theta
 			self.submit_all(run_layout_fill_kernel, (
 				(state.working_array, output, state.layout, stage.target, index)
 				for index in range(count)
@@ -531,7 +537,7 @@ class PipelineExecutor:
 				layout = state.layout
 				if layout not in (ProjOrder, SinoOrder):
 					return stage.run(state)
-				count = data.shape[0] if layout is ProjOrder else data.shape[1]
+				count = data.shape[layout.axis_of("Theta")]
 				self.submit_all(run_projection_kernel, (
 					(state.working_array, layout, index, stage, _payload(state), count)
 					for index in range(count)
@@ -542,9 +548,9 @@ class PipelineExecutor:
 				raise ValueError("fused affine transition requires a known tomography layout")
 			if input_layout is stage.target_layout:
 				raise ValueError("fused affine transition must change layout")
-			projection_count = data.shape[0] if input_layout is ProjOrder else data.shape[1]
-			row_count = data.shape[1] if input_layout is ProjOrder else data.shape[0]
-			shape = stage.output_shape(input_layout(*data.shape))
+			projection_count = state.buffer_spec.shape.Theta
+			row_count = state.buffer_spec.shape.Y
+			shape = stage.output_shape(state.buffer_spec.shape)
 			output, _target = allocate_output(
 				state, shape, data.dtype, role="fused_geometry",
 			)
@@ -569,11 +575,10 @@ class PipelineExecutor:
 		if isinstance(stage, HelicalIndexRemapStage):
 			if not stage.enabled:
 				return state
-			from lftomo.pipeline.layout import resolve_layout
-
-			layout = resolve_layout(state, stage.order, stage.name)
-			count = data.shape[0] if layout is ProjOrder else data.shape[1]
-			y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
+			layout = type(state.buffer_spec.shape)
+			source_shape = state.buffer_spec.shape
+			count = source_shape.Theta
+			y_size = source_shape.Y
 			direction = -1 if stage.going_up else 1
 			indices = stage.projection_start + np.arange(count)
 			shifts = np.rint(direction * stage._pitch(state) * indices).astype(int)
@@ -583,15 +588,12 @@ class PipelineExecutor:
 				if start >= stop:
 					raise ValueError("helical pitch leaves no detector rows valid across all projections")
 				row_count = stop - start
-				shape = (
-					(count, row_count, data.shape[2]) if layout is ProjOrder else
-					(row_count, count, data.shape[2])
-				)
+				shape = type(source_shape)(**{**source_shape.as_dict(), "Y": row_count})
 			else:
 				start, stop = 0, y_size
-				shape = data.shape
+				shape = source_shape
 			output, target = allocate_output(
-				state, layout(*shape), data.dtype, role="helical_remap",
+				state, shape, data.dtype, role="helical_remap",
 			)
 			if not stage.crop_valid:
 				target.fill(stage.fill_value)
@@ -660,11 +662,12 @@ def run_bounded_sinogram_segment(
 	for stage in stages:
 		if not callable(getattr(stage, "run_sinogram", None)):
 			raise TypeError(f"{stage.name} declares bounded views but has no run_sinogram kernel")
-	row_count = n_rows(data, state.layout)
-	sinogram_shape = (
-		(data.shape[0], data.shape[2])
-		if state.layout is ProjOrder else (data.shape[1], data.shape[2])
+	row_count = data.shape[state.layout.axis_of("Y")]
+	shape = (
+		state.buffer_spec.shape
+		if state.buffer_spec is not None else state.layout(*data.shape)
 	)
+	sinogram_shape = (shape.Theta, shape.X)
 	allocated = _prepare_vo_work(state, stages, row_count, sinogram_shape)
 	member_samples: list[list[float]] = [[] for _stage in stages]
 	try:
@@ -695,7 +698,9 @@ def run_bounded_sinogram_segment(
 
 			for index in range(row_count):
 				state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
-				working = sinogram_scratch(data, state.layout, index) if state.layout is ProjOrder else sinogram_view(data, state.layout, index)
+				working = data[state.layout.point_index(Y=index)]
+				if state.layout is ProjOrder:
+					working = np.ascontiguousarray(working)
 				for member_index, stage in enumerate(stages):
 					if checkpoint is not None:
 						checkpoint()
@@ -706,7 +711,7 @@ def run_bounded_sinogram_segment(
 					if result is not None and result is not working:
 						working = np.asarray(result)
 				if state.layout is ProjOrder:
-					sinogram_view(data, state.layout, index)[:] = working
+					data[state.layout.point_index(Y=index)] = working
 			state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
 	finally:
 		_release_vo_work(state, allocated)

@@ -7,7 +7,7 @@ from lftomo.pipeline.stages import GridrecStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 
 
-def _state(array, config, artifacts=None):
+def _state(array, config, artifacts=None, layout=ProjOrder):
 	return PipelineState(
 		working_array=array,
 		scan=Scan(
@@ -21,6 +21,7 @@ def _state(array, config, artifacts=None):
 		),
 		recon=Recon(pipeline=[config]),
 		artifacts={} if artifacts is None else artifacts,
+		layout=layout,
 	)
 
 
@@ -28,7 +29,7 @@ def test_gridrec_is_registered_and_uses_center_artifact(monkeypatch):
 	config = StageConfig(
 		kind="recon",
 		algorithm="gridrec",
-		params={"sinogram_order": True, "circle_mask": True, "ncore": 2},
+		params={"circle_mask": True, "ncore": 2},
 	)
 	working = np.ones((2, 3, 5), dtype=np.float32)
 	calls = {}
@@ -44,7 +45,9 @@ def test_gridrec_is_registered_and_uses_center_artifact(monkeypatch):
 	monkeypatch.setattr("tomopy.recon", recon)
 	monkeypatch.setattr("tomopy.circ_mask", circ_mask)
 	stage = create_stage(config)
-	result = Pipeline([stage]).run(_state(working, config, {"center": 2.5}))
+	result = Pipeline([stage]).run(_state(
+		working, config, {"center": 2.5}, layout=SinoOrder,
+	))
 
 	assert STAGE_REGISTRY["recon.gridrec"] is GridrecStage
 	assert stage.contract.expected_input is SinoOrder
@@ -87,7 +90,7 @@ def test_gridrec_projection_order_accepts_center_param_and_crops(monkeypatch):
 	stage = create_stage(config)
 	result = Pipeline([stage]).run(_state(working, config))
 
-	assert stage.contract.expected_input is ProjOrder
+	assert ProjOrder in stage.contract.accepted_layouts
 	assert stage.contract.consumes_artifacts == ()
 	assert calls["sinogram_order"] is False
 	assert calls["data_shape"] == (3, 2, 3)

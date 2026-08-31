@@ -36,7 +36,7 @@ pipeline:
     params: {value_px: 1282.75, find_center: false}
   - kind: recon
     algorithm: gridrec
-    params: {ncore: 32, sinogram_order: false, circle_mask: false}
+    params: {ncore: 32, circle_mask: false}
   - kind: write
     algorithm: tiff_slices
     params: {dtype: float32, naming_template: "rec_{slice:05d}.tif"}

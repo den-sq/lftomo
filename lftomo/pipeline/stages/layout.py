@@ -56,9 +56,13 @@ class LayoutConvertStage(Stage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("layout.convert expects a three-dimensional tomography array")
-		shape = self.target(data.shape[1], data.shape[0], data.shape[2])
+		input_shape = (
+			state.buffer_spec.shape
+			if state.buffer_spec is not None else state.layout(*data.shape)
+		)
+		shape = input_shape.to(self.target)
 		output, converted = allocate_output(
 			state, shape, data.dtype, role=f"layout:{self.target.__name__}",
 		)
-		converted[...] = np.transpose(data, (1, 0, 2))
+		converted[...] = input_shape.transposed_view(data, self.target)
 		return commit_output(state, output, retire_as=None, layout=self.target)

@@ -64,7 +64,7 @@ def test_retirement_occurs_only_after_normalization_handoff():
 			raw, _scan(), _recon(), storage=context.storage, layout=ProjOrder,
 			domain=DataDomain.RAW,
 		)
-		result = WeightedNormalizeStage(order="projection").run(state)
+		result = WeightedNormalizeStage().run(state)
 
 		assert isinstance(result.working_array, ManagedBuffer)
 		assert isinstance(result.artifacts["flat_fields"], ManagedBuffer)
@@ -83,7 +83,7 @@ def test_failed_normalization_does_not_retire_current_input():
 		)
 		state = PipelineState(raw, scan, _recon(), storage=context.storage, layout=ProjOrder)
 		with pytest.raises(ValueError, match="flat_fields"):
-			WeightedNormalizeStage(order="projection").run(state)
+			WeightedNormalizeStage().run(state)
 		assert not any(
 			event["action"] == "retire" and event["name"] == raw.name
 			for event in context.storage.allocation_events
@@ -159,7 +159,7 @@ def test_phase_filter_is_a_manager_issued_producer_artifact():
 			working, _scan(projections=3), _recon(), storage=context.storage,
 			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
 		)
-		result = PaganinFilterStage(order="projection").run(state)
+		result = PaganinFilterStage().run(state)
 		assert isinstance(result.artifacts["phase_filter"], ManagedBuffer)
 
 
@@ -167,9 +167,9 @@ def test_planner_emits_liveness_alias_and_managed_artifact_allocations():
 	scan = _scan()
 	stages = [
 		TIFFStackReadStage(order="projection"),
-		WeightedNormalizeStage(order="projection"),
-		PaganinFilterStage(order="projection"),
-		NegativeLogStage(order="projection"),
+		WeightedNormalizeStage(),
+		PaganinFilterStage(),
+		NegativeLogStage(),
 		GridrecStage(center=2, circle_mask=False),
 	]
 	plan = validate_pipeline(stages, scan, mode="complete")
@@ -218,8 +218,8 @@ def test_reconstruction_crop_keeps_full_physical_allocation_in_plan():
 	scan = _scan()
 	stages = [
 		TIFFStackReadStage(order="projection"),
-		WeightedNormalizeStage(order="projection"),
-		NegativeLogStage(order="projection"),
+		WeightedNormalizeStage(),
+		NegativeLogStage(),
 		GridrecStage(
 			center=2, circle_mask=False, edge_buffer_left=1,
 			edge_buffer_right=1, output_width=1,
@@ -240,8 +240,8 @@ def test_engine_alias_is_refused_when_normalized_capacity_is_too_small():
 	scan = _scan(projections=6, rows=1, columns=16)
 	stages = [
 		TIFFStackReadStage(order="projection"),
-		WeightedNormalizeStage(order="projection"),
-		NegativeLogStage(order="projection"),
+		WeightedNormalizeStage(),
+		NegativeLogStage(),
 		GridrecStage(center=8, circle_mask=False),
 	]
 	plan = validate_pipeline(
@@ -308,9 +308,9 @@ def _normalization_to_recon_pipeline(*, aliasing: bool):
 			raw, scan, _recon(aliasing=aliasing, engine_aliasing=False),
 			storage=context.storage, layout=ProjOrder, domain=DataDomain.RAW,
 		)
-		state = WeightedNormalizeStage(order="projection").run(state)
+		state = WeightedNormalizeStage().run(state)
 		state.domain = DataDomain.TRANSMISSION
-		state = NegativeLogStage(order="projection").run(state)
+		state = NegativeLogStage().run(state)
 		state.domain = DataDomain.ATTENUATION
 		state = GridrecStage(center=4, circle_mask=False, ncore=1).run(state)
 		return raw.name, state.working_array.name, np.asarray(state.working_array).copy()
