@@ -1,4 +1,4 @@
-from dataclasses import astuple, is_dataclass, replace, asdict, fields
+from dataclasses import replace
 from functools import cached_property
 from multiprocessing.shared_memory import SharedMemory, ShareableList
 from multiprocessing.managers import SharedMemoryManager, BaseManager
@@ -20,14 +20,20 @@ from lftomo.storage import (
 	is_advanced_index,
 )
 
-from .shapes import DataShape
+from .shapes import DataShape, Proj, Theta, X, XSlice, Y, YSlice, Z
 from .log import log, LOG
 
 MEM_INTERVAL_TIMER = 1.0
 
-
-def _shape_tuple(shape) -> tuple[int, ...]:
-	return tuple(astuple(shape)) if is_dataclass(shape) else tuple(shape)
+_VIEW_SHAPES = {
+	("Y", "X"): Proj,
+	("Theta", "X"): YSlice,
+	("Theta", "Y"): XSlice,
+	("Theta",): Theta,
+	("Y",): Y,
+	("X",): X,
+	("Z",): Z,
+}
 
 
 class SharedNPManager(SharedMemoryManager, StorageBackend):
@@ -119,7 +125,9 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 
 	def SharedNPArray(self, shape: DataShape, dtype: np.dtype, *create_with: tuple[DataShape, np.dtype]):
 		full_set = [(shape, dtype)] + list(create_with)
-		size = max([np.prod(_shape_tuple(shape)) * np.dtype(dtype).itemsize for (shape, dtype) in full_set])
+		if any(not isinstance(item_shape, DataShape) for item_shape, _dtype in full_set):
+			raise TypeError("shared allocations require DataShape instances")
+		size = max(item_shape.nbytes(item_dtype) for item_shape, item_dtype in full_set)
 		mem = self.SharedMemory(size)
 		self._physical[mem.name] = {
 			"capacity": int(size), "active_roles": set(), "pins": set(),
@@ -127,12 +135,14 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		result = [SharedNPArray(mem.name, shape, dtype) for (shape, dtype) in full_set]
 		return result[0] if len(result) == 1 else result
 
-	def allocate(self, shape, dtype, *, aliases=(), role=None, reuse_from=(),
+	def allocate(self, shape: DataShape, dtype, *, aliases=(), role=None, reuse_from=(),
 			alias_from=None, proof=None):
 		"""Allocate manager-owned storage using only named, proved alias paths."""
 
+		if not isinstance(shape, DataShape):
+			raise TypeError("shared allocations require a DataShape")
 		dtype = np.dtype(dtype)
-		required = int(np.prod(_shape_tuple(shape), dtype=np.float64) * dtype.itemsize)
+		required = shape.nbytes(dtype)
 		name = None
 		alias_kind = None
 		if self.enable_aliasing:
@@ -198,13 +208,11 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 			self._minimum_capacities.get(role, 0), int(capacity),
 		)
 
-	def fork(self, source, *, label: str):
+	def fork(self, source, *, shape: DataShape, label: str):
 		"""Return a manager-owned copy of an existing buffer."""
 
 		source_view = buffer_view(source)
-		result = self.allocate(
-			getattr(source, "shape", source_view.shape), source_view.dtype, role=label,
-		)
+		result = self.allocate(shape, source_view.dtype, role=label)
 		result.array()[...] = source_view
 		return result
 
@@ -270,6 +278,8 @@ class SharedNPArray(ManagedBuffer):
 	def __init__(self, name: str, shape: DataShape, dtype: np.dtype,
 					views: list = None, *, allocate: bool = False,
 					role: str | None = None):
+		if not isinstance(shape, DataShape):
+			raise TypeError("SharedNPArray.shape must be a DataShape")
 		self.__name = name
 		self.__shape = shape
 		self.__dtype = np.dtype(dtype)
@@ -283,24 +293,24 @@ class SharedNPArray(ManagedBuffer):
 		else:
 			self.__sm = SharedMemory(name=name)
 
-	def size(self, swap=None):
+	def size(self, swap: DataShape | None = None):
 		""" Size of array in memory.
 
-			:param swap: Tuple overriding shape parameters, for a custom size.
+			:param swap: Named extents overriding shape parameters for a custom size.
 			:retval: Size in bytes.
 		"""
 		if swap is None:
 			calc_shape = self.shape
-		elif is_dataclass(self.shape):
-			calc_shape = replace(self.shape, **asdict(swap))
 		else:
-			calc_shape = swap
-		return int(np.prod(_shape_tuple(calc_shape), dtype=np.float64) * self.__dtype.itemsize)
+			calc_shape = replace(self.shape, **swap.as_dict())
+		return calc_shape.nbytes(self.__dtype)
 
 	def __load(self) -> np.ndarray:
 		"""Allocates a numpy array in the shared memory."""
 		if self.__sm.buf is not None:
-			self.__ar = np.ndarray(shape=_shape_tuple(self.__shape), dtype=self.dtype, buffer=self.__sm.buf)
+			self.__ar = np.ndarray(
+				shape=self.__shape.as_tuple(), dtype=self.dtype, buffer=self.__sm.buf,
+			)
 			if self.has_views:
 				ar = self.__ar
 				for view in self.__views:
@@ -374,6 +384,35 @@ class SharedNPArray(ManagedBuffer):
 				self.__name, self.__shape, self.__dtype, self.__views + [view], role=self._role,
 			)
 
+	def __view_shape(self) -> DataShape:
+		"""Apply basic views using only declared named shape classes."""
+
+		names = list(self.__shape.names)
+		values = list(self.__shape.as_tuple())
+		for view in self.__views:
+			indices = view if isinstance(view, tuple) else (view,)
+			if Ellipsis in indices:
+				position = indices.index(Ellipsis)
+				missing = len(values) - (len(indices) - 1)
+				indices = indices[:position] + (slice(None),) * missing + indices[position + 1:]
+			indices += (slice(None),) * (len(values) - len(indices))
+			if len(indices) != len(values) or any(index is None for index in indices):
+				raise TypeError("new-axis ManagedBuffer views have no canonical DataShape")
+			selected = [
+				(name, len(range(*index.indices(size))))
+				for name, size, index in zip(names, values, indices, strict=True)
+				if not isinstance(index, (int, np.integer))
+			]
+			names = [name for name, _value in selected]
+			values = [value for _name, value in selected]
+		shape_type = (
+			type(self.__shape)
+			if tuple(names) == self.__shape.names else _VIEW_SHAPES.get(tuple(names))
+		)
+		if shape_type is None:
+			raise TypeError(f"no canonical DataShape for basic view axes {tuple(names)!r}")
+		return shape_type(*values)
+
 	@cached_property
 	def has_views(self):
 		return len(self.__views) > 0
@@ -397,17 +436,8 @@ class SharedNPArray(ManagedBuffer):
 		return self.__allocated
 
 	@cached_property
-	def shape(self):
-		if len(self.__views) == 0:
-			return self.__shape
-		else:
-			# non-ideal but we shouldn't be calling this much anwyay!
-			shape = self.__load().shape
-			if is_dataclass(self.__shape) and len(shape) == len(fields(self.__shape)):
-				shape = type(self.__shape)(*shape)
-			elif is_dataclass(self.__shape):
-				shape = self.__shape.gen(fields(self.__shape)[-len(shape):])(*shape)
-			return shape
+	def shape(self) -> DataShape:
+		return self.__shape if not self.__views else self.__view_shape()
 
 
 def cleanup_mem(*shm_objects):

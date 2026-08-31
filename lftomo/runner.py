@@ -34,6 +34,7 @@ from lftomo.config import (
 )
 from lftomo.pipeline import (
 	Backend,
+	BufferSpec,
 	CandidateLimitError,
 	NumpyBackend,
 	Pipeline,
@@ -478,16 +479,16 @@ def _crop_to_window_interior(
 ) -> PipelineState:
 	"""Discard source-context rows before reconstruction and publish core coordinates."""
 
-	interior = window.internal.index[1]
+	interior = window.internal.axis_slice("Y")
 	working = state.working_array
 	values = working if isinstance(working, ManagedBuffer) else np.asarray(working)
-	if state.layout is ProjOrder:
-		view = values[:, interior, :]
-	elif state.layout is SinoOrder:
-		view = values[interior, :, :]
-	else:
+	if state.layout not in (ProjOrder, SinoOrder):
 		raise TypeError("window interior cropping requires projection or sinogram order")
-	result = state.with_array(view)
+	view = values[state.layout.point_index(Y=interior)]
+	shape = type(state.buffer_spec.shape)(**{
+		**state.buffer_spec.shape.as_dict(), "Y": len(range(*interior.indices(state.buffer_spec.shape.Y))),
+	})
+	result = state.with_array(view, buffer_spec=BufferSpec(shape, state.buffer_spec.dtype))
 	if state.source_window is not None:
 		result.source_window = state.source_window.with_pad(["Y"]).rescope(
 			pos=Y(window.pos.Y), shape=Y(window.shape.Y),
@@ -495,10 +496,10 @@ def _crop_to_window_interior(
 	center = result.artifacts.get("center")
 	if center is not None:
 		center_values = np.asarray(center)
-		row_count = values.shape[1] if state.layout is ProjOrder else values.shape[0]
+		row_count = state.buffer_spec.shape.Y
 		if center_values.ndim == 1 and len(center_values) == row_count:
 			result.artifacts["center"] = center_values[interior]
-	core = window.index[1]
+	core = window.axis_slice("Y")
 	result.artifacts["streaming_window"] = {
 		"index": index,
 		"core_start": core.start,

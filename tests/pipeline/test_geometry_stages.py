@@ -1,10 +1,8 @@
-from dataclasses import astuple
-
 import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	AffineSkewMovementStage,
 	MovementCorrectStage,
@@ -16,7 +14,7 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 from lftomo.util.window import TomoWindow
 
 
-def _state(array, config):
+def _state(array, config, layout=SinoOrder):
 	return PipelineState(
 		working_array=array,
 		scan=Scan(
@@ -29,6 +27,7 @@ def _state(array, config):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 	)
 
 
@@ -108,7 +107,6 @@ def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(mo
 	)
 	working = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
 	state = _state(working, config)
-	state.layout = SinoOrder
 	state.domain = DataDomain.ATTENUATION
 	state.source_window = TomoWindow(
 		ProjOrder(Theta=3, Y=2, X=4), ProjOrder(0, 0, 0),
@@ -127,7 +125,8 @@ def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(mo
 	np.testing.assert_array_equal(result.working_array, expected)
 	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=-1)
 	assert result.source_window.shape == ProjOrder(Theta=3, Y=2, X=6)
-	assert result.buffer_spec.shape == astuple(result.source_window.shape)
+	assert result.buffer_spec.shape == result.source_window.shape
+	assert result.buffer_spec.layout is ProjOrder
 
 
 def test_fused_transition_is_direction_parametric():
@@ -136,9 +135,7 @@ def test_fused_transition_is_direction_parametric():
 		params={"transition_to": "sinogram", "pad_x": 0},
 	)
 	working = np.arange(24, dtype=np.float32).reshape(3, 2, 4)
-	state = _state(working.transpose(1, 0, 2), config)
-	state.working_array = working
-	state.layout = ProjOrder
+	state = _state(working, config, ProjOrder)
 	state.domain = DataDomain.ATTENUATION
 
 	result = create_stage(config).run(state)
@@ -154,7 +151,6 @@ def test_nonzero_fused_transition_resamples_once_per_projection(monkeypatch):
 	)
 	working = np.ones((2, 3, 4), dtype=np.float32)
 	state = _state(working, config)
-	state.layout = SinoOrder
 	calls = []
 	monkeypatch.setattr("cv2.getRotationMatrix2D", lambda center, degrees, scale:
 		(center, degrees, scale))
@@ -186,9 +182,7 @@ def test_nontransition_affine_preserves_aaa523_style_projection_layout():
 		params={"skew_degrees": 0, "movement_enabled": False},
 	)
 	working = np.ones((3, 2, 4), dtype=np.float32)
-	state = _state(working.transpose(1, 0, 2), config)
-	state.working_array = working
-	state.layout = ProjOrder
+	state = _state(working, config, ProjOrder)
 
 	stage = create_stage(config)
 	result = stage.run(state)

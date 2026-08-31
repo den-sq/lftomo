@@ -172,7 +172,7 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(tmp_path, 
 			{"kind": "normalize", "algorithm": "weighted"},
 			{"kind": "phase", "algorithm": "paganin"},
 			{"kind": "center", "algorithm": "manual", "params": {"value_px": 2}},
-			{"kind": "recon", "algorithm": "gridrec", "params": {"sinogram_order": True, "circle_mask": False}},
+			{"kind": "recon", "algorithm": "gridrec", "params": {"circle_mask": False}},
 			{"kind": "write", "algorithm": "tiff_slices", "params": {"naming_template": "slice_{slice:03d}.tif"}},
 		],
 	})

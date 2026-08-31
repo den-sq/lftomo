@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, astuple, dataclass, field, is_dataclass, replace
+from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
 import time
-from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal
 import uuid
 
 import numpy as np
@@ -105,15 +105,14 @@ class PadRequirement:
 class StageContract:
 	"""Behavioral contract advertised by a Stage before it runs.
 
-	``expected_input`` and ``produced_output`` are shape classes, usually from
-	``lftomo.util.shapes`` such as ``ProjOrder``, ``SinoOrder``, or
-	``ReconOrder``. These contract fields are consumed by the Pipeline validator
-	defined by issue #18 / PR #42. ``runtime_requirements`` declares invariant
-	optional dependencies and bounded post-import API probes for preflight.
+	``accepts`` declares the input layout capabilities and ``produces`` declares
+	the output layout or ``PRESERVE`` effect consumed by the Pipeline validator.
+	Layout classes usually come from ``lftomo.util.shapes``, such as
+	``ProjOrder``, ``SinoOrder``, or ``ReconOrder``. ``runtime_requirements``
+	declares invariant optional dependencies and bounded post-import API probes
+	for preflight.
 	"""
 
-	expected_input: type[Any] | None = None
-	produced_output: type[Any] | None = None
 	mutates_input: bool = False
 	# Prefix caching is fail-closed: a Stage must explicitly promise that its
 	# output is deterministic and fully represented by its config, contract,
@@ -153,13 +152,9 @@ class StageContract:
 
 	@property
 	def accepted_layouts(self) -> tuple[type[Any], ...] | None:
-		"""Return explicit capabilities or the legacy expected shape."""
+		"""Return the explicitly declared input layout capabilities."""
 
-		if self.accepts is not None:
-			return self.accepts
-		if self.expected_input is not None:
-			return (self.expected_input,)
-		return None
+		return self.accepts
 
 	@property
 	def preferred_layout(self) -> type[Any] | None:
@@ -173,7 +168,7 @@ class StageContract:
 	def output_layout(self, input_layout: type[Any] | None) -> type[Any] | None:
 		"""Resolve the concrete output layout for ``input_layout``."""
 
-		effect = self.produced_output if self.produces is None else self.produces
+		effect = self.produces
 		if effect is PRESERVE:
 			return input_layout
 		return effect
@@ -242,47 +237,48 @@ class DaskStubBackend(Backend):
 		return da.from_array(array)
 
 
-class WorkingArray(Protocol):
-	"""Minimal shape-bearing protocol for pipeline working arrays."""
-
-	@property
-	def shape(self) -> tuple[int, ...]:
-		"""Array shape in backend-native form."""
-
-
 @dataclass(frozen=True)
 class BufferSpec:
-	"""Shape, dtype, and layout of the current working allocation."""
+	"""Canonical logical shape and dtype of one working allocation."""
 
-	shape: Any
+	shape: DataShape
 	dtype: np.dtype
-	layout: type[Any] | None
 
-	def with_layout(self, layout: type[Any] | None) -> "BufferSpec":
-		return replace(self, layout=layout)
+	def __post_init__(self):
+		if not isinstance(self.shape, DataShape):
+			raise TypeError("BufferSpec.shape must be a DataShape")
+		object.__setattr__(self, "dtype", np.dtype(self.dtype))
+
+	@property
+	def layout(self) -> type[DataShape]:
+		return type(self.shape)
 
 
-def _buffer_spec(buffer: Any, layout: type[Any] | None) -> BufferSpec | None:
+def _buffer_spec(buffer: Any) -> BufferSpec | None:
 	shape = getattr(buffer, "shape", None)
 	if shape is None:
 		return None
+	if not isinstance(shape, DataShape):
+		if isinstance(buffer, ManagedBuffer):
+			raise TypeError("ManagedBuffer.shape must be a DataShape")
+		return None
 	try:
-		values = astuple(shape) if is_dataclass(shape) else tuple(shape)
-		if not all(int(value) > 0 for value in values):
+		if not all(int(value) > 0 for value in shape.as_tuple()):
 			return None
 	except TypeError:
 		return None
 	dtype = getattr(buffer, "dtype", None)
 	if dtype is None and hasattr(buffer, "array"):
-		dtype = getattr(buffer.array, "dtype", None)
-	return None if dtype is None else BufferSpec(shape, np.dtype(dtype), layout)
+		view = buffer.array
+		dtype = getattr(view() if callable(view) else view, "dtype", None)
+	return None if dtype is None else BufferSpec(shape, np.dtype(dtype))
 
 
 @dataclass
 class PipelineState:
 	"""Mutable state object passed from Stage to Stage."""
 
-	working_array: np.ndarray | DaskArrayStub | WorkingArray
+	working_array: Any
 	scan: Scan
 	recon: Recon
 	artifacts: dict[str, Any] = field(default_factory=dict)
@@ -292,25 +288,41 @@ class PipelineState:
 	dataset: TomoDataSet | None = None
 	source_window: TomoWindow | None = None
 	buffer_spec: BufferSpec | None = None
-	# Fragment callers may omit axes for legacy compatibility. Complete pipelines
-	# always acquire both from their read Stage before data processing begins.
-	layout: type[Any] | None = None
 	domain: DataDomain | None = None
 
 	def __post_init__(self):
 		if self.buffer_spec is None:
-			self.buffer_spec = _buffer_spec(self.working_array, self.layout)
+			self.buffer_spec = _buffer_spec(self.working_array)
+		if self.buffer_spec is None:
+			if np.asarray(self.working_array).size:
+				raise TypeError("non-empty plain arrays require an explicit BufferSpec")
+			return
+		actual = getattr(self.working_array, "shape", ())
+		actual_shape = actual.as_tuple() if isinstance(actual, DataShape) else tuple(actual)
+		if actual_shape != self.buffer_spec.shape.as_tuple():
+			raise ValueError("working array shape disagrees with BufferSpec.shape")
+		actual_dtype = getattr(self.working_array, "dtype", None)
+		if actual_dtype is None and hasattr(self.working_array, "array"):
+			view = self.working_array.array
+			actual_dtype = getattr(view() if callable(view) else view, "dtype", None)
+		if actual_dtype is None or np.dtype(actual_dtype) != self.buffer_spec.dtype:
+			raise ValueError("working array dtype disagrees with BufferSpec.dtype")
+
+	@property
+	def layout(self) -> type[DataShape] | None:
+		"""Return the stage-contract layout derived from the canonical shape."""
+
+		return None if self.buffer_spec is None else self.buffer_spec.layout
 
 	def with_array(
 		self,
 		working_array: Any,
 		*,
-		layout: type[Any] | None = None,
+		buffer_spec: BufferSpec | None = None,
 		domain: DataDomain | None = None,
 	) -> "PipelineState":
-		"""Return a shallow-copy state with a different working array."""
+		"""Return a shallow-copy state with a newly bound array and BufferSpec."""
 
-		resolved_layout = self.layout if layout is None else layout
 		return PipelineState(
 			working_array=working_array,
 			scan=self.scan,
@@ -321,21 +333,14 @@ class PipelineState:
 			executor=self.executor,
 			dataset=self.dataset,
 			source_window=self.source_window,
-			buffer_spec=_buffer_spec(working_array, resolved_layout),
-			layout=resolved_layout,
+			buffer_spec=buffer_spec,
 			domain=self.domain if domain is None else domain,
 		)
-
-	def sync_buffer_spec(self) -> None:
-		"""Synchronize layout metadata after a preserving in-place Stage."""
-
-		if self.buffer_spec is not None and self.buffer_spec.layout is not self.layout:
-			self.buffer_spec = self.buffer_spec.with_layout(self.layout)
 
 
 def allocate_output(
 	state: PipelineState,
-	shape: Any,
+	shape: DataShape,
 	dtype: np.dtype,
 	*,
 	role: str,
@@ -346,7 +351,7 @@ def allocate_output(
 	"""Allocate a prospective output without changing or retiring current state."""
 
 	if state.storage is None:
-		array = np.empty(tuple(shape) if not is_dataclass(shape) else astuple(shape), dtype=dtype)
+		array = np.empty(shape.as_tuple(), dtype=dtype)
 		return array, array
 	alias_from = state.working_array if alias_from_current and hasattr(state.working_array, "name") else None
 	buffer = state.storage.allocate(
@@ -361,12 +366,12 @@ def commit_output(
 	output: Any,
 	*,
 	retire_as: str | None,
-	layout: type[Any] | None = None,
+	buffer_spec: BufferSpec,
 	domain: DataDomain | None = None,
 ) -> PipelineState:
 	"""Publish a filled output, then retire its predecessor after the handoff."""
 
-	result = state.with_array(output, layout=layout, domain=domain)
+	result = state.with_array(output, buffer_spec=buffer_spec, domain=domain)
 	if (
 		state.storage is not None
 		and output is not state.working_array
@@ -385,6 +390,11 @@ class Stage(ABC):
 	@abstractmethod
 	def run(self, state: PipelineState) -> PipelineState:
 		"""Execute the Stage and return the next PipelineState."""
+
+	def output_window(self, source: TomoWindow) -> TomoWindow:
+		"""Return the source-coordinate window published after this Stage."""
+
+		return source
 
 
 StageObserver = Callable[
@@ -530,6 +540,8 @@ class Pipeline:
 			if segment.kind is ExecutionKind.BOUNDED_SINOGRAM:
 				from lftomo.pipeline.execution import run_bounded_sinogram_segment
 
+				expected_layout = state.layout
+				expected_domain = state.domain
 				stage_indices = {
 					id(stage): offset
 					for offset, stage in enumerate(segment_stages, start=segment.start)
@@ -587,9 +599,13 @@ class Pipeline:
 					for offset, stage in enumerate(segment_stages, start=segment.start):
 						self.observer("completed", offset, stage, None)
 				for stage in segment_stages:
-					state.layout = stage.contract.output_layout(state.layout)
-					state.domain = stage.contract.output_domain(state.domain)
-				state.sync_buffer_spec()
+					expected_layout = stage.contract.output_layout(expected_layout)
+					expected_domain = stage.contract.output_domain(expected_domain)
+				if expected_layout is not None and state.layout is not expected_layout:
+					raise ValueError(
+						"Stage output BufferSpec disagrees with its declared layout contract"
+					)
+				state.domain = expected_domain
 				if self.execution_observer is not None:
 					member_timings = tuple(MemberTiming(
 						member=member,
@@ -649,11 +665,12 @@ class Pipeline:
 					self.observer("completed", index, stage, None)
 				output_layout = stage.contract.output_layout(input_layout)
 				output_domain = stage.contract.output_domain(input_domain)
-				if output_layout is not None:
-					state.layout = output_layout
+				if output_layout is not None and state.layout is not output_layout:
+					raise ValueError(
+						"Stage output BufferSpec disagrees with its declared layout contract"
+					)
 				if output_domain is not None:
 					state.domain = output_domain
-				state.sync_buffer_spec()
 				if self.execution_observer is not None:
 					member = members[0]
 					member_unavailable = (

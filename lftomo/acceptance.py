@@ -506,7 +506,7 @@ def _current_oracle_reproduction_pipeline(
 				"value_px": 1282.75, "tilt": 0.0,
 			}},
 			{"id": "reconstruct", "kind": "recon", "algorithm": "gridrec", "params": {
-				"ncore": workers, "sinogram_order": False, "circle_mask": False,
+				"ncore": workers, "circle_mask": False,
 			}},
 			{"id": "write", "kind": "write", "algorithm": "tiff_slices", "params": {
 				"dtype": "float32", "naming_template": "{slice:05d}.tif",
@@ -927,7 +927,7 @@ def _experiment_config(*, y_start: int, y_stop: int, workers: int) -> Experiment
 					"value_px": 1282.75, "tilt": 0.0,
 				}},
 				{"id": "reconstruct", "kind": "recon", "algorithm": "gridrec", "params": {
-					"ncore": workers, "sinogram_order": False,
+					"ncore": workers,
 				}},
 				{"id": "evaluate", "kind": "evaluate", "algorithm": "metrics", "params": {
 					"metrics": [{"kind": "ring", "inner_radius": 2, "smoothing_sigma": 2}],

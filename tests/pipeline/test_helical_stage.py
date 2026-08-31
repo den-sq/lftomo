@@ -1,8 +1,10 @@
 import numpy as np
 
 from lftomo.config import Acquisition, Detector, Helical, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline.planning import stage_output_spec
 from lftomo.pipeline.stages import HelicalIndexRemapStage, STAGE_REGISTRY, create_stage
+from lftomo.util.shapes import SinoOrder
 
 
 def _state(array, config, pitch_um=1):
@@ -19,7 +21,28 @@ def _state(array, config, pitch_um=1):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
+		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	)
+
+
+def test_planning_and_execution_call_the_same_output_geometry(monkeypatch):
+	working = np.arange(5 * 3 * 2, dtype=np.float32).reshape(5, 3, 2)
+	config = StageConfig(kind="helical_correct", algorithm="index_remap")
+	state = _state(working, config)
+	stage = HelicalIndexRemapStage(pitch_px_per_projection=0.5)
+	calls = []
+	output_geometry = stage.output_geometry
+
+	def track(source_shape, pitch):
+		calls.append((source_shape, pitch))
+		return output_geometry(source_shape, pitch)
+
+	monkeypatch.setattr(stage, "output_geometry", track)
+	planned = stage_output_spec(stage, state.buffer_spec, state.scan)
+	result = stage.run(state)
+
+	assert len(calls) == 2
+	assert result.buffer_spec == planned
 
 
 def test_helical_remap_crops_to_rows_valid_for_every_projection():

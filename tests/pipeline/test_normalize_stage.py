@@ -4,6 +4,7 @@ import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
+	BufferSpec,
 	NumpyBackend,
 	Pipeline,
 	PipelineRunContext,
@@ -19,7 +20,7 @@ from lftomo.util.window import TomoWindow
 
 
 class PassThroughStage(Stage):
-	contract = StageContract(expected_input=SinoOrder, produced_output=SinoOrder)
+	contract = StageContract(accepts=(SinoOrder,), produces=SinoOrder)
 
 	def __init__(self, name):
 		self.name = name
@@ -78,6 +79,7 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 		working_array=working,
 		scan=_scan(flats),
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
+		buffer_spec=BufferSpec(SinoOrder(*working.shape), working.dtype),
 	)
 
 	result = Pipeline([
@@ -104,6 +106,7 @@ def test_weighted_normalize_promotes_integer_projections_to_float32():
 		working_array=working,
 		scan=_scan(flats),
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
+		buffer_spec=BufferSpec(SinoOrder(*working.shape), working.dtype),
 	)
 
 	result = WeightedNormalizeStage().run(state)
@@ -125,7 +128,6 @@ def test_float32_normalization_replaces_raw_handle_after_successful_handoff():
 			scan=_scan(flats),
 			recon=Recon(pipeline=[StageConfig(kind="normalize")]),
 			storage=context.storage,
-			layout=SinoOrder,
 		)
 
 		result = WeightedNormalizeStage().run(state)
@@ -153,11 +155,12 @@ def test_taper_normalize_projection_batch_uses_global_theta_weights():
 		scan=scan,
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
 		artifacts={"projection_start": 2, "projection_count": 4},
+		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
 	)
-	stage = TaperBlendedNormalizeStage(order="projection")
+	stage = TaperBlendedNormalizeStage()
 
 	result = stage.run(state)
 
-	assert stage.contract.expected_input is ProjOrder
+	assert stage.contract.accepted_layouts == (ProjOrder, SinoOrder)
 	np.testing.assert_allclose(result.working_array[0], 10 / 30)
 	np.testing.assert_allclose(result.working_array[1], 10 / 35)

@@ -126,8 +126,7 @@ full-volume run as the one-window case.
 `Pipeline` validates the ordered Stage list before execution. The validator
 checks:
 
-- adjacent Stage shape compatibility through `expected_input` and
-  `produced_output`
+- adjacent Stage shape compatibility through `accepts` and `produces`
 - required `Scan` metadata fields
 - artifact consumers only reference artifacts produced upstream
 - GPU-requiring Stages do not run under CPU-only backends

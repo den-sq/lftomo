@@ -15,6 +15,7 @@ import numpy as np
 from lftomo.experiment.runner import TrialExecution
 from lftomo.experiment.events import current_execution_context
 from lftomo.pipeline import PipelineRunContext
+from lftomo.util.shapes import ImgSlice
 
 
 def candidate_alpha(identity) -> float:
@@ -137,7 +138,7 @@ class HangingManagedExecutor:
 	def __call__(self, _identity, output_root):
 		output_root.mkdir(parents=True, exist_ok=True)
 		with PipelineRunContext(max_workers=1) as context:
-			buffer = context.storage.allocate((8, 8), np.float32, role="test")
+			buffer = context.storage.allocate(ImgSlice(8, 8), np.float32, role="test")
 			buffer.array()[...] = 1
 			(output_root / "managed-process-tree.json").write_text(json.dumps({
 				"trial_pid": os.getpid(),

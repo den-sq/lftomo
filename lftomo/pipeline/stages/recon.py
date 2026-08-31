@@ -8,6 +8,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
+	BufferSpec,
 	Locality,
 	PipelineState,
 	ResourceHints,
@@ -21,17 +22,6 @@ from lftomo.pipeline.runtime import ASTRA_RUNTIME_REQUIREMENT, tomopy_requiremen
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 
 
-def _state_sinogram_order(state: PipelineState, configured: bool | None, name: str) -> bool:
-	"""Resolve the TomoPy flag from state, retaining unknown-fragment compatibility."""
-
-	if state.layout is None:
-		return configured or False
-	resolved = state.layout is SinoOrder
-	if configured is not None and configured != resolved:
-		raise ValueError(f"{name} sinogram_order compatibility flag disagrees with PipelineState.layout")
-	return resolved
-
-
 class GridrecStage(Stage):
 	"""Reconstruct projection or sinogram-order data with TomoPy gridrec."""
 
@@ -43,7 +33,6 @@ class GridrecStage(Stage):
 	def __init__(
 		self,
 		center: float | list[float] | None = None,
-		sinogram_order: bool | None = None,
 		ncore: int | None = None,
 		ncore_from_machine: bool = False,
 		circle_mask: bool = True,
@@ -69,7 +58,6 @@ class GridrecStage(Stage):
 		if output_width is not None and output_width < 1:
 			raise ValueError("gridrec output_width must be positive")
 		self.center = center
-		self.sinogram_order = sinogram_order
 		self.ncore = (os.cpu_count() or 1) if ncore_from_machine else ncore
 		self.circle_mask = circle_mask
 		self.circle_mask_ratio = circle_mask_ratio
@@ -82,8 +70,6 @@ class GridrecStage(Stage):
 		self.output_width = output_width
 		self.angle_endpoint = angle_endpoint
 		self.contract = StageContract(
-			expected_input=SinoOrder if sinogram_order else ProjOrder,
-			produced_output=ReconOrder,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=SinoOrder,
 			produces=ReconOrder,
@@ -171,10 +157,10 @@ class GridrecStage(Stage):
 		return reconstruction[:, :, left:right]
 
 	def _allocate_reconstruction(
-		self, state: PipelineState, data: np.ndarray, *, sinogram_order: bool,
+		self, state: PipelineState, data: np.ndarray, layout: type,
 	):
-		slice_count = data.shape[0 if sinogram_order else 1]
-		width = data.shape[2]
+		slice_count = data.shape[layout.axis_of("Y")]
+		width = data.shape[layout.axis_of("X")]
 		shape = ReconOrder(Y=slice_count, Z=width, X=width)
 		current_role = getattr(state.working_array, "role", None)
 		can_alias_input = state.layout is ProjOrder and current_role == "normalized"
@@ -204,7 +190,11 @@ class GridrecStage(Stage):
 			if not np.shares_memory(masked, target):
 				target[...] = masked
 		cropped = self._crop_buffer(output)
-		return commit_output(state, cropped, retire_as=None)
+		shape = ReconOrder(*np.asarray(cropped).shape)
+		return commit_output(
+			state, cropped, retire_as=None,
+			buffer_spec=BufferSpec(shape, np.dtype(np.float32)),
+		)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
@@ -212,11 +202,10 @@ class GridrecStage(Stage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("recon.gridrec expects a three-dimensional tomography array")
-		sinogram_order = _state_sinogram_order(state, self.sinogram_order, self.name)
-		theta_axis = 1 if sinogram_order else 0
-		slice_axis = 0 if sinogram_order else 1
-		angles = self._angles(state, data.shape[theta_axis])
-		center = self._center(state, data.shape[slice_axis])
+		layout = type(state.buffer_spec.shape)
+		sinogram_order = layout is SinoOrder
+		angles = self._angles(state, data.shape[layout.axis_of("Theta")])
+		center = self._center(state, data.shape[layout.axis_of("Y")])
 		data, center = self._prepare_input(data, center)
 
 		import tomopy
@@ -224,9 +213,7 @@ class GridrecStage(Stage):
 		kwargs = {"filter_name": self.filter_name}
 		if self.filter_parameters is not None:
 			kwargs["filter_par"] = self.filter_parameters
-		output, target = self._allocate_reconstruction(
-			state, data, sinogram_order=sinogram_order,
-		)
+		output, target = self._allocate_reconstruction(state, data, layout)
 		reconstruction = tomopy.recon(
 			data,
 			angles,
@@ -255,7 +242,6 @@ class AstraCudaStage(GridrecStage):
 	def __init__(
 		self,
 		center: float | list[float] | None = None,
-		sinogram_order: bool | None = None,
 		iterations: int = 1,
 		proj_type: str = "cuda",
 		extra_options: dict | None = None,
@@ -272,7 +258,6 @@ class AstraCudaStage(GridrecStage):
 			raise ValueError("ASTRA iterations must be positive")
 		super().__init__(
 			center=center,
-			sinogram_order=sinogram_order,
 			ncore=1,
 			circle_mask=circle_mask,
 			circle_mask_ratio=circle_mask_ratio,
@@ -287,8 +272,6 @@ class AstraCudaStage(GridrecStage):
 		self.proj_type = proj_type
 		self.extra_options = extra_options or {}
 		self.contract = StageContract(
-			expected_input=SinoOrder if sinogram_order else ProjOrder,
-			produced_output=ReconOrder,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=SinoOrder,
 			produces=ReconOrder,
@@ -311,11 +294,10 @@ class AstraCudaStage(GridrecStage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError(f"{self.name} expects a three-dimensional tomography array")
-		sinogram_order = _state_sinogram_order(state, self.sinogram_order, self.name)
-		theta_axis = 1 if sinogram_order else 0
-		slice_axis = 0 if sinogram_order else 1
-		angles = self._angles(state, data.shape[theta_axis])
-		center = self._center(state, data.shape[slice_axis])
+		layout = type(state.buffer_spec.shape)
+		sinogram_order = layout is SinoOrder
+		angles = self._angles(state, data.shape[layout.axis_of("Theta")])
+		center = self._center(state, data.shape[layout.axis_of("Y")])
 		data, center = self._prepare_input(data, center)
 
 		import tomopy
@@ -330,9 +312,7 @@ class AstraCudaStage(GridrecStage):
 		kwargs = {"filter_name": self.filter_name}
 		if self.filter_parameters is not None:
 			kwargs["filter_par"] = self.filter_parameters
-		output, target = self._allocate_reconstruction(
-			state, data, sinogram_order=sinogram_order,
-		)
+		output, target = self._allocate_reconstruction(state, data, layout)
 		reconstruction = tomopy.recon(
 			data,
 			angles,

@@ -11,7 +11,6 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.layout import configured_layout, n_projections, projection_view, resolve_layout
 from lftomo.util.shapes import Proj, ProjOrder, SinoOrder
 
 
@@ -25,24 +24,16 @@ class BilateralFilterStage(Stage):
 	"""
 
 	name = "filter.bilateral"
-	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
-		mutates_input=True,
-		window_axes=("Y", "Theta"),
-	)
 
 	def __init__(self, diameter: int = 3, sigma_color: float = 1,
 				sigma_space: float = 1, enabled: bool = True,
-				border_type: int = cv2.BORDER_DEFAULT, order: str | None = None):
+				border_type: int = cv2.BORDER_DEFAULT):
 		if diameter < 1:
 			raise ValueError("bilateral diameter must be positive")
 		if sigma_color <= 0 or sigma_space <= 0:
 			raise ValueError("bilateral sigma values must be positive")
-		compatibility = configured_layout(order)
-		shape = compatibility or SinoOrder
 		self.contract = StageContract(
-			expected_input=shape, produced_output=shape, mutates_input=enabled,
+			mutates_input=enabled,
 			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE, locality=Locality.PROJECTION,
@@ -56,7 +47,6 @@ class BilateralFilterStage(Stage):
 		self.sigma_space = sigma_space
 		self.enabled = enabled
 		self.border_type = border_type
-		self.order = order
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "BilateralFilterStage":
@@ -66,14 +56,14 @@ class BilateralFilterStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BilateralFilterStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("filter.bilateral expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
-		count = n_projections(data, layout)
+		count = data.shape[layout.axis_of("Theta")]
 		for projection in range(count):
-			image = projection_view(data, layout, projection)
+			image = data[layout.point_index(Theta=projection)]
 			# This conversion is intentional and is part of the Stage's public
 			# numerical behavior; cv2.bilateralFilter rejects float64 inputs.
 			image[:] = cv2.bilateralFilter(

@@ -17,7 +17,7 @@ import numpy as np
 import psutil
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineState
 from lftomo.pipeline.stages import VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -96,7 +96,8 @@ def _state(array: np.ndarray, layout: type) -> PipelineState:
 	return PipelineState(
 		working_array=array, scan=_scan(theta),
 		recon=Recon(pipeline=[StageConfig(kind="benchmark")]),
-		layout=layout, domain=DataDomain.ATTENUATION,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
+		domain=DataDomain.ATTENUATION,
 	)
 
 

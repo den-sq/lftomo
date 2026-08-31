@@ -3,6 +3,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
+	BufferSpec,
 	DataDomain,
 	DomainCompatibilityError,
 	Locality,
@@ -35,6 +36,7 @@ def _state(array, config):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
+		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	)
 
 

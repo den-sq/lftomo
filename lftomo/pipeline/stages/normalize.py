@@ -18,6 +18,7 @@ from lftomo.calibration import (
 )
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
+	BufferSpec,
 	Locality,
 	PipelineState,
 	Stage,
@@ -26,27 +27,20 @@ from lftomo.pipeline.core import (
 	commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.layout import (
-	configured_layout,
-	n_projections,
-	projection_view,
-	resolve_layout,
-)
 from lftomo.prep.flat import _weighted_normalize_projection
 from lftomo.storage import buffer_view
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
 
 
 def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 	"""Return a float32 prospective output while the raw input remains live."""
 
 	source = np.asarray(state.working_array)
-	# Plain arrays remain a lightweight hermetic-test compatibility path. Real
-	# runs always provide storage and therefore take the managed replacement path.
+	# Float32 arrays can be normalized in place; other dtypes require promotion.
 	if state.storage is None and source.dtype == np.dtype(np.float32):
 		return state.working_array, source
 	output, data = allocate_output(
-		state, source.shape, np.float32, role="normalized",
+		state, state.buffer_spec.shape, np.float32, role="normalized",
 		reuse_from=("normalized", "reconstruction"),
 	)
 	data[...] = source
@@ -54,7 +48,10 @@ def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 
 
 def _finish_normalization(state: PipelineState, output: object) -> PipelineState:
-	return commit_output(state, output, retire_as="raw_staging")
+	return commit_output(
+		state, output, retire_as="raw_staging",
+		buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(np.float32)),
+	)
 
 
 def _managed_flat_fields(state: PipelineState) -> np.ndarray:
@@ -70,7 +67,8 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 		state.artifacts["flat_fields"] = fields
 		return fields
 	artifact = state.storage.allocate(
-		fields.shape, fields.dtype, role="flat_fields", reuse_from=("flat_fields",),
+		GenericOrder(*fields.shape), fields.dtype,
+		role="flat_fields", reuse_from=("flat_fields",),
 	)
 	artifact.array()[...] = fields
 	state.artifacts["flat_fields"] = artifact
@@ -87,8 +85,6 @@ class WeightedNormalizeStage(Stage):
 
 	name = "normalize.weighted"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.RAW,),
 		produces_domain=DataDomain.TRANSMISSION,
@@ -104,11 +100,9 @@ class WeightedNormalizeStage(Stage):
 	)
 
 	def __init__(self, pre_sub: bool = False, pre_subtracted: bool | None = None,
-				timing_source: str | None = None, order: str | None = None):
-		configured_layout(order)
+				timing_source: str | None = None):
 		self.pre_sub = pre_sub if pre_subtracted is None else pre_subtracted
 		self.timing_source = timing_source
-		self.order = order
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
@@ -116,17 +110,17 @@ class WeightedNormalizeStage(Stage):
 
 		output, working = _normalization_output(state)
 		flats = _managed_flat_fields(state)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if working.ndim != 3:
 			raise ValueError("weighted-normalize expects a (Y, Theta, X) working array")
-		y_size = working.shape[1] if layout is ProjOrder else working.shape[0]
-		if flats.shape != (4, y_size, working.shape[2]):
+		y_size = working.shape[layout.axis_of("Y")]
+		if flats.shape != (4, y_size, working.shape[layout.axis_of("X")]):
 			raise ValueError(
 				"flat_fields must have shape (4, Y, X) matching the working array"
 			)
 
 		sinogram_view = working if layout is SinoOrder else np.transpose(working, (1, 0, 2))
-		batch_count = n_projections(working, layout)
+		batch_count = working.shape[layout.axis_of("Theta")]
 		projection_start = int(state.artifacts.get("projection_start", 0))
 		projection_count = int(state.artifacts.get("projection_count", batch_count))
 		for projection in range(batch_count):
@@ -144,8 +138,8 @@ class WeightedNormalizeStage(Stage):
 
 def _flat_fields(state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
 	flats = _managed_flat_fields(state)
-	y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
-	if flats.shape != (4, y_size, data.shape[2]):
+	y_size = data.shape[layout.axis_of("Y")]
+	if flats.shape != (4, y_size, data.shape[layout.axis_of("X")]):
 		raise ValueError("flat_fields must have shape (4, Y, X) matching the working array")
 	return flats
 
@@ -212,10 +206,9 @@ class BeamTrackingNormalizeStage(Stage):
 	def __init__(
 		self, *, transport_sigma: float = 12, schedule: dict | None = None,
 		fit_schedule: bool = False, schedule_sample_count: int = 8,
-		component_names: dict[str, str] | None = None, order: str | None = None,
+		component_names: dict[str, str] | None = None,
 		pre_subtracted: bool = False,
 	):
-		configured_layout(order)
 		if schedule_sample_count < 2:
 			raise ValueError("schedule_sample_count must be at least two")
 		self.transport_sigma = transport_sigma
@@ -227,7 +220,6 @@ class BeamTrackingNormalizeStage(Stage):
 			"pre_dark": "pre_dark", "post_dark": "post_dark",
 			**(component_names or {}),
 		}
-		self.order = order
 		self.pre_subtracted = pre_subtracted
 
 	@classmethod
@@ -238,16 +230,16 @@ class BeamTrackingNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BeamTrackingNormalizeStage currently requires the NumPy backend")
 		output, data = _normalization_output(state)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_tracking expects a three-dimensional array")
-		y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
+		y_size = data.shape[layout.axis_of("Y")]
 		pre_gain, post_gain, pre_dark, post_dark = _tracking_fields(
 			state, y_size, self.component_names,
 		)
 		projection_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
 		projection_start = int(state.artifacts.get("projection_start", 0))
-		batch_count = n_projections(data, layout)
+		batch_count = data.shape[layout.axis_of("Theta")]
 		if batch_count != state.scan.n_projections and not {
 			"projection_start", "projection_count",
 		}.issubset(state.artifacts):
@@ -265,7 +257,7 @@ class BeamTrackingNormalizeStage(Stage):
 			indices = np.unique(np.linspace(0, batch_count - 1, self.schedule_sample_count).astype(int))
 			fractions = (projection_start + indices) / max(projection_count - 1, 1)
 			fit = calibrate_schedule(
-				np.stack([projection_view(data, layout, int(index)) for index in indices]),
+				np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
 				fractions, pre_gain, post_gain,
 			)
 			schedule = fit.schedule
@@ -281,7 +273,7 @@ class BeamTrackingNormalizeStage(Stage):
 			# not carry that motion model, so keep them within measured endpoints.
 			dark_time = float(np.clip(beam_time, 0, 1))
 			dark = (1 - dark_time) * pre_dark + dark_time * post_dark
-			image = projection_view(data, layout, local_index)
+			image = data[layout.point_index(Theta=local_index)]
 			image[:] = _normalize_with_maps(
 				image, gain, dark, self.pre_subtracted, floor_nonpositive=True,
 			)
@@ -310,14 +302,11 @@ class BeamKeyframesNormalizeStage(Stage):
 	)
 
 	def __init__(self, *, component: str = "beam_keyframes", dark_component: str | None = None,
-			transport_sigma: float = 12, maximum_gap: float | None = None,
-			order: str | None = None):
-		configured_layout(order)
+			transport_sigma: float = 12, maximum_gap: float | None = None):
 		self.component = component
 		self.dark_component = dark_component
 		self.transport_sigma = transport_sigma
 		self.maximum_gap = maximum_gap
-		self.order = order
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "BeamKeyframesNormalizeStage":
@@ -325,8 +314,8 @@ class BeamKeyframesNormalizeStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		output, data = _normalization_output(state)
-		layout = resolve_layout(state, self.order, self.name)
-		y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
+		layout = type(state.buffer_spec.shape)
+		y_size = data.shape[layout.axis_of("Y")]
 		start, stop = _calibration_y_window(state, y_size)
 		ref = state.artifacts.get("calibration_bundle")
 		if not isinstance(ref, CalibrationBundleRef):
@@ -342,10 +331,12 @@ class BeamKeyframesNormalizeStage(Stage):
 			if times is None:
 				raise ValueError("physical-time keyframes require projection_times artifacts")
 			times = np.asarray(times, dtype=float)
-			if len(times) != n_projections(data, layout):
+			if len(times) != data.shape[layout.axis_of("Theta")]:
 				raise ValueError("projection_times must match the current Theta window")
 		else:
-			times = projection_start + np.arange(n_projections(data, layout), dtype=float)
+			times = projection_start + np.arange(
+				data.shape[layout.axis_of("Theta")], dtype=float,
+			)
 		dark = 0.0 if self.dark_component is None else bundle.read_component(
 			self.dark_component, y_start=start, y_stop=stop,
 		)
@@ -367,7 +358,7 @@ class BeamKeyframesNormalizeStage(Stage):
 				- np.log(np.clip(bracket.before, 1e-6, None)), self.transport_sigma,
 			)
 			gain = np.exp(average + (bracket.weight - 0.5) * transport)
-			image = projection_view(data, layout, local_index)
+			image = data[layout.point_index(Theta=local_index)]
 			image[:] = _normalize_with_maps(image, gain, dark, False, floor_nonpositive=True)
 		state.artifacts["beam_keyframe_qc"] = {
 			"component": self.component, "maximum_gap_seen": maximum_seen_gap,
@@ -399,9 +390,8 @@ class BeamBasisFitNormalizeStage(Stage):
 		maximum_basis_condition: float = 1e6,
 		maximum_contamination_fraction: float = 0.5,
 		maximum_coefficient_extrapolation: float = 1.0,
-		fail_on_qc: bool = True, order: str | None = None,
+		fail_on_qc: bool = True,
 	):
-		configured_layout(order)
 		if (
 			not 0 < air_threshold <= 1 or not 0 < minimum_air_fraction <= 1
 			or not 0 <= exposure_quantile <= 1 or not 0 <= edge_quantile <= 1
@@ -433,7 +423,6 @@ class BeamBasisFitNormalizeStage(Stage):
 		self.maximum_contamination_fraction = maximum_contamination_fraction
 		self.maximum_coefficient_extrapolation = maximum_coefficient_extrapolation
 		self.fail_on_qc = fail_on_qc
-		self.order = order
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "BeamBasisFitNormalizeStage":
@@ -447,7 +436,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		if value.ndim == 2:
 			mask = value
 		elif value.ndim == 3:
-			mask = projection_view(value, layout, index)
+			mask = value[layout.point_index(Theta=index)]
 		else:
 			raise ValueError(f"{self.air_mask_artifact} must be a 2-D or 3-D mask")
 		if mask.shape != shape:
@@ -458,7 +447,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BeamBasisFitNormalizeStage currently requires the NumPy backend")
 		output, data = _normalization_output(state)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_basis_fit expects a three-dimensional array")
 		ref = state.artifacts.get("calibration_bundle")
@@ -468,7 +457,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		descriptor = bundle.component(self.component)
 		if descriptor.kind != "beam_basis" or descriptor.coordinate_frame != "beam":
 			raise ValueError("beam-basis component must have kind='beam_basis' in beam coordinates")
-		y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
+		y_size = data.shape[layout.axis_of("Y")]
 		start, stop = _calibration_y_window(state, y_size)
 		basis = bundle.read_component(self.component, y_start=start, y_stop=stop)
 		if basis.shape[2] != data.shape[2]:
@@ -487,8 +476,8 @@ class BeamBasisFitNormalizeStage(Stage):
 		training_min = np.asarray(metadata.get("training_coefficient_min", []), dtype=float)
 		training_max = np.asarray(metadata.get("training_coefficient_max", []), dtype=float)
 		qcs, coefficients, violations = [], [], []
-		for index in range(n_projections(data, layout)):
-			image = projection_view(data, layout, index)
+		for index in range(data.shape[layout.axis_of("Theta")]):
+			image = data[layout.point_index(Theta=index)]
 			fit = fit_projection_beam(
 				image, basis, detector=detector,
 				air_mask=self._mask(state, layout, index, image.shape),
@@ -556,38 +545,25 @@ class ThetaSwitchNormalizeStage(Stage):
 
 	name = "normalize.theta_switch"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
+		produces=PRESERVE,
+		accepts=(ProjOrder, SinoOrder),
+		prefers=ProjOrder,
+		accepts_domain=(DataDomain.RAW,),
+		produces_domain=DataDomain.TRANSMISSION,
+		locality=Locality.PROJECTION,
 		mutates_input=False,
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
 		required_metadata=("metadata.flat_fields",),
+		produces_artifacts=("flat_fields",),
+		managed_artifacts=("flat_fields",),
 	)
 
 	def __init__(self, gain_averaging: bool = False, pre_subtracted: bool = False,
 				pre_gain: str | None = None, post_gain: str | None = None,
 				pre_dark: str | None = None, post_dark: str | None = None,
-				order: str | None = None, floor_nonpositive: bool = False,
+				floor_nonpositive: bool = False,
 				floor_value: float = 1.0):
-		compatibility = configured_layout(order)
-		shape = compatibility or SinoOrder
-		self.contract = StageContract(
-			expected_input=shape,
-			produced_output=shape,
-			produces=PRESERVE,
-			accepts=(ProjOrder, SinoOrder),
-			prefers=ProjOrder,
-			accepts_domain=(DataDomain.RAW,),
-			produces_domain=DataDomain.TRANSMISSION,
-			locality=Locality.PROJECTION,
-			mutates_input=False,
-			cacheable_prefix=True,
-			window_axes=("Y", "Theta"),
-			required_metadata=("metadata.flat_fields",),
-			produces_artifacts=("flat_fields",),
-			managed_artifacts=("flat_fields",),
-		)
-		self.order = order
 		self.floor_nonpositive = floor_nonpositive
 		self.floor_value = floor_value
 		self.gain_averaging = gain_averaging
@@ -607,12 +583,12 @@ class ThetaSwitchNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("ThetaSwitchNormalizeStage currently requires the NumPy backend")
 		output, data = _normalization_output(state)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("normalize.theta_switch expects a three-dimensional tomography array")
 		flats = _flat_fields(state, data, layout)
 		pre_gain, post_gain, pre_dark, post_dark = flats
-		batch_count = n_projections(data, layout)
+		batch_count = data.shape[layout.axis_of("Theta")]
 		total_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
 		projection_start = int(state.artifacts.get("projection_start", 0))
 		for local_projection in range(batch_count):
@@ -625,7 +601,7 @@ class ThetaSwitchNormalizeStage(Stage):
 				gain, dark = post_gain, post_dark
 			else:
 				gain, dark = pre_gain, pre_dark
-			image = projection_view(data, layout, local_projection)
+			image = data[layout.point_index(Theta=local_projection)]
 			image[:] = _normalize_with_maps(
 				image, gain, dark, self.pre_subtracted,
 				self.floor_nonpositive, self.floor_value,
@@ -643,7 +619,7 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 			pre_dark: str | None = None, post_dark: str | None = None,
 			pre_weight: str = "linear", post_weight: str = "linear",
 				gain_averaging: bool = True, gain_movement_enabled: bool = False,
-				order: str | None = None, floor_nonpositive: bool = False,
+				floor_nonpositive: bool = False,
 				floor_value: float = 1.0):
 		if pre_weight != "linear" or post_weight != "linear":
 			raise ValueError("taper-blended normalization currently supports linear weights")
@@ -658,7 +634,6 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 			post_gain=post_gain,
 			pre_dark=pre_dark,
 			post_dark=post_dark,
-			order=order,
 			floor_nonpositive=floor_nonpositive,
 			floor_value=floor_value,
 		)
@@ -674,12 +649,12 @@ def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 	if not isinstance(stage, BeamTrackingNormalizeStage) or not stage.fit_schedule:
 		return
 	data = np.asarray(state.working_array)
-	layout = resolve_layout(state, stage.order, stage.name)
-	y_size = data.shape[1] if layout is ProjOrder else data.shape[0]
+	layout = type(state.buffer_spec.shape)
+	y_size = data.shape[layout.axis_of("Y")]
 	pre_gain, post_gain, _pre_dark, _post_dark = _tracking_fields(
 		state, y_size, stage.component_names,
 	)
-	batch_count = n_projections(data, layout)
+	batch_count = data.shape[layout.axis_of("Theta")]
 	projection_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
 	projection_start = int(state.artifacts.get("projection_start", 0))
 	indices = np.unique(
@@ -687,7 +662,7 @@ def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 	)
 	fractions = (projection_start + indices) / max(projection_count - 1, 1)
 	stage._dispatch_schedule_fit = calibrate_schedule(
-		np.stack([projection_view(data, layout, int(index)) for index in indices]),
+		np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
 		fractions, pre_gain, post_gain,
 	)
 

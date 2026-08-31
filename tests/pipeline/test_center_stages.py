@@ -5,7 +5,7 @@ import pytest
 import yaml
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	EntropyLocalCenterStage,
 	ManualCenterStage,
@@ -31,6 +31,7 @@ def _state(array, configs):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=configs),
+		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	)
 
 
@@ -41,7 +42,7 @@ def test_all_center_algorithms_are_registered():
 	assert STAGE_REGISTRY["center.entropy_local"] is EntropyLocalCenterStage
 	for stage_type in STAGE_REGISTRY.values():
 		if stage_type in (ManualCenterStage, VoCenterStage, PhaseCorrelationCenterStage, EntropyLocalCenterStage):
-			assert stage_type.contract.expected_input is SinoOrder
+			assert stage_type.contract.accepts == (SinoOrder,)
 			assert stage_type.contract.produces_artifacts == ("center",)
 
 

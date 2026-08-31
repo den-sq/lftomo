@@ -28,7 +28,7 @@ from lftomo.config import (
 from lftomo.pipeline.core import PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
-from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
@@ -38,7 +38,7 @@ def _output_contract(order: str, *, required_metadata: tuple[str, ...],
 		raise ValueError("read order must be 'projection' or 'sinogram'")
 	angle_artifacts = ("angles", "acquisition_indices", "angle_provenance")
 	return StageContract(
-		produced_output=ProjOrder if order == "projection" else SinoOrder,
+		produces=ProjOrder if order == "projection" else SinoOrder,
 		cacheable_prefix=True,
 		produces_domain=DataDomain.RAW,
 		window_axes=("Theta", "Y"),
@@ -159,7 +159,6 @@ def _bind_source_state(
 	*,
 	full_shape: ProjOrder,
 	dtype,
-	layout,
 	theta_start: int,
 	theta_stop: int,
 	theta_stride: int,
@@ -206,7 +205,7 @@ def _bind_source_state(
 			np.float32,
 			pad_after=planned.pad_after,
 		)
-	result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
+	result = state.with_array(working, domain=DataDomain.RAW)
 	result.dataset = dataset
 	result.source_window = source_window
 	return result
@@ -339,7 +338,7 @@ class HDF5DxchangeReadStage(Stage):
 						("white_fields", source.white_path), ("dark_fields", source.dark_path),
 					):
 						dataset = handle[path]
-						artifact_shape = (
+						artifact_shape = GenericOrder(
 							dataset.shape[0], y_stop - self.y_start, dataset.shape[2],
 						)
 						artifact = _storage(state).allocate(
@@ -355,7 +354,6 @@ class HDF5DxchangeReadStage(Stage):
 			memory,
 			full_shape=ProjOrder(Theta=theta_count, Y=rows, X=columns),
 			dtype=dtype,
-			layout=layout,
 			theta_start=self.theta_start,
 			theta_stop=theta_stop,
 			theta_stride=self.theta_stride,
@@ -480,7 +478,6 @@ class TIFFStackReadStage(Stage):
 			memory,
 			full_shape=ProjOrder(Theta=count, Y=rows, X=columns),
 			dtype=dtype,
-			layout=layout,
 			theta_start=self.theta_start,
 			theta_stop=theta_stop,
 			theta_stride=self.theta_stride,

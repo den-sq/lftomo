@@ -25,7 +25,7 @@ pipeline:
     params: {value_px: 6235.0, tilt_radians: -0.003134796238244514, center_dump: true, center_samples_per_job: 2}
   - kind: recon
     algorithm: gridrec
-    params: {sinogram_order: false, filter_name: butterworth, filter_parameters: [0.2, 2]}
+    params: {filter_name: butterworth, filter_parameters: [0.2, 2]}
   - kind: normalize_output
     algorithm: percentile
     params: {low_percentile: 15.0, high_percentile: 99.0, output_low: 0.0, output_high: 1.0}

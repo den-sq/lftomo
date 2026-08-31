@@ -2,21 +2,25 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import ProjOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
-def _state(array, config):
+def _state(array, layout, config):
 	return PipelineState(
 		working_array=array,
 		scan=Scan(
-			energy_keV=20, pixel_size_um=1, n_projections=array.shape[1], degrees_per_fov=180,
+			energy_keV=20, pixel_size_um=1,
+			n_projections=array.shape[layout.axis_of("Theta")], degrees_per_fov=180,
 			detector=Detector(pixel_size_um=1),
-			acquisition=Acquisition(n_projections=array.shape[1], rotation_end_deg=180),
+			acquisition=Acquisition(
+				n_projections=array.shape[layout.axis_of("Theta")], rotation_end_deg=180,
+			),
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 	)
 
 
@@ -40,7 +44,7 @@ def test_registered_vo_stage_mutates_tier1_striped_sinogram(algorithm, params):
 	working = _striped_fixture()
 	before = working.copy()
 
-	result = Pipeline([create_stage(config)]).run(_state(working, config))
+	result = Pipeline([create_stage(config)]).run(_state(working, SinoOrder, config))
 
 	stage = create_stage(config)
 	assert f"stripe.{algorithm}" in STAGE_REGISTRY
@@ -60,16 +64,12 @@ def test_fourier_wavelet_projection_order_matches_sinogram_order():
 	sino_config = StageConfig(
 		kind="stripe", algorithm="fw", params={"level": 2, "wavelet": "db2"},
 	)
-	proj_config = StageConfig(
-		kind="stripe", algorithm="fw",
-		params={"level": 2, "wavelet": "db2", "order": "projection"},
-	)
+	proj_config = sino_config
 
-	create_stage(sino_config).run(_state(sinogram_order, sino_config))
+	create_stage(sino_config).run(_state(sinogram_order, SinoOrder, sino_config))
 	proj_stage = create_stage(proj_config)
-	proj_state = _state(np.transpose(projection_order, (1, 0, 2)), proj_config)
-	proj_state.working_array = projection_order
+	proj_state = _state(projection_order, ProjOrder, proj_config)
 	proj_stage.run(proj_state)
 
-	assert proj_stage.contract.expected_input is ProjOrder
+	assert proj_stage.contract.accepted_layouts == (SinoOrder,)
 	np.testing.assert_allclose(projection_order, np.transpose(sinogram_order, (1, 0, 2)))

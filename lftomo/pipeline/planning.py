@@ -101,16 +101,10 @@ class PipelinePlan:
 		return tuple(item for step in self.steps for item in step.materializations)
 
 
-def _shape_tuple(shape: Any) -> tuple[int, ...]:
-	if hasattr(shape, "__dataclass_fields__"):
-		return tuple(int(getattr(shape, name)) for name in shape.__dataclass_fields__)
-	return tuple(int(value) for value in shape)
-
-
 def _nbytes(spec: BufferSpec | None) -> int:
 	if spec is None:
 		return 0
-	return int(np.prod(_shape_tuple(spec.shape), dtype=np.float64) * spec.dtype.itemsize)
+	return spec.shape.nbytes(spec.dtype)
 
 
 def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
@@ -149,7 +143,7 @@ def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
 				with tf.TiffFile(files[0]) as handle:
 					dtype = handle.series[0].dtype
 	dtype = np.dtype("uint16" if dtype is None else dtype)
-	return BufferSpec(shape, dtype, layout)
+	return BufferSpec(shape, dtype)
 
 
 def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) -> BufferSpec | None:
@@ -162,33 +156,21 @@ def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) ->
 	shape = input_spec.shape
 	layout = stage.contract.output_layout(input_spec.layout)
 	dtype = input_spec.dtype
-	values = _shape_tuple(shape)
 	if stage.name.startswith("normalize.") or stage.name == "weighted-normalize":
 		dtype = np.dtype(np.float32)
 	elif stage.name == "layout.convert":
-		shape = layout(values[1], values[0], values[2])
+		shape = shape.to(layout)
 	elif stage.name == "geometry.affine_skew_movement" and getattr(stage, "target_layout", None) is not None:
 		shape = stage.output_shape(shape)
 	elif stage.name == "helical_correct.index_remap" and getattr(stage, "enabled", True):
-		if getattr(stage, "crop_valid", False):
-			count = values[0] if input_spec.layout is ProjOrder else values[1]
-			rows = values[1] if input_spec.layout is ProjOrder else values[0]
-			pitch = stage.pitch_px_per_projection
-			if pitch is None and scan.helical.pitch_um_per_projection is not None:
-				pitch = scan.helical.pitch_um_per_projection / scan.pixel_size_um
-			if pitch is not None:
-				direction = -1 if stage.going_up else 1
-				indices = stage.projection_start + np.arange(count)
-				shifts = np.rint(direction * pitch * indices).astype(int)
-				row_count = min(rows, rows - int(shifts.max())) - max(0, -int(shifts.min()))
-				shape = (
-					ProjOrder(Theta=count, Y=row_count, X=values[2])
-					if input_spec.layout is ProjOrder else
-					SinoOrder(Y=row_count, Theta=count, X=values[2])
-				)
+		pitch = stage.pitch_px_per_projection
+		if pitch is None and scan.helical.pitch_um_per_projection is not None:
+			pitch = scan.helical.pitch_um_per_projection / scan.pixel_size_um
+		if pitch is not None:
+			shape, _shifts, _start, _stop = stage.output_geometry(shape, pitch)
 	elif stage.name.startswith("recon."):
-		slices = values[0] if input_spec.layout is SinoOrder else values[1]
-		base_width = values[2]
+		slices = shape.Y
+		base_width = shape.X
 		if getattr(stage, "edge_buffer_input", False):
 			base_width -= stage.edge_buffer_left + stage.edge_buffer_right
 		output_width = base_width
@@ -200,7 +182,7 @@ def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) ->
 		dtype = np.dtype(np.float32)
 	elif stage.name.startswith("super_resolve."):
 		dtype = np.dtype(np.float32)
-	return BufferSpec(shape, dtype, layout)
+	return BufferSpec(shape, dtype)
 
 
 def stage_allocation_spec(
@@ -210,13 +192,12 @@ def stage_allocation_spec(
 
 	if input_spec is None or output_spec is None or not stage.name.startswith("recon."):
 		return output_spec
-	values = _shape_tuple(input_spec.shape)
-	slices = values[0] if input_spec.layout is SinoOrder else values[1]
-	width = values[2]
+	slices = input_spec.shape.Y
+	width = input_spec.shape.X
 	if getattr(stage, "edge_buffer_input", False):
 		width -= stage.edge_buffer_left + stage.edge_buffer_right
 	return BufferSpec(
-		ReconOrder(Y=slices, Z=width, X=width), np.dtype(np.float32), ReconOrder,
+		ReconOrder(Y=slices, Z=width, X=width), np.dtype(np.float32),
 	)
 
 
@@ -262,12 +243,10 @@ def build_allocation_schedule(
 	for step, stage in zip(steps, stages):
 		artifact_specs: list[tuple[str, int]] = []
 		if "flat_fields" in stage.contract.produces_artifacts and step.output_buffer is not None:
-			shape = _shape_tuple(step.output_buffer.shape)
-			rows, width = (shape[1], shape[2]) if step.output_buffer.layout is ProjOrder else (shape[0], shape[2])
+			rows, width = step.output_buffer.shape.Y, step.output_buffer.shape.X
 			artifact_specs.append(("flat_fields", 4 * rows * width * np.dtype(np.float32).itemsize))
 		if "phase_filter" in stage.contract.produces_artifacts and step.output_buffer is not None:
-			shape = _shape_tuple(step.output_buffer.shape)
-			rows, width = (shape[1], shape[2]) if step.output_buffer.layout is ProjOrder else (shape[0], shape[2])
+			rows, width = step.output_buffer.shape.Y, step.output_buffer.shape.X
 			artifact_specs.append(("phase_filter", rows * width * np.dtype(np.float64).itemsize))
 		for artifact_role, artifact_bytes in artifact_specs:
 			physical_role = artifact_role

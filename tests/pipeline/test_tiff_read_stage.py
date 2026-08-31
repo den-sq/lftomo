@@ -27,7 +27,7 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 
 class NoopStage(Stage):
 	name = "noop"
-	contract = StageContract(expected_input=SinoOrder, produced_output=SinoOrder)
+	contract = StageContract(accepts=(SinoOrder,), produces=SinoOrder)
 
 	def run(self, state):
 		return state
@@ -97,7 +97,9 @@ def _run(state, *stages):
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
 		assert isinstance(result.working_array, SharedNPArray)
-		return result.with_array(np.asarray(result.working_array).copy())
+		return result.with_array(
+			np.asarray(result.working_array).copy(), buffer_spec=result.buffer_spec,
+		)
 
 
 def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path):
@@ -115,7 +117,7 @@ def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path)
 	result = _run(_state(projection_dir, count, size, config), stage, NoopStage())
 
 	assert "read.tiff_stack" in STAGE_REGISTRY
-	assert stage.contract.produced_output is SinoOrder
+	assert stage.contract.produces is SinoOrder
 	np.testing.assert_array_equal(result.working_array, np.transpose(stack, (1, 0, 2)))
 	assert result.dataset.shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=0)
@@ -223,7 +225,7 @@ def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch)
 	)
 	recon_config = StageConfig(
 		kind="recon", algorithm="gridrec",
-		params={"sinogram_order": True, "circle_mask": False},
+		params={"circle_mask": False},
 	)
 	seen_angles = []
 

@@ -9,13 +9,15 @@ from typing import Any, Self
 
 import numpy as np
 
+from lftomo.util.shapes import DataShape
+
 
 class ManagedBuffer(ABC):
 	"""A reopenable array buffer with explicit storage ownership."""
 
 	@property
 	@abstractmethod
-	def shape(self) -> Any:
+	def shape(self) -> DataShape:
 		"""Return the logical array shape."""
 
 	@property
@@ -130,7 +132,7 @@ class StorageBackend(ABC):
 	@abstractmethod
 	def allocate(
 		self,
-		shape: Any,
+		shape: DataShape,
 		dtype: np.dtype,
 		*,
 		aliases: tuple[tuple[Any, np.dtype], ...] = (),
@@ -142,7 +144,7 @@ class StorageBackend(ABC):
 		"""Allocate storage, optionally using an explicitly proved named alias."""
 
 	@abstractmethod
-	def fork(self, source: Any, *, label: str) -> ManagedBuffer:
+	def fork(self, source: Any, *, shape: DataShape, label: str) -> ManagedBuffer:
 		"""Allocate an owned copy of ``source``."""
 
 	@abstractmethod

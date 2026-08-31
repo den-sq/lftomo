@@ -6,6 +6,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
+	BufferSpec,
 	DataDomain,
 	DomainCompatibilityError,
 	PRESERVE,
@@ -53,7 +54,7 @@ def _run(stages, data, layout):
 		working_array=data,
 		scan=_scan(),
 		recon=Recon(pipeline=[config]),
-		layout=layout,
+		buffer_spec=BufferSpec(layout(*data.shape), data.dtype),
 		domain=DataDomain.TRANSMISSION,
 	)
 	return Pipeline(
@@ -247,7 +248,8 @@ def test_disabled_correction_is_a_domain_preserving_noop():
 	state = PipelineState(
 		working_array=data, scan=_scan(),
 		recon=Recon(pipeline=[StageConfig(kind="phase", algorithm="bac_correction")]),
-		layout=ProjOrder, domain=DataDomain.ATTENUATION,
+		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype),
+		domain=DataDomain.ATTENUATION,
 	)
 
 	result = Pipeline(

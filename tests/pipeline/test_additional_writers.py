@@ -5,13 +5,15 @@ import h5py
 import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import HDF5VolumeWriteStage, NeuroglancerWriteStage, STAGE_REGISTRY, create_stage
+from lftomo.util.shapes import ReconOrder
 
 
 def _state(array, config, output):
 	return PipelineState(
 		working_array=array,
+		buffer_spec=BufferSpec(ReconOrder(*array.shape), array.dtype),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=0.7,

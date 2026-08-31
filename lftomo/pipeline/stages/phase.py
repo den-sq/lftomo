@@ -14,15 +14,8 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.layout import (
-	configured_layout,
-	n_projections,
-	n_rows,
-	projection_view,
-	resolve_layout,
-)
 from lftomo.storage import buffer_view
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ImgSlice, ProjOrder, SinoOrder
 
 
 def _managed_phase_filter(
@@ -36,7 +29,8 @@ def _managed_phase_filter(
 		return values
 	previous = state.artifacts.get("phase_filter")
 	artifact = state.storage.allocate(
-		values.shape, values.dtype, role="phase_filter", reuse_from=("phase_filter",),
+		ImgSlice(*values.shape), values.dtype,
+		role="phase_filter", reuse_from=("phase_filter",),
 	)
 	artifact.array()[...] = values
 	state.artifacts["phase_filter"] = artifact
@@ -69,9 +63,11 @@ def prepare_phase_filter(stage: Stage, state: PipelineState) -> None:
 	"""Create one shared filter before projection workers are dispatched."""
 
 	data = np.asarray(state.working_array)
-	layout = resolve_layout(state, getattr(stage, "order", None), stage.name)
+	layout = type(state.buffer_spec.shape)
 	_resolved_phase_filter(
-		state, (n_rows(data, layout), data.shape[2]), stage.alpha,
+		state, (
+			data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
+		), stage.alpha,
 	)
 
 
@@ -177,17 +173,12 @@ class PaganinFilterStage(Stage):
 
 	name = "phase.paganin_filter"
 
-	def __init__(self, alpha: float = 0.06, enabled: bool = True,
-			order: str | None = None):
+	def __init__(self, alpha: float = 0.06, enabled: bool = True):
 		if alpha <= 0:
 			raise ValueError("Paganin alpha must be positive")
 		self.alpha = alpha
 		self.enabled = enabled
-		self.order = order
-		compatibility = configured_layout(order)
 		self.contract = StageContract(
-			expected_input=compatibility or SinoOrder,
-			produced_output=compatibility or SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -213,16 +204,18 @@ class PaganinFilterStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinFilterStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin_filter expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
 		transfer = _resolved_phase_filter(
-			state, (n_rows(data, layout), data.shape[2]), self.alpha,
+			state, (
+				data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
+			), self.alpha,
 		)
-		for projection in range(n_projections(data, layout)):
-			image = projection_view(data, layout, projection)
+		for projection in range(data.shape[layout.axis_of("Theta")]):
+			image = data[layout.point_index(Theta=projection)]
 			image[:] = _paganin_filter(image, transfer)
 		return state
 
@@ -233,7 +226,7 @@ class NegativeLogStage(Stage):
 	name = "phase.negative_log"
 
 	def __init__(self, epsilon: float | None = 1e-8, maximum: float | None = None,
-			enabled: bool = True, invert: bool = False, order: str | None = None):
+			enabled: bool = True, invert: bool = False):
 		if epsilon is not None and epsilon <= 0:
 			raise ValueError("negative-log epsilon must be positive or null")
 		if maximum is not None and maximum <= 0:
@@ -244,11 +237,7 @@ class NegativeLogStage(Stage):
 		self.maximum = maximum
 		self.enabled = enabled
 		self.invert = invert
-		self.order = order
-		compatibility = configured_layout(order)
 		self.contract = StageContract(
-			expected_input=compatibility or SinoOrder,
-			produced_output=compatibility or SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -270,13 +259,13 @@ class NegativeLogStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("NegativeLogStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("phase.negative_log expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		for projection in range(n_projections(data, layout)):
-			image = projection_view(data, layout, projection)
+		for projection in range(data.shape[layout.axis_of("Theta")]):
+			image = data[layout.point_index(Theta=projection)]
 			image[:] = _negative_log(
 				image, epsilon=self.epsilon, maximum=self.maximum, invert=self.invert,
 			)
@@ -288,13 +277,9 @@ class BetaScaleStage(Stage):
 
 	name = "phase.beta_scale"
 
-	def __init__(self, enabled: bool = True, order: str | None = None):
+	def __init__(self, enabled: bool = True):
 		self.enabled = enabled
-		self.order = order
-		compatibility = configured_layout(order)
 		self.contract = StageContract(
-			expected_input=compatibility or SinoOrder,
-			produced_output=compatibility or SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -317,7 +302,6 @@ class BetaScaleStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BetaScaleStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		resolve_layout(state, self.order, self.name)
 		if data.ndim != 3:
 			raise ValueError("phase.beta_scale expects a three-dimensional tomography array")
 		if not self.enabled:
@@ -331,8 +315,6 @@ class PaganinStage(Stage):
 
 	name = "phase.paganin"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
@@ -349,18 +331,14 @@ class PaganinStage(Stage):
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
 				enabled: bool = True, pad_y: bool = False,
-				order: str | None = None):
+			):
 		if alpha <= 0:
 			raise ValueError("Paganin alpha must be positive")
 		self.alpha = alpha
 		self.epsilon = epsilon
 		self.enabled = enabled
 		self.pad_y = pad_y
-		self.order = order
-		compatibility = configured_layout(order)
 		self.contract = StageContract(
-			expected_input=compatibility or SinoOrder,
-			produced_output=compatibility or SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -386,16 +364,18 @@ class PaganinStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
 		transfer = _resolved_phase_filter(
-			state, (n_rows(data, layout), data.shape[2]), self.alpha,
+			state, (
+				data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
+			), self.alpha,
 		)
-		for projection in range(n_projections(data, layout)):
-			image = projection_view(data, layout, projection)
+		for projection in range(data.shape[layout.axis_of("Theta")]):
+			image = data[layout.point_index(Theta=projection)]
 			filtered = _paganin_filter(image, transfer)
 			image[:] = _negative_log(filtered, epsilon=self.epsilon, maximum=None)
 		return state
@@ -406,8 +386,6 @@ class PaganinPhaseAbsorptionStage(Stage):
 
 	name = "phase.paganin_phase_absorption"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
@@ -423,16 +401,12 @@ class PaganinPhaseAbsorptionStage(Stage):
 	)
 
 	def __init__(self, alpha: float = 0.06, epsilon: float = 1e-8,
-				order: str | None = None):
+			):
 		if alpha <= 0:
 			raise ValueError("phase/absorption alpha must be positive")
 		self.alpha = alpha
 		self.epsilon = epsilon
-		self.order = order
-		compatibility = configured_layout(order)
 		self.contract = StageContract(
-			expected_input=compatibility or SinoOrder,
-			produced_output=compatibility or SinoOrder,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -456,16 +430,18 @@ class PaganinPhaseAbsorptionStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("PaganinPhaseAbsorptionStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("phase.paganin_phase_absorption expects a (Y, Theta, X) sinogram array")
 		wavelength = _wavelength_cm(state.scan.energy_keV)
 		beta_scale = 4 * np.pi / wavelength
 		transfer = _resolved_phase_filter(
-			state, (n_rows(data, layout), data.shape[2]), self.alpha,
+			state, (
+				data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
+			), self.alpha,
 		)
-		for projection in range(n_projections(data, layout)):
-			image = projection_view(data, layout, projection)
+		for projection in range(data.shape[layout.axis_of("Theta")]):
+			image = data[layout.point_index(Theta=projection)]
 			# Corrected-paper branch from dan_scripts/prep/phase.py:22-144.
 			transmission = _paganin_filter(image, transfer)
 			absorption = _negative_log(
@@ -481,18 +457,14 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 	name = "phase.bac_correction"
 
 	def __init__(self, alpha: float, gamma: float = 1.0, enabled: bool = True,
-			processes: int = 1, order: str | None = None, clip_input: bool = False,
+			processes: int = 1, clip_input: bool = False,
 			clip_minimum: float = 1e-9, clip_threshold: float = 2.0,
 			clip_high_value: float = 1.0):
 		if alpha <= 0 or gamma <= 0:
 			raise ValueError("BAC alpha and gamma must be positive")
 		if processes < 1:
 			raise ValueError("BAC processes must be positive")
-		compatibility = configured_layout(order)
-		shape = compatibility or SinoOrder
 		self.contract = StageContract(
-			expected_input=shape,
-			produced_output=shape,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -509,7 +481,6 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 		self.gamma = gamma
 		self.enabled = enabled
 		self.processes = processes
-		self.order = order
 		self.clip_input = clip_input
 		self.clip_minimum = clip_minimum
 		self.clip_threshold = clip_threshold
@@ -534,19 +505,19 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 				"BronnikovAidedCorrectionFilterStage currently requires the NumPy backend"
 			)
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("phase.bac_correction expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		count = n_projections(data, layout)
+		count = data.shape[layout.axis_of("Theta")]
 
 		def image(index: int) -> np.ndarray:
-			return projection_view(data, layout, index).copy()
+			return data[layout.point_index(Theta=index)].copy()
 
 		corrected = (self._correct(image(index)) for index in range(count))
 		for projection, result in enumerate(corrected):
-			projection_view(data, layout, projection)[:] = result
+			data[layout.point_index(Theta=projection)] = result
 		return state
 
 
@@ -555,8 +526,6 @@ class BronnikovAidedCorrectionStage(Stage):
 
 	name = "phase.bac"
 	contract = StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
 		mutates_input=True,
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
@@ -565,18 +534,14 @@ class BronnikovAidedCorrectionStage(Stage):
 
 	def __init__(self, alpha: float, gamma: float = 1.0, enabled: bool = True,
 				invert: bool = False, processes: int = 1, device: str | None = None,
-				order: str | None = None, clip_input: bool = False,
+				clip_input: bool = False,
 				clip_minimum: float = 1e-9, clip_threshold: float = 2.0,
 				clip_high_value: float = 1.0):
 		if alpha <= 0 or gamma <= 0:
 			raise ValueError("BAC alpha and gamma must be positive")
 		if processes < 1:
 			raise ValueError("BAC processes must be positive")
-		compatibility = configured_layout(order)
-		shape = compatibility or SinoOrder
 		self.contract = StageContract(
-			expected_input=shape,
-			produced_output=shape,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -596,7 +561,6 @@ class BronnikovAidedCorrectionStage(Stage):
 		self.invert = invert
 		self.processes = processes
 		self.device = device
-		self.order = order
 		self.clip_input = clip_input
 		self.clip_minimum = clip_minimum
 		self.clip_threshold = clip_threshold
@@ -632,15 +596,15 @@ class BronnikovAidedCorrectionStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BronnikovAidedCorrectionStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = resolve_layout(state, self.order, self.name)
+		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("phase.bac expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		count = n_projections(data, layout)
+		count = data.shape[layout.axis_of("Theta")]
 		def image(index: int) -> np.ndarray:
-			return projection_view(data, layout, index).copy()
+			return data[layout.point_index(Theta=index)].copy()
 		corrected = (self._correct(image(index)) for index in range(count))
 		for projection, result in enumerate(corrected):
-			projection_view(data, layout, projection)[:] = result
+			data[layout.point_index(Theta=projection)] = result
 		return state

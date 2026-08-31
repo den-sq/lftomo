@@ -4,6 +4,7 @@ import pytest
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
 	Backend,
+	BufferSpec,
 	BackendCompatibilityError,
 	DaskStubBackend,
 	MissingArtifactError,
@@ -51,6 +52,7 @@ class ContractStage(Stage):
 def state_for(backend=None):
 	return PipelineState(
 		working_array=np.zeros((3, 4, 5), dtype=np.float32),
+		buffer_spec=BufferSpec(ProjOrder(3, 4, 5), np.dtype(np.float32)),
 		scan=scan_config(),
 		recon=recon_config(),
 		backend=backend or NumpyBackend(),
@@ -59,8 +61,8 @@ def state_for(backend=None):
 
 def test_valid_noop_pipeline_builds_for_numpy_and_dask_stub():
 	stages = [
-		ContractStage("read", StageContract(expected_input=ProjOrder, produced_output=ProjOrder)),
-		ContractStage("echo", StageContract(expected_input=ProjOrder, produced_output=ProjOrder)),
+		ContractStage("read", StageContract(accepts=(ProjOrder,), produces=ProjOrder)),
+		ContractStage("echo", StageContract(accepts=(ProjOrder,), produces=ProjOrder)),
 	]
 
 	for backend in (NumpyBackend(), DaskStubBackend()):
@@ -71,22 +73,22 @@ def test_valid_noop_pipeline_builds_for_numpy_and_dask_stub():
 
 def test_shape_mismatch_identifies_stage_and_field():
 	stages = [
-		ContractStage("read", StageContract(expected_input=ProjOrder, produced_output=SinoOrder)),
-		ContractStage("recon", StageContract(expected_input=ReconOrder, produced_output=ReconOrder)),
+		ContractStage("read", StageContract(accepts=(ProjOrder,), produces=SinoOrder)),
+		ContractStage("recon", StageContract(accepts=(ReconOrder,), produces=ReconOrder)),
 	]
 
-	with pytest.raises(ShapeCompatibilityError, match="1:recon: expected_input"):
+	with pytest.raises(ShapeCompatibilityError, match="1:recon: accepts"):
 		validate_pipeline(stages, scan_config())
 
 
 def test_shape_mismatch_uses_stable_stage_occurrence_id_when_available():
 	stages = [
-		ContractStage("read", StageContract(expected_input=ProjOrder, produced_output=SinoOrder)),
-		ContractStage("recon", StageContract(expected_input=ReconOrder, produced_output=ReconOrder)),
+		ContractStage("read", StageContract(accepts=(ProjOrder,), produces=SinoOrder)),
+		ContractStage("recon", StageContract(accepts=(ReconOrder,), produces=ReconOrder)),
 	]
 	stages[1].occurrence_id = "final-recon"
 
-	with pytest.raises(ShapeCompatibilityError, match="final-recon:recon: expected_input"):
+	with pytest.raises(ShapeCompatibilityError, match="final-recon:recon: accepts"):
 		validate_pipeline(stages, scan_config())
 
 

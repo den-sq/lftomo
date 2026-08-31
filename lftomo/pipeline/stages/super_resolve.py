@@ -18,6 +18,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
+	BufferSpec,
 	PipelineState,
 	RuntimeRequirement,
 	Stage,
@@ -42,8 +43,8 @@ def _contract(
 	runtime_requirements: tuple[RuntimeRequirement, ...] = (),
 ) -> StageContract:
 	return StageContract(
-		expected_input=SinoOrder,
-		produced_output=SinoOrder,
+		accepts=(SinoOrder,),
+		produces=SinoOrder,
 		window_axes=("Y", "Theta"),
 		produces_artifacts=("super_resolution",),
 		runtime_requirements=runtime_requirements,
@@ -122,7 +123,9 @@ def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> P
 			state.storage.retire(source, role=None)
 	else:
 		target[...] = np.transpose(values, (1, 0, 2))
-	result = commit_output(state, output, retire_as=None)
+	result = commit_output(
+		state, output, retire_as=None, buffer_spec=BufferSpec(shape, np.dtype(np.float32)),
+	)
 	result.artifacts["super_resolution"] = metadata
 	return result
 

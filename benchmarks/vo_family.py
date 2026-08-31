@@ -219,7 +219,7 @@ def run(
 		_fill_fixture(working.array())
 		state = PipelineState(
 			working, scan, recon, storage=context.storage, executor=context.executor,
-			layout=ProjOrder, domain=DataDomain.ATTENUATION,
+			domain=DataDomain.ATTENUATION,
 		)
 		pipeline = Pipeline(
 			stages, scan=scan,

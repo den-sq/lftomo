@@ -1,5 +1,4 @@
 from collections import namedtuple
-from dataclasses import fields
 from enum import Enum
 from pathlib import Path
 
@@ -44,8 +43,7 @@ class FLAT(Enum):
 
 def _axis_slice(window: TomoWindow, axis: str) -> slice:
 	"""Return the current-API index for one named window axis."""
-	axis_index = [field.name for field in fields(window.shape)].index(axis)
-	return window.index[axis_index]
+	return window.axis_slice(axis)
 
 
 def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats: np.ndarray,

@@ -2,7 +2,7 @@ from functools import partial
 import numpy as np
 import pytest
 
-from lftomo.util.shapes import ProjOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
+from lftomo.util.shapes import ProjOrder, ReconOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
 from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, DataRef
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
 
@@ -151,6 +151,25 @@ def test_tomo_window():
 
 	assert twi.pos == Y(2)
 	assert twi.dtype == np.float32
+	assert isinstance(twi, TomoWindow)
+
+
+def test_recon_shape_uses_unpadded_core_geometry():
+	window = TomoWindow(
+		ProjOrder(Theta=4, Y=10, X=12), Y(2), Y(5), Y(1),
+		np.uint16, np.float32, pad_after=Y(3),
+	)
+
+	assert window.recon_shape() == ReconOrder(Y=10, Z=12, X=12)
+
+
+def test_dataset_geometry_arrays_are_read_only():
+	dataset = generate_dataset()
+
+	with pytest.raises(ValueError, match="read-only"):
+		dataset.angles[0] = 0
+	with pytest.raises(ValueError, match="read-only"):
+		dataset.acquisition_indices[0] = 0
 
 
 def test_window_coordinate_operations_share_the_existing_dataref_model():
@@ -339,6 +358,8 @@ def test_data_ref_fields():
 	assert df.step == Y(1)
 	assert df.dtype == np.int16
 	assert df.itemsize == 2
+	assert df.nbytes() == 1900 * 24 * 2048 * 2
+	assert df.axis_slice("Y") == df.index[ProjOrder.axis_of("Y")]
 	assert str(df) == f"{ProjOrder(Theta=1900, Y=24, X=2048)} ({np.int16}) at {Y(1024)} stepping by {Y(1)}"
 	assert df.step_shape == ProjOrder(Theta=1900, Y=1, X=2048)
 	assert df.stride == ProjOrder(Theta=98304, Y=4096, X=2)

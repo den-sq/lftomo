@@ -1,4 +1,3 @@
-from dataclasses import astuple
 from multiprocessing.shared_memory import SharedMemory, ShareableList
 import pytest
 from sys import getsizeof
@@ -7,7 +6,7 @@ from time import sleep
 import numpy as np
 
 from lftomo.util.mem import SharedNPManager, SharedNPArray, cleanup_mem, exit_cleanly
-from lftomo.util.shapes import SinoOrder, ProjOrder, ReconOrder
+from lftomo.util.shapes import SinoOrder, ProjOrder, ReconOrder, YSlice
 
 
 def test_alt_creation():
@@ -89,8 +88,8 @@ def test_mem():
 
 	assert snp.shape == SinoOrder(Y=24, Theta=1501, X=2048)
 	assert snpss.shape == SinoOrder(Y=9, Theta=1501, X=2048)
-	assert astuple(snpv.shape) == (1501, 2048)
-	assert astuple(snpvv.shape) == (5, 2048)
+	assert snpv.shape == YSlice(Theta=1501, X=2048)
+	assert snpvv.shape == YSlice(Theta=5, X=2048)
 	assert snp.size() == 147554304
 	assert snpv.size() == 6148096
 	assert snpvv.size() == 20480

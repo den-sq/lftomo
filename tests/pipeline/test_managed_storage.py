@@ -14,7 +14,7 @@ from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFS
 from lftomo.pipeline import PipelineState, Stage, StageContract
 from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
 from lftomo.util.mem import FileBackedNPArray, SharedNPArray, SharedNPManager
-from lftomo.util.shapes import ProjOrder
+from lftomo.util.shapes import ImgSlice, ProjOrder
 
 
 def _scan() -> Scan:
@@ -42,6 +42,17 @@ class _IncrementStage(Stage):
 		return state
 
 
+class _UntypedBuffer(ManagedBuffer):
+	shape = (2, 3)
+	dtype = np.dtype(np.float32)
+
+	def array(self):
+		return np.empty(self.shape, dtype=self.dtype)
+
+	def __getitem__(self, view):
+		return self
+
+
 def _run_increment(buffer, scan, recon):
 	_IncrementStage().run(PipelineState(buffer, scan, recon))
 
@@ -50,7 +61,7 @@ def _crashing_run(connection):
 	if hasattr(os, "setsid"):
 		os.setsid()
 	with PipelineRunContext() as context:
-		buffer = context.storage.allocate((2, 3), np.float32)
+		buffer = context.storage.allocate(ImgSlice(2, 3), np.float32)
 		connection.send(buffer.name)
 		connection.close()
 		while True:
@@ -80,19 +91,32 @@ def test_existing_shared_types_directly_implement_storage_contracts():
 	manager.start()
 	try:
 		assert isinstance(manager, StorageBackend)
-		buffer = manager.allocate((2, 3), np.float32)
+		buffer = manager.allocate(ImgSlice(2, 3), np.float32)
 		assert isinstance(buffer, ManagedBuffer)
 		buffer.array()[...] = np.arange(6, dtype=np.float32).reshape(2, 3)
-		fork = manager.fork(buffer, label="test-copy")
+		fork = manager.fork(buffer, shape=buffer.shape, label="test-copy")
 		np.testing.assert_array_equal(fork.array(), buffer.array())
 		assert fork.name != buffer.name
 	finally:
 		manager.shutdown()
 
 
+def test_pipeline_state_rejects_an_untyped_managed_buffer_at_the_storage_seam():
+	with pytest.raises(TypeError, match="ManagedBuffer.shape must be a DataShape"):
+		PipelineState(_UntypedBuffer(), _scan(), _recon())
+
+
+def test_shared_basic_view_keeps_named_extents_without_loading_shape_from_numpy():
+	with PipelineRunContext() as context:
+		buffer = context.storage.allocate(ProjOrder(Theta=4, Y=5, X=6), np.float32)
+		view = buffer[1:3, :, 2:6:2]
+
+		assert view.shape == ProjOrder(Theta=2, Y=5, X=2)
+
+
 def test_pickled_handle_is_always_a_non_owning_attachment():
 	name = f"lftomo-pickle-{os.getpid()}-{time.time_ns()}"
-	owner = SharedNPArray(name, (2, 3), np.float32, allocate=True)
+	owner = SharedNPArray(name, ImgSlice(2, 3), np.float32, allocate=True)
 	try:
 		clone = pickle.loads(pickle.dumps(owner))
 		assert owner.owns_unlink
@@ -142,7 +166,7 @@ def _assert_numpy_protocol(buffer, expected, *, writeable):
 def test_managed_buffers_expose_an_honest_no_copy_numpy_protocol(tmp_path):
 	expected = np.arange(6, dtype=np.float32).reshape(2, 3)
 	with PipelineRunContext() as context:
-		shared = context.storage.allocate(expected.shape, expected.dtype)
+		shared = context.storage.allocate(ImgSlice(*expected.shape), expected.dtype)
 		shared.array()[...] = expected
 		_assert_numpy_protocol(shared, expected, writeable=True)
 
@@ -180,7 +204,7 @@ def test_run_context_unlinks_segments_after_exception():
 	name = None
 	with pytest.raises(RuntimeError, match="deliberate"):
 		with PipelineRunContext() as context:
-			buffer = context.storage.allocate((2, 3), np.float32)
+			buffer = context.storage.allocate(ImgSlice(2, 3), np.float32)
 			name = buffer.name
 			assert _segment_exists(name)
 			raise RuntimeError("deliberate")

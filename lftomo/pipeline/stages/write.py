@@ -55,8 +55,7 @@ class TIFFSlicesWriteStage(Stage):
 
 	name = "write.tiff_slices"
 	contract = StageContract(
-		expected_input=ReconOrder,
-		produced_output=ReconOrder,
+		accepts=(ReconOrder,),
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.RECON,),
 		produces_domain=PRESERVE,
@@ -139,8 +138,7 @@ class HDF5VolumeWriteStage(Stage):
 
 	name = "write.hdf5_volume"
 	contract = StageContract(
-		expected_input=ReconOrder,
-		produced_output=ReconOrder,
+		accepts=(ReconOrder,),
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.RECON,),
 		produces_domain=PRESERVE,
@@ -221,8 +219,7 @@ class NeuroglancerWriteStage(Stage):
 
 	name = "write.neuroglancer"
 	contract = StageContract(
-		expected_input=ReconOrder,
-		produced_output=ReconOrder,
+		accepts=(ReconOrder,),
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.RECON,),
 		produces_domain=PRESERVE,

@@ -5,6 +5,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
+	BufferSpec,
 	DataDomain,
 	ExecutionKind,
 	ExecutionSpanPhase,
@@ -17,7 +18,7 @@ from lftomo.pipeline import (
 	Stage,
 	StageContract,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, X
 
 
 def _scan(theta=6, rows=3, columns=8):
@@ -46,7 +47,7 @@ def _state(array, *, storage=None, executor=None):
 		backend=NumpyBackend(),
 		storage=storage,
 		executor=executor,
-		layout=ProjOrder,
+		buffer_spec=BufferSpec(ProjOrder(*shape), np.asarray(array).dtype),
 		domain=DataDomain.ATTENUATION,
 	)
 
@@ -99,7 +100,7 @@ class _AllocatingStage(_PassStage):
 	name = "test.allocate"
 
 	def run(self, state):
-		buffer = state.storage.allocate((1,), np.uint8, role="telemetry_probe")
+		buffer = state.storage.allocate(X(1), np.uint8, role="telemetry_probe")
 		state.storage.retire(buffer, role="telemetry_probe")
 		return state
 

@@ -1,8 +1,9 @@
 import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import FourierWaveletStripeStage, STAGE_REGISTRY, create_stage
+from lftomo.util.shapes import SinoOrder
 
 
 def test_registered_fourier_wavelet_stage_filters_tier1_striped_sinogram():
@@ -23,6 +24,7 @@ def test_registered_fourier_wavelet_stage_filters_tier1_striped_sinogram():
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
+		buffer_spec=BufferSpec(SinoOrder(*working.shape), working.dtype),
 	)
 
 	stage = create_stage(config)

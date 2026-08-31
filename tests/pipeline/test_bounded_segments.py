@@ -5,6 +5,7 @@ import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
+	BufferSpec,
 	DataDomain,
 	ExecutionKind,
 	Locality,
@@ -31,7 +32,8 @@ def state(array, layout):
 	return PipelineState(
 		working_array=array, scan=scan_config(array.shape[0] if layout is ProjOrder else array.shape[1]),
 		recon=Recon(pipeline=[StageConfig(kind="test")]),
-		layout=layout, domain=DataDomain.ATTENUATION,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
+		domain=DataDomain.ATTENUATION,
 	)
 
 
@@ -98,19 +100,18 @@ def test_planner_groups_adjacent_bounded_stages_and_stops_at_barrier():
 
 
 def test_segment_gathers_once_per_row_for_whole_chain(monkeypatch):
-	import lftomo.pipeline.execution as execution
-
 	array = np.zeros((12, 4, 8), dtype=np.float32)
-	calls = []
-	original = execution.sinogram_scratch
-	monkeypatch.setattr(execution, "sinogram_scratch", lambda data, layout, index:
-		calls.append(index) or original(data, layout, index))
+	stages = [AddSinogramStage("first", 1), AddSinogramStage("second", 2)]
+	rows = [[], []]
+	for index, stage in enumerate(stages):
+		original = stage.run_sinogram
+		monkeypatch.setattr(stage, "run_sinogram", lambda row, state, i=index, run=original:
+			rows[i].append(id(row)) or run(row, state))
 
-	result = pipeline([
-		AddSinogramStage("first", 1), AddSinogramStage("second", 2),
-	]).run(state(array, ProjOrder))
+	result = pipeline(stages).run(state(array, ProjOrder))
 
-	assert calls == [0, 1, 2, 3]
+	assert rows[0] == rows[1]
+	assert len(rows[0]) == array.shape[1]
 	np.testing.assert_array_equal(result.working_array, 3)
 
 

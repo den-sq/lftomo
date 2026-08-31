@@ -18,7 +18,7 @@ import tifffile as tf
 from lftomo.prep.flat import FLAT, weighted_normalize
 from lftomo.util.io import read_window, write_slice
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import DataRange, GenericOrder, ProjOrder, ReconOrder, SinoOrder, Y
+from lftomo.util.shapes import DataRange, GenericOrder, ProjOrder, SinoOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
@@ -47,7 +47,6 @@ def _tomopy_gridrec(data: np.ndarray, angles: np.ndarray, center: float, process
 	return tomopy.recon(
 		data,
 		angles,
-		sinogram_order=False,
 		center=center,
 		algorithm="gridrec",
 		ncore=processes,
@@ -129,7 +128,7 @@ def run(config: B10ReconConfig, reconstructor: Reconstructor = _tomopy_gridrec) 
 			normalized = SharedNPArray(
 				f"b10-normalized-{uuid4().hex}", sino_shape, np.float32, allocate=True
 			)
-			recon_shape = ReconOrder(Y=window.shape.Y, Z=window.shape.X, X=window.shape.X)
+			recon_shape = window.recon_shape()
 			recon_memory = SharedNPArray(
 				f"b10-recon-{uuid4().hex}", recon_shape, np.float32, allocate=True
 			)

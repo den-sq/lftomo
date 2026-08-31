@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, MaterializationKind, Pipeline, PipelineState, validate_pipeline
+from lftomo.pipeline import BufferSpec, DataDomain, MaterializationKind, Pipeline, PipelineState, validate_pipeline
 from lftomo.pipeline.stages import (
 	BilateralFilterStage,
 	BronnikovAidedCorrectionStage,
@@ -48,7 +48,7 @@ def state(array, layout, config=None):
 		scan=scan_config(array.shape[0] if layout is ProjOrder else array.shape[1],
 			array.shape[1] if layout is ProjOrder else array.shape[0], array.shape[2]),
 		recon=Recon(pipeline=[config]),
-		layout=layout,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 		domain=DataDomain.TRANSMISSION,
 	)
 
@@ -104,12 +104,6 @@ def test_state_layout_drives_paganin_without_constructor_order():
 	PaganinStage(alpha=0.06).run(state(sinogram, SinoOrder))
 
 	np.testing.assert_allclose(projection, sinogram.transpose(1, 0, 2), rtol=1e-6, atol=1e-6)
-
-
-def test_legacy_order_flag_is_checked_not_applied():
-	stage = ThetaSwitchNormalizeStage(order="sinogram")
-	with pytest.raises(ValueError, match="disagrees with PipelineState.layout"):
-		stage.run(state(np.ones((3, 2, 4), dtype=np.float32), ProjOrder))
 
 
 def test_phase_contrast_canonical_plans_projection_order_without_injection():

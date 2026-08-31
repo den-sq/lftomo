@@ -2,13 +2,15 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import DRHTStage, LDMStage, STAGE_REGISTRY, create_stage
+from lftomo.util.shapes import SinoOrder
 
 
 def _state(array, config, mask):
 	return PipelineState(
 		working_array=array,
+		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,

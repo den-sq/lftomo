@@ -32,8 +32,6 @@ class EvaluationStage(Stage):
 
 	name = "evaluate.metrics"
 	contract = StageContract(
-		expected_input=ReconOrder,
-		produced_output=ReconOrder,
 		accepts=(ReconOrder,),
 		prefers=ReconOrder,
 		produces=PRESERVE,

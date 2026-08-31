@@ -3,7 +3,7 @@ import sys
 import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DaskArrayStub, DaskStubBackend, NumpyBackend, Pipeline, PipelineState, Stage, StageContract
+from lftomo.pipeline import BufferSpec, DaskArrayStub, DaskStubBackend, NumpyBackend, Pipeline, PipelineState, Stage, StageContract
 from lftomo.util.shapes import ProjOrder
 
 
@@ -25,7 +25,9 @@ def recon_config():
 
 class EchoStage(Stage):
 	name = "echo"
-	contract = StageContract(expected_input=ProjOrder, produced_output=ProjOrder, produces_artifacts=("echo",))
+	contract = StageContract(
+		accepts=(ProjOrder,), produces=ProjOrder, produces_artifacts=("echo",),
+	)
 
 	def run(self, state):
 		state.artifacts["echo"] = True
@@ -35,6 +37,7 @@ class EchoStage(Stage):
 def test_numpy_backend_runs_echo_pipeline():
 	state = PipelineState(
 		working_array=np.zeros((3, 4, 5), dtype=np.float32),
+		buffer_spec=BufferSpec(ProjOrder(3, 4, 5), np.dtype(np.float32)),
 		scan=scan_config(),
 		recon=recon_config(),
 	)
@@ -49,7 +52,10 @@ def test_dask_stub_backend_wraps_without_distributed():
 	array = np.zeros((3, 4, 5), dtype=np.float32)
 	backend = DaskStubBackend()
 	wrapped = backend.wrap_array(array)
-	state = PipelineState(working_array=wrapped, scan=scan_config(), recon=recon_config(), backend=backend)
+	state = PipelineState(
+		working_array=wrapped, scan=scan_config(), recon=recon_config(), backend=backend,
+		buffer_spec=BufferSpec(ProjOrder(*array.shape), array.dtype),
+	)
 
 	result = Pipeline([EchoStage()], backend=backend).run(state)
 
