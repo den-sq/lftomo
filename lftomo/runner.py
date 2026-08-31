@@ -187,13 +187,16 @@ def _resolve_path(value: str | Path, root: Path) -> Path:
 
 
 def _detector_shape(scan: Scan) -> tuple[int, int]:
-	if scan.detector.rows is not None and scan.detector.columns is not None:
-		return scan.detector.rows, scan.detector.columns
-	if isinstance(scan.projections, HDF5DxchangeProjections):
+	detector = scan.detector
+	if detector.rows is None or detector.columns is None:
+		if not isinstance(scan.projections, HDF5DxchangeProjections):
+			return detector.projection_shape().as_tuple()
 		with h5py.File(scan.projections.path, "r") as handle:
 			shape = handle[scan.projections.data_path].shape
-			return int(shape[1]), int(shape[2])
-	raise ValueError("external calibration requires detector rows and columns in scan metadata")
+		detector = detector.model_copy(update={
+			"rows": int(shape[1]), "columns": int(shape[2]),
+		})
+	return detector.projection_shape().as_tuple()
 
 
 def calibration_target(scan: Scan, recon: Recon) -> CalibrationTarget:
@@ -398,10 +401,8 @@ def _estimated_output_bytes(scan: Scan, recon: Recon) -> int | None:
 
 	if recon.output_path is None:
 		return 0
-	rows = scan.detector.rows
-	columns = scan.detector.columns
-	if rows is None or columns is None:
-		return None
+	detector = scan.detector.projection_shape()
+	rows, columns = detector.Y, detector.X
 	read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
 	y_start = int(read.params.get("y_start", 0)) if read is not None else 0
 	y_stop = int(read.params.get("y_stop", rows)) if read is not None else rows

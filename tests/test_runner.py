@@ -23,6 +23,7 @@ from lftomo.config import Recon, Scan
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import (
 	_center_artifacts,
+	_detector_shape,
 	load_recon,
 	load_scan,
 	main,
@@ -147,6 +148,17 @@ def hdf5_scan(tmp_path, *, detector_id="camera-a"):
 		"static_artifact_epoch": "epoch-a",
 	}
 	return Scan.model_validate(document)
+
+
+def test_hdf5_probe_resolves_detector_before_canonical_shape_bridge(tmp_path):
+	data_path = tmp_path / "shape-only.h5"
+	with h5py.File(data_path, "w") as handle:
+		handle.create_dataset("exchange/data", shape=(3, 5, 7), dtype=np.uint16)
+	document = scan_document(data_path)
+	document["detector"].pop("rows")
+	document["detector"].pop("columns")
+
+	assert _detector_shape(Scan.model_validate(document)) == (5, 7)
 
 
 def test_all_bundled_canonical_templates_instantiate():

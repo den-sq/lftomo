@@ -177,6 +177,27 @@ def test_data_ref_units_pair_local_indices_with_global_strided_positions(
 	assert all(unit.step == step and getattr(unit.shape, axis) == 1 for unit in units)
 
 
+def test_window_from_bounds_records_edge_clamped_halo_and_theta_stride():
+	physical = ProjOrder(12, 10, 8)
+	top = TomoWindow.from_bounds(
+		physical, y=(0, 4), theta=(2, 11, 3), halo=3,
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+	bottom = TomoWindow.from_bounds(
+		physical, y=(7, 10), theta=(0, 12), halo=4,
+		dtype=np.uint16, work_dtype=np.float32,
+	)
+	full = TomoWindow.from_bounds(physical, y=(0, 10), halo=5)
+
+	assert (top.shape, top.pos, top.step) == (
+		ProjOrder(9, 4, 8), ProjOrder(2, 0, 0), ProjOrder(3, 1, 1),
+	)
+	assert (top.pad_before, top.pad_after) == (ProjOrder(0, 0, 0), ProjOrder(0, 3, 0))
+	assert (bottom.pad_before, bottom.pad_after) == (ProjOrder(0, 4, 0), ProjOrder(0, 0, 0))
+	assert (full.pad_before, full.pad_after) == (physical.make_with(0), physical.make_with(0))
+	assert top.frange.length == ProjOrder(3, 4, 8)
+
+
 def test_recon_shape_uses_unpadded_core_geometry():
 	window = TomoWindow(
 		ProjOrder(Theta=4, Y=10, X=12), Y(2), Y(5), Y(1),

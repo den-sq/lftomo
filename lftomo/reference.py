@@ -360,7 +360,7 @@ def run_reference_archive(root: str | Path, producer: str,
 		chunk_size = int(read.params["sinogram_chunk_size"])
 		overlap = int(read.params.get("chunk_overlap", 0))
 		(window_start, window_stop), core_window = aligned_producer_window(
-			selected, int(scan.detector.rows), chunk_size, overlap,
+			selected, scan.detector.projection_shape().Y, chunk_size, overlap,
 		)
 		recon = _phase_contrast_configs(recon, (window_start, window_stop))
 		_resolve_flat_fields(scan, recon)
@@ -372,7 +372,9 @@ def run_reference_archive(root: str | Path, producer: str,
 	else:
 		halo = _processing_halo(recon)
 		window_start = max(0, min(selected) - halo)
-		window_stop = min(scan.detector.rows or max(selected) + halo + 1, max(selected) + halo + 1)
+		window_stop = min(
+			scan.detector.projection_shape().Y, max(selected) + halo + 1,
+		)
 		core_window = (min(selected), max(selected) + 1)
 		for config in recon.pipeline:
 			if config.kind == "read":

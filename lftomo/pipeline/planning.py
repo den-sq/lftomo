@@ -11,6 +11,7 @@ import numpy as np
 from lftomo.pipeline.core import BufferSpec, Stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+from lftomo.util.window import TomoWindow
 
 
 class MaterializationKind(Enum):
@@ -108,22 +109,22 @@ def _nbytes(spec: BufferSpec | None) -> int:
 
 
 def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
-	rows = scan.detector.rows
-	columns = scan.detector.columns
-	if rows is None or columns is None:
-		return None
-	theta_stop = scan.n_projections if getattr(stage, "theta_stop", None) is None else stage.theta_stop
-	theta_start = getattr(stage, "theta_start", 0)
-	theta_stride = getattr(stage, "theta_stride", 1)
-	count = len(range(theta_start, theta_stop, theta_stride))
-	y_start = getattr(stage, "y_start", 0)
-	y_stop = rows if getattr(stage, "y_stop", None) is None else stage.y_stop
-	layout = ProjOrder if getattr(stage, "order", "projection") == "projection" else SinoOrder
-	shape = (
-		ProjOrder(Theta=count, Y=y_stop - y_start, X=columns)
-		if layout is ProjOrder else
-		SinoOrder(Y=y_stop - y_start, Theta=count, X=columns)
+	physical_shape = scan.projection_shape()
+	window = TomoWindow.from_bounds(
+		physical_shape,
+		y=(
+			getattr(stage, "y_start", 0),
+			physical_shape.Y if getattr(stage, "y_stop", None) is None else stage.y_stop,
+		),
+		theta=(
+			getattr(stage, "theta_start", 0),
+			physical_shape.Theta
+			if getattr(stage, "theta_stop", None) is None else stage.theta_stop,
+			getattr(stage, "theta_stride", 1),
+		),
 	)
+	layout = ProjOrder if getattr(stage, "order", "projection") == "projection" else SinoOrder
+	shape = window.frange.length.to(layout)
 	dtype = scan.metadata.get("raw_dtype")
 	if dtype is None:
 		source = scan.projections

@@ -22,6 +22,7 @@ from lftomo.pipeline.stages import (
 	TIFFStackReadStage,
 	WeightedNormalizeStage,
 )
+from lftomo.pipeline.planning import _read_spec
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import ProjOrder, SinoOrder, X
 
@@ -212,6 +213,18 @@ def test_planner_emits_liveness_alias_and_managed_artifact_allocations():
 		event for event in fully_pinned.allocation_schedule if event.role == "reconstruction"
 	)
 	assert fully_pinned_recon.action is BufferAction.ALLOCATE
+
+
+def test_read_planning_uses_canonical_strided_window_geometry():
+	spec = _read_spec(
+		TIFFStackReadStage(
+			order="sinogram", y_start=1, y_stop=5,
+			theta_start=1, theta_stop=10, theta_stride=3,
+		),
+		_scan(projections=10, rows=6, columns=4),
+	)
+
+	assert spec.shape == SinoOrder(Y=4, Theta=3, X=4)
 
 
 def test_reconstruction_crop_keeps_full_physical_allocation_in_plan():

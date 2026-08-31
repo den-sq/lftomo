@@ -115,10 +115,9 @@ def resolve_streaming_plan(
 	"""Resolve composed Stage padding and global row windows before allocation."""
 
 	config = config or WindowConfig()
-	rows = scan.detector.rows
-	columns = scan.detector.columns
-	if rows is None or columns is None:
-		raise WindowPlanError("window planning requires detector rows and columns")
+	physical_shape = scan.projection_shape()
+	rows = physical_shape.Y
+	columns = physical_shape.X
 	read = next((stage for stage in stages if stage.name.startswith("read.")), None)
 	selection_start = int(getattr(read, "y_start", 0))
 	selection_stop = rows if read is None or getattr(read, "y_stop", None) is None \
@@ -127,7 +126,7 @@ def resolve_streaming_plan(
 		raise WindowPlanError("read Stage has an invalid detector-row selection")
 	selected_rows = selection_stop - selection_start
 	window_rows = selected_rows if config.rows is None else min(config.rows, selected_rows)
-	theta_count = scan.n_projections
+	theta_count = physical_shape.Theta
 	input_shape = ProjOrder(theta_count, window_rows, columns)
 	required = ProjOrder(0, 0, 0)
 	required_after = ProjOrder(0, 0, 0)
@@ -167,7 +166,7 @@ def resolve_streaming_plan(
 			LOGGER.warning(message)
 	dataset = TomoDataSet(
 		CTFov(theta_count, scan.degrees_per_fov, 1),
-		ProjOrder(theta_count, rows, columns),
+		physical_shape,
 		Y.drange(selection_start, selection_stop, window_rows),
 	)
 	center_prepass = (

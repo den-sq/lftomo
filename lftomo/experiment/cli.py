@@ -17,6 +17,7 @@ from lftomo.pipeline import NumpyBackend, Pipeline, validate_pipeline
 from lftomo.pipeline.stages import create_stage, dispatch_for_stage
 from lftomo.review import CandidateReport, ExperimentCandidateResolver
 from lftomo.runner import load_scan, run_reconstruction
+from lftomo.util.window import TomoWindow
 
 from .models import (
 	CodeIdentity,
@@ -74,6 +75,27 @@ from .store import ResumePolicy
 
 def _sha256(value: bytes) -> str:
 	return hashlib.sha256(value).hexdigest()
+
+
+def _fidelity_window(scan, identity, window) -> TomoWindow:
+	"""Resolve one experiment window through the canonical bounds constructor."""
+
+	theta_start = 0 if window.theta_start is None else window.theta_start
+	theta_stop = scan.n_projections if window.theta_stop is None else window.theta_stop
+	if identity.fidelity.projection_limit is not None:
+		theta_stop = min(
+			theta_stop,
+			theta_start
+			+ identity.fidelity.projection_limit * identity.fidelity.projection_stride,
+		)
+	return TomoWindow.from_bounds(
+		scan.projection_shape(),
+		y=(window.y_start, window.y_stop),
+		theta=(theta_start, theta_stop, identity.fidelity.projection_stride),
+		halo=window.halo,
+		dtype=np.dtype(scan.metadata.get("raw_dtype", np.uint16)),
+		work_dtype=np.float32,
+	)
 
 
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
@@ -197,32 +219,19 @@ class PipelineTrialExecutor:
 		read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
 		if read is None:
 			raise ValueError("fidelity window execution requires a read stage")
-		rows = scan.detector.rows
-		if rows is not None and (
-			window.y_start - window.halo < 0 or window.y_stop + window.halo > rows
-		):
-			raise ValueError(
-				f"window {window.id!r} halo exceeds detector rows [0, {rows})"
-			)
-		read.params["y_start"] = window.y_start - window.halo
-		read.params["y_stop"] = window.y_stop + window.halo
-		theta_start = 0 if window.theta_start is None else window.theta_start
-		theta_stop = scan.n_projections if window.theta_stop is None else window.theta_stop
-		if identity.fidelity.projection_limit is not None:
-			theta_stop = min(
-				theta_stop,
-				theta_start
-				+ identity.fidelity.projection_limit * identity.fidelity.projection_stride,
-			)
-		read.params["theta_start"] = theta_start
-		read.params["theta_stop"] = theta_stop
-		read.params["theta_stride"] = identity.fidelity.projection_stride
+		selected = _fidelity_window(scan, identity, window)
+		source = selected.with_pad(["Y"])
+		read.params["y_start"] = source.pos.Y
+		read.params["y_stop"] = source.pos.Y + source.shape.Y
+		read.params["theta_start"] = selected.pos.Theta
+		read.params["theta_stop"] = selected.pos.Theta + selected.shape.Theta
+		read.params["theta_stride"] = selected.step.Theta
 		for stage in recon.pipeline:
 			if stage.kind == "evaluate":
 				stage.params["windows"] = [{
 					"id": window.id,
-					"slice_start": window.halo,
-					"slice_stop": window.halo + window.y_stop - window.y_start,
+					"slice_start": selected.pad_before.Y,
+					"slice_stop": selected.pad_before.Y + selected.shape.Y,
 				}]
 		is_full_finalist = (
 			self.config.output.write_full_finalists
@@ -314,23 +323,8 @@ class PipelineTrialExecutor:
 
 	@staticmethod
 	def _estimated_snapshot_bytes(scan, identity, window) -> int | None:
-		columns = scan.detector.columns
-		if columns is None:
-			return None
-		rows = window.y_stop - window.y_start + 2 * window.halo
-		theta_start = 0 if window.theta_start is None else window.theta_start
-		theta_stop = scan.n_projections if window.theta_stop is None else window.theta_stop
-		if identity.fidelity.projection_limit is not None:
-			theta_stop = min(
-				theta_stop,
-				theta_start
-				+ identity.fidelity.projection_limit * identity.fidelity.projection_stride,
-			)
-		selected = max(0, theta_stop - theta_start)
-		selected = (
-			selected + identity.fidelity.projection_stride - 1
-		) // identity.fidelity.projection_stride
-		return selected * rows * columns * np.dtype(np.float32).itemsize
+		selected = _fidelity_window(scan, identity, window).with_pad(["Y"])
+		return selected.frange.length.nbytes(np.float32)
 
 	def plan_prefix_cache(self, trials) -> PrefixCachePlan:
 		"""Plan trial/window prefixes without opening projection payloads."""

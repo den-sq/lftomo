@@ -8,7 +8,7 @@ from typing import Self, Sequence, Iterator
 
 import numpy as np
 
-from .shapes import DataShape, DataRange, IntIter, ReconOrder, SliceIter, TFIter
+from .shapes import DataShape, DataRange, IntIter, ReconOrder, SliceIter, TFIter, Y
 
 # Field of view during data acquisition.
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
@@ -191,9 +191,60 @@ class DataRef(object):
 
 class TomoWindow(DataRef):
 	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape, step: DataShape,
-					dtype: type, work_dtype: type, *, pad_after: DataShape = None):
+				dtype: type, work_dtype: type, *, pad_after: DataShape = None):
 		super().__init__(shape, pad, pos, step, dtype, pad_after=pad_after)
 		self.__work_dtype = work_dtype
+
+	@classmethod
+	def from_bounds(
+		cls,
+		physical_shape: DataShape,
+		*,
+		y: tuple[int, int] | slice | None = None,
+		theta: tuple[int, int] | tuple[int, int, int] | slice | None = None,
+		halo: int | DataShape = 0,
+		dtype: type = None,
+		work_dtype: type = np.float32,
+	) -> Self:
+		"""Construct a source-coordinate window and record its realized halo."""
+
+		def bounds(value, size: int, name: str, *, stride: bool) -> tuple[int, int, int]:
+			if value is None:
+				start, stop, step = 0, size, 1
+			elif isinstance(value, slice):
+				start = 0 if value.start is None else value.start
+				stop = size if value.stop is None else value.stop
+				step = 1 if value.step is None else value.step
+			else:
+				if len(value) not in ((2, 3) if stride else (2,)):
+					raise ValueError(f"{name} bounds must contain start/stop" + ("[/stride]" if stride else ""))
+				start, stop = value[:2]
+				step = value[2] if len(value) == 3 else 1
+			if not 0 <= start < stop <= size or step < 1 or (not stride and step != 1):
+				raise ValueError(f"invalid {name} bounds [{start}, {stop}) with stride {step}")
+			return int(start), int(stop), int(step)
+
+		theta_start, theta_stop, theta_step = bounds(
+			theta, physical_shape.Theta, "Theta", stride=True,
+		)
+		y_start, y_stop, _ = bounds(y, physical_shape.Y, "Y", stride=False)
+		shape = type(physical_shape)(
+			Theta=theta_stop - theta_start, Y=y_stop - y_start, X=physical_shape.X,
+		)
+		pos = type(physical_shape)(Theta=theta_start, Y=y_start, X=0)
+		step = type(physical_shape)(Theta=theta_step, Y=1, X=1)
+		requested = replace(
+			physical_shape.make_with(0),
+			**(Y(halo).as_dict() if isinstance(halo, int) else halo.as_dict()),
+		)
+		if any(value < 0 for value in requested.as_tuple()):
+			raise ValueError("window halo cannot be negative")
+		pad_before, pad_after = _resolved_padding(
+			pos, shape, requested, requested, physical_shape,
+		)
+		return cls(
+			shape, pad_before, pos, step, dtype, work_dtype, pad_after=pad_after,
+		)
 
 	@property
 	def internal(self):
