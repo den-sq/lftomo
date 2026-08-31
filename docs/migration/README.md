@@ -28,10 +28,11 @@ identifiers from the breakout; they do not imply order — the waves do.
 - **Wave D** — experiment subsystem: B23 → B24
 - **Wave E** — optional tail: B26, B27
 
-Waves 0 and A are filed; later waves are filed as their predecessors near
-completion. One GitHub milestone per wave.
+Waves 0, A, and B are filed; later waves are filed as their predecessors
+near completion. One GitHub milestone per wave.
 
-Filed so far (2026-08-31):
+Filed so far (2026-08-31; Wave B same day, post-Wave-A merge — its
+briefings are grounded against `670eca8`, not `8fff4b7`):
 
 | B-id | issue | milestone |
 |---|---|---|
@@ -42,6 +43,14 @@ Filed so far (2026-08-31):
 | B5 | #244 | Wave A |
 | B11 | #245 | Wave A |
 | B12 | #246 | Wave A |
+| B6 | #260 | Wave B |
+| B10 | #261 | Wave B |
+| B13 | #262 | Wave B |
+| B14 | #263 | Wave B |
+| B15 | #264 | Wave B |
+| B16 | #265 | Wave B |
+| B17 | #266 | Wave B |
+| B18 | #267 | Wave B |
 
 ```
 B1,B2,B3 (parallel, alongside Wave A)
