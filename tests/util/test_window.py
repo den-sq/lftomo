@@ -2,7 +2,7 @@ from functools import partial
 import numpy as np
 import pytest
 
-from lftomo.util.shapes import ProjOrder, ReconOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
+from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
 from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, DataRef
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
 
@@ -152,6 +152,29 @@ def test_tomo_window():
 	assert twi.pos == Y(2)
 	assert twi.dtype == np.float32
 	assert isinstance(twi, TomoWindow)
+
+
+@pytest.mark.parametrize(
+	("shape", "axis", "pos", "step", "positions", "indices"),
+	[
+		(
+			ProjOrder(3, 2, 4), "Theta", ProjOrder(5, 10, 0), ProjOrder(2, 1, 1),
+			[5, 7, 9], [np.s_[0:1, :, :], np.s_[1:2, :, :], np.s_[2:3, :, :]],
+		),
+		(
+			SinoOrder(2, 3, 4), "Y", SinoOrder(10, 5, 0), SinoOrder(3, 2, 1),
+			[10, 13], [np.s_[0:1, :, :], np.s_[1:2, :, :]],
+		),
+	],
+)
+def test_data_ref_units_pair_local_indices_with_global_strided_positions(
+	shape, axis, pos, step, positions, indices,
+):
+	units = list(DataRef(shape, shape.make_with(0), pos, step, np.float32).units(axis))
+
+	assert [getattr(unit.pos, axis) for unit in units] == positions
+	assert [unit.index for unit in units] == indices
+	assert all(unit.step == step and getattr(unit.shape, axis) == 1 for unit in units)
 
 
 def test_recon_shape_uses_unpadded_core_geometry():

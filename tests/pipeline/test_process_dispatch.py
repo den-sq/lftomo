@@ -1,4 +1,5 @@
 import os
+import pickle
 import sys
 import time
 
@@ -169,7 +170,11 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 		state = PipelineState(
 			raw, scan, _recon(), storage=context.storage, executor=context.executor,
 			domain=DataDomain.RAW,
-			artifacts={"projection_start": 2, "projection_count": 10},
+			artifacts={"projection_count": 10},
+			source_window=TomoWindow(
+				shape, shape.make_with(0), ProjOrder(2, 0, 0), shape.make_with(1),
+				np.uint16, np.float32,
+			),
 		)
 		captured = []
 		original = context.executor.submit_all
@@ -185,8 +190,15 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 		)
 
 		assert all(isinstance(task[0], ManagedBuffer) for task in captured)
-		assert all(isinstance(task[4].artifacts["flat_fields"], ManagedBuffer) for task in captured)
-		assert all("flat_fields" not in task[4].scan.metadata for task in captured)
+		assert all(isinstance(task[2].artifacts["flat_fields"], ManagedBuffer) for task in captured)
+		assert all("flat_fields" not in task[2].scan.metadata for task in captured)
+		assert [task[2].source_window.pos.Theta for task in captured] == list(range(2, 8))
+		assert all(task[0].shape == task[2].source_window.shape == ProjOrder(1, 2, 8)
+				for task in captured)
+		for task in captured:
+			handle, unit = pickle.loads(pickle.dumps((task[0], task[2].source_window)))
+			assert handle.shape == unit.shape
+			assert unit.index == task[2].source_window.index
 		expected = np.empty((6, 2, 8), dtype=np.float32)
 		for index in range(6):
 			global_index = index + 2

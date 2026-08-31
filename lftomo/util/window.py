@@ -25,9 +25,12 @@ class DataRef(object):
 		self.__step = step
 		self.__dtype = dtype
 		self.__offset = offset
+		self.__memory_index = None
 
 	@property
 	def index(self) -> tuple[slice]:
+		if self.__memory_index is not None:
+			return self.__memory_index
 		start = list(asdict(self.pos.merge(self.shape.make_with(0))).values())
 		stop = list(asdict(self.shape + self.pos).values())
 		step = list(asdict(self.step.merge(self.shape.make_with(1))).values())
@@ -118,7 +121,10 @@ class DataRef(object):
 		new_ref = copy(self)
 
 		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape
-		new_pos = replace(self.pos, **asdict(pos)) if pos is not None else self.pos
+		new_pos = (
+			pos if pos is not None and set(self.pos.names) < set(pos.names)
+			else replace(self.pos, **asdict(pos)) if pos is not None else self.pos
+		)
 		new_dtype = dtype if dtype is not None else self.dtype
 
 		if pad is not None:
@@ -160,6 +166,27 @@ class DataRef(object):
 
 	def slice_iter(self) -> Iterator:
 		return self.frange.get_iter(conv=partial(SliceIter, shape=self.shape))
+
+	def units(self, axis: str) -> Iterator[Self]:
+		"""Yield one-sample refs with local memory indices and global positions."""
+
+		axis_index = self.shape.axis_of(axis)
+		position = self.pos.as_dict()
+		step = self.step.as_dict().get(axis, 1)
+		start = position.get(axis, 0)
+		for memory_position in range(getattr(self.shape, axis)):
+			unit_position = replace(
+				self.shape.make_with(0),
+				**{**position, axis: start + memory_position * step},
+			)
+			unit = self.rescope(
+				pos=unit_position,
+				shape=replace(self.shape, **{axis: 1}),
+			)
+			index = [slice(None)] * len(self.shape.names)
+			index[axis_index] = slice(memory_position, memory_position + 1)
+			unit.__memory_index = tuple(index)
+			yield unit
 
 
 class TomoWindow(DataRef):

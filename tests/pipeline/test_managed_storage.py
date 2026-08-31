@@ -144,6 +144,27 @@ def test_file_backed_buffer_reopens_read_only_in_each_process(tmp_path):
 		clone.close()
 
 
+def test_file_backed_buffer_preserves_typed_shape_through_views_and_pickle(tmp_path):
+	path = tmp_path / "working.npy"
+	np.save(path, np.arange(24, dtype=np.float32).reshape(2, 3, 4))
+	buffer = FileBackedNPArray(path, ProjOrder(2, 3, 4))
+	clone = pickle.loads(pickle.dumps(buffer[:, 1:2, :]))
+	try:
+		assert clone.shape == ProjOrder(2, 1, 4)
+		np.testing.assert_array_equal(clone.array(), buffer.array()[:, 1:2, :])
+	finally:
+		buffer.close()
+		clone.close()
+
+
+def test_file_backed_buffer_rejects_datashape_rank_mismatch(tmp_path):
+	path = tmp_path / "working.npy"
+	np.save(path, np.zeros((2, 3), dtype=np.float32))
+
+	with pytest.raises(ValueError, match="rank disagrees"):
+		FileBackedNPArray(path, shape=ProjOrder(2, 3, 1))
+
+
 def _assert_numpy_protocol(buffer, expected, *, writeable):
 	view = np.asarray(buffer)
 	assert view.dtype == expected.dtype
