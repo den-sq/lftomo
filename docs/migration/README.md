@@ -22,17 +22,17 @@ identifiers from the breakout; they do not imply order — the waves do.
 - **Wave A** — typed shapes & binding (spine B2 → B4 → B5 → B11 → B12)
 - **Wave B** — window-driven pipeline: B6, B10 → B13 → B14 → {B15, B16, B17}
   → B18
-- **Track C-early** — records & grids (concurrent with Wave B): B7 → B9 →
-  B25; B8
-- **Wave C-late** — driver authority: B19, B20, B21 → B22
+- **Track C-early** — records & grids (concurrent with Wave B): B7 → B9 → B25
+- **Wave C-late** — driver authority: B8, B19, B20, B21 → B22
 - **Wave D** — experiment subsystem: B23 → B24
 - **Wave E** — optional tail: B26, B27
 
 Waves 0, A, B, and Track C-early are filed; later waves are filed as their
 predecessors near completion. One GitHub milestone per wave. **B8 (ChunkGrid)
-is deliberately held back from C-early pending a scope decision** — its only
-consumers (B20/B22) land in Wave C-late, so it is a candidate to build with
-them rather than ahead of them.
+moved to Wave C-late (decided 2026-08-31):** it is built with its only
+consumers, B20/B22, not a wave ahead of them — building it in C-early would be
+speculative front-load and would land C-early net-LOC-positive with no in-wave
+deletions to offset it.
 
 Filed so far (2026-08-31; Wave B briefings grounded against `670eca8`, Track
 C-early briefings against `f0e4e89` — re-grounded per wave, not copied):
@@ -62,7 +62,7 @@ C-early briefings against `f0e4e89` — re-grounded per wave, not copied):
 B1,B2,B3 (parallel, alongside Wave A)
 Wave A:        B2 → B4 → B5 → B11 → B12
 Wave B:        B5 → B6;  B4 → B10;  {B6,B10} → B13 → B14 → {B15,B17} → B18;  B13 → B16
-Track C-early: B4 → B7 → B9 → B25;  B8 anytime          (concurrent with Wave B)
+Track C-early: B4 → B7 → B9 → B25                       (concurrent with Wave B)
 Wave C-late:   {B18,B9} → B19;  {B8,B6} → B20;  {B12,B13,B7} → B21 → B22
 Wave D:        {B9,B10} → B23 → B24
 Wave E:        B26, B27
