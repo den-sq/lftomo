@@ -225,13 +225,24 @@ class DataShape(ABC):
 		return cls(*([val] * len(cls.names)))
 
 	@classmethod
+	def _coerce(cls, value: Self | int | Sequence[int]) -> Self:
+		return (
+			value if isinstance(value, cls)
+			else cls(*value) if isinstance(value, Sequence)
+			else cls.make_with(value)
+		)
+
+	@classmethod
 	def drange(cls, start: Self | int | Sequence[int],
 					stop: Self | int | Sequence[int],
 					step: Self | int | Sequence[int]):
-		return DataRange(
-				start if isinstance(start, cls) else cls(*start) if isinstance(start, Sequence) else cls.make_with(start),
-				stop if isinstance(stop, cls) else cls(*stop) if isinstance(stop, Sequence) else cls.make_with(stop),
-				step if isinstance(step, cls) else cls(*step) if isinstance(step, Sequence) else cls.make_with(step))
+		return DataRange(cls._coerce(start), cls._coerce(stop), cls._coerce(step))
+
+	@classmethod
+	def interval(cls, start: Self | int | Sequence[int],
+					 stop: Self | int | Sequence[int]):
+		"""Construct bounds without asserting an iteration stride."""
+		return DataRange(cls._coerce(start), cls._coerce(stop))
 
 	@classmethod
 	def range_at_interval(cls, start: Self | int | Sequence[int],
@@ -302,33 +313,54 @@ class GenericOrder(DataShape): A: int; B: int; C: int 	 # noqa: E701,E702
 NPString = namedtuple("NPString", 'T')
 
 
-@dataclass
+@dataclass(eq=False)
 class DataRange(object):
-	start: DataShape; stop: DataShape; step: DataShape 	 # noqa: E701,E702
+	start: DataShape; stop: DataShape; step: DataShape | None = None 	 # noqa: E701,E702
 
 	def __post_init__(self):
-		if not (self.step.is_sub(self.stop) and self.stop.is_sub(self.start)):
+		if not self.stop.is_sub(self.start):
+			raise ValueError("Stop fields must be in Start.")
+		if self.step is not None and not self.step.is_sub(self.stop):
 			raise ValueError("Step and Stop fields must be in Start.")
 
+	def start_stop(self, name: str) -> tuple[int, int]:
+		"""Return the half-open bounds for one semantic axis."""
+		self.start.axis_of(name)
+		self.stop.axis_of(name)
+		return int(getattr(self.start, name)), int(getattr(self.stop, name))
+
+	def __eq__(self, other):
+		if isinstance(other, tuple):
+			return len(self.start.names) == 1 and self.start_stop(self.start.names[0]) == other
+		if not isinstance(other, DataRange):
+			return NotImplemented
+		return self.start == other.start and self.stop == other.stop and self.step == other.step
+
+	def _iteration_step(self) -> DataShape:
+		if self.step is None:
+			raise TypeError("an interval has no iteration stride")
+		return self.step
+
 	def get_iter(self, conv: 'TFIter' = None):
-		return _DataRangeIter(self.start, self.stop, self.step, conv)
+		return _DataRangeIter(self.start, self.stop, self._iteration_step(), conv)
 
 	@cached_property
 	def shape(self) -> DataShape:
 		""" Shape of the area iterated over. """
-		return self.stop - self.start.extract(self.stop).extract(self.step)
+		shape = self.stop - self.start.extract(self.stop)
+		return shape if self.step is None else shape.extract(self.step)
 
 	@cached_property
 	def length(self) -> DataShape:
 		""" Number of steps in each dimension of the iteration. """
-		return -(self.shape // -self.step)
+		return -(self.shape // -self._iteration_step())
 
 	def __len__(self) -> int:
 		""" Total number of steps in the iteration. """
 		return self.length.prod()
 
 	def __iter__(self) -> '_DataRangeIter':
-		return _DataRangeIter(self.start, self.stop, self.step)
+		return _DataRangeIter(self.start, self.stop, self._iteration_step())
 
 
 @dataclass

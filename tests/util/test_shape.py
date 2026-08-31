@@ -214,6 +214,12 @@ def test_shape_func():
 
 	daft_seq = Y.drange(Y(0), Y(5), Y(1))
 	assert daft_seq == dr
+	interval = Y.interval(0, 5)
+	assert interval == (0, 5)
+	assert interval.start_stop("Y") == (0, 5)
+	assert interval.shape == Y(5)
+	with pytest.raises(TypeError, match="no iteration stride"):
+		list(interval)
 
 
 def test_range_1D():

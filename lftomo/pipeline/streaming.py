@@ -75,9 +75,7 @@ class StreamingPlan:
 
 	@property
 	def whole_volume(self) -> bool:
-		return self.window_count == 1 and (
-			int(self.dataset.pos.Y), int(self.dataset.pos.Y + self.dataset.shape.Y)
-		) == self.selection
+		return self.window_count == 1 and self.dataset.frange == self.selection
 
 	def record(self) -> dict[str, Any]:
 		"""Serialize derived plan geometry for the run manifest."""

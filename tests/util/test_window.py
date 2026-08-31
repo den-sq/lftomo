@@ -49,6 +49,7 @@ def test_creation():
 
 	assert tdr.pos == Y(0)
 	assert tdr.shape == shape
+	assert tdr.start_stop("Y") == (0, 2048)
 
 	tw = tds.full_window()
 

@@ -83,6 +83,12 @@ class DataRef(object):
 	def axis_slice(self, name: str) -> slice:
 		return self.index[self.shape.axis_of(name)]
 
+	def start_stop(self, name: str) -> tuple[int, int]:
+		"""Return the half-open covered bounds for one semantic axis."""
+		self.shape.axis_of(name)
+		start = int(getattr(self.pos, name, 0))
+		return start, start + int(getattr(self.shape, name))
+
 	def nbytes(self) -> int:
 		return self.shape.nbytes(self.dtype)
 
