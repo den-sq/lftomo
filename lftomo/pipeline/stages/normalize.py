@@ -120,10 +120,10 @@ class WeightedNormalizeStage(Stage):
 			)
 
 		sinogram_view = working if layout is SinoOrder else np.transpose(working, (1, 0, 2))
-		batch_count = working.shape[layout.axis_of("Theta")]
-		projection_start = int(state.artifacts.get("projection_start", 0))
-		projection_count = int(state.artifacts.get("projection_count", batch_count))
-		for projection in range(batch_count):
+		if state.source_window is None or state.dataset is None:
+			raise RuntimeError(f"{self.name} requires canonical source geometry")
+		projection_count = state.dataset.physical_shape.Theta
+		for projection in range(state.buffer_spec.shape.Theta):
 			_weighted_normalize_projection(
 				sinogram_view,
 				sinogram_view,
@@ -131,7 +131,10 @@ class WeightedNormalizeStage(Stage):
 				projection,
 				projection_count,
 				self.pre_sub,
-				projection_index=projection_start + projection,
+				projection_index=(
+					state.source_window.pos.Theta
+					+ projection * state.source_window.step.Theta
+				),
 			)
 		return _finish_normalization(state, output)
 
@@ -163,19 +166,19 @@ def _normalize_with_maps(projection: np.ndarray, gain: np.ndarray, dark: np.ndar
 	return np.divide(numerator, denominator)
 
 
-def _calibration_y_window(state: PipelineState, y_size: int) -> tuple[int, int]:
-	read = next((stage for stage in state.recon.pipeline if stage.kind == "read"), None)
-	start = int(read.params.get("y_start", 0)) if read is not None else 0
-	return start, start + y_size
-
-
 def _tracking_fields(
 	state: PipelineState, y_size: int, component_names: dict[str, str],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 	ref = state.artifacts.get("calibration_bundle")
 	if isinstance(ref, CalibrationBundleRef):
 		bundle = CalibrationBundle.open(ref.manifest_path)
-		start, stop = _calibration_y_window(state, y_size)
+		if state.source_window is None:
+			raise RuntimeError("calibration reads require PipelineState.source_window")
+		source_window = state.source_window.with_pad(["Y"])
+		start = source_window.pos.Y
+		stop = start + source_window.shape.Y
+		if stop - start != y_size:
+			raise ValueError("calibration rows do not match the canonical source window")
 		return tuple(
 			bundle.read_component(component_names[name], y_start=start, y_stop=stop).astype(np.float32)
 			for name in ("pre_gain", "post_gain", "pre_dark", "post_dark")
@@ -237,16 +240,10 @@ class BeamTrackingNormalizeStage(Stage):
 		pre_gain, post_gain, pre_dark, post_dark = _tracking_fields(
 			state, y_size, self.component_names,
 		)
-		projection_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
-		projection_start = int(state.artifacts.get("projection_start", 0))
-		batch_count = data.shape[layout.axis_of("Theta")]
-		if batch_count != state.scan.n_projections and not {
-			"projection_start", "projection_count",
-		}.issubset(state.artifacts):
-			raise ValueError(
-				"Theta-windowed beam tracking requires projection_start and "
-				"projection_count artifacts"
-			)
+		if state.source_window is None or state.dataset is None:
+			raise RuntimeError(f"{self.name} requires canonical source geometry")
+		projection_count = state.dataset.physical_shape.Theta
+		batch_count = state.buffer_spec.shape.Theta
 		schedule = self.schedule
 		fit = None
 		prepared = getattr(self, "_dispatch_schedule_fit", None)
@@ -255,7 +252,10 @@ class BeamTrackingNormalizeStage(Stage):
 			schedule = fit.schedule
 		elif self.fit_schedule:
 			indices = np.unique(np.linspace(0, batch_count - 1, self.schedule_sample_count).astype(int))
-			fractions = (projection_start + indices) / max(projection_count - 1, 1)
+			fractions = (
+				state.source_window.pos.Theta
+				+ indices * state.source_window.step.Theta
+			) / max(projection_count - 1, 1)
 			fit = calibrate_schedule(
 				np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
 				fractions, pre_gain, post_gain,
@@ -265,7 +265,10 @@ class BeamTrackingNormalizeStage(Stage):
 			pre_gain, post_gain, transport_sigma=self.transport_sigma, schedule=schedule,
 		)
 		for local_index in range(batch_count):
-			global_index = projection_start + local_index
+			global_index = (
+				state.source_window.pos.Theta
+				+ local_index * state.source_window.step.Theta
+			)
 			fraction = global_index / max(projection_count - 1, 1)
 			beam_time = float(schedule(fraction))
 			gain = gain_at(fraction)
@@ -284,7 +287,6 @@ class BeamTrackingNormalizeStage(Stage):
 				"residual_std": fit.residual_std, "air_pixel_count": fit.air_pixel_count,
 				"air_fraction": fit.air_fraction, "beam_times": fit.beam_times,
 			},
-			"projection_start": projection_start, "projection_count": projection_count,
 		}
 		return _finish_normalization(state, output)
 
@@ -316,7 +318,13 @@ class BeamKeyframesNormalizeStage(Stage):
 		output, data = _normalization_output(state)
 		layout = type(state.buffer_spec.shape)
 		y_size = data.shape[layout.axis_of("Y")]
-		start, stop = _calibration_y_window(state, y_size)
+		if state.source_window is None:
+			raise RuntimeError(f"{self.name} requires PipelineState.source_window")
+		source_window = state.source_window.with_pad(["Y"])
+		start = source_window.pos.Y
+		stop = start + source_window.shape.Y
+		if stop - start != y_size:
+			raise ValueError("calibration rows do not match the canonical source window")
 		ref = state.artifacts.get("calibration_bundle")
 		if not isinstance(ref, CalibrationBundleRef):
 			raise ValueError("normalize.beam_keyframes requires a selected calibration bundle")
@@ -324,8 +332,6 @@ class BeamKeyframesNormalizeStage(Stage):
 		component = bundle.component(self.component)
 		if component.time_axis is None:
 			raise ValueError("beam keyframes require an explicit time axis")
-		projection_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
-		projection_start = int(state.artifacts.get("projection_start", 0))
 		if component.time_axis.kind == "timestamp_seconds":
 			times = state.artifacts.get("projection_times")
 			if times is None:
@@ -334,9 +340,10 @@ class BeamKeyframesNormalizeStage(Stage):
 			if len(times) != data.shape[layout.axis_of("Theta")]:
 				raise ValueError("projection_times must match the current Theta window")
 		else:
-			times = projection_start + np.arange(
-				data.shape[layout.axis_of("Theta")], dtype=float,
-			)
+			times = (
+				state.source_window.pos.Theta
+				+ np.arange(state.buffer_spec.shape.Theta) * state.source_window.step.Theta
+			).astype(float)
 		dark = 0.0 if self.dark_component is None else bundle.read_component(
 			self.dark_component, y_start=start, y_stop=stop,
 		)
@@ -362,7 +369,6 @@ class BeamKeyframesNormalizeStage(Stage):
 			image[:] = _normalize_with_maps(image, gain, dark, False, floor_nonpositive=True)
 		state.artifacts["beam_keyframe_qc"] = {
 			"component": self.component, "maximum_gap_seen": maximum_seen_gap,
-			"projection_start": projection_start, "projection_count": projection_count,
 			"observability": "events wholly inside a keyframe gap cannot be recovered",
 		}
 		return _finish_normalization(state, output)
@@ -458,7 +464,13 @@ class BeamBasisFitNormalizeStage(Stage):
 		if descriptor.kind != "beam_basis" or descriptor.coordinate_frame != "beam":
 			raise ValueError("beam-basis component must have kind='beam_basis' in beam coordinates")
 		y_size = data.shape[layout.axis_of("Y")]
-		start, stop = _calibration_y_window(state, y_size)
+		if state.source_window is None:
+			raise RuntimeError(f"{self.name} requires PipelineState.source_window")
+		source_window = state.source_window.with_pad(["Y"])
+		start = source_window.pos.Y
+		stop = start + source_window.shape.Y
+		if stop - start != y_size:
+			raise ValueError("calibration rows do not match the canonical source window")
 		basis = bundle.read_component(self.component, y_start=start, y_stop=stop)
 		if basis.shape[2] != data.shape[2]:
 			raise ValueError("beam-basis X extent is incompatible with the active detector window")
@@ -588,11 +600,14 @@ class ThetaSwitchNormalizeStage(Stage):
 			raise ValueError("normalize.theta_switch expects a three-dimensional tomography array")
 		flats = _flat_fields(state, data, layout)
 		pre_gain, post_gain, pre_dark, post_dark = flats
-		batch_count = data.shape[layout.axis_of("Theta")]
-		total_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
-		projection_start = int(state.artifacts.get("projection_start", 0))
-		for local_projection in range(batch_count):
-			projection = projection_start + local_projection
+		if state.source_window is None or state.dataset is None:
+			raise RuntimeError(f"{self.name} requires canonical source geometry")
+		total_count = state.dataset.physical_shape.Theta
+		for local_projection in range(state.buffer_spec.shape.Theta):
+			projection = (
+				state.source_window.pos.Theta
+				+ local_projection * state.source_window.step.Theta
+			)
 			if self.gain_averaging:
 				weight = projection / total_count
 				gain = pre_gain * (1 - weight) + post_gain * weight
@@ -654,13 +669,17 @@ def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 	pre_gain, post_gain, _pre_dark, _post_dark = _tracking_fields(
 		state, y_size, stage.component_names,
 	)
-	batch_count = data.shape[layout.axis_of("Theta")]
-	projection_count = int(state.artifacts.get("projection_count", state.scan.n_projections))
-	projection_start = int(state.artifacts.get("projection_start", 0))
+	if state.source_window is None or state.dataset is None:
+		raise RuntimeError(f"{stage.name} requires canonical source geometry")
+	projection_count = state.dataset.physical_shape.Theta
+	batch_count = state.buffer_spec.shape.Theta
 	indices = np.unique(
 		np.linspace(0, batch_count - 1, stage.schedule_sample_count).astype(int),
 	)
-	fractions = (projection_start + indices) / max(projection_count - 1, 1)
+	fractions = (
+		state.source_window.pos.Theta
+		+ indices * state.source_window.step.Theta
+	) / max(projection_count - 1, 1)
 	stage._dispatch_schedule_fit = calibrate_schedule(
 		np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
 		fractions, pre_gain, post_gain,
@@ -697,18 +716,10 @@ def merge_normalization_dispatch(
 		qcs = [item["beam_keyframe_qc"] for item in results]
 		merged = dict(qcs[0])
 		merged["maximum_gap_seen"] = max(item["maximum_gap_seen"] for item in qcs)
-		merged["projection_start"] = int(state.artifacts.get("projection_start", 0))
-		merged["projection_count"] = int(
-			state.artifacts.get("projection_count", state.scan.n_projections),
-		)
 		state.artifacts["beam_keyframe_qc"] = merged
 		return
 	if isinstance(stage, BeamTrackingNormalizeStage) and results:
 		merged = dict(results[0]["beam_tracking_qc"])
-		merged["projection_start"] = int(state.artifacts.get("projection_start", 0))
-		merged["projection_count"] = int(
-			state.artifacts.get("projection_count", state.scan.n_projections),
-		)
 		state.artifacts["beam_tracking_qc"] = merged
 		if hasattr(stage, "_dispatch_schedule_fit"):
 			del stage._dispatch_schedule_fit

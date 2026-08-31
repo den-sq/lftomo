@@ -22,6 +22,7 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.runner import load_recon
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from tests.sample_data import attach_source_geometry
 
 
 def scan_config(n_projections=3, rows=2, columns=4):
@@ -43,14 +44,14 @@ def scan_config(n_projections=3, rows=2, columns=4):
 
 def state(array, layout, config=None):
 	config = config or StageConfig(kind="test")
-	return PipelineState(
+	return attach_source_geometry(PipelineState(
 		working_array=array,
 		scan=scan_config(array.shape[0] if layout is ProjOrder else array.shape[1],
 			array.shape[1] if layout is ProjOrder else array.shape[0], array.shape[2]),
 		recon=Recon(pipeline=[config]),
 		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 		domain=DataDomain.TRANSMISSION,
-	)
+	))
 
 
 @pytest.mark.parametrize("stage", [

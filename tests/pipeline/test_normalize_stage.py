@@ -17,6 +17,7 @@ from lftomo.prep.flat import weighted_normalize
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
 from lftomo.util.window import TomoWindow
+from tests.sample_data import attach_source_geometry
 
 
 class PassThroughStage(Stage):
@@ -75,12 +76,12 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 	], dtype=np.float32)
 	expected = _classic(source, flats)
 	working = source.copy()
-	state = PipelineState(
+	state = attach_source_geometry(PipelineState(
 		working_array=working,
 		scan=_scan(flats),
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
 		buffer_spec=BufferSpec(SinoOrder(*working.shape), working.dtype),
-	)
+	))
 
 	result = Pipeline([
 		PassThroughStage("read"),
@@ -102,12 +103,12 @@ def test_weighted_normalize_promotes_integer_projections_to_float32():
 		np.full((2, 2), 20), np.full((2, 2), 20),
 		np.zeros((2, 2)), np.zeros((2, 2)),
 	]).astype(np.float32)
-	state = PipelineState(
+	state = attach_source_geometry(PipelineState(
 		working_array=working,
 		scan=_scan(flats),
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
 		buffer_spec=BufferSpec(SinoOrder(*working.shape), working.dtype),
-	)
+	))
 
 	result = WeightedNormalizeStage().run(state)
 
@@ -123,12 +124,12 @@ def test_float32_normalization_replaces_raw_handle_after_successful_handoff():
 	with PipelineRunContext() as context:
 		buffer = context.storage.allocate(SinoOrder(Y=2, Theta=3, X=2), np.float32)
 		buffer.array()[...] = 10
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			working_array=buffer,
 			scan=_scan(flats),
 			recon=Recon(pipeline=[StageConfig(kind="normalize")]),
 			storage=context.storage,
-		)
+		))
 
 		result = WeightedNormalizeStage().run(state)
 
@@ -150,13 +151,12 @@ def test_taper_normalize_projection_batch_uses_global_theta_weights():
 	]).astype(np.float32)
 	scan = _scan(flats)
 	scan.n_projections = 4
-	state = PipelineState(
+	state = attach_source_geometry(PipelineState(
 		working_array=working,
 		scan=scan,
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
-		artifacts={"projection_start": 2, "projection_count": 4},
 		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
-	)
+	), theta_start=2, physical_theta=4)
 	stage = TaperBlendedNormalizeStage()
 
 	result = stage.run(state)
@@ -164,3 +164,5 @@ def test_taper_normalize_projection_batch_uses_global_theta_weights():
 	assert stage.contract.accepted_layouts == (ProjOrder, SinoOrder)
 	np.testing.assert_allclose(result.working_array[0], 10 / 30)
 	np.testing.assert_allclose(result.working_array[1], 10 / 35)
+	assert "projection_start" not in result.artifacts
+	assert "projection_count" not in result.artifacts

@@ -48,29 +48,45 @@ _INTERPOLATION = {
 	"lanczos": cv2.INTER_LANCZOS4,
 }
 
+_BORDER_MODE = {
+	"constant": cv2.BORDER_CONSTANT,
+	"edge": cv2.BORDER_REPLICATE,
+	"reflect": cv2.BORDER_REFLECT_101,
+	"symmetric": cv2.BORDER_REFLECT,
+}
+
 
 def transform_affine_projection(
 	stage: "AffineSkewMovementStage",
 	image: np.ndarray,
-	projection: int,
-	projection_count: int,
+	source_window: TomoWindow,
+	local_projection: int,
+	physical_shape,
 	row_count: int,
+	target: np.ndarray | None = None,
 ) -> np.ndarray:
 	"""Return one fused affine projection for serial or process dispatch."""
 
 	if stage.movement_enabled and (stage.movement_y != 0 or stage.movement_x != 0):
-		fraction = projection / projection_count
+		fraction = (
+			source_window.pos.Theta
+			+ local_projection * source_window.step.Theta
+		) / physical_shape.Theta
 		image = shift(
 			image,
 			(stage.movement_y * fraction, stage.movement_x * fraction),
 			order=3, mode="constant", cval=0.0,
 		)
-	padded = np.pad(
-		image, ((0, 0), (stage.pad_x, stage.pad_x)), mode=stage.pad_mode,
+	if target is None:
+		width = stage.output_shape(ProjOrder(1, row_count, image.shape[1])).X
+		target = np.empty((row_count, width), dtype=image.dtype)
+	cv2.copyMakeBorder(
+		image, 0, 0, stage.pad_x, stage.pad_x,
+		_BORDER_MODE[stage.pad_mode], dst=target, value=0,
 	)
 	if stage.skew_degrees != 0:
-		width = padded.shape[1]
-		left_padding = (padded.shape[1] - image.shape[1]) // 2
+		width = target.shape[1]
+		left_padding = (target.shape[1] - image.shape[1]) // 2
 		center = (
 			(image.shape[1] / 2 if stage.center_px is None else stage.center_px)
 			+ left_padding,
@@ -83,10 +99,13 @@ def transform_affine_projection(
 			raise ValueError(
 				f"unknown skew interpolation {stage.interpolation_name!r}"
 			) from error
-		padded = cv2.warpAffine(
-			padded, matrix, (width, row_count), flags=interpolation,
+		# OpenCV does not support an affine transform whose source and destination
+		# are the same array. Its result is the one unavoidable library temporary;
+		# the canonical output allocation still owns the published buffer.
+		target[...] = cv2.warpAffine(
+			target, matrix, (width, row_count), flags=interpolation,
 		)
-	return padded
+	return target
 
 
 class SkewCorrectStage(Stage):
@@ -182,11 +201,13 @@ class MovementCorrectStage(Stage):
 		layout = type(state.buffer_spec.shape)
 		if not self.enabled or (self.y == 0 and self.x == 0):
 			return state
-		count = data.shape[layout.axis_of("Theta")]
-		projection_start = int(state.artifacts.get("projection_start", 0))
-		projection_count = int(state.artifacts.get("projection_count", count))
-		for projection in range(count):
-			fraction = (projection_start + projection) / projection_count
+		if state.source_window is None or state.dataset is None:
+			raise RuntimeError(f"{self.name} requires canonical source geometry")
+		for projection in range(data.shape[layout.axis_of("Theta")]):
+			fraction = (
+				state.source_window.pos.Theta
+				+ projection * state.source_window.step.Theta
+			) / state.dataset.physical_shape.Theta
 			image = data[layout.point_index(Theta=projection)]
 			image[:] = shift(
 				image,
@@ -302,19 +323,20 @@ class AffineSkewMovementStage(Stage):
 			raise ValueError("fused affine transition requires a known tomography layout")
 		if input_layout is self.target_layout:
 			raise ValueError("fused affine transition must change layout")
+		if state.source_window is None or state.dataset is None:
+			raise RuntimeError(f"{self.name} requires canonical source geometry")
 		source_shape = state.buffer_spec.shape
-		projection_count = source_shape.Theta
 		row_count = source_shape.Y
 		shape = self.output_shape(source_shape)
 		output_buffer, output = allocate_output(
 			state, shape, data.dtype, role="fused_geometry",
 		)
-		for projection in range(projection_count):
+		for projection in range(data.shape[input_layout.axis_of("Theta")]):
 			image = data[input_layout.point_index(Theta=projection)]
-			output[self.target_layout.point_index(Theta=projection)] = (
-				transform_affine_projection(
-					self, image, projection, projection_count, row_count,
-				)
+			transform_affine_projection(
+				self, image, state.source_window, projection,
+				state.dataset.physical_shape, row_count,
+				target=output[self.target_layout.point_index(Theta=projection)],
 			)
 		result = commit_output(
 			state, output_buffer, retire_as=None,

@@ -186,7 +186,11 @@ def stage_output_spec(
 		if pitch is None and scan.helical.pitch_um_per_projection is not None:
 			pitch = scan.helical.pitch_um_per_projection / scan.pixel_size_um
 		if pitch is not None:
-			shape, _shifts, _start, _stop = stage.output_geometry(shape, pitch)
+			if source_window is None:
+				raise RuntimeError("helical planning requires the canonical source window")
+			shape, _shifts, _start, _stop = stage.output_geometry(
+				shape, pitch, source_window,
+			)
 	elif stage.name.startswith("recon."):
 		slices = shape.Y
 		base_width = shape.X

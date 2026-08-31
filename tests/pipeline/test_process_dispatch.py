@@ -32,7 +32,7 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import ProjOrder, ReconOrder, X
-from lftomo.util.window import TomoWindow
+from tests.sample_data import attach_source_geometry
 
 
 def _scan(theta=6, rows=2, columns=8):
@@ -167,15 +167,10 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 	with PipelineRunContext(max_workers=2) as context:
 		raw = context.storage.allocate(shape, np.uint16, role="raw_staging")
 		raw.array()[...] = 10
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			raw, scan, _recon(), storage=context.storage, executor=context.executor,
 			domain=DataDomain.RAW,
-			artifacts={"projection_count": 10},
-			source_window=TomoWindow(
-				shape, shape.make_with(0), ProjOrder(2, 0, 0), shape.make_with(1),
-				np.uint16, np.float32,
-			),
-		)
+		), theta_start=1, theta_stride=2, physical_theta=12)
 		captured = []
 		original = context.executor.submit_all
 
@@ -192,18 +187,20 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 		assert all(isinstance(task[0], ManagedBuffer) for task in captured)
 		assert all(isinstance(task[2].artifacts["flat_fields"], ManagedBuffer) for task in captured)
 		assert all("flat_fields" not in task[2].scan.metadata for task in captured)
-		assert [task[2].source_window.pos.Theta for task in captured] == list(range(2, 8))
+		assert [task[2].source_window.pos.Theta for task in captured] == [1, 3, 5, 7, 9, 11]
 		assert all(task[0].shape == task[2].source_window.shape == ProjOrder(1, 2, 8)
 				for task in captured)
 		for task in captured:
 			handle, unit = pickle.loads(pickle.dumps((task[0], task[2].source_window)))
 			assert handle.shape == unit.shape
 			assert unit.index == task[2].source_window.index
+		assert "projection_start" not in result.artifacts
+		assert "projection_count" not in result.artifacts
 		expected = np.empty((6, 2, 8), dtype=np.float32)
 		for index in range(6):
-			global_index = index + 2
+			global_index = 1 + 2 * index
 			expected[index] = 10 / (
-				20 * (1 - global_index / 10) + 40 * (global_index / 10)
+				20 * (1 - global_index / 12) + 40 * (global_index / 12)
 			)
 		np.testing.assert_allclose(np.asarray(result.working_array), expected)
 
@@ -291,23 +288,24 @@ def test_process_beam_tracking_matches_serial_and_merges_qc():
 	values = np.full((6, 64, 64), 10, dtype=np.uint16)
 	params = {"schedule": {"kind": "linear", "alpha": 0, "beta": 1}}
 	expected = values.copy()
-	expected_state = BeamTrackingNormalizeStage(**params).run(PipelineState(
+	expected_input = attach_source_geometry(PipelineState(
 		expected, scan, _recon(),
 		buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
 		domain=DataDomain.RAW,
 	))
+	expected_state = BeamTrackingNormalizeStage(**params).run(expected_input)
 	with PipelineRunContext(max_workers=2) as context:
 		working = context.storage.allocate(ProjOrder(6, 64, 64), np.uint16, role="raw_staging")
 		working.array()[...] = values
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			working, scan, _recon(), storage=context.storage, executor=context.executor,
 			domain=DataDomain.RAW,
-		)
+		))
 		result = context.executor.run_stage(state, BeamTrackingNormalizeStage(**params))
 		np.testing.assert_allclose(
 			np.asarray(result.working_array), np.asarray(expected_state.working_array),
 		)
-		assert result.artifacts["beam_tracking_qc"]["projection_count"] == 6
+		assert "projection_count" not in result.artifacts["beam_tracking_qc"]
 
 
 @pytest.mark.parametrize("stage", [
@@ -323,24 +321,20 @@ def test_process_beam_tracking_matches_serial_and_merges_qc():
 def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypatch):
 	values = np.arange(4 * 6 * 8, dtype=np.float32).reshape(4, 6, 8)
 	scan = _scan(theta=4, rows=6, columns=8)
-	source_window = TomoWindow(
-		ProjOrder(4, 6, 8), ProjOrder(0, 0, 0), ProjOrder(0, 0, 0),
-		ProjOrder(1, 1, 1), np.float32, np.float32,
-	)
 	expected_values = values.copy()
-	expected = stage.run(PipelineState(
+	expected_input = attach_source_geometry(PipelineState(
 		expected_values, scan, _recon(),
 		buffer_spec=BufferSpec(ProjOrder(*expected_values.shape), expected_values.dtype),
-		domain=DataDomain.TRANSMISSION, source_window=source_window,
+		domain=DataDomain.TRANSMISSION,
 	))
+	expected = stage.run(expected_input)
 	with PipelineRunContext(max_workers=2) as context:
 		working = context.storage.allocate(ProjOrder(4, 6, 8), np.float32, role="normalized")
 		working.array()[...] = values
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			working, scan, _recon(), storage=context.storage, executor=context.executor,
 			domain=DataDomain.TRANSMISSION,
-			source_window=source_window,
-		)
+		))
 		captured = []
 		original = context.executor.submit_all
 

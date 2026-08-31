@@ -17,6 +17,7 @@ from lftomo.pipeline.stages import (
 	create_stage,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from tests.sample_data import attach_source_geometry
 
 
 class ArrayFrameSource:
@@ -138,12 +139,12 @@ def test_stage_preserves_both_layouts_and_reports_coefficients_and_qc(tmp_path):
 		(ProjOrder, projections.copy()),
 		(SinoOrder, projections.transpose(1, 0, 2).copy()),
 	):
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			values, _scan(40, 52, 3), Recon.model_validate({"pipeline": []}),
 			artifacts={"calibration_bundle": ref}, backend=NumpyBackend(),
 			buffer_spec=BufferSpec(layout(*values.shape), values.dtype),
 			domain=DataDomain.RAW,
-		)
+		))
 		BeamBasisFitNormalizeStage(maximum_out_of_basis=1.1).run(state)
 		corrected = values if layout is ProjOrder else values.transpose(1, 0, 2)
 		assert np.quantile(np.abs(corrected - 1), 0.6) < 0.01
@@ -168,20 +169,20 @@ def test_gross_mask_contamination_is_caught_by_stage_qc(tmp_path):
 		"calibration_bundle": ref,
 		"air_mask": np.ones_like(beam, dtype=bool),
 	}
-	state = PipelineState(
+	state = attach_source_geometry(PipelineState(
 		projection.copy(), _scan(40, 52, 1), Recon.model_validate({"pipeline": []}),
 		artifacts=artifacts.copy(), backend=NumpyBackend(),
 		buffer_spec=BufferSpec(ProjOrder(*projection.shape), projection.dtype),
 		domain=DataDomain.RAW,
-	)
+	))
 	with pytest.raises(ValueError, match="failed QC"):
 		BeamBasisFitNormalizeStage().run(state)
-	diagnostic = PipelineState(
+	diagnostic = attach_source_geometry(PipelineState(
 		projection.copy(), _scan(40, 52, 1), Recon.model_validate({"pipeline": []}),
 		artifacts=artifacts.copy(), backend=NumpyBackend(),
 		buffer_spec=BufferSpec(ProjOrder(*projection.shape), projection.dtype),
 		domain=DataDomain.RAW,
-	)
+	))
 	BeamBasisFitNormalizeStage(fail_on_qc=False).run(diagnostic)
 	qc = diagnostic.artifacts["beam_basis_qc"]
 	assert qc["violating_projection_count"] == 1

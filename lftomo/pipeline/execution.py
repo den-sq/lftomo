@@ -119,9 +119,6 @@ def run_projection_kernel(
 	state = _worker_state(handle, payload)
 	unit = payload.source_window
 	index = unit.axis_slice("Theta").start
-	total = int(payload.artifacts.get("projection_count", payload.buffer_spec.shape.Theta))
-	state.artifacts["projection_start"] = int(unit.pos.Theta)
-	state.artifacts["projection_count"] = total
 	projection_times = state.artifacts.get("projection_times")
 	if isinstance(projection_times, ManagedBuffer):
 		projection_times = projection_times.array()
@@ -322,14 +319,11 @@ def run_affine_fill_kernel(
 
 	source_values = source.array()
 	target_values = target.array()
-	projection = payload.source_window.axis_slice("Theta").start
-	projection_count = payload.buffer_spec.shape.Theta
 	row_count = payload.buffer_spec.shape.Y
 	image = source_values[type(source.shape).point_index(Theta=0)]
-	target_values[type(target.shape).point_index(Theta=0)] = (
-		transform_affine_projection(
-			stage, image, projection, projection_count, row_count,
-		)
+	transform_affine_projection(
+		stage, image, payload.source_window, 0, payload.dataset.physical_shape, row_count,
+		target=target_values[type(target.shape).point_index(Theta=0)],
 	)
 
 
@@ -597,22 +591,25 @@ class PipelineExecutor:
 			if not stage.enabled:
 				return state
 			source_shape = state.buffer_spec.shape
+			if state.source_window is None:
+				raise RuntimeError("helical remap requires PipelineState.source_window")
 			shape, shifts, start, stop = stage.output_geometry(
-				source_shape, stage._pitch(state),
+				source_shape, stage._pitch(state), state.source_window,
 			)
 			output, target = allocate_output(
 				state, shape, data.dtype, role="helical_remap",
 			)
 			if not stage.crop_valid:
 				target.fill(stage.fill_value)
+			units = _buffer_units(state, "Theta")
 			self.submit_all(run_helical_fill_kernel, (
 				(
 					_unit_handle(state.working_array, unit),
 					_unit_handle(output, unit),
-					int(shifts[unit.axis_slice("Theta").start]),
+					int(shifts[index]),
 					start, stop, stage.crop_valid,
 				)
-				for unit in _buffer_units(state, "Theta")
+				for index, unit in enumerate(units)
 			))
 			result = commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
