@@ -144,19 +144,12 @@ def run_sinogram_chain_kernel(
 	payload: _WorkerState,
 	collect_timings: bool = False,
 ) -> tuple[float, ...]:
-	"""Gather/process/scatter one row for a complete bounded Stage chain."""
+	"""Process one unit-shaped row through a complete bounded Stage chain."""
 
 	state = _worker_state(handle, payload)
 	data = np.asarray(state.working_array)
 	layout = state.layout
-	index = payload.source_window.axis_slice("Y").start
-	if layout is ProjOrder:
-		working = np.ascontiguousarray(data[layout.point_index(Y=0)])
-	else:
-		working = data[layout.point_index(Y=0)]
-	from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
-
-	state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
+	working = data[layout.point_index(Y=0)]
 	timings = []
 	for stage in stages:
 		started = time.perf_counter() if collect_timings else None
@@ -164,9 +157,7 @@ def run_sinogram_chain_kernel(
 		if started is not None:
 			timings.append(time.perf_counter() - started)
 		if result is not None and result is not working:
-			working = np.asarray(result)
-	if layout is ProjOrder:
-		data[layout.point_index(Y=0)] = working
+			working[...] = result
 	return tuple(timings)
 
 
@@ -253,7 +244,7 @@ def _prepare_vo_work(
 		"median_pad_bytes": median_pad_bytes,
 		"managed_bytes": float_bytes + index_bytes + median_pad_bytes,
 		"allocation_count": 2 + int(median_pad_work is not None),
-		"indexing": "source_window_row",
+		"indexing": "source_window_unit_index",
 	}
 	state.artifacts.setdefault("vo_scratch_allocations", []).append(report)
 	return tuple(allocated)
@@ -264,9 +255,6 @@ def _release_vo_work(
 ) -> None:
 	"""Retire temporary Vo planes after all dispatched rows have completed."""
 
-	from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
-
-	state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
 	if not allocated:
 		return
 	from lftomo.pipeline.stages.stripe import (
@@ -700,25 +688,23 @@ def run_bounded_sinogram_segment(
 						member_samples[member_index].append(elapsed)
 		else:
 			# ndarray-only hermetic execution is deliberately serial.
-			from lftomo.pipeline.stages.stripe import SINOGRAM_ROW_ARTIFACT
-
-			for index in range(row_count):
-				state.artifacts[SINOGRAM_ROW_ARTIFACT] = index
-				working = data[state.layout.point_index(Y=index)]
-				if state.layout is ProjOrder:
-					working = np.ascontiguousarray(working)
+			for unit in _buffer_units(state, "Y"):
+				row_data = data[unit.index]
+				row_state = state.with_array(
+					row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
+				)
+				row_state.artifacts = state.artifacts
+				row_state.source_window = unit
+				working = row_data[state.layout.point_index(Y=0)]
 				for member_index, stage in enumerate(stages):
 					if checkpoint is not None:
 						checkpoint()
 					started = time.perf_counter() if timing_observer is not None else None
-					result = stage.run_sinogram(working, state)
+					result = stage.run_sinogram(working, row_state)
 					if started is not None:
 						member_samples[member_index].append(time.perf_counter() - started)
 					if result is not None and result is not working:
-						working = np.asarray(result)
-				if state.layout is ProjOrder:
-					data[state.layout.point_index(Y=index)] = working
-			state.artifacts.pop(SINOGRAM_ROW_ARTIFACT, None)
+						working[...] = result
 	finally:
 		_release_vo_work(state, allocated)
 	if timing_observer is not None:

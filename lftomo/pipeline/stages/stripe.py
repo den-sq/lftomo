@@ -6,6 +6,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
+	BufferSpec,
 	Locality,
 	PipelineState,
 	RuntimeRequirement,
@@ -27,7 +28,6 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 VO_FLOAT_WORK_ARTIFACT = "_vo_float_work"
 VO_INDEX_WORK_ARTIFACT = "_vo_index_work"
 VO_MEDIAN_PAD_WORK_ARTIFACT = "_vo_median_pad_work"
-SINOGRAM_ROW_ARTIFACT = "_sinogram_row_index"
 
 
 def _vo_work_planes(
@@ -42,16 +42,16 @@ def _vo_work_planes(
 		return None, None, None
 	if float_buffer is None or index_buffer is None:
 		raise ValueError("Vo reusable work requires both floating-point and index planes")
-	row = state.artifacts.get(SINOGRAM_ROW_ARTIFACT)
-	if row is None:
-		raise ValueError("Vo reusable work requires a bounded sinogram row index")
-	float_work = float_buffer.array()[int(row)]
-	index_work = index_buffer.array()[int(row)]
+	if state.source_window is None or state.source_window.shape.Y != 1:
+		raise ValueError("Vo reusable work requires a dispatched Y unit")
+	row = state.source_window.axis_slice("Y").start
+	float_work = float_buffer.array()[row]
+	index_work = index_buffer.array()[row]
 	if float_work.shape != sinogram.shape or index_work.shape != sinogram.shape:
 		raise ValueError("Vo reusable work does not match the dispatched sinogram shape")
 	median_pad_work = None
 	if median_pad_buffer is not None:
-		median_pad_work = median_pad_buffer.array()[int(row)]
+		median_pad_work = median_pad_buffer.array()[row]
 		if (
 			median_pad_work.shape[0] != sinogram.shape[0]
 			or median_pad_work.shape[1] < sinogram.shape[1]
@@ -81,13 +81,19 @@ def _run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
 	layout = type(state.buffer_spec.shape)
 	if data.ndim != 3:
 		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
-	for y_index in range(data.shape[layout.axis_of("Y")]):
-		if layout is ProjOrder:
-			sinogram = np.ascontiguousarray(data[layout.point_index(Y=y_index)])
-			stage.run_sinogram(sinogram, state)
-			data[layout.point_index(Y=y_index)] = sinogram
-		else:
-			stage.run_sinogram(data[layout.point_index(Y=y_index)], state)
+	from lftomo.pipeline.execution import _buffer_units
+
+	for unit in _buffer_units(state, "Y"):
+		row_data = data[unit.index]
+		row_state = state.with_array(
+			row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
+		)
+		row_state.artifacts = state.artifacts
+		row_state.source_window = unit
+		sinogram = row_data[layout.point_index(Y=0)]
+		result = stage.run_sinogram(sinogram, row_state)
+		if result is not None and result is not sinogram:
+			sinogram[...] = result
 	return state
 
 
@@ -325,6 +331,9 @@ class AllOfTheStripeStage(Stage):
 
 		shape = state.buffer_spec.shape
 		tomopy_input = shape.transposed_view(data, ProjOrder)
+		# TomoPy copies this view into its own multiprocessing shared array and
+		# returns that allocation. The final assignment is therefore the required
+		# library-boundary handoff; no pipeline-side transpose is materialized.
 		corrected = tomopy.remove_all_stripe(
 			tomopy_input,
 			snr=self.snr,

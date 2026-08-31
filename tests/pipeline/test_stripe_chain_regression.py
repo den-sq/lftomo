@@ -27,6 +27,7 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.runner import load_recon
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from tests.sample_data import attach_source_geometry
 
 
 def _scan(theta: int, rows: int = 6, columns: int = 32) -> Scan:
@@ -87,7 +88,7 @@ def test_r254_canonical_authors_fourier_wavelet_then_vo_sort():
 	] == ["fw", "vo_sort"]
 
 
-def test_real_fw_vo_chain_gathers_once_and_matches_contiguous_sinograms(monkeypatch):
+def test_real_fw_vo_chain_uses_unit_views_and_matches_contiguous_sinograms(monkeypatch):
 	projection = _fixture()
 	sinogram = projection.transpose(1, 0, 2).copy()
 	scratch = []
@@ -95,7 +96,8 @@ def test_real_fw_vo_chain_gathers_once_and_matches_contiguous_sinograms(monkeypa
 	original = stages[0].run_sinogram
 
 	def record_scratch(row, state):
-		scratch.append((row.shape, row.nbytes, row.flags.c_contiguous))
+		assert "_sinogram_row_index" not in state.artifacts
+		scratch.append((row.shape, row.nbytes, row.flags.c_contiguous, np.shares_memory(row, projection)))
 		return original(row, state)
 
 	monkeypatch.setattr(stages[0], "run_sinogram", record_scratch)
@@ -110,7 +112,7 @@ def test_real_fw_vo_chain_gathers_once_and_matches_contiguous_sinograms(monkeypa
 	assert len(scratch) == projection.shape[1]
 	assert {item[0] for item in scratch} == {(projection.shape[0], projection.shape[2])}
 	assert max(item[1] for item in scratch) < projection.nbytes
-	assert all(item[2] for item in scratch)
+	assert all(not item[2] and item[3] for item in scratch)
 	assert all(not step.materializations for step in bounded.plan.steps)
 	np.testing.assert_allclose(
 		projection, sinogram.transpose(1, 0, 2), rtol=1e-6, atol=1e-6,
@@ -219,11 +221,11 @@ def _managed_vo_chain(workers: int):
 			ProjOrder(*projection.shape), np.float32, role="normalized",
 		)
 		working.array()[...] = projection
-		state = PipelineState(
+		state = attach_source_geometry(PipelineState(
 			working, scan, _state(projection, ProjOrder).recon,
 			storage=context.storage, executor=context.executor,
 			domain=DataDomain.ATTENUATION,
-		)
+		), y_start=7, physical_y=11)
 		result = Pipeline(
 			stages, scan=scan, initial_layout=ProjOrder,
 			initial_domain=DataDomain.ATTENUATION, bounded_workers=workers,
@@ -247,7 +249,7 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
 	actual, report, events, artifacts = _managed_vo_chain(2)
 	np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 	assert report == {
-		"scope": "whole_volume",
+		"scope": "window",
 		"rows": 4,
 		"sinogram_shape": [32, 32],
 		"float_dtype": np.dtype(np.float32).str,
@@ -258,7 +260,7 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
 		"median_pad_bytes": 4 * 32 * 36 * 4,
 		"managed_bytes": 2 * 4 * 32 * 32 * 4 + 4 * 32 * 36 * 4,
 		"allocation_count": 3,
-		"indexing": "source_window_row",
+		"indexing": "source_window_unit_index",
 	}
 	work_events = [
 		event for event in events
@@ -272,6 +274,7 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
 	assert "_vo_float_work" not in artifacts
 	assert "_vo_index_work" not in artifacts
 	assert "_vo_median_pad_work" not in artifacts
+	assert "_sinogram_row_index" not in artifacts
 
 
 def test_managed_vo_allocation_is_independent_of_worker_count():
