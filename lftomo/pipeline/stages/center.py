@@ -18,6 +18,7 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.execution import _buffer_units
 from lftomo.pipeline.runtime import tomopy_requirement
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -122,8 +123,10 @@ class ManualCenterStage(Stage):
 			raise ValueError("center.manual expects a three-dimensional tomography array")
 		if self.slope == 0:
 			return _store_center(state, self.value_px)
+		if state.source_window is None:
+			raise RuntimeError("center.manual tilt requires PipelineState.source_window")
 		y_size = data.shape[layout.axis_of("Y")]
-		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
+		source_y = int(state.source_window.pos.Y)
 		rows = source_y + np.arange(y_size, dtype=np.float32)
 		return _store_center(state, self.value_px + (rows - self.reference_y) * self.slope)
 
@@ -218,11 +221,16 @@ class EntropyLocalCenterStage(Stage):
 		index = row_count // 2 if self.slice_index is None else self.slice_index
 		if not 0 <= index < row_count:
 			raise ValueError("center.entropy_local slice_index is outside the sinogram window")
+		if state.source_window is None:
+			raise RuntimeError("center.entropy_local requires PipelineState.source_window")
 		current_start = data.shape[layout.axis_of("X")] / 2 if self.start is None else self.start
 		angles = _angles(state, data.shape[layout.axis_of("Theta")])
-		sinogram = np.ascontiguousarray(data[layout.point_index(Y=index)])
-		source_y = 0 if state.source_window is None else int(state.source_window.pos.Y)
-		source_slice = source_y + index
+		unit = next(
+			unit for local, unit in enumerate(_buffer_units(state, "Y"))
+			if local == index
+		)
+		sinogram = data[unit.index][layout.point_index(Y=0)]
+		source_slice = int(unit.pos.Y)
 		diagnostic_root = self._diagnostic_root(state) if self.diagnostic_images else None
 
 		import tomopy
@@ -448,15 +456,19 @@ class VoCenterStage(Stage):
 		local_rows = np.unique(np.linspace(0, row_count - 1, count).round().astype(int))
 		if len(local_rows) <= self.fit_degree:
 			raise ValueError("center.vo needs more sampled rows than the polynomial degree")
-		source_start = 0
-		source_step = 1
-		if state.source_window is not None:
-			source_start = int(state.source_window.pos.Y)
-			source_step = int(state.source_window.step.Y)
-		source_rows = source_start + local_rows * source_step
+		if state.source_window is None:
+			raise RuntimeError("center.vo tilt fit requires PipelineState.source_window")
+		source_start = int(state.source_window.pos.Y)
+		source_step = int(state.source_window.step.Y)
+		selected = set(local_rows)
+		units = [
+			unit for local, unit in enumerate(_buffer_units(state, "Y"))
+			if local in selected
+		]
+		source_rows = np.asarray([unit.pos.Y for unit in units])
 		centers = np.asarray([
-			self._find(np.ascontiguousarray(data[layout.point_index(Y=int(index))]))
-			for index in local_rows
+			self._find(data[unit.index][layout.point_index(Y=0)])
+			for unit in units
 		], dtype=np.float64)
 		coefficients, residuals, inliers, iterations, clipping_limited = self._robust_fit(
 			source_rows.astype(np.float64), centers,
@@ -511,6 +523,8 @@ class VoCenterStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data, layout = _sinograms(state)
+		if state.source_window is None:
+			raise RuntimeError("center.vo requires PipelineState.source_window")
 		row_count = data.shape[layout.axis_of("Y")]
 		try:
 			if self.tilt_fit == "polynomial":
@@ -519,7 +533,11 @@ class VoCenterStage(Stage):
 				index = row_count // 2 if self.ind is None else self.ind
 				if not 0 <= index < row_count:
 					raise ValueError("center.vo ind is outside the sinogram window")
-				center = self._find(np.ascontiguousarray(data[layout.point_index(Y=index)]))
+				unit = next(
+					unit for local, unit in enumerate(_buffer_units(state, "Y"))
+					if local == index
+				)
+				center = self._find(data[unit.index][layout.point_index(Y=0)])
 		except (ValueError, RuntimeError, ArithmeticError) as error:
 			if self.fallback != "entropy_local":
 				raise
