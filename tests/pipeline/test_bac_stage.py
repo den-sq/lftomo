@@ -5,7 +5,7 @@ import sys
 from types import ModuleType
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, PRESERVE, Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, DataDomain, PRESERVE, Pipeline, PipelineState
 from lftomo.pipeline.stages import BronnikovAidedCorrectionStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -23,7 +23,7 @@ def _state(array, config, layout=SinoOrder):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		layout=layout,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 	)
 
 

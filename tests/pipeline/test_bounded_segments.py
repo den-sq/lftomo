@@ -5,6 +5,7 @@ import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
+	BufferSpec,
 	DataDomain,
 	ExecutionKind,
 	Locality,
@@ -31,7 +32,8 @@ def state(array, layout):
 	return PipelineState(
 		working_array=array, scan=scan_config(array.shape[0] if layout is ProjOrder else array.shape[1]),
 		recon=Recon(pipeline=[StageConfig(kind="test")]),
-		layout=layout, domain=DataDomain.ATTENUATION,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
+		domain=DataDomain.ATTENUATION,
 	)
 
 

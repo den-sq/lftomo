@@ -97,7 +97,9 @@ def _run(state, *stages):
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
 		assert isinstance(result.working_array, SharedNPArray)
-		return result.with_array(np.asarray(result.working_array).copy())
+		return result.with_array(
+			np.asarray(result.working_array).copy(), buffer_spec=result.buffer_spec,
+		)
 
 
 def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path):

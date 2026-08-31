@@ -67,7 +67,6 @@ def _worker_state(
 		dataset=payload.dataset,
 		source_window=payload.source_window,
 		buffer_spec=buffer_spec,
-		layout=buffer_spec.layout,
 		domain=payload.domain,
 	)
 
@@ -466,7 +465,9 @@ class PipelineExecutor:
 			output, _values = _normalization_output(state)
 			if "flat_fields" in state.scan.metadata:
 				_managed_flat_fields(state)
-			working_state = state.with_array(output)
+			working_state = state.with_array(
+				output, buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(np.float32)),
+			)
 			air_mask_key = getattr(stage, "air_mask_artifact", "air_mask")
 			air_mask = working_state.artifacts.get(air_mask_key)
 			if (
@@ -501,7 +502,10 @@ class PipelineExecutor:
 			from lftomo.pipeline.stages.normalize import merge_normalization_dispatch
 
 			merge_normalization_dispatch(stage, working_state, results)
-			result = commit_output(original, output, retire_as="raw_staging")
+			result = commit_output(
+				original, output, retire_as="raw_staging",
+				buffer_spec=BufferSpec(original.buffer_spec.shape, np.dtype(np.float32)),
+			)
 			result.artifacts.update(working_state.artifacts)
 			return result
 		for artifacts in results:
@@ -530,7 +534,9 @@ class PipelineExecutor:
 				(state.working_array, output, state.layout, stage.target, index)
 				for index in range(count)
 			))
-			return commit_output(state, output, retire_as=None, layout=stage.target)
+			return commit_output(
+				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+			)
 
 		if isinstance(stage, AffineSkewMovementStage):
 			if stage.target_layout is None:
@@ -562,7 +568,7 @@ class PipelineExecutor:
 				for index in range(projection_count)
 			))
 			result = commit_output(
-				state, output, retire_as=None, layout=stage.target_layout,
+				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
 			)
 			if state.source_window is not None:
 				result.source_window = stage.output_window(state.source_window)
@@ -578,20 +584,9 @@ class PipelineExecutor:
 			layout = type(state.buffer_spec.shape)
 			source_shape = state.buffer_spec.shape
 			count = source_shape.Theta
-			y_size = source_shape.Y
-			direction = -1 if stage.going_up else 1
-			indices = stage.projection_start + np.arange(count)
-			shifts = np.rint(direction * stage._pitch(state) * indices).astype(int)
-			if stage.crop_valid:
-				start = max(0, -int(shifts.min()))
-				stop = min(y_size, y_size - int(shifts.max()))
-				if start >= stop:
-					raise ValueError("helical pitch leaves no detector rows valid across all projections")
-				row_count = stop - start
-				shape = type(source_shape)(**{**source_shape.as_dict(), "Y": row_count})
-			else:
-				start, stop = 0, y_size
-				shape = source_shape
+			shape, shifts, start, stop = stage.output_geometry(
+				source_shape, stage._pitch(state),
+			)
 			output, target = allocate_output(
 				state, shape, data.dtype, role="helical_remap",
 			)
@@ -604,7 +599,9 @@ class PipelineExecutor:
 				)
 				for index in range(count)
 			))
-			result = commit_output(state, output, retire_as=None)
+			result = commit_output(
+				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+			)
 			result.artifacts["helical_row_shifts"] = shifts
 			return result
 
@@ -663,10 +660,7 @@ def run_bounded_sinogram_segment(
 		if not callable(getattr(stage, "run_sinogram", None)):
 			raise TypeError(f"{stage.name} declares bounded views but has no run_sinogram kernel")
 	row_count = data.shape[state.layout.axis_of("Y")]
-	shape = (
-		state.buffer_spec.shape
-		if state.buffer_spec is not None else state.layout(*data.shape)
-	)
+	shape = state.buffer_spec.shape
 	sinogram_shape = (shape.Theta, shape.X)
 	allocated = _prepare_vo_work(state, stages, row_count, sinogram_shape)
 	member_samples: list[list[float]] = [[] for _stage in stages]

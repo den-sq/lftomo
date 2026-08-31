@@ -18,6 +18,7 @@ from lftomo.calibration import (
 )
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
+	BufferSpec,
 	Locality,
 	PipelineState,
 	Stage,
@@ -35,18 +36,9 @@ def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 	"""Return a float32 prospective output while the raw input remains live."""
 
 	source = np.asarray(state.working_array)
-	# Plain arrays remain a lightweight hermetic-test compatibility path. Real
-	# runs always provide storage and therefore take the managed replacement path.
+	# Float32 arrays can be normalized in place; other dtypes require promotion.
 	if state.storage is None and source.dtype == np.dtype(np.float32):
 		return state.working_array, source
-	if state.buffer_spec is None:
-		if state.storage is not None:
-			raise TypeError("managed normalization input requires a typed BufferSpec")
-		# Untyped plain arrays remain a fragment-test boundary; complete pipelines
-		# bind their DataShape before entering normalization.
-		data = np.empty(source.shape, dtype=np.float32)
-		data[...] = source
-		return data, data
 	output, data = allocate_output(
 		state, state.buffer_spec.shape, np.float32, role="normalized",
 		reuse_from=("normalized", "reconstruction"),
@@ -56,7 +48,10 @@ def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 
 
 def _finish_normalization(state: PipelineState, output: object) -> PipelineState:
-	return commit_output(state, output, retire_as="raw_staging")
+	return commit_output(
+		state, output, retire_as="raw_staging",
+		buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(np.float32)),
+	)
 
 
 def _managed_flat_fields(state: PipelineState) -> np.ndarray:

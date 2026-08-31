@@ -23,7 +23,7 @@ from lftomo.pipeline.stages import (
 	WeightedNormalizeStage,
 )
 from lftomo.storage import ManagedBuffer
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, X
 
 
 def _scan(*, projections: int = 10, rows: int = 2, columns: int = 4) -> Scan:
@@ -61,7 +61,7 @@ def test_retirement_occurs_only_after_normalization_handoff():
 		)
 		raw.array()[...] = 10
 		state = PipelineState(
-			raw, _scan(), _recon(), storage=context.storage, layout=ProjOrder,
+			raw, _scan(), _recon(), storage=context.storage,
 			domain=DataDomain.RAW,
 		)
 		result = WeightedNormalizeStage().run(state)
@@ -81,7 +81,7 @@ def test_failed_normalization_does_not_retire_current_input():
 		raw = context.storage.allocate(
 			ProjOrder(Theta=10, Y=2, X=4), np.uint16, role="raw_staging",
 		)
-		state = PipelineState(raw, scan, _recon(), storage=context.storage, layout=ProjOrder)
+		state = PipelineState(raw, scan, _recon(), storage=context.storage)
 		with pytest.raises(ValueError, match="flat_fields"):
 			WeightedNormalizeStage().run(state)
 		assert not any(
@@ -92,17 +92,17 @@ def test_failed_normalization_does_not_retire_current_input():
 
 def test_external_pin_blocks_named_alias_until_released():
 	with PipelineRunContext() as context:
-		raw = context.storage.allocate((128,), np.uint16, role="raw_staging")
+		raw = context.storage.allocate(X(128), np.uint16, role="raw_staging")
 		context.storage.pin(raw, owner="trial-a")
 		context.storage.retire(raw, role="raw_staging")
 		pinned = context.storage.allocate(
-			(32,), np.float32, role="reconstruction", reuse_from=("raw_staging",),
+			X(32), np.float32, role="reconstruction", reuse_from=("raw_staging",),
 		)
 		assert pinned.name != raw.name
 
 		context.storage.unpin(raw, owner="trial-a")
 		reused = context.storage.allocate(
-			(32,), np.float32, role="reconstruction:retry", reuse_from=("raw_staging",),
+			X(32), np.float32, role="reconstruction:retry", reuse_from=("raw_staging",),
 		)
 		assert reused.name == raw.name
 
@@ -115,7 +115,7 @@ def test_layout_and_super_resolution_outputs_are_manager_issued():
 		working.array()[...] = np.arange(24, dtype=np.float32).reshape(3, 2, 4)
 		state = PipelineState(
 			working, _scan(projections=3), _recon(), storage=context.storage,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			domain=DataDomain.TRANSMISSION,
 		)
 		converted = LayoutConvertStage("sinogram", "bounded sinogram kernels").run(state)
 		assert isinstance(converted.working_array, ManagedBuffer)
@@ -134,7 +134,7 @@ def test_fused_geometry_and_helical_outputs_are_manager_issued():
 		working.array()[...] = np.arange(24, dtype=np.float32).reshape(3, 2, 4)
 		state = PipelineState(
 			working, _scan(projections=3), _recon(), storage=context.storage,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			domain=DataDomain.TRANSMISSION,
 		)
 		geometry = AffineSkewMovementStage(
 			transition_to="sinogram", pad_x=1,
@@ -157,7 +157,7 @@ def test_phase_filter_is_a_manager_issued_producer_artifact():
 		working.array()[...] = 0.8
 		state = PipelineState(
 			working, _scan(projections=3), _recon(), storage=context.storage,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			domain=DataDomain.TRANSMISSION,
 		)
 		result = PaganinFilterStage().run(state)
 		assert isinstance(result.artifacts["phase_filter"], ManagedBuffer)
@@ -279,7 +279,7 @@ def _actual_gridrec(*, engine_aliasing: bool):
 		state = PipelineState(
 			working, _scan(projections=shape.Theta, rows=shape.Y, columns=shape.X),
 			_recon(engine_aliasing=engine_aliasing), storage=context.storage,
-			layout=ProjOrder, domain=DataDomain.ATTENUATION,
+			domain=DataDomain.ATTENUATION,
 			artifacts={"angles": angles},
 		)
 		result = GridrecStage(center=4, circle_mask=False, ncore=1).run(state)
@@ -306,7 +306,7 @@ def _normalization_to_recon_pipeline(*, aliasing: bool):
 		raw.array()[...] = 10
 		state = PipelineState(
 			raw, scan, _recon(aliasing=aliasing, engine_aliasing=False),
-			storage=context.storage, layout=ProjOrder, domain=DataDomain.RAW,
+			storage=context.storage, domain=DataDomain.RAW,
 		)
 		state = WeightedNormalizeStage().run(state)
 		state.domain = DataDomain.TRANSMISSION

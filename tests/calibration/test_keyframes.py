@@ -9,7 +9,7 @@ from lftomo.calibration import (
 	ProducerInfo, TIFFRandomFrameSource, TimeAxis, build_flat_series_digest,
 )
 from lftomo.config import Recon, Scan, StageConfig
-from lftomo.pipeline import NumpyBackend, PipelineState, validate_pipeline
+from lftomo.pipeline import BufferSpec, NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.stages import BeamKeyframesNormalizeStage, create_stage
 from lftomo.util.shapes import ProjOrder
@@ -55,7 +55,9 @@ def test_event_keyframes_beat_endpoint_model_and_keep_detector_defect_fixed(tmp_
 	state = PipelineState(
 		projections, _scan(20, 28, 3), Recon.model_validate({"pipeline": []}),
 		artifacts={"calibration_bundle": ref, "projection_times": np.array([0, 5, 10])},
-		backend=NumpyBackend(), layout=ProjOrder, domain=DataDomain.RAW,
+		backend=NumpyBackend(),
+		buffer_spec=BufferSpec(ProjOrder(*projections.shape), projections.dtype),
+		domain=DataDomain.RAW,
 	)
 	BeamKeyframesNormalizeStage(transport_sigma=2).run(state)
 	assert np.std(projections - 1) < 0.003
@@ -78,10 +80,13 @@ def test_heldout_midpoints_beat_a_scan_endpoint_model(tmp_path):
 	])
 	endpoint = np.sqrt(keyframes[0] * keyframes[-1])
 	endpoint_error = np.std(heldout / endpoint - 1)
+	working = heldout.copy()
 	state = PipelineState(
-		heldout.copy(), _scan(20, 28, 2), Recon.model_validate({"pipeline": []}),
+		working, _scan(20, 28, 2), Recon.model_validate({"pipeline": []}),
 		artifacts={"calibration_bundle": ref, "projection_times": np.array([2.5, 7.5])},
-		backend=NumpyBackend(), layout=ProjOrder, domain=DataDomain.RAW,
+		backend=NumpyBackend(),
+		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
+		domain=DataDomain.RAW,
 	)
 	BeamKeyframesNormalizeStage(transport_sigma=2).run(state)
 	assert np.std(np.asarray(state.working_array) - 1) < endpoint_error / 20
@@ -125,9 +130,11 @@ def test_digest_samples_short_centered_medians_and_writes_trajectory(tmp_path):
 def test_keyframe_stage_rejects_missing_times_and_large_gaps(tmp_path):
 	keyframes = np.ones((2, 4, 5), dtype=np.float32)
 	ref = _build_bundle(tmp_path, keyframes, [0, 10])
+	working = np.ones((1, 4, 5), np.float32)
 	state = PipelineState(
-		np.ones((1, 4, 5), np.float32), _scan(4, 5, 1), Recon.model_validate({"pipeline": []}),
-		artifacts={"calibration_bundle": ref}, backend=NumpyBackend(), layout=ProjOrder,
+		working, _scan(4, 5, 1), Recon.model_validate({"pipeline": []}),
+		artifacts={"calibration_bundle": ref}, backend=NumpyBackend(),
+		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
 		domain=DataDomain.RAW,
 	)
 	with pytest.raises(ValueError, match="projection_times"):

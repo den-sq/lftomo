@@ -29,7 +29,7 @@ from lftomo.experiment.runner import ExperimentInputs, TrialExecution
 from lftomo.experiment.cli import load_experiment_config
 from lftomo.experiment.selection import select_candidates
 from lftomo.experiment.models import OutputRecord
-from lftomo.pipeline import NumpyBackend, Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, NumpyBackend, Pipeline, PipelineState
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.stages import create_stage
 from lftomo.util.shapes import ProjOrder
@@ -135,7 +135,7 @@ def run_fragment(recon, source):
 		scan=scan(),
 		recon=recon,
 		backend=NumpyBackend(),
-		layout=ProjOrder,
+		buffer_spec=BufferSpec(ProjOrder(*source.shape), source.dtype),
 		domain=DataDomain.TRANSMISSION,
 	)
 	return Pipeline(

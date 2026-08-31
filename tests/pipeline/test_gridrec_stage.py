@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import GridrecStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 
@@ -21,7 +21,7 @@ def _state(array, config, artifacts=None, layout=ProjOrder):
 		),
 		recon=Recon(pipeline=[config]),
 		artifacts={} if artifacts is None else artifacts,
-		layout=layout,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 	)
 
 

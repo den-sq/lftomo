@@ -101,16 +101,10 @@ class PipelinePlan:
 		return tuple(item for step in self.steps for item in step.materializations)
 
 
-def _shape_tuple(shape: Any) -> tuple[int, ...]:
-	if hasattr(shape, "__dataclass_fields__"):
-		return tuple(int(getattr(shape, name)) for name in shape.__dataclass_fields__)
-	return tuple(int(value) for value in shape)
-
-
 def _nbytes(spec: BufferSpec | None) -> int:
 	if spec is None:
 		return 0
-	return int(np.prod(_shape_tuple(spec.shape), dtype=np.float64) * spec.dtype.itemsize)
+	return spec.shape.nbytes(spec.dtype)
 
 
 def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
@@ -169,18 +163,11 @@ def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) ->
 	elif stage.name == "geometry.affine_skew_movement" and getattr(stage, "target_layout", None) is not None:
 		shape = stage.output_shape(shape)
 	elif stage.name == "helical_correct.index_remap" and getattr(stage, "enabled", True):
-		if getattr(stage, "crop_valid", False):
-			count = shape.Theta
-			rows = shape.Y
-			pitch = stage.pitch_px_per_projection
-			if pitch is None and scan.helical.pitch_um_per_projection is not None:
-				pitch = scan.helical.pitch_um_per_projection / scan.pixel_size_um
-			if pitch is not None:
-				direction = -1 if stage.going_up else 1
-				indices = stage.projection_start + np.arange(count)
-				shifts = np.rint(direction * pitch * indices).astype(int)
-				row_count = min(rows, rows - int(shifts.max())) - max(0, -int(shifts.min()))
-				shape = type(shape)(**{**shape.as_dict(), "Y": row_count})
+		pitch = stage.pitch_px_per_projection
+		if pitch is None and scan.helical.pitch_um_per_projection is not None:
+			pitch = scan.helical.pitch_um_per_projection / scan.pixel_size_um
+		if pitch is not None:
+			shape, _shifts, _start, _stop = stage.output_geometry(shape, pitch)
 	elif stage.name.startswith("recon."):
 		slices = shape.Y
 		base_width = shape.X

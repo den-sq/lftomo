@@ -34,7 +34,7 @@ from lftomo.experiment import (
 	plan_common_prefixes,
 )
 from lftomo.experiment.runner import ExperimentInputs, TrialExecution
-from lftomo.pipeline import Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 from lftomo.util.shapes import ProjOrder, X
@@ -57,7 +57,10 @@ class SourceStage(Stage):
 		if self.calls is not None:
 			with self.calls["lock"]:
 				self.calls["count"] += 1
-		state = state.with_array(self.values.copy(), layout=ProjOrder)
+		values = self.values.copy()
+		state = state.with_array(
+			values, buffer_spec=BufferSpec(ProjOrder(*values.shape), values.dtype),
+		)
 		state.artifacts["nested"] = {
 			"history": ["source"],
 			"array": np.arange(3, dtype=np.float32),
@@ -150,9 +153,19 @@ class ManagedArtifactSourceStage(Stage):
 		self.values = np.asarray(values, dtype=np.float32)
 
 	def run(self, state):
-		state.working_array = self.values.copy()
+		values = self.values.copy()
+		state = state.with_array(
+			values, buffer_spec=BufferSpec(ProjOrder(*values.shape), values.dtype),
+		)
+		mask = self.values > self.values.mean()
+		if state.storage is not None:
+			managed = state.storage.allocate(
+				ProjOrder(*mask.shape), mask.dtype, role="large_mask",
+			)
+			managed.array()[...] = mask
+			mask = managed
 		state.artifacts.update({
-			"large_mask": self.values > self.values.mean(),
+			"large_mask": mask,
 			"center": 7.5,
 			"qc": {"valid": True},
 		})
@@ -293,10 +306,11 @@ def _crashing_cached_trial(connection, scratch):
 		initial = state(candidates[0].configs)
 		initial.storage = context.storage
 		initial.executor = context.executor
-		initial.working_array = context.storage.allocate(
+		working = context.storage.allocate(
 			ProjOrder(*values.shape), values.dtype, role="trial-input",
 		)
-		np.asarray(initial.working_array)[...] = values
+		np.asarray(working)[...] = values
+		initial = initial.with_array(working)
 		executor.execute(
 			plan.decisions[0], initial,
 			(SourceStage(values), MutatingTailStage(2)), candidates[0].configs,
@@ -464,10 +478,11 @@ def test_cache_fork_is_manager_issued_and_identity_ignores_buffer_name(tmp_path)
 			initial = state(configs)
 			initial.storage = context.storage
 			initial.executor = context.executor
-			initial.working_array = context.storage.allocate(
+			working = context.storage.allocate(
 				ProjOrder(*values.shape), values.dtype, role=role,
 			)
-			np.asarray(initial.working_array)[...] = values
+			np.asarray(working)[...] = values
+			initial = initial.with_array(working)
 			return executor.execute(
 				decision, initial,
 				(SourceStage(values), MutatingTailStage(2)), configs,
@@ -560,8 +575,7 @@ def test_cache_pin_blocks_alias_while_prefix_operation_retains_source(tmp_path):
 		initial = state(candidates[0].configs)
 		initial.storage = context.storage
 		initial.executor = context.executor
-		initial.working_array = raw
-		initial.layout = ProjOrder
+		initial = initial.with_array(raw)
 		initial.domain = DataDomain.TRANSMISSION
 		with ThreadPoolExecutor(max_workers=1) as pool:
 			future = pool.submit(
@@ -631,7 +645,10 @@ def test_initial_working_array_content_is_part_of_cache_identity(tmp_path):
 
 	def execute(values):
 		initial = state(candidates[0].configs)
-		initial.working_array = np.asarray(values, dtype=np.float32).reshape(1, 1, -1)
+		working = np.asarray(values, dtype=np.float32).reshape(1, 1, -1)
+		initial = initial.with_array(
+			working, buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
+		)
 		return executor.execute(
 			decision,
 			initial,
@@ -858,9 +875,11 @@ class FullRunnerCachedExecutor:
 
 		configs = tuple(identity.resolved_recon.pipeline)
 		stages = tuple(create_stage(item) for item in configs)
+		working = self.source.copy()
 		initial = PipelineState(
-			working_array=self.source.copy(), scan=scan(), recon=identity.resolved_recon,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			working_array=working, scan=scan(), recon=identity.resolved_recon,
+			buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
+			domain=DataDomain.TRANSMISSION,
 		)
 		result, event = self.cache.execute(
 			self.decisions[identity.trial_id.value], initial, stages, configs,
@@ -896,9 +915,11 @@ class FullRunnerIndependentExecutor:
 
 		configs = tuple(identity.resolved_recon.pipeline)
 		stages = tuple(create_stage(item) for item in configs)
+		working = self.source.copy()
 		result = Pipeline(list(stages)).run(PipelineState(
-			working_array=self.source.copy(), scan=scan(), recon=identity.resolved_recon,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			working_array=working, scan=scan(), recon=identity.resolved_recon,
+			buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
+			domain=DataDomain.TRANSMISSION,
 		))
 		path = output_root / "screen.npy"
 		path.parent.mkdir(parents=True, exist_ok=True)

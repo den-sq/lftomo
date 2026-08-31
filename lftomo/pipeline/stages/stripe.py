@@ -326,7 +326,7 @@ class AllOfTheStripeStage(Stage):
 
 		import tomopy
 
-		shape = state.buffer_spec.shape if state.buffer_spec is not None else layout(*data.shape)
+		shape = state.buffer_spec.shape
 		tomopy_input = shape.transposed_view(data, ProjOrder)
 		corrected = tomopy.remove_all_stripe(
 			tomopy_input,

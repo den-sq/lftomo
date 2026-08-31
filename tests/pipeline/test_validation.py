@@ -4,6 +4,7 @@ import pytest
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
 	Backend,
+	BufferSpec,
 	BackendCompatibilityError,
 	DaskStubBackend,
 	MissingArtifactError,
@@ -51,6 +52,7 @@ class ContractStage(Stage):
 def state_for(backend=None):
 	return PipelineState(
 		working_array=np.zeros((3, 4, 5), dtype=np.float32),
+		buffer_spec=BufferSpec(ProjOrder(3, 4, 5), np.dtype(np.float32)),
 		scan=scan_config(),
 		recon=recon_config(),
 		backend=backend or NumpyBackend(),

@@ -6,7 +6,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality, PipelineState, Stage, StageContract,
+	BufferSpec, Locality, PipelineState, Stage, StageContract,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -72,6 +72,23 @@ class HelicalIndexRemapStage(Stage):
 			)
 		return pitch_um / state.scan.pixel_size_um
 
+	def output_geometry(
+		self, source_shape: ProjOrder | SinoOrder, pitch: float,
+	) -> tuple[ProjOrder | SinoOrder, np.ndarray, int, int]:
+		"""Return the canonical output shape, shifts, and valid source-row bounds."""
+
+		direction = -1 if self.going_up else 1
+		indices = self.projection_start + np.arange(source_shape.Theta)
+		shifts = np.rint(direction * pitch * indices).astype(int)
+		if not self.crop_valid:
+			return source_shape, shifts, 0, source_shape.Y
+		start = max(0, -int(shifts.min()))
+		stop = min(source_shape.Y, source_shape.Y - int(shifts.max()))
+		if start >= stop:
+			raise ValueError("helical pitch leaves no detector rows valid across all projections")
+		shape = type(source_shape)(**{**source_shape.as_dict(), "Y": stop - start})
+		return shape, shifts, start, stop
+
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("HelicalIndexRemapStage currently requires the NumPy backend")
@@ -81,26 +98,13 @@ class HelicalIndexRemapStage(Stage):
 			raise ValueError("helical_correct.index_remap expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
-		source_shape = (
-			state.buffer_spec.shape
-			if state.buffer_spec is not None else layout(*data.shape)
-		)
-		pitch = self._pitch(state)
-		direction = -1 if self.going_up else 1
+		source_shape = state.buffer_spec.shape
 		count = source_shape.Theta
 		y_size = source_shape.Y
-		projection_indices = self.projection_start + np.arange(count)
-		shifts = np.rint(direction * pitch * projection_indices).astype(int)
+		shape, shifts, start, stop = self.output_geometry(source_shape, self._pitch(state))
 
 		if self.crop_valid:
-			start = max(0, -int(shifts.min()))
-			stop = min(y_size, y_size - int(shifts.max()))
-			if start >= stop:
-				raise ValueError("helical pitch leaves no detector rows valid across all projections")
 			output_rows = np.arange(start, stop)
-			shape = type(source_shape)(**{
-				**source_shape.as_dict(), "Y": len(output_rows),
-			})
 			output, remapped = allocate_output(
 				state, shape, data.dtype, role="helical_remap",
 			)
@@ -120,6 +124,8 @@ class HelicalIndexRemapStage(Stage):
 				remapped[layout.point_index(Theta=projection)][valid] = (
 					data[layout.point_index(Theta=projection)][source[valid]]
 				)
-		result = commit_output(state, output, retire_as=None)
+		result = commit_output(
+			state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+		)
 		result.artifacts["helical_row_shifts"] = shifts
 		return result

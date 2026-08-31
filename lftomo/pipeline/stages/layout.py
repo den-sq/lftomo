@@ -6,7 +6,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality, PipelineState, Stage, StageContract, allocate_output, commit_output,
+	BufferSpec, Locality, PipelineState, Stage, StageContract, allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import PRESERVE
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -56,13 +56,12 @@ class LayoutConvertStage(Stage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("layout.convert expects a three-dimensional tomography array")
-		input_shape = (
-			state.buffer_spec.shape
-			if state.buffer_spec is not None else state.layout(*data.shape)
-		)
+		input_shape = state.buffer_spec.shape
 		shape = input_shape.to(self.target)
 		output, converted = allocate_output(
 			state, shape, data.dtype, role=f"layout:{self.target.__name__}",
 		)
 		converted[...] = input_shape.transposed_view(data, self.target)
-		return commit_output(state, output, retire_as=None, layout=self.target)
+		return commit_output(
+			state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+		)

@@ -8,7 +8,7 @@ from scipy.ndimage import shift
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality, PadRequirement, PipelineState, Stage, StageContract,
+	BufferSpec, Locality, PadRequirement, PipelineState, Stage, StageContract,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -305,10 +305,7 @@ class AffineSkewMovementStage(Stage):
 			raise ValueError("fused affine transition requires a known tomography layout")
 		if input_layout is self.target_layout:
 			raise ValueError("fused affine transition must change layout")
-		source_shape = (
-			state.buffer_spec.shape
-			if state.buffer_spec is not None else input_layout(*data.shape)
-		)
+		source_shape = state.buffer_spec.shape
 		projection_count = source_shape.Theta
 		row_count = source_shape.Y
 		shape = self.output_shape(source_shape)
@@ -323,7 +320,8 @@ class AffineSkewMovementStage(Stage):
 				)
 			)
 		result = commit_output(
-			state, output_buffer, retire_as=None, layout=self.target_layout,
+			state, output_buffer, retire_as=None,
+			buffer_spec=BufferSpec(shape, data.dtype),
 		)
 		if state.source_window is not None:
 			result.source_window = self.output_window(state.source_window)

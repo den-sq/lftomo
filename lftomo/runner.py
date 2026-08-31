@@ -34,6 +34,7 @@ from lftomo.config import (
 )
 from lftomo.pipeline import (
 	Backend,
+	BufferSpec,
 	CandidateLimitError,
 	NumpyBackend,
 	Pipeline,
@@ -484,7 +485,10 @@ def _crop_to_window_interior(
 	if state.layout not in (ProjOrder, SinoOrder):
 		raise TypeError("window interior cropping requires projection or sinogram order")
 	view = values[state.layout.point_index(Y=interior)]
-	result = state.with_array(view)
+	shape = type(state.buffer_spec.shape)(**{
+		**state.buffer_spec.shape.as_dict(), "Y": len(range(*interior.indices(state.buffer_spec.shape.Y))),
+	})
+	result = state.with_array(view, buffer_spec=BufferSpec(shape, state.buffer_spec.dtype))
 	if state.source_window is not None:
 		result.source_window = state.source_window.with_pad(["Y"]).rescope(
 			pos=Y(window.pos.Y), shape=Y(window.shape.Y),

@@ -144,7 +144,7 @@ class StorageBackend(ABC):
 		"""Allocate storage, optionally using an explicitly proved named alias."""
 
 	@abstractmethod
-	def fork(self, source: Any, *, label: str) -> ManagedBuffer:
+	def fork(self, source: Any, *, shape: DataShape, label: str) -> ManagedBuffer:
 		"""Allocate an owned copy of ``source``."""
 
 	@abstractmethod

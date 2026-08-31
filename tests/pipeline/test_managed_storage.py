@@ -14,7 +14,7 @@ from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFS
 from lftomo.pipeline import PipelineState, Stage, StageContract
 from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
 from lftomo.util.mem import FileBackedNPArray, SharedNPArray, SharedNPManager
-from lftomo.util.shapes import ProjOrder
+from lftomo.util.shapes import ImgSlice, ProjOrder
 
 
 def _scan() -> Scan:
@@ -61,7 +61,7 @@ def _crashing_run(connection):
 	if hasattr(os, "setsid"):
 		os.setsid()
 	with PipelineRunContext() as context:
-		buffer = context.storage.allocate((2, 3), np.float32)
+		buffer = context.storage.allocate(ImgSlice(2, 3), np.float32)
 		connection.send(buffer.name)
 		connection.close()
 		while True:
@@ -91,10 +91,10 @@ def test_existing_shared_types_directly_implement_storage_contracts():
 	manager.start()
 	try:
 		assert isinstance(manager, StorageBackend)
-		buffer = manager.allocate((2, 3), np.float32)
+		buffer = manager.allocate(ImgSlice(2, 3), np.float32)
 		assert isinstance(buffer, ManagedBuffer)
 		buffer.array()[...] = np.arange(6, dtype=np.float32).reshape(2, 3)
-		fork = manager.fork(buffer, label="test-copy")
+		fork = manager.fork(buffer, shape=buffer.shape, label="test-copy")
 		np.testing.assert_array_equal(fork.array(), buffer.array())
 		assert fork.name != buffer.name
 	finally:
@@ -116,7 +116,7 @@ def test_shared_basic_view_keeps_named_extents_without_loading_shape_from_numpy(
 
 def test_pickled_handle_is_always_a_non_owning_attachment():
 	name = f"lftomo-pickle-{os.getpid()}-{time.time_ns()}"
-	owner = SharedNPArray(name, (2, 3), np.float32, allocate=True)
+	owner = SharedNPArray(name, ImgSlice(2, 3), np.float32, allocate=True)
 	try:
 		clone = pickle.loads(pickle.dumps(owner))
 		assert owner.owns_unlink
@@ -166,7 +166,7 @@ def _assert_numpy_protocol(buffer, expected, *, writeable):
 def test_managed_buffers_expose_an_honest_no_copy_numpy_protocol(tmp_path):
 	expected = np.arange(6, dtype=np.float32).reshape(2, 3)
 	with PipelineRunContext() as context:
-		shared = context.storage.allocate(expected.shape, expected.dtype)
+		shared = context.storage.allocate(ImgSlice(*expected.shape), expected.dtype)
 		shared.array()[...] = expected
 		_assert_numpy_protocol(shared, expected, writeable=True)
 
@@ -204,7 +204,7 @@ def test_run_context_unlinks_segments_after_exception():
 	name = None
 	with pytest.raises(RuntimeError, match="deliberate"):
 		with PipelineRunContext() as context:
-			buffer = context.storage.allocate((2, 3), np.float32)
+			buffer = context.storage.allocate(ImgSlice(2, 3), np.float32)
 			name = buffer.name
 			assert _segment_exists(name)
 			raise RuntimeError("deliberate")

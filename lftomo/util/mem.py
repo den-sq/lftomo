@@ -1,4 +1,4 @@
-from dataclasses import astuple, is_dataclass, replace, asdict
+from dataclasses import replace
 from functools import cached_property
 from multiprocessing.shared_memory import SharedMemory, ShareableList
 from multiprocessing.managers import SharedMemoryManager, BaseManager
@@ -34,10 +34,6 @@ _VIEW_SHAPES = {
 	("X",): X,
 	("Z",): Z,
 }
-
-
-def _shape_tuple(shape) -> tuple[int, ...]:
-	return tuple(astuple(shape)) if is_dataclass(shape) else tuple(shape)
 
 
 class SharedNPManager(SharedMemoryManager, StorageBackend):
@@ -129,7 +125,9 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 
 	def SharedNPArray(self, shape: DataShape, dtype: np.dtype, *create_with: tuple[DataShape, np.dtype]):
 		full_set = [(shape, dtype)] + list(create_with)
-		size = max([np.prod(_shape_tuple(shape)) * np.dtype(dtype).itemsize for (shape, dtype) in full_set])
+		if any(not isinstance(item_shape, DataShape) for item_shape, _dtype in full_set):
+			raise TypeError("shared allocations require DataShape instances")
+		size = max(item_shape.nbytes(item_dtype) for item_shape, item_dtype in full_set)
 		mem = self.SharedMemory(size)
 		self._physical[mem.name] = {
 			"capacity": int(size), "active_roles": set(), "pins": set(),
@@ -137,12 +135,14 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		result = [SharedNPArray(mem.name, shape, dtype) for (shape, dtype) in full_set]
 		return result[0] if len(result) == 1 else result
 
-	def allocate(self, shape, dtype, *, aliases=(), role=None, reuse_from=(),
+	def allocate(self, shape: DataShape, dtype, *, aliases=(), role=None, reuse_from=(),
 			alias_from=None, proof=None):
 		"""Allocate manager-owned storage using only named, proved alias paths."""
 
+		if not isinstance(shape, DataShape):
+			raise TypeError("shared allocations require a DataShape")
 		dtype = np.dtype(dtype)
-		required = int(np.prod(_shape_tuple(shape), dtype=np.float64) * dtype.itemsize)
+		required = shape.nbytes(dtype)
 		name = None
 		alias_kind = None
 		if self.enable_aliasing:
@@ -208,13 +208,11 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 			self._minimum_capacities.get(role, 0), int(capacity),
 		)
 
-	def fork(self, source, *, label: str):
+	def fork(self, source, *, shape: DataShape, label: str):
 		"""Return a manager-owned copy of an existing buffer."""
 
 		source_view = buffer_view(source)
-		result = self.allocate(
-			getattr(source, "shape", source_view.shape), source_view.dtype, role=label,
-		)
+		result = self.allocate(shape, source_view.dtype, role=label)
 		result.array()[...] = source_view
 		return result
 
@@ -280,6 +278,8 @@ class SharedNPArray(ManagedBuffer):
 	def __init__(self, name: str, shape: DataShape, dtype: np.dtype,
 					views: list = None, *, allocate: bool = False,
 					role: str | None = None):
+		if not isinstance(shape, DataShape):
+			raise TypeError("SharedNPArray.shape must be a DataShape")
 		self.__name = name
 		self.__shape = shape
 		self.__dtype = np.dtype(dtype)
@@ -293,24 +293,24 @@ class SharedNPArray(ManagedBuffer):
 		else:
 			self.__sm = SharedMemory(name=name)
 
-	def size(self, swap=None):
+	def size(self, swap: DataShape | None = None):
 		""" Size of array in memory.
 
-			:param swap: Tuple overriding shape parameters, for a custom size.
+			:param swap: Named extents overriding shape parameters for a custom size.
 			:retval: Size in bytes.
 		"""
 		if swap is None:
 			calc_shape = self.shape
-		elif is_dataclass(self.shape):
-			calc_shape = replace(self.shape, **asdict(swap))
 		else:
-			calc_shape = swap
-		return int(np.prod(_shape_tuple(calc_shape), dtype=np.float64) * self.__dtype.itemsize)
+			calc_shape = replace(self.shape, **swap.as_dict())
+		return calc_shape.nbytes(self.__dtype)
 
 	def __load(self) -> np.ndarray:
 		"""Allocates a numpy array in the shared memory."""
 		if self.__sm.buf is not None:
-			self.__ar = np.ndarray(shape=_shape_tuple(self.__shape), dtype=self.dtype, buffer=self.__sm.buf)
+			self.__ar = np.ndarray(
+				shape=self.__shape.as_tuple(), dtype=self.dtype, buffer=self.__sm.buf,
+			)
 			if self.has_views:
 				ar = self.__ar
 				for view in self.__views:

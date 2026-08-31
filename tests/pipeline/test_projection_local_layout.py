@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, MaterializationKind, Pipeline, PipelineState, validate_pipeline
+from lftomo.pipeline import BufferSpec, DataDomain, MaterializationKind, Pipeline, PipelineState, validate_pipeline
 from lftomo.pipeline.stages import (
 	BilateralFilterStage,
 	BronnikovAidedCorrectionStage,
@@ -48,7 +48,7 @@ def state(array, layout, config=None):
 		scan=scan_config(array.shape[0] if layout is ProjOrder else array.shape[1],
 			array.shape[1] if layout is ProjOrder else array.shape[0], array.shape[2]),
 		recon=Recon(pipeline=[config]),
-		layout=layout,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 		domain=DataDomain.TRANSMISSION,
 	)
 

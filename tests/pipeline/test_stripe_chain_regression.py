@@ -9,6 +9,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
+	BufferSpec,
 	DataDomain,
 	ExecutionKind,
 	Pipeline,
@@ -55,7 +56,7 @@ def _state(array: np.ndarray, layout: type) -> PipelineState:
 		working_array=array,
 		scan=_scan(theta, rows, array.shape[2]),
 		recon=Recon(pipeline=[StageConfig(kind="test")]),
-		layout=layout,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 		domain=DataDomain.ATTENUATION,
 	)
 
@@ -221,7 +222,7 @@ def _managed_vo_chain(workers: int):
 		state = PipelineState(
 			working, scan, _state(projection, ProjOrder).recon,
 			storage=context.storage, executor=context.executor,
-			layout=ProjOrder, domain=DataDomain.ATTENUATION,
+			domain=DataDomain.ATTENUATION,
 		)
 		result = Pipeline(
 			stages, scan=scan, initial_layout=ProjOrder,

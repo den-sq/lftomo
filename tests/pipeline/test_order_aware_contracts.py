@@ -3,6 +3,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
+	BufferSpec,
 	CompletePipelineError,
 	DataDomain,
 	DomainCompatibilityError,
@@ -82,15 +83,22 @@ def test_legacy_shape_fields_derive_layout_contract_defaults():
 	assert contract.output_layout(ProjOrder) is SinoOrder
 
 
-def test_with_array_preserves_explicit_layout_and_domain():
+def test_with_array_binds_new_spec_and_preserves_domain():
+	array = np.zeros((3, 2, 4))
 	state = PipelineState(
-		working_array=np.zeros((3, 2, 4)), scan=scan_config(), recon=recon_config(),
-		layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+		working_array=array, scan=scan_config(), recon=recon_config(),
+		buffer_spec=BufferSpec(ProjOrder(*array.shape), array.dtype),
+		domain=DataDomain.TRANSMISSION,
 	)
 
-	result = state.with_array(np.ones((3, 2, 4)))
+	replacement = np.ones((3, 2, 4))
+	result = state.with_array(
+		replacement, buffer_spec=BufferSpec(ProjOrder(*replacement.shape), replacement.dtype),
+	)
 
 	assert result.layout is ProjOrder
+	assert "layout" not in result.__dict__
+	assert not hasattr(result, "sync_buffer_spec")
 	assert result.domain is DataDomain.TRANSMISSION
 
 
@@ -116,9 +124,12 @@ def test_layout_convert_is_explicit_contiguous_and_visible_in_plan():
 		[stage], scan_config(), initial_layout=ProjOrder,
 		initial_domain=DataDomain.TRANSMISSION,
 	)
+	array = np.arange(24).reshape(3, 2, 4)
 	state = PipelineState(
-		working_array=np.arange(24).reshape(3, 2, 4), scan=scan_config(),
-		recon=recon_config(), layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+		working_array=array, scan=scan_config(),
+		recon=recon_config(),
+		buffer_spec=BufferSpec(ProjOrder(*array.shape), array.dtype),
+		domain=DataDomain.TRANSMISSION,
 	)
 
 	result = Pipeline([stage], validate=False).run(state)

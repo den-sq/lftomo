@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Backend, Pipeline, PipelineState
+from lftomo.pipeline import Backend, BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import AstraCudaStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -32,7 +32,7 @@ def _state(array, config, backend=None, layout=ProjOrder):
 		),
 		recon=Recon(pipeline=[config]),
 		backend=backend or Backend("cuda", supports_gpu=True),
-		layout=layout,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 	)
 
 

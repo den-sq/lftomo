@@ -159,7 +159,6 @@ def _bind_source_state(
 	*,
 	full_shape: ProjOrder,
 	dtype,
-	layout,
 	theta_start: int,
 	theta_stop: int,
 	theta_stride: int,
@@ -206,7 +205,7 @@ def _bind_source_state(
 			np.float32,
 			pad_after=planned.pad_after,
 		)
-	result = state.with_array(working, layout=layout, domain=DataDomain.RAW)
+	result = state.with_array(working, domain=DataDomain.RAW)
 	result.dataset = dataset
 	result.source_window = source_window
 	return result
@@ -355,7 +354,6 @@ class HDF5DxchangeReadStage(Stage):
 			memory,
 			full_shape=ProjOrder(Theta=theta_count, Y=rows, X=columns),
 			dtype=dtype,
-			layout=layout,
 			theta_start=self.theta_start,
 			theta_stop=theta_stop,
 			theta_stride=self.theta_stride,
@@ -480,7 +478,6 @@ class TIFFStackReadStage(Stage):
 			memory,
 			full_shape=ProjOrder(Theta=count, Y=rows, X=columns),
 			dtype=dtype,
-			layout=layout,
 			theta_start=self.theta_start,
 			theta_stop=theta_stop,
 			theta_stride=self.theta_stride,

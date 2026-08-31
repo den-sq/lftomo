@@ -15,6 +15,7 @@ import tifffile as tf
 import yaml
 
 from lftomo.pipeline import (
+	BufferSpec,
 	DataDomain,
 	NumpyBackend,
 	PipelineRunContext,
@@ -294,14 +295,18 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 			raise ValueError("phase-contrast input contains no projections")
 		state = PipelineState(
 			working_array=volume, scan=scan, recon=recon, backend=NumpyBackend(),
-			layout=ProjOrder, domain=DataDomain.ATTENUATION,
+			buffer_spec=BufferSpec(ProjOrder(*volume.shape), volume.dtype),
+			domain=DataDomain.ATTENUATION,
 		)
 		state = create_stage(stripe_config).run(state)
 		volume.flush()
 		read_start = int(read_config.params["y_start"])
 		local_start = min(selected) - read_start
 		local_stop = max(selected) - read_start + 1
-		state = state.with_array(volume[:, local_start:local_stop, :])
+		cropped = volume[:, local_start:local_stop, :]
+		state = state.with_array(
+			cropped, buffer_spec=BufferSpec(ProjOrder(*cropped.shape), cropped.dtype),
+		)
 		for config in post_configs:
 			state = create_stage(config).run(state)
 		return np.asarray(state.working_array).astype(np.float32, copy=True)
@@ -372,8 +377,6 @@ def run_reference_archive(root: str | Path, producer: str,
 		for config in recon.pipeline:
 			if config.kind == "read":
 				config.params.update({"y_start": window_start, "y_stop": window_stop, "order": "sinogram"})
-			elif config.kind == "recon":
-				config.params["sinogram_order"] = True
 		_resolve_flat_fields(scan, recon)
 		configs = [config for config in recon.pipeline if config.kind != "write"]
 		stages = [create_stage(config) for config in configs]
@@ -391,7 +394,13 @@ def run_reference_archive(root: str | Path, producer: str,
 				if not cropped and config.kind in {"center", "recon"}:
 					start = min(selected) - window_start
 					stop = max(selected) - window_start + 1
-					state = state.with_array(np.asarray(state.working_array)[start:stop].copy())
+					values = np.asarray(state.working_array)[start:stop].copy()
+					shape = type(state.buffer_spec.shape)(**{
+						**state.buffer_spec.shape.as_dict(), "Y": stop - start,
+					})
+					state = state.with_array(
+						values, buffer_spec=BufferSpec(shape, values.dtype),
+					)
 					cropped = True
 				state = stage.run(state)
 			if not cropped:

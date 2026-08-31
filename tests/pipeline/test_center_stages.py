@@ -5,7 +5,7 @@ import pytest
 import yaml
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	EntropyLocalCenterStage,
 	ManualCenterStage,
@@ -31,7 +31,7 @@ def _state(array, configs):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=configs),
-		layout=SinoOrder,
+		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	)
 
 

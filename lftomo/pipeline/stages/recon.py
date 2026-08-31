@@ -8,6 +8,7 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
+	BufferSpec,
 	Locality,
 	PipelineState,
 	ResourceHints,
@@ -191,7 +192,11 @@ class GridrecStage(Stage):
 			if not np.shares_memory(masked, target):
 				target[...] = masked
 		cropped = self._crop_buffer(output)
-		return commit_output(state, cropped, retire_as=None, layout=ReconOrder)
+		shape = ReconOrder(*np.asarray(cropped).shape)
+		return commit_output(
+			state, cropped, retire_as=None,
+			buffer_spec=BufferSpec(shape, np.dtype(np.float32)),
+		)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":

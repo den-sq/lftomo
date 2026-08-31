@@ -20,6 +20,9 @@ unified.
    shape store; it keeps its accepts/produces surface unchanged.
 2. **`with_array` binds shape at handoff** — array and DataRef enter the
    state together; no post-hoc reconciliation. Delete `sync_buffer_spec()`.
+   `PipelineState` does not accept a `layout` compatibility input: typed
+   managed buffers provide their spec directly, non-empty plain arrays require
+   an explicit `BufferSpec`, and only the empty pre-read state may have no spec.
 3. **`BufferSpec` in planning unifies** with the same frozen DataRef-spec —
    removes the `shape: Any` and the `_shape_tuple` decompose helpers
    (planning.py:104, mem.py:29, core.py:270; the fourth copy at core.py:349

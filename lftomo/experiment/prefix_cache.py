@@ -24,6 +24,7 @@ from pydantic import Field, model_validator
 
 from lftomo.config import ConfigModel, StageConfig
 from lftomo.pipeline import (
+	BufferSpec,
 	ExecutionSpanObserver,
 	Pipeline,
 	PipelineState,
@@ -489,7 +490,10 @@ def _clone_initial_state(state: PipelineState) -> PipelineState:
 	working = np.asarray(state.working_array)
 	working_copy = (
 		working.copy() if state.storage is None or working.size == 0 else
-		state.storage.fork(state.working_array, label="experiment.prefix-fork")
+		state.storage.fork(
+			state.working_array, shape=state.buffer_spec.shape,
+			label="experiment.prefix-fork",
+		)
 	)
 	return PipelineState(
 		working_array=working_copy,
@@ -501,7 +505,6 @@ def _clone_initial_state(state: PipelineState) -> PipelineState:
 		dataset=copy.deepcopy(state.dataset),
 		source_window=copy.deepcopy(state.source_window),
 		buffer_spec=copy.deepcopy(state.buffer_spec),
-		layout=state.layout,
 		domain=state.domain,
 	)
 
@@ -672,13 +675,17 @@ class PrefixCacheStore:
 		except Exception as error:
 			raise PrefixCacheIntegrityError(f"snapshot cannot be loaded: {error}") from error
 		if not isinstance(payload, dict) or not {
-			"artifacts", "scan", "recon_metadata", "layout", "domain",
+			"artifacts", "scan", "recon_metadata", "buffer_spec",
+			"managed_artifact_specs", "domain",
 		}.issubset(payload):
 			raise PrefixCacheIntegrityError("snapshot state payload is incomplete")
 		if requires_copy:
 			working = (
 				np.array(mapped.array(), copy=True) if current.storage is None else
-				current.storage.fork(mapped, label="experiment.cache-fork")
+				current.storage.fork(
+					mapped, shape=payload["buffer_spec"].shape,
+					label="experiment.cache-fork",
+				)
 			)
 			mapped.close()
 		else:
@@ -687,10 +694,12 @@ class PrefixCacheStore:
 		for name, relative in manifest.artifact_files.items():
 			artifact_map = FileBackedNPArray(entry / relative)
 			if requires_copy:
+				artifact_spec = payload["managed_artifact_specs"][name]
 				artifacts[name] = (
 					np.array(artifact_map.array(), copy=True) if current.storage is None else
 					current.storage.fork(
-						artifact_map, label=f"experiment.cache-artifact:{name}",
+						artifact_map, shape=artifact_spec.shape,
+						label=f"experiment.cache-artifact:{name}",
 					)
 				)
 				artifact_map.close()
@@ -708,7 +717,6 @@ class PrefixCacheStore:
 			dataset=copy.deepcopy(payload.get("dataset")),
 			source_window=copy.deepcopy(payload.get("source_window")),
 			buffer_spec=copy.deepcopy(payload.get("buffer_spec")),
-			layout=payload["layout"],
 			domain=payload["domain"],
 		)
 		return state, manifest, time.perf_counter() - started
@@ -767,6 +775,10 @@ class PrefixCacheStore:
 					})),
 				)
 			state_path = build / "state.pkl"
+			managed_artifact_specs = {
+				name: BufferSpec(state.artifacts[name].shape, state.artifacts[name].dtype)
+				for name in managed_artifacts
+			}
 			_write_bytes(state_path, pickle.dumps({
 				"artifacts": _snapshot_value(ordinary_artifacts),
 				"scan": state.scan.model_copy(deep=True),
@@ -774,7 +786,7 @@ class PrefixCacheStore:
 				"dataset": copy.deepcopy(state.dataset),
 				"source_window": copy.deepcopy(state.source_window),
 				"buffer_spec": copy.deepcopy(state.buffer_spec),
-				"layout": state.layout,
+				"managed_artifact_specs": managed_artifact_specs,
 				"domain": state.domain,
 			}, protocol=pickle.HIGHEST_PROTOCOL))
 			array_bytes = array_path.stat().st_size

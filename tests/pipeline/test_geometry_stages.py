@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	AffineSkewMovementStage,
 	MovementCorrectStage,
@@ -27,7 +27,7 @@ def _state(array, config, layout=SinoOrder):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		layout=layout,
+		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 	)
 
 

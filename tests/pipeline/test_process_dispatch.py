@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, Pipeline, PipelineRunContext, PipelineState
+from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.core import Locality, Stage, StageContract
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.pipeline.execution import (
@@ -30,7 +30,7 @@ from lftomo.pipeline.stages import (
 	_build_stage_dispatch,
 )
 from lftomo.storage import ManagedBuffer
-from lftomo.util.shapes import ProjOrder, ReconOrder
+from lftomo.util.shapes import ProjOrder, ReconOrder, X
 from lftomo.util.window import TomoWindow
 
 
@@ -129,7 +129,8 @@ def test_ndarray_bounded_segment_checks_cancellation_before_each_kernel():
 	state = PipelineState(
 		np.ones((2, 3, 4), dtype=np.float32),
 		_scan(theta=2, rows=3, columns=4), _recon(),
-		layout=ProjOrder, domain=DataDomain.ATTENUATION,
+		buffer_spec=BufferSpec(ProjOrder(2, 3, 4), np.dtype(np.float32)),
+		domain=DataDomain.ATTENUATION,
 	)
 	checkpoints = []
 	run_bounded_sinogram_segment(
@@ -151,7 +152,8 @@ def test_engine_internal_core_budget_is_scoped_to_the_call(monkeypatch):
 	monkeypatch.setattr(stage, "run", capture)
 	state = PipelineState(
 		np.ones((4, 2, 8), dtype=np.float32), _scan(theta=4), _recon(),
-		layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+		buffer_spec=BufferSpec(ProjOrder(4, 2, 8), np.dtype(np.float32)),
+		domain=DataDomain.TRANSMISSION,
 	)
 	PipelineExecutor(2).run_stage(state, stage)
 	assert seen == [2]
@@ -166,7 +168,7 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 		raw.array()[...] = 10
 		state = PipelineState(
 			raw, scan, _recon(), storage=context.storage, executor=context.executor,
-			layout=ProjOrder, domain=DataDomain.RAW,
+			domain=DataDomain.RAW,
 			artifacts={"projection_start": 2, "projection_count": 10},
 		)
 		captured = []
@@ -200,7 +202,9 @@ def test_process_phase_chain_matches_intentionally_coupled_stage():
 	scan = _scan(theta=4)
 	expected = values.copy()
 	PaganinStage(alpha=0.06).run(PipelineState(
-		expected, scan, _recon(), layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+		expected, scan, _recon(),
+		buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
+		domain=DataDomain.TRANSMISSION,
 	))
 	with PipelineRunContext(max_workers=2) as context:
 		working = context.storage.allocate(
@@ -209,7 +213,7 @@ def test_process_phase_chain_matches_intentionally_coupled_stage():
 		working.array()[...] = values
 		state = PipelineState(
 			working, scan, _recon(), storage=context.storage, executor=context.executor,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			domain=DataDomain.TRANSMISSION,
 		)
 		state = context.executor.run_stage(state, PaganinFilterStage(alpha=0.06))
 		state = context.executor.run_stage(state, NegativeLogStage())
@@ -249,14 +253,16 @@ class BronnikovAidedCorrection:
 	scan = _scan(theta=4, rows=8, columns=8)
 	expected = values.copy()
 	BronnikovAidedCorrectionStage(alpha=2, gamma=1.25).run(PipelineState(
-		expected, scan, _recon(), layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+		expected, scan, _recon(),
+		buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
+		domain=DataDomain.TRANSMISSION,
 	))
 	with PipelineRunContext(max_workers=2) as context:
 		working = context.storage.allocate(ProjOrder(4, 8, 8), np.float32, role="normalized")
 		working.array()[...] = values
 		state = PipelineState(
 			working, scan, _recon(), storage=context.storage, executor=context.executor,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			domain=DataDomain.TRANSMISSION,
 		)
 		state = context.executor.run_stage(
 			state, BronnikovAidedCorrectionFilterStage(alpha=2, gamma=1.25),
@@ -272,15 +278,18 @@ def test_process_beam_tracking_matches_serial_and_merges_qc():
 	scan.metadata["flat_fields"][1] += 2 * gradient
 	values = np.full((6, 64, 64), 10, dtype=np.uint16)
 	params = {"schedule": {"kind": "linear", "alpha": 0, "beta": 1}}
+	expected = values.copy()
 	expected_state = BeamTrackingNormalizeStage(**params).run(PipelineState(
-		values.copy(), scan, _recon(), layout=ProjOrder, domain=DataDomain.RAW,
+		expected, scan, _recon(),
+		buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
+		domain=DataDomain.RAW,
 	))
 	with PipelineRunContext(max_workers=2) as context:
 		working = context.storage.allocate(ProjOrder(6, 64, 64), np.uint16, role="raw_staging")
 		working.array()[...] = values
 		state = PipelineState(
 			working, scan, _recon(), storage=context.storage, executor=context.executor,
-			layout=ProjOrder, domain=DataDomain.RAW,
+			domain=DataDomain.RAW,
 		)
 		result = context.executor.run_stage(state, BeamTrackingNormalizeStage(**params))
 		np.testing.assert_allclose(
@@ -306,8 +315,10 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		ProjOrder(4, 6, 8), ProjOrder(0, 0, 0), ProjOrder(0, 0, 0),
 		ProjOrder(1, 1, 1), np.float32, np.float32,
 	)
+	expected_values = values.copy()
 	expected = stage.run(PipelineState(
-		values.copy(), scan, _recon(), layout=ProjOrder,
+		expected_values, scan, _recon(),
+		buffer_spec=BufferSpec(ProjOrder(*expected_values.shape), expected_values.dtype),
 		domain=DataDomain.TRANSMISSION, source_window=source_window,
 	))
 	with PipelineRunContext(max_workers=2) as context:
@@ -315,7 +326,7 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		working.array()[...] = values
 		state = PipelineState(
 			working, scan, _recon(), storage=context.storage, executor=context.executor,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			domain=DataDomain.TRANSMISSION,
 			source_window=source_window,
 		)
 		captured = []
@@ -345,7 +356,7 @@ def test_bounded_process_child_mutation_is_visible_in_parent():
 		state = PipelineState(
 			working, _scan(theta=4, rows=3, columns=5), _recon(),
 			storage=context.storage, executor=context.executor,
-			layout=ProjOrder, domain=DataDomain.TRANSMISSION,
+			domain=DataDomain.TRANSMISSION,
 		)
 		run_bounded_sinogram_segment(
 			state, [_AddSinogramStage()], executor=context.executor,
@@ -362,7 +373,7 @@ def test_tiff_process_dispatch_passes_handles_not_slices(tmp_path, monkeypatch):
 		state = PipelineState(
 			working, _scan(theta=2, rows=2, columns=4), _recon(tmp_path),
 			storage=context.storage, executor=context.executor,
-			layout=ReconOrder, domain=DataDomain.RECON,
+			domain=DataDomain.RECON,
 		)
 		captured = []
 
@@ -383,7 +394,7 @@ def test_tiff_process_dispatch_passes_handles_not_slices(tmp_path, monkeypatch):
 
 def test_timeout_kills_writer_and_recreates_pool():
 	with PipelineRunContext(max_workers=1) as context:
-		working = context.storage.allocate((1,), np.int64, role="test")
+		working = context.storage.allocate(X(1), np.int64, role="test")
 		executor = PipelineExecutor(1, timeout_seconds=0.2, context="spawn")
 		try:
 			with pytest.raises(WorkerTimeoutError):
