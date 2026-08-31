@@ -159,6 +159,20 @@ class DataRef(object):
 			shape=self.shape + expansion + expansion,
 		)
 
+	def with_crop(self, before: DataShape, after: DataShape) -> Self:
+		"""Return the positive interval left after an asymmetric axis crop."""
+
+		zero = self.shape.make_with(0)
+		before = replace(zero, **asdict(before))
+		after = replace(zero, **asdict(after))
+		if any(value < 0 for value in (*before.as_tuple(), *after.as_tuple())):
+			raise ValueError("crop extents cannot be negative")
+		shape = self.shape - before - after
+		if any(value < 1 for value in shape.as_tuple()):
+			raise ValueError("crop must retain a positive extent on every axis")
+		position = self.pos + before.extract(self.pos)
+		return self.rescope(pos=position, shape=shape)
+
 	def int_iter(self) -> Iterator:
 		return self.frange.get_iter(conv=IntIter)
 

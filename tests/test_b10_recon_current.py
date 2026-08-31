@@ -169,8 +169,11 @@ def test_streaming_bac_matches_current_driver_at_fixed_window_extent(tmp_path, m
 
 	import tomopy
 
-	monkeypatch.setattr(tomopy, "recon", lambda data, *args, **kwargs:
-		reconstruct(data, None, None, None))
+	def tomopy_reconstruct(data, *args, **kwargs):
+		kwargs["init_recon"][...] = reconstruct(data, None, None, None)
+		return kwargs["init_recon"]
+
+	monkeypatch.setattr(tomopy, "recon", tomopy_reconstruct)
 	result = run_reconstruction(
 		pipeline_path, scan_path, streaming_output,
 		window_config=WindowConfig(rows=window_rows),

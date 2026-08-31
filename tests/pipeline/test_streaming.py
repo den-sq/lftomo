@@ -226,9 +226,10 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 
 	def reconstruct(data, *args, **kwargs):
 		reconstruction_inputs.append(tuple(data.shape))
-		return np.repeat(
+		kwargs["init_recon"][...] = np.repeat(
 			np.asarray(data).mean(axis=0)[:, None, :], data.shape[2], axis=1,
 		)
+		return kwargs["init_recon"]
 
 	monkeypatch.setattr(tomopy, "recon", reconstruct)
 	whole_output = tmp_path / "whole"

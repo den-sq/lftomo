@@ -19,7 +19,8 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.runtime import ASTRA_RUNTIME_REQUIREMENT, tomopy_requirement
-from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder, X
+from lftomo.util.window import TomoWindow
 
 
 class GridrecStage(Stage):
@@ -115,55 +116,59 @@ class GridrecStage(Stage):
 			raise ValueError(f"gridrec center array must contain one value for each of {slice_count} slices")
 		return values
 
-	def _prepare_input(self, data: np.ndarray,
-			center: float | np.ndarray) -> tuple[np.ndarray, float | np.ndarray]:
-		if not self.edge_buffer_input:
-			return data, center
-		left = self.edge_buffer_left
-		right = data.shape[2] - self.edge_buffer_right
-		if left >= right:
+	def output_geometry(
+		self, source_shape: ProjOrder | SinoOrder,
+		source_window: TomoWindow | None = None,
+	) -> tuple[ReconOrder, ReconOrder, slice, slice]:
+		"""Return allocation/output shapes and their input/output X views."""
+
+		if source_window is None:
+			width, input_offset = source_shape.X, 0
+		else:
+			width = source_window.recon_shape().X
+			input_offset = source_window.internal.axis_slice("X").start
+		edge_stop = width - self.edge_buffer_right
+		if self.edge_buffer_left >= edge_stop:
 			raise ValueError("gridrec edge buffers remove the entire reconstruction width")
-		return data[:, :, left:right], center
-
-	def _crop(self, reconstruction: np.ndarray) -> np.ndarray:
-		if not self.edge_buffer_input:
-			left = self.edge_buffer_left
-			right = reconstruction.shape[2] - self.edge_buffer_right
-			if left >= right:
-				raise ValueError("gridrec edge buffers remove the entire reconstruction width")
-			reconstruction = reconstruction[:, :, left:right]
+		input_start, input_stop = (
+			(self.edge_buffer_left, edge_stop) if self.edge_buffer_input else (0, width)
+		)
+		output_start, output_stop = (
+			(0, input_stop - input_start)
+			if self.edge_buffer_input else (self.edge_buffer_left, edge_stop)
+		)
 		if self.output_width is not None:
-			if self.output_width > reconstruction.shape[2]:
+			if self.output_width > output_stop - output_start:
 				raise ValueError("gridrec output_width exceeds the reconstructed width")
-			extra = reconstruction.shape[2] - self.output_width
-			start = extra // 2
-			reconstruction = reconstruction[:, :, start:start + self.output_width]
-		return reconstruction
+			output_start += (output_stop - output_start - self.output_width) // 2
+			output_stop = output_start + self.output_width
 
-	def _crop_buffer(self, reconstruction):
-		"""Return a basic managed view matching ``_crop`` without copying."""
-
-		width = getattr(reconstruction.shape, "X", None)
-		if width is None:
-			width = reconstruction.shape[2]
-		left = 0 if self.edge_buffer_input else self.edge_buffer_left
-		right = width if self.edge_buffer_input else width - self.edge_buffer_right
-		if left >= right:
-			raise ValueError("gridrec edge buffers remove the entire reconstruction width")
-		if self.output_width is not None:
-			if self.output_width > right - left:
-				raise ValueError("gridrec output_width exceeds the reconstructed width")
-			extra = (right - left) - self.output_width
-			left += extra // 2
-			right = left + self.output_width
-		return reconstruction[:, :, left:right]
+		if source_window is None:
+			allocation = ReconOrder.of(
+				source_shape - X(input_start + width - input_stop)
+			)
+			output = allocation - X(allocation.X - output_stop + output_start)
+		else:
+			input_window = source_window.with_crop(
+				X(input_start), X(width - input_stop),
+			)
+			allocation = input_window.recon_shape()
+			output_window = input_window.with_crop(
+				X(output_start), X(input_window.shape.X - output_stop),
+			)
+			output = allocation - X(allocation.X - output_window.shape.X)
+		input_offset = (
+			0 if source_window is None else source_window.internal.axis_slice("X").start
+		)
+		return (
+			allocation, output,
+			slice(input_offset + input_start, input_offset + input_stop),
+			slice(output_start, output_stop),
+		)
 
 	def _allocate_reconstruction(
-		self, state: PipelineState, data: np.ndarray, layout: type,
+		self, state: PipelineState, shape: ReconOrder,
 	):
-		slice_count = data.shape[layout.axis_of("Y")]
-		width = data.shape[layout.axis_of("X")]
-		shape = ReconOrder(Y=slice_count, Z=width, X=width)
 		current_role = getattr(state.working_array, "role", None)
 		can_alias_input = state.layout is ProjOrder and current_role == "normalized"
 		return allocate_output(
@@ -176,23 +181,19 @@ class GridrecStage(Stage):
 			proof="tomopy_input_materialization" if can_alias_input else None,
 		)
 
-	def _finish_reconstruction(self, state: PipelineState, output, target: np.ndarray,
-			reconstruction, tomopy, *, ncore: int | None) -> PipelineState:
-		values = np.asarray(reconstruction, dtype=np.float32)
-		if not np.shares_memory(values, target):
-			target[...] = values
+	def _finish_reconstruction(
+		self, state: PipelineState, output, target: np.ndarray, tomopy,
+		shape: ReconOrder, output_x: slice, *, ncore: int | None,
+	) -> PipelineState:
 		if self.circle_mask:
-			masked = np.asarray(tomopy.circ_mask(
+			tomopy.circ_mask(
 				target,
 				axis=0,
 				ratio=self.circle_mask_ratio,
 				val=self.circle_mask_value,
 				ncore=ncore,
-			), dtype=np.float32)
-			if not np.shares_memory(masked, target):
-				target[...] = masked
-		cropped = self._crop_buffer(output)
-		shape = ReconOrder(*np.asarray(cropped).shape)
+			)
+		cropped = output[ReconOrder.point_index(X=output_x)]
 		return commit_output(
 			state, cropped, retire_as=None,
 			buffer_spec=BufferSpec(shape, np.dtype(np.float32)),
@@ -205,18 +206,21 @@ class GridrecStage(Stage):
 		if data.ndim != 3:
 			raise ValueError("recon.gridrec expects a three-dimensional tomography array")
 		layout = type(state.buffer_spec.shape)
+		allocation_shape, output_shape, input_x, output_x = self.output_geometry(
+			state.buffer_spec.shape, state.source_window,
+		)
+		data = data[layout.point_index(X=input_x)]
 		sinogram_order = layout is SinoOrder
 		angles = self._angles(state, data.shape[layout.axis_of("Theta")])
 		center = self._center(state, data.shape[layout.axis_of("Y")])
-		data, center = self._prepare_input(data, center)
 
 		import tomopy
 
 		kwargs = {"filter_name": self.filter_name}
 		if self.filter_parameters is not None:
 			kwargs["filter_par"] = self.filter_parameters
-		output, target = self._allocate_reconstruction(state, data, layout)
-		reconstruction = tomopy.recon(
+		output, target = self._allocate_reconstruction(state, allocation_shape)
+		tomopy.recon(
 			data,
 			angles,
 			center=center,
@@ -227,7 +231,7 @@ class GridrecStage(Stage):
 			**kwargs,
 		)
 		return self._finish_reconstruction(
-			state, output, target, reconstruction, tomopy, ncore=self.ncore,
+			state, output, target, tomopy, output_shape, output_x, ncore=self.ncore,
 		)
 
 
@@ -297,10 +301,13 @@ class AstraCudaStage(GridrecStage):
 		if data.ndim != 3:
 			raise ValueError(f"{self.name} expects a three-dimensional tomography array")
 		layout = type(state.buffer_spec.shape)
+		allocation_shape, output_shape, input_x, output_x = self.output_geometry(
+			state.buffer_spec.shape, state.source_window,
+		)
+		data = data[layout.point_index(X=input_x)]
 		sinogram_order = layout is SinoOrder
 		angles = self._angles(state, data.shape[layout.axis_of("Theta")])
 		center = self._center(state, data.shape[layout.axis_of("Y")])
-		data, center = self._prepare_input(data, center)
 
 		import tomopy
 
@@ -314,8 +321,8 @@ class AstraCudaStage(GridrecStage):
 		kwargs = {"filter_name": self.filter_name}
 		if self.filter_parameters is not None:
 			kwargs["filter_par"] = self.filter_parameters
-		output, target = self._allocate_reconstruction(state, data, layout)
-		reconstruction = tomopy.recon(
+		output, target = self._allocate_reconstruction(state, allocation_shape)
+		tomopy.recon(
 			data,
 			angles,
 			center=center,
@@ -327,7 +334,7 @@ class AstraCudaStage(GridrecStage):
 			**kwargs,
 		)
 		return self._finish_reconstruction(
-			state, output, target, reconstruction, tomopy, ncore=1,
+			state, output, target, tomopy, output_shape, output_x, ncore=1,
 		)
 
 

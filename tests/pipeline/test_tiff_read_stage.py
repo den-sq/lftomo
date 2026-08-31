@@ -237,9 +237,13 @@ def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch)
 	)
 	seen_angles = []
 
-	def recon(data, angles, **_kwargs):
+	def recon(data, angles, **kwargs):
 		seen_angles.append(np.asarray(angles).copy())
-		return np.ones((data.shape[0], data.shape[2], data.shape[2]), dtype=np.float32)
+		target = kwargs.get("init_recon")
+		if target is None:
+			return np.ones((data.shape[0], data.shape[2], data.shape[2]), dtype=np.float32)
+		target.fill(1)
+		return target
 
 	monkeypatch.setattr("tomopy.recon", recon)
 	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)

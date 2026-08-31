@@ -196,16 +196,11 @@ def stage_output_spec(
 				shape, pitch, source_window,
 			)
 	elif stage.name.startswith("recon."):
-		slices = shape.Y
-		base_width = shape.X
-		if getattr(stage, "edge_buffer_input", False):
-			base_width -= stage.edge_buffer_left + stage.edge_buffer_right
-		output_width = base_width
-		if not getattr(stage, "edge_buffer_input", False):
-			output_width -= stage.edge_buffer_left + stage.edge_buffer_right
-		if stage.output_width is not None:
-			output_width = stage.output_width
-		shape = ReconOrder(Y=slices, Z=base_width, X=output_width)
+		geometry = getattr(stage, "output_geometry", None)
+		shape = (
+			ReconOrder.of(shape) if geometry is None
+			else geometry(shape, source_window)[1]
+		)
 		dtype = np.dtype(np.float32)
 	elif stage.name.startswith("super_resolve."):
 		dtype = np.dtype(np.float32)
@@ -214,18 +209,18 @@ def stage_output_spec(
 
 def stage_allocation_spec(
 	stage: Stage, input_spec: BufferSpec | None, output_spec: BufferSpec | None,
+	*, source_window: TomoWindow | None = None,
 ) -> BufferSpec | None:
 	"""Return the physical allocation spec when the published output is a view."""
 
 	if input_spec is None or output_spec is None or not stage.name.startswith("recon."):
 		return output_spec
-	slices = input_spec.shape.Y
-	width = input_spec.shape.X
-	if getattr(stage, "edge_buffer_input", False):
-		width -= stage.edge_buffer_left + stage.edge_buffer_right
-	return BufferSpec(
-		ReconOrder(Y=slices, Z=width, X=width), np.dtype(np.float32),
+	geometry = getattr(stage, "output_geometry", None)
+	shape = (
+		ReconOrder.of(input_spec.shape) if geometry is None
+		else geometry(input_spec.shape, source_window)[0]
 	)
+	return BufferSpec(shape, np.dtype(np.float32))
 
 
 def _transition_role(stage: Stage) -> tuple[str | None, str | None]:

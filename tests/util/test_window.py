@@ -245,6 +245,9 @@ def test_window_coordinate_operations_share_the_existing_dataref_model():
 	assert list(rescoped.int_iter()) == list(range(30, 70))
 	assert list(rescoped.slice_iter()) == [np.s_[:, y, :] for y in range(30, 70)]
 
+	cropped = window.with_crop(X(1), X(2))
+	assert cropped.shape.X == 3
+
 
 def test_nondivisible_selection_emits_a_short_final_unpadded_window():
 	selection = Y.drange(100, 1000, 400)

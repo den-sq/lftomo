@@ -59,7 +59,8 @@ def test_astra_stage_passes_bridge_options_and_iterations(monkeypatch):
 
 	def recon(data, angles, **kwargs):
 		calls.update(kwargs)
-		return np.ones((2, 8, 8), dtype=np.float32)
+		kwargs["init_recon"].fill(1)
+		return kwargs["init_recon"]
 
 	monkeypatch.setattr("tomopy.recon", recon)
 	backend = Backend("cuda", supports_gpu=True)
