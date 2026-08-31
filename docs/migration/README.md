@@ -31,6 +31,18 @@ identifiers from the breakout; they do not imply order — the waves do.
 Waves 0 and A are filed; later waves are filed as their predecessors near
 completion. One GitHub milestone per wave.
 
+Filed so far (2026-08-31):
+
+| B-id | issue | milestone |
+|---|---|---|
+| B1 | #240 | Wave 0 |
+| B2 | #241 | Wave 0 |
+| B3 | #242 | Wave 0 |
+| B4 | #243 | Wave A |
+| B5 | #244 | Wave A |
+| B11 | #245 | Wave A |
+| B12 | #246 | Wave A |
+
 ```
 B1,B2,B3 (parallel, alongside Wave A)
 Wave A:        B2 → B4 → B5 → B11 → B12
