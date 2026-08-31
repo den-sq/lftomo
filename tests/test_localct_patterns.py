@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,22 @@ def test_run_summary_json_roundtrip(tmp_path):
 	write_run_summary(summary, path)
 
 	assert read_run_summary(path) == summary
+	assert RunSummary.from_document(summary.to_document()) == summary
+	assert path.read_text() == json.dumps({
+		"request": {
+			"session_path": str(tmp_path / "session"),
+			"recon_config": str(tmp_path / "recon.yaml"),
+			"output_path": str(tmp_path / "output"),
+			"scan_config": str(tmp_path / "scan.yaml"),
+			"metadata": {"lineage": "localCT-pattern"},
+		},
+		"result": {
+			"output_path": str(tmp_path / "output"),
+			"artifacts": {"slice": str(tmp_path / "output" / "slice_0001.tif")},
+			"metrics": {"seconds": 1.25}, "status": "success",
+		},
+		"metadata": {"status": "demo"},
+	}, indent=2, sort_keys=True)
 
 
 def test_tomopy_runtime_check_is_structured():
