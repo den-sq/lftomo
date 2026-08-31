@@ -231,7 +231,8 @@ class Z(DataShape): Z: int 	 # noqa: E701,E702
 class GenericOrder(DataShape): A: int; B: int; C: int 	 # noqa: E701,E702
 
 
-# ????
+# Deprecated: retained for import compatibility only.
+# Removal: delete in the next breaking release; do not add new consumers.
 NPString = namedtuple("NPString", 'T')
 
 
