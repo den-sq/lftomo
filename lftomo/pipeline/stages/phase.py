@@ -22,7 +22,7 @@ from lftomo.pipeline.layout import (
 	resolve_layout,
 )
 from lftomo.storage import buffer_view
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ImgSlice, ProjOrder, SinoOrder
 
 
 def _managed_phase_filter(
@@ -36,7 +36,8 @@ def _managed_phase_filter(
 		return values
 	previous = state.artifacts.get("phase_filter")
 	artifact = state.storage.allocate(
-		values.shape, values.dtype, role="phase_filter", reuse_from=("phase_filter",),
+		ImgSlice(*values.shape), values.dtype,
+		role="phase_filter", reuse_from=("phase_filter",),
 	)
 	artifact.array()[...] = values
 	state.artifacts["phase_filter"] = artifact

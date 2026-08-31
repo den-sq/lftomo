@@ -495,7 +495,7 @@ def _crop_to_window_interior(
 	center = result.artifacts.get("center")
 	if center is not None:
 		center_values = np.asarray(center)
-		row_count = values.shape[1] if state.layout is ProjOrder else values.shape[0]
+		row_count = state.buffer_spec.shape.Y
 		if center_values.ndim == 1 and len(center_values) == row_count:
 			result.artifacts["center"] = center_values[interior]
 	core = window.index[1]

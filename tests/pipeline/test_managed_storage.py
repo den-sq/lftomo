@@ -42,6 +42,17 @@ class _IncrementStage(Stage):
 		return state
 
 
+class _UntypedBuffer(ManagedBuffer):
+	shape = (2, 3)
+	dtype = np.dtype(np.float32)
+
+	def array(self):
+		return np.empty(self.shape, dtype=self.dtype)
+
+	def __getitem__(self, view):
+		return self
+
+
 def _run_increment(buffer, scan, recon):
 	_IncrementStage().run(PipelineState(buffer, scan, recon))
 
@@ -88,6 +99,19 @@ def test_existing_shared_types_directly_implement_storage_contracts():
 		assert fork.name != buffer.name
 	finally:
 		manager.shutdown()
+
+
+def test_pipeline_state_rejects_an_untyped_managed_buffer_at_the_storage_seam():
+	with pytest.raises(TypeError, match="ManagedBuffer.shape must be a DataShape"):
+		PipelineState(_UntypedBuffer(), _scan(), _recon())
+
+
+def test_shared_basic_view_keeps_named_extents_without_loading_shape_from_numpy():
+	with PipelineRunContext() as context:
+		buffer = context.storage.allocate(ProjOrder(Theta=4, Y=5, X=6), np.float32)
+		view = buffer[1:3, :, 2:6:2]
+
+		assert view.shape == ProjOrder(Theta=2, Y=5, X=2)
 
 
 def test_pickled_handle_is_always_a_non_owning_attachment():

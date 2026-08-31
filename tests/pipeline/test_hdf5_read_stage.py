@@ -14,7 +14,7 @@ from lftomo.config import (
 from lftomo.pipeline import NumpyBackend, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet
 
 
@@ -66,8 +66,8 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	assert "read.hdf5_dxchange" in STAGE_REGISTRY
 	assert stage.contract.produced_output is SinoOrder
 	np.testing.assert_array_equal(result.working_array, np.transpose(data[1:3, 2:5, :], (1, 0, 2)))
-	assert result.artifacts["white_fields"].shape == (2, 3, size)
-	assert result.artifacts["dark_fields"].shape == (2, 3, size)
+	assert result.artifacts["white_fields"].shape == GenericOrder(2, 3, size)
+	assert result.artifacts["dark_fields"].shape == GenericOrder(2, 3, size)
 	assert isinstance(result.artifacts["white_fields"], SharedNPArray)
 	assert isinstance(result.artifacts["dark_fields"], SharedNPArray)
 	assert result.artifacts["hdf5_read_strategy"] == "bounded_scratch"

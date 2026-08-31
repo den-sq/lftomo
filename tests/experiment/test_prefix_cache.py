@@ -37,7 +37,7 @@ from lftomo.experiment.runner import ExperimentInputs, TrialExecution
 from lftomo.pipeline import Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
-from lftomo.util.shapes import ProjOrder
+from lftomo.util.shapes import ProjOrder, X
 
 
 class SourceStage(Stage):
@@ -294,7 +294,7 @@ def _crashing_cached_trial(connection, scratch):
 		initial.storage = context.storage
 		initial.executor = context.executor
 		initial.working_array = context.storage.allocate(
-			values.shape, values.dtype, role="trial-input",
+			ProjOrder(*values.shape), values.dtype, role="trial-input",
 		)
 		np.asarray(initial.working_array)[...] = values
 		executor.execute(
@@ -465,7 +465,7 @@ def test_cache_fork_is_manager_issued_and_identity_ignores_buffer_name(tmp_path)
 			initial.storage = context.storage
 			initial.executor = context.executor
 			initial.working_array = context.storage.allocate(
-				values.shape, values.dtype, role=role,
+				ProjOrder(*values.shape), values.dtype, role=role,
 			)
 			np.asarray(initial.working_array)[...] = values
 			return executor.execute(
@@ -539,7 +539,7 @@ def test_declared_large_artifact_uses_mutability_aware_managed_handles(tmp_path)
 
 
 def test_cache_pin_blocks_alias_while_prefix_operation_retains_source(tmp_path):
-	values = np.arange(128, dtype=np.uint16)
+	values = np.arange(128, dtype=np.uint16).reshape(2, 8, 8)
 	entered = threading.Event()
 	release = threading.Event()
 	shared = config("prefix", "blocking")
@@ -555,7 +555,7 @@ def test_cache_pin_blocks_alias_while_prefix_operation_retains_source(tmp_path):
 	executor = PrefixCachingPipelineExecutor(policy)
 
 	with PipelineRunContext(max_workers=1) as context:
-		raw = context.storage.allocate(values.shape, values.dtype, role="raw_staging")
+		raw = context.storage.allocate(ProjOrder(*values.shape), values.dtype, role="raw_staging")
 		raw.array()[...] = values
 		initial = state(candidates[0].configs)
 		initial.storage = context.storage
@@ -571,14 +571,14 @@ def test_cache_pin_blocks_alias_while_prefix_operation_retains_source(tmp_path):
 			assert entered.wait(timeout=10)
 			context.storage.retire(raw, role="raw_staging")
 			refused = context.storage.allocate(
-				(32,), np.float32, role="reconstruction", reuse_from=("raw_staging",),
+				X(32), np.float32, role="reconstruction", reuse_from=("raw_staging",),
 			)
 			assert refused.name != raw.name
 			release.set()
 			future.result(timeout=20)
 
 		reused = context.storage.allocate(
-			(32,), np.float32, role="reconstruction:retry", reuse_from=("raw_staging",),
+			X(32), np.float32, role="reconstruction:retry", reuse_from=("raw_staging",),
 		)
 		assert reused.name == raw.name
 		pin_events = [
@@ -631,7 +631,7 @@ def test_initial_working_array_content_is_part_of_cache_identity(tmp_path):
 
 	def execute(values):
 		initial = state(candidates[0].configs)
-		initial.working_array = np.asarray(values, dtype=np.float32)
+		initial.working_array = np.asarray(values, dtype=np.float32).reshape(1, 1, -1)
 		return executor.execute(
 			decision,
 			initial,
@@ -642,13 +642,13 @@ def test_initial_working_array_content_is_part_of_cache_identity(tmp_path):
 
 	first, event = execute([1, 2, 3])
 	assert event.status == "miss"
-	np.testing.assert_array_equal(first.working_array, [2, 4, 6])
+	np.testing.assert_array_equal(np.asarray(first.working_array).ravel(), [2, 4, 6])
 	_same, event = execute([1, 2, 3])
 	assert event.status == "hit"
 	changed, event = execute([4, 5, 6])
 	assert event.status == "miss"
 	assert "initial_working_array.sha256" in event.invalidation_fields
-	np.testing.assert_array_equal(changed.working_array, [8, 10, 12])
+	np.testing.assert_array_equal(np.asarray(changed.working_array).ravel(), [8, 10, 12])
 
 
 def test_invalidation_corruption_recovery_eviction_and_sampled_verification(tmp_path):

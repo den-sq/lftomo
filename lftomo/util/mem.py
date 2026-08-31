@@ -1,4 +1,4 @@
-from dataclasses import astuple, is_dataclass, replace, asdict, fields
+from dataclasses import astuple, is_dataclass, replace, asdict
 from functools import cached_property
 from multiprocessing.shared_memory import SharedMemory, ShareableList
 from multiprocessing.managers import SharedMemoryManager, BaseManager
@@ -20,10 +20,20 @@ from lftomo.storage import (
 	is_advanced_index,
 )
 
-from .shapes import DataShape
+from .shapes import DataShape, Proj, Theta, X, XSlice, Y, YSlice, Z
 from .log import log, LOG
 
 MEM_INTERVAL_TIMER = 1.0
+
+_VIEW_SHAPES = {
+	("Y", "X"): Proj,
+	("Theta", "X"): YSlice,
+	("Theta", "Y"): XSlice,
+	("Theta",): Theta,
+	("Y",): Y,
+	("X",): X,
+	("Z",): Z,
+}
 
 
 def _shape_tuple(shape) -> tuple[int, ...]:
@@ -374,6 +384,35 @@ class SharedNPArray(ManagedBuffer):
 				self.__name, self.__shape, self.__dtype, self.__views + [view], role=self._role,
 			)
 
+	def __view_shape(self) -> DataShape:
+		"""Apply basic views using only declared named shape classes."""
+
+		names = list(self.__shape.names)
+		values = list(self.__shape.as_tuple())
+		for view in self.__views:
+			indices = view if isinstance(view, tuple) else (view,)
+			if Ellipsis in indices:
+				position = indices.index(Ellipsis)
+				missing = len(values) - (len(indices) - 1)
+				indices = indices[:position] + (slice(None),) * missing + indices[position + 1:]
+			indices += (slice(None),) * (len(values) - len(indices))
+			if len(indices) != len(values) or any(index is None for index in indices):
+				raise TypeError("new-axis ManagedBuffer views have no canonical DataShape")
+			selected = [
+				(name, len(range(*index.indices(size))))
+				for name, size, index in zip(names, values, indices, strict=True)
+				if not isinstance(index, (int, np.integer))
+			]
+			names = [name for name, _value in selected]
+			values = [value for _name, value in selected]
+		shape_type = (
+			type(self.__shape)
+			if tuple(names) == self.__shape.names else _VIEW_SHAPES.get(tuple(names))
+		)
+		if shape_type is None:
+			raise TypeError(f"no canonical DataShape for basic view axes {tuple(names)!r}")
+		return shape_type(*values)
+
 	@cached_property
 	def has_views(self):
 		return len(self.__views) > 0
@@ -397,17 +436,8 @@ class SharedNPArray(ManagedBuffer):
 		return self.__allocated
 
 	@cached_property
-	def shape(self):
-		if len(self.__views) == 0:
-			return self.__shape
-		else:
-			# non-ideal but we shouldn't be calling this much anwyay!
-			shape = self.__load().shape
-			if is_dataclass(self.__shape) and len(shape) == len(fields(self.__shape)):
-				shape = type(self.__shape)(*shape)
-			elif is_dataclass(self.__shape):
-				shape = self.__shape.gen(fields(self.__shape)[-len(shape):])(*shape)
-			return shape
+	def shape(self) -> DataShape:
+		return self.__shape if not self.__views else self.__view_shape()
 
 
 def cleanup_mem(*shm_objects):

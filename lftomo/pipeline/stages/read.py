@@ -28,7 +28,7 @@ from lftomo.config import (
 from lftomo.pipeline.core import PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
-from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
@@ -339,7 +339,7 @@ class HDF5DxchangeReadStage(Stage):
 						("white_fields", source.white_path), ("dark_fields", source.dark_path),
 					):
 						dataset = handle[path]
-						artifact_shape = (
+						artifact_shape = GenericOrder(
 							dataset.shape[0], y_stop - self.y_start, dataset.shape[2],
 						)
 						artifact = _storage(state).allocate(

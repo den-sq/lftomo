@@ -34,7 +34,7 @@ from lftomo.pipeline.layout import (
 )
 from lftomo.prep.flat import _weighted_normalize_projection
 from lftomo.storage import buffer_view
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
 
 
 def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
@@ -45,8 +45,16 @@ def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 	# runs always provide storage and therefore take the managed replacement path.
 	if state.storage is None and source.dtype == np.dtype(np.float32):
 		return state.working_array, source
+	if state.buffer_spec is None:
+		if state.storage is not None:
+			raise TypeError("managed normalization input requires a typed BufferSpec")
+		# Untyped plain arrays remain a fragment-test boundary; complete pipelines
+		# bind their DataShape before entering normalization.
+		data = np.empty(source.shape, dtype=np.float32)
+		data[...] = source
+		return data, data
 	output, data = allocate_output(
-		state, source.shape, np.float32, role="normalized",
+		state, state.buffer_spec.shape, np.float32, role="normalized",
 		reuse_from=("normalized", "reconstruction"),
 	)
 	data[...] = source
@@ -70,7 +78,8 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 		state.artifacts["flat_fields"] = fields
 		return fields
 	artifact = state.storage.allocate(
-		fields.shape, fields.dtype, role="flat_fields", reuse_from=("flat_fields",),
+		GenericOrder(*fields.shape), fields.dtype,
+		role="flat_fields", reuse_from=("flat_fields",),
 	)
 	artifact.array()[...] = fields
 	state.artifacts["flat_fields"] = artifact

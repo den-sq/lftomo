@@ -149,7 +149,7 @@ def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
 				with tf.TiffFile(files[0]) as handle:
 					dtype = handle.series[0].dtype
 	dtype = np.dtype("uint16" if dtype is None else dtype)
-	return BufferSpec(shape, dtype, layout)
+	return BufferSpec(shape, dtype)
 
 
 def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) -> BufferSpec | None:
@@ -200,7 +200,7 @@ def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) ->
 		dtype = np.dtype(np.float32)
 	elif stage.name.startswith("super_resolve."):
 		dtype = np.dtype(np.float32)
-	return BufferSpec(shape, dtype, layout)
+	return BufferSpec(shape, dtype)
 
 
 def stage_allocation_spec(
@@ -216,7 +216,7 @@ def stage_allocation_spec(
 	if getattr(stage, "edge_buffer_input", False):
 		width -= stage.edge_buffer_left + stage.edge_buffer_right
 	return BufferSpec(
-		ReconOrder(Y=slices, Z=width, X=width), np.dtype(np.float32), ReconOrder,
+		ReconOrder(Y=slices, Z=width, X=width), np.dtype(np.float32),
 	)
 
 

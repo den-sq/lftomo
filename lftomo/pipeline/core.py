@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, astuple, dataclass, field, is_dataclass, replace
+from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
 import time
-from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Callable, Literal
 import uuid
 
 import numpy as np
@@ -242,47 +242,51 @@ class DaskStubBackend(Backend):
 		return da.from_array(array)
 
 
-class WorkingArray(Protocol):
-	"""Minimal shape-bearing protocol for pipeline working arrays."""
-
-	@property
-	def shape(self) -> tuple[int, ...]:
-		"""Array shape in backend-native form."""
-
-
 @dataclass(frozen=True)
 class BufferSpec:
 	"""Shape, dtype, and layout of the current working allocation."""
 
-	shape: Any
+	shape: DataShape
 	dtype: np.dtype
-	layout: type[Any] | None
 
-	def with_layout(self, layout: type[Any] | None) -> "BufferSpec":
-		return replace(self, layout=layout)
+	@property
+	def layout(self) -> type[DataShape]:
+		return type(self.shape)
 
 
 def _buffer_spec(buffer: Any, layout: type[Any] | None) -> BufferSpec | None:
 	shape = getattr(buffer, "shape", None)
 	if shape is None:
 		return None
+	if not isinstance(shape, DataShape):
+		if layout is None or not issubclass(layout, DataShape):
+			if isinstance(buffer, ManagedBuffer):
+				raise TypeError("ManagedBuffer.shape must be a DataShape")
+			return None
+		try:
+			shape = layout(*shape)
+		except TypeError as error:
+			if isinstance(buffer, ManagedBuffer):
+				raise TypeError(
+					"ManagedBuffer.shape must match its declared DataShape layout"
+				) from error
+			return None
 	try:
-		values = astuple(shape) if is_dataclass(shape) else tuple(shape)
-		if not all(int(value) > 0 for value in values):
+		if not all(int(value) > 0 for value in shape.as_tuple()):
 			return None
 	except TypeError:
 		return None
 	dtype = getattr(buffer, "dtype", None)
 	if dtype is None and hasattr(buffer, "array"):
 		dtype = getattr(buffer.array, "dtype", None)
-	return None if dtype is None else BufferSpec(shape, np.dtype(dtype), layout)
+	return None if dtype is None else BufferSpec(shape, np.dtype(dtype))
 
 
 @dataclass
 class PipelineState:
 	"""Mutable state object passed from Stage to Stage."""
 
-	working_array: np.ndarray | DaskArrayStub | WorkingArray
+	working_array: Any
 	scan: Scan
 	recon: Recon
 	artifacts: dict[str, Any] = field(default_factory=dict)
@@ -327,10 +331,10 @@ class PipelineState:
 		)
 
 	def sync_buffer_spec(self) -> None:
-		"""Synchronize layout metadata after a preserving in-place Stage."""
+		"""Validate the transitional layout tag against the shaped buffer."""
 
 		if self.buffer_spec is not None and self.buffer_spec.layout is not self.layout:
-			self.buffer_spec = self.buffer_spec.with_layout(self.layout)
+			raise ValueError("PipelineState.layout disagrees with BufferSpec.shape")
 
 
 def allocate_output(
@@ -346,7 +350,7 @@ def allocate_output(
 	"""Allocate a prospective output without changing or retiring current state."""
 
 	if state.storage is None:
-		array = np.empty(tuple(shape) if not is_dataclass(shape) else astuple(shape), dtype=dtype)
+		array = np.empty(shape.as_tuple(), dtype=dtype)
 		return array, array
 	alias_from = state.working_array if alias_from_current and hasattr(state.working_array, "name") else None
 	buffer = state.storage.allocate(
@@ -385,6 +389,11 @@ class Stage(ABC):
 	@abstractmethod
 	def run(self, state: PipelineState) -> PipelineState:
 		"""Execute the Stage and return the next PipelineState."""
+
+	def output_window(self, source: TomoWindow) -> TomoWindow:
+		"""Return the source-coordinate window published after this Stage."""
+
+		return source
 
 
 StageObserver = Callable[

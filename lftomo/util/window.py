@@ -1,5 +1,5 @@
 from collections import namedtuple
-from copy import deepcopy
+from copy import copy
 from dataclasses import asdict, replace, fields
 from functools import partial
 from os import PathLike
@@ -8,7 +8,7 @@ from typing import Self, Sequence, Iterator
 
 import numpy as np
 
-from .shapes import DataShape, DataRange, IntIter, SliceIter, TFIter
+from .shapes import DataShape, DataRange, IntIter, ReconOrder, SliceIter, TFIter
 
 # Field of view during data acquisition.
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
@@ -93,7 +93,9 @@ class DataRef(object):
 		return type(self.shape)(*[self.itemsize * np.prod(vals[x + 1:]) for x in range(len(vals) - 1)])
 
 	def with_pad(self, pad_dim: Sequence = None, shrink=False) -> Self:
-		new_ref = deepcopy(self)
+		# DataShape values are immutable by convention; re-init replaces every
+		# DataRef field while retaining the concrete subclass.
+		new_ref = copy(self)
 
 		if pad_dim is None:
 			pad_dim = [field.name for field in fields(self.pad_before)]
@@ -113,7 +115,7 @@ class DataRef(object):
 
 	def rescope(self, pos: DataShape = None, pad: DataShape = None, dtype: type = None,
 					shape: DataShape = None, *, pad_after: DataShape = None) -> Self:
-		new_ref = deepcopy(self)
+		new_ref = copy(self)
 
 		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape
 		new_pos = replace(self.pos, **asdict(pos)) if pos is not None else self.pos
@@ -169,6 +171,15 @@ class TomoWindow(DataRef):
 	@property
 	def internal(self):
 		return self.rescope(pos=self.pad_before.extract(self.pos), dtype=self.__work_dtype)
+
+	def recon_shape(self) -> ReconOrder:
+		"""Return the square physical reconstruction shape for the core window.
+
+		Published/cropped Z and X extents remain reconstruction-stage policy. The
+		result is meaningful only for a window that will actually be reconstructed.
+		"""
+
+		return ReconOrder.of(self.internal.shape)
 
 
 def _resolved_padding(pos: DataShape, shape: DataShape, pad_before: DataShape, pad_after: DataShape,
@@ -285,6 +296,10 @@ class TomoDataSet(DataRef):
 		if len(acquisition_indices) != shape.Theta:
 			raise ValueError("one acquisition index is required for every projection")
 		self.__acquisition_indices = np.asarray(acquisition_indices, dtype=np.int64)
+		# Geometry copies share these arrays, so construction makes the convention
+		# they rely on enforceable instead of cloning full angle vectors per rescope.
+		self.__angles.setflags(write=False)
+		self.__acquisition_indices.setflags(write=False)
 
 	@property
 	def angles(self):

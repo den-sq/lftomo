@@ -168,7 +168,7 @@ def _prepare_vo_work(
 	theta_count, column_count = sinogram_shape
 	if max(theta_count, column_count) > np.iinfo(np.uint32).max:
 		raise ValueError("Vo sorting indices exceed uint32 capacity")
-	shape = (row_count, theta_count, column_count)
+	shape = SinoOrder(row_count, theta_count, column_count)
 	float_dtype = np.dtype(state.working_array.dtype)
 	if not np.issubdtype(float_dtype, np.floating):
 		raise TypeError("Vo reusable work requires floating-point pipeline data")
@@ -190,7 +190,7 @@ def _prepare_vo_work(
 		allocated.append((index_work, "vo_index_work"))
 		median_pad_work = None
 		if median_half_width:
-			median_pad_shape = (
+			median_pad_shape = SinoOrder(
 				row_count, theta_count, column_count + 2 * median_half_width,
 			)
 			median_pad_work = state.storage.allocate(
@@ -208,10 +208,10 @@ def _prepare_vo_work(
 	state.artifacts[VO_INDEX_WORK_ARTIFACT] = index_work
 	if median_pad_work is not None:
 		state.artifacts[VO_MEDIAN_PAD_WORK_ARTIFACT] = median_pad_work
-	float_bytes = int(np.prod(shape, dtype=np.int64) * float_dtype.itemsize)
-	index_bytes = int(np.prod(shape, dtype=np.int64) * np.dtype(np.uint32).itemsize)
+	float_bytes = shape.nbytes(float_dtype)
+	index_bytes = shape.nbytes(np.uint32)
 	median_pad_bytes = (
-		int(np.prod(median_pad_shape, dtype=np.int64) * float_dtype.itemsize)
+		median_pad_shape.nbytes(float_dtype)
 		if median_pad_work is not None else 0
 	)
 	report = {
@@ -469,7 +469,7 @@ class PipelineExecutor:
 				and working_state.storage is not None
 			):
 				managed_mask = working_state.storage.allocate(
-					air_mask.shape, air_mask.dtype, role="air_mask",
+					working_state.buffer_spec.shape, air_mask.dtype, role="air_mask",
 				)
 				managed_mask.array()[...] = air_mask
 				working_state.artifacts[air_mask_key] = managed_mask

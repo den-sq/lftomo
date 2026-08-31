@@ -1,5 +1,3 @@
-from dataclasses import astuple
-
 import numpy as np
 import pytest
 
@@ -127,7 +125,8 @@ def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(mo
 	np.testing.assert_array_equal(result.working_array, expected)
 	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=-1)
 	assert result.source_window.shape == ProjOrder(Theta=3, Y=2, X=6)
-	assert result.buffer_spec.shape == astuple(result.source_window.shape)
+	assert result.buffer_spec.shape == result.source_window.shape
+	assert result.buffer_spec.layout is ProjOrder
 
 
 def test_fused_transition_is_direction_parametric():
