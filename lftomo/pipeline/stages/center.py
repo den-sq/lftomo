@@ -48,7 +48,9 @@ def _sinograms(state: PipelineState) -> tuple[np.ndarray, type]:
 
 
 def _angles(state: PipelineState, theta_count: int) -> np.ndarray:
-	angles = state.artifacts.get("angles")
+	angles = None
+	if state.dataset is not None and state.source_window is not None:
+		angles = state.dataset.angles[state.source_window.axis_slice("Theta")]
 	if angles is None:
 		acquisition = state.scan.acquisition
 		angles = np.linspace(

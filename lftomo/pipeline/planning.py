@@ -11,7 +11,7 @@ import numpy as np
 from lftomo.pipeline.core import BufferSpec, Stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
-from lftomo.util.window import TomoWindow
+from lftomo.util.window import TomoDataSet, TomoWindow
 
 
 class MaterializationKind(Enum):
@@ -108,24 +108,35 @@ def _nbytes(spec: BufferSpec | None) -> int:
 	return spec.shape.nbytes(spec.dtype)
 
 
-def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
-	physical_shape = scan.projection_shape()
-	window = TomoWindow.from_bounds(
-		physical_shape,
-		y=(
-			getattr(stage, "y_start", 0),
-			physical_shape.Y if getattr(stage, "y_stop", None) is None else stage.y_stop,
-		),
-		theta=(
-			getattr(stage, "theta_start", 0),
-			physical_shape.Theta
-			if getattr(stage, "theta_stop", None) is None else stage.theta_stop,
-			getattr(stage, "theta_stride", 1),
-		),
-	)
+def _read_spec(
+	stage: Stage,
+	scan: Any,
+	dataset: TomoDataSet | None = None,
+	source_window: TomoWindow | None = None,
+) -> BufferSpec | None:
+	if (dataset is None) != (source_window is None):
+		raise ValueError("read planning requires dataset and source_window together")
+	if source_window is None:
+		physical_shape = scan.projection_shape()
+		window = TomoWindow.from_bounds(
+			physical_shape,
+			y=(
+				getattr(stage, "y_start", 0),
+				physical_shape.Y if getattr(stage, "y_stop", None) is None else stage.y_stop,
+			),
+			theta=(
+				getattr(stage, "theta_start", 0),
+				physical_shape.Theta
+				if getattr(stage, "theta_stop", None) is None else stage.theta_stop,
+				getattr(stage, "theta_stride", 1),
+			),
+		)
+	else:
+		window = source_window.with_pad(["Y"])
 	layout = ProjOrder if getattr(stage, "order", "projection") == "projection" else SinoOrder
 	shape = window.frange.length.to(layout)
-	dtype = scan.metadata.get("raw_dtype")
+	dtype = None if dataset is None else dataset.dtype
+	dtype = scan.metadata.get("raw_dtype") if dtype is None else dtype
 	if dtype is None:
 		source = scan.projections
 		path = source.path
@@ -147,11 +158,18 @@ def _read_spec(stage: Stage, scan: Any) -> BufferSpec | None:
 	return BufferSpec(shape, dtype)
 
 
-def stage_output_spec(stage: Stage, input_spec: BufferSpec | None, scan: Any) -> BufferSpec | None:
+def stage_output_spec(
+	stage: Stage,
+	input_spec: BufferSpec | None,
+	scan: Any,
+	*,
+	dataset: TomoDataSet | None = None,
+	source_window: TomoWindow | None = None,
+) -> BufferSpec | None:
 	"""Resolve the concrete BufferSpec transition for one known Stage."""
 
 	if stage.name.startswith("read."):
-		return _read_spec(stage, scan)
+		return _read_spec(stage, scan, dataset, source_window)
 	if input_spec is None:
 		return None
 	shape = input_spec.shape

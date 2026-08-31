@@ -11,11 +11,13 @@ from lftomo.config import (
 	Scan,
 	StageConfig,
 )
-from lftomo.pipeline import NumpyBackend, Pipeline, PipelineRunContext, PipelineState
+from lftomo.pipeline import (
+	NumpyBackend, Pipeline, PipelineRunContext, PipelineState, WindowConfig,
+	resolve_streaming_plan,
+)
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
-from lftomo.util.window import CTFov, TomoDataSet
 
 
 def _state(path, count, size, config):
@@ -43,6 +45,10 @@ def _write(path, data, calibration=True, **dataset_kwargs):
 
 
 def _run(state, *stages):
+	if state.dataset is None:
+		plan = resolve_streaming_plan(stages, state.scan)
+		state.dataset = plan.dataset
+		state.source_window = next(iter(plan))
 	with PipelineRunContext() as context:
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
@@ -73,7 +79,7 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	assert isinstance(result.artifacts["white_fields"], SharedNPArray)
 	assert isinstance(result.artifacts["dark_fields"], SharedNPArray)
 	assert result.artifacts["hdf5_read_strategy"] == "bounded_scratch"
-	assert result.dataset.shape == ProjOrder(Theta=count, Y=size, X=size)
+	assert result.dataset.physical_shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=1, Y=2, X=0)
 	assert result.source_window.shape == ProjOrder(Theta=2, Y=3, X=size)
 	assert result.buffer_spec.layout is SinoOrder
@@ -88,14 +94,19 @@ def test_read_state_retains_the_planned_canonical_window(tmp_path):
 		"y_start": 0, "y_stop": 8,
 	})
 	state = _state(path, count, size, config)
-	state.dataset = TomoDataSet(
-		CTFov(count, 180, 1), ProjOrder(count, size, size),
-		Y.drange(2, 8, 4), dtype=np.uint16, work_dtype=np.float32,
+	selection = create_stage(StageConfig(
+		kind="read", algorithm="hdf5_dxchange", params={"y_start": 2, "y_stop": 8},
+	))
+	plan = resolve_streaming_plan(
+		[selection], state.scan, WindowConfig(rows=4, extra_pad=Y(2)),
 	)
-	state.source_window = next(state.dataset.iter_with(wsize=Y(4), pad=Y(2)))
+	state.dataset = plan.dataset
+	state.source_window = next(iter(plan))
+	dataset = state.dataset
 
 	result = _run(state, create_stage(config))
 
+	assert result.dataset is dataset
 	assert result.dataset.physical_shape == ProjOrder(count, size, size)
 	assert result.dataset.frange == Y.drange(2, 8, 4)
 	assert result.source_window.pos == ProjOrder(0, 2, 0)
@@ -130,6 +141,35 @@ def test_hdf5_stage_reports_missing_projection_dataset(tmp_path):
 		_run(_state(path, 2, 3, config), create_stage(config))
 
 
+def test_plan_time_probe_rejects_detector_header_mismatch(tmp_path):
+	path = tmp_path / "mismatched.h5"
+	_write(path, np.ones((2, 4, 4), dtype=np.uint16))
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange")
+
+	with pytest.raises(ValueError, match="declares projection shape.*source header"):
+		resolve_streaming_plan([create_stage(config)], _state(path, 2, 3, config).scan)
+
+
+def test_plan_time_probe_opens_the_source_once(tmp_path, monkeypatch):
+	import lftomo.pipeline.stages.read as read_module
+
+	path = tmp_path / "scan.h5"
+	_write(path, np.ones((2, 3, 3), dtype=np.uint16))
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange")
+	original_file = read_module.h5py.File
+	opens = []
+
+	def counted_file(*args, **kwargs):
+		opens.append(args[0])
+		return original_file(*args, **kwargs)
+
+	monkeypatch.setattr(read_module.h5py, "File", counted_file)
+	plan = resolve_streaming_plan([create_stage(config)], _state(path, 2, 3, config).scan)
+
+	assert len(opens) == 1
+	assert plan.dataset.dtype == np.dtype(np.uint16)
+
+
 def test_hdf5_stage_can_require_calibration(tmp_path):
 	data = np.ones((2, 3, 3), dtype=np.uint16)
 	path = tmp_path / "scan.h5"
@@ -155,7 +195,10 @@ def test_hdf5_stage_reads_strided_theta_window_with_matching_angles(tmp_path):
 	result = _run(_state(path, count, size, config), create_stage(config))
 
 	np.testing.assert_array_equal(result.working_array, data[1:6:2])
-	np.testing.assert_allclose(result.artifacts["angles"], np.deg2rad([30, 90, 150]))
+	np.testing.assert_allclose(
+		result.dataset.angles[result.source_window.axis_slice("Theta")],
+		np.deg2rad([30, 90, 150]),
+	)
 	assert result.source_window.shape.Theta == 5
 	assert result.working_array.shape[0] == 3
 	assert result.source_window.step == ProjOrder(Theta=2, Y=1, X=1)
@@ -178,8 +221,7 @@ def test_hdf5_stage_imports_explicit_angles_and_derives_indices(tmp_path):
 
 	result = _run(state, create_stage(config))
 
-	np.testing.assert_array_equal(result.artifacts["acquisition_indices"], [0, 1, 3, 4])
-	np.testing.assert_allclose(np.rad2deg(result.artifacts["angles"]), [0, 36, 108, 144])
+	np.testing.assert_allclose(np.rad2deg(result.dataset.angles), [0, 36, 108, 144])
 
 
 def test_hdf5_stage_uses_bounded_fallback_for_chunked_compressed_source(tmp_path):

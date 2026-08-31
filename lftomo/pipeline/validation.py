@@ -20,6 +20,7 @@ from lftomo.pipeline.planning import (
 	stage_allocation_spec,
 	stage_output_spec,
 )
+from lftomo.util.window import TomoDataSet, TomoWindow
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -124,6 +125,8 @@ def validate_pipeline(
 	enable_aliasing: bool = True,
 	enable_engine_aliasing: bool = True,
 	external_pins: tuple[str, ...] = (),
+	dataset: TomoDataSet | None = None,
+	source_window: TomoWindow | None = None,
 ) -> PipelinePlan:
 	"""Validate a Stage sequence and return its resolved execution plan."""
 
@@ -271,7 +274,9 @@ def validate_pipeline(
 				hidden=True,
 			))
 
-		output_buffer = stage_output_spec(stage, input_buffer, scan)
+		output_buffer = stage_output_spec(
+			stage, input_buffer, scan, dataset=dataset, source_window=source_window,
+		)
 		allocation_buffer = stage_allocation_spec(stage, input_buffer, output_buffer)
 		output_role, retires_role = _transition_role(stage)
 		steps.append(PlanStep(

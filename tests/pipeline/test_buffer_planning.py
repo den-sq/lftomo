@@ -283,7 +283,6 @@ def test_engine_alias_is_refused_when_normalized_capacity_is_too_small():
 
 def _actual_gridrec(*, engine_aliasing: bool):
 	shape = ProjOrder(Theta=16, Y=1, X=8)
-	angles = np.linspace(0, np.pi, shape.Theta, endpoint=False, dtype=np.float32)
 	shape_tuple = (shape.Theta, shape.Y, shape.X)
 	input_values = np.exp(-np.linspace(0.05, 0.5, np.prod(shape_tuple), dtype=np.float32)).reshape(shape_tuple)
 	with PipelineRunContext(enable_engine_aliasing=engine_aliasing) as context:
@@ -293,7 +292,6 @@ def _actual_gridrec(*, engine_aliasing: bool):
 			working, _scan(projections=shape.Theta, rows=shape.Y, columns=shape.X),
 			_recon(engine_aliasing=engine_aliasing), storage=context.storage,
 			domain=DataDomain.ATTENUATION,
-			artifacts={"angles": angles},
 		)
 		result = GridrecStage(center=4, circle_mask=False, ncore=1).run(state)
 		return working.name, result.working_array.name, np.asarray(result.working_array).copy()

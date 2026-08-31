@@ -22,7 +22,10 @@ def generate_dataset():
 	dtype = np.int16
 	work_dtype = np.float32
 
-	return TomoDataSet(fov, shape, over, dtype=dtype, work_dtype=work_dtype)
+	return TomoDataSet(
+		fov, shape, over, dtype=dtype, work_dtype=work_dtype,
+		angles=np.linspace(0, np.deg2rad(fov.Degrees), shape.Theta, endpoint=False),
+	)
 
 
 def disk_dataset():

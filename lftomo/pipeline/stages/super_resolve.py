@@ -63,7 +63,9 @@ def _dense_inputs(state: PipelineState) -> tuple[np.ndarray, np.ndarray, np.ndar
 		mask = np.broadcast_to(mask[:, None, None], volume.shape)
 	else:
 		mask = np.broadcast_to(mask, volume.shape)
-	angles = state.artifacts.get("angles")
+	angles = None
+	if state.dataset is not None and state.source_window is not None:
+		angles = state.dataset.angles[state.source_window.axis_slice("Theta")]
 	if angles is None:
 		angles = np.linspace(
 			state.scan.acquisition.rotation_start_deg,

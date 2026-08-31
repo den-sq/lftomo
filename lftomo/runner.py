@@ -533,12 +533,14 @@ def _planned_pipeline(
 	*, execution_observer: ExecutionSpanObserver | None = None,
 	stage_index_offset: int = 0, mode: str = "complete",
 	initial_layout=None, initial_domain=None,
+	dataset=None, source_window=None,
 ) -> Pipeline:
 	plan = validate_pipeline(
 		stages, scan, backend, available_artifacts=available_artifacts,
 		mode=mode, initial_layout=initial_layout, initial_domain=initial_domain,
 		enable_aliasing=recon.buffer_aliasing,
 		enable_engine_aliasing=recon.tomopy_input_aliasing,
+		dataset=dataset, source_window=source_window,
 	)
 	pipeline = Pipeline(
 		stages, backend=backend, validate=False, observer=observer,
@@ -585,6 +587,7 @@ def _run_streaming_pipeline(
 			reserve_stages[:reserve_writer], reserve_scan, backend,
 			initial_artifacts, None, reserve_recon,
 			execution_observer=None,
+			dataset=window_plan.dataset, source_window=largest,
 		)
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
@@ -610,6 +613,7 @@ def _run_streaming_pipeline(
 			prepass = _planned_pipeline(
 				prepass_stages, window_scan, backend, window_initial, stage_observer,
 				window_recon, execution_observer=execution_observer,
+				dataset=window_plan.dataset, source_window=window,
 			)
 			prepass_state = prepass.run(prepass_state)
 			center_artifacts = _center_artifacts(prepass_state)
@@ -641,6 +645,7 @@ def _run_streaming_pipeline(
 			compute = _planned_pipeline(
 				compute_stages, window_scan, backend, window_initial, stage_observer,
 				window_recon, execution_observer=execution_observer,
+				dataset=window_plan.dataset, source_window=window,
 			)
 			state = compute.run(state)
 		else:
@@ -648,6 +653,7 @@ def _run_streaming_pipeline(
 				compute_stages[:reconstruction_start], window_scan, backend,
 				window_initial, stage_observer, window_recon,
 				execution_observer=execution_observer,
+				dataset=window_plan.dataset, source_window=window,
 			)
 			state = prefix.run(state)
 			state = _crop_to_window_interior(
@@ -659,6 +665,7 @@ def _run_streaming_pipeline(
 				execution_observer=execution_observer,
 				stage_index_offset=reconstruction_start,
 				mode="fragment", initial_layout=state.layout, initial_domain=state.domain,
+				dataset=window_plan.dataset, source_window=window,
 			)
 			state = reconstruction.run(state)
 		if writer_stages and state.domain is not DataDomain.RECON:
@@ -757,6 +764,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		if resolution.compatibility is not None:
 			initial_artifacts["calibration_compatibility"] = resolution.compatibility
 		stages = [create_stage(config) for config in concrete.pipeline]
+		window_plan = resolve_streaming_plan(stages, run_scan, window_config)
 		# Validate every selected complete structure before the first projection
 		# Stage runs. Candidate N cannot fail contract validation after candidate
 		# N-1 has already produced output.
@@ -768,13 +776,17 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			mode="complete",
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
+			dataset=window_plan.dataset,
+			source_window=window_plan.source_window,
 		)
 		prepared.append((
 			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
+			window_plan,
 		))
 	results = []
-	for run, concrete, resolved_document, run_scan, initial_artifacts, stages in prepared:
-		window_plan = resolve_streaming_plan(stages, run_scan, window_config)
+	for (
+		run, concrete, resolved_document, run_scan, initial_artifacts, stages, window_plan,
+	) in prepared:
 		resolved_document.setdefault("metadata", {})["resolved_window"] = window_plan.record()
 		with PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
@@ -796,6 +808,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					backend=backend,
 					storage=run_context.storage,
 					executor=run_context.executor,
+					dataset=window_plan.dataset,
+					source_window=next(iter(window_plan)),
 				)
 				state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
 				# Experiment-managed arrays belong to the run context. Do not return

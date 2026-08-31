@@ -5,6 +5,7 @@ from functools import partial
 from os import PathLike
 from pathlib import Path
 from typing import Self, Sequence, Iterator
+import warnings
 
 import numpy as np
 
@@ -202,11 +203,18 @@ class TomoWindow(DataRef):
 		*,
 		y: tuple[int, int] | slice | None = None,
 		theta: tuple[int, int] | tuple[int, int, int] | slice | None = None,
-		halo: int | DataShape = 0,
+		halo: int | DataShape | tuple[int | DataShape, int | DataShape] = 0,
 		dtype: type = None,
 		work_dtype: type = np.float32,
 	) -> Self:
-		"""Construct a source-coordinate window and record its realized halo."""
+		"""Construct a source-coordinate window and record its realized halo.
+
+		``shape`` records the covered source-coordinate span while ``step``
+		records sampling within it.  Consequently a strided Theta selection has
+		``shape.Theta == stop - start`` even though ``frange.length.Theta`` is
+		the number of samples allocated in memory.  A two-item ``halo`` supplies
+		independent before/after requirements for streaming boundaries.
+		"""
 
 		def bounds(value, size: int, name: str, *, stride: bool) -> tuple[int, int, int]:
 			if value is None:
@@ -233,14 +241,26 @@ class TomoWindow(DataRef):
 		)
 		pos = type(physical_shape)(Theta=theta_start, Y=y_start, X=0)
 		step = type(physical_shape)(Theta=theta_step, Y=1, X=1)
-		requested = replace(
-			physical_shape.make_with(0),
-			**(Y(halo).as_dict() if isinstance(halo, int) else halo.as_dict()),
-		)
-		if any(value < 0 for value in requested.as_tuple()):
+		def canonical_halo(value: int | DataShape) -> DataShape:
+			return replace(
+				physical_shape.make_with(0),
+				**(Y(value).as_dict() if isinstance(value, int) else value.as_dict()),
+			)
+
+		if isinstance(halo, tuple):
+			if len(halo) != 2:
+				raise ValueError("window halo pair must contain before and after values")
+			requested_before, requested_after = map(canonical_halo, halo)
+		else:
+			requested_before = requested_after = canonical_halo(halo)
+		if any(
+			value < 0
+			for requested in (requested_before, requested_after)
+			for value in requested.as_tuple()
+		):
 			raise ValueError("window halo cannot be negative")
 		pad_before, pad_after = _resolved_padding(
-			pos, shape, requested, requested, physical_shape,
+			pos, shape, requested_before, requested_after, physical_shape,
 		)
 		return cls(
 			shape, pad_before, pos, step, dtype, work_dtype, pad_after=pad_after,
@@ -363,6 +383,11 @@ class TomoDataSet(DataRef):
 				raise ValueError("one source angle is required for every projection")
 			self.__angles = np.asarray(angles, dtype=np.float32)
 		elif angle_steps is None:
+			warnings.warn(
+				"TomoDataSet FOV angle synthesis is deprecated; pass acquisition-model angles",
+				DeprecationWarning,
+				stacklevel=2,
+			)
 			if shape.Theta == fov.Theta * fov.Count:
 				self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
 			else:
@@ -374,8 +399,8 @@ class TomoDataSet(DataRef):
 		if len(acquisition_indices) != shape.Theta:
 			raise ValueError("one acquisition index is required for every projection")
 		self.__acquisition_indices = np.asarray(acquisition_indices, dtype=np.int64)
-		# Geometry copies share these arrays, so construction makes the convention
-		# they rely on enforceable instead of cloning full angle vectors per rescope.
+		# Geometry copies share these arrays, so construction makes their
+		# immutability convention enforceable instead of cloning them per rescope.
 		self.__angles.setflags(write=False)
 		self.__acquisition_indices.setflags(write=False)
 

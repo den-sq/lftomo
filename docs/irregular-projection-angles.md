@@ -6,12 +6,11 @@ They are equal for an ordinary uniform acquisition.  If they differ, the scan
 must declare a non-uniform `angle_source`; read validation still requires the
 physical source count to equal the recorded count.
 
-Every read produces three artifacts:
+Source discovery validates two aligned arrays:
 
 - `acquisition_indices`: strictly increasing zero-based planned-slot indices,
-  one for each recorded projection;
-- `angles`: the corresponding per-projection angles in radians;
-- `angle_provenance`: source, count, convention, and selection metadata.
+	one for each recorded projection;
+- `angles`: the corresponding per-projection angles in radians.
 
 The acquisition convention divides the interval from `rotation_start_deg` to
 `rotation_end_deg` into `Acquisition.n_projections` endpoint-exclusive slots.
@@ -34,10 +33,11 @@ observed interval ratios still round to their correct slot counts.  Use an
 `explicit` index or angle source when boundary-slot identity must be recovered
 independently of the first-record anchor.
 
-Theta start/stop/stride selection applies one identical slice to projection
-data, indices, and angles.  The full arrays remain on `TomoDataSet`, while the
-selected arrays are carried in `PipelineState.artifacts` to center and
-reconstruction stages.  No dummy projection is inserted for a missing slot.
+The full arrays remain on `TomoDataSet`. Theta start/stop/stride selection is
+recorded once by `TomoWindow`; center, reconstruction, and super-resolution
+derive their selected angles directly from that dataset/window pair. They are
+not republished as `PipelineState.artifacts`. No dummy projection is inserted
+for a missing slot.
 
 The historical `get_thetas` helper has no call sites and is not migrated.  The
 active historical `skip_adjustment` path is also not copied: it applied local

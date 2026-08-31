@@ -7,6 +7,10 @@ from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, D
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
 
 
+def _uniform_angles(count):
+	return np.linspace(0, np.pi, count, endpoint=False)
+
+
 @pytest.mark.integration
 def test_file_load():
 	tds = disk_dataset()
@@ -32,7 +36,10 @@ def test_creation():
 	dtype = np.int16
 	work_dtype = np.float32
 
-	tds = TomoDataSet(fov, shape, over, dtype=dtype, work_dtype=work_dtype)
+	tds = TomoDataSet(
+		fov, shape, over, dtype=dtype, work_dtype=work_dtype,
+		angles=_uniform_angles(shape.Theta),
+	)
 
 	assert tds.pos == Y(0)
 	assert tds.shape == ProjOrder(Theta=1501, Y=1048, X=2048)
@@ -51,8 +58,9 @@ def test_creation():
 	assert tw.internal.dtype == np.dtype(work_dtype)
 
 	# Missing angle steps
-	with pytest.raises(Exception):
-		tds = TomoDataSet(CTFov(1969, 180, 1), shape, over, dtype=dtype, work_dtype=work_dtype)
+	with pytest.warns(DeprecationWarning, match="FOV angle synthesis"):
+		with pytest.raises(Exception):
+			TomoDataSet(CTFov(1969, 180, 1), shape, over, dtype=dtype, work_dtype=work_dtype)
 
 	# Passing Angles
 	tds = TomoDataSet(fov, shape, over, angle_steps=np.arange(0, 1501, 2),
@@ -242,7 +250,7 @@ def test_nondivisible_selection_emits_a_short_final_unpadded_window():
 	selection = Y.drange(100, 1000, 400)
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
-		dtype=np.uint16, work_dtype=np.float32,
+		dtype=np.uint16, work_dtype=np.float32, angles=_uniform_angles(4),
 	)
 
 	windows = list(dataset)
@@ -300,7 +308,7 @@ def test_dataset_keeps_physical_shape_separate_from_output_range():
 	selection = Y.drange(100, 900, 400)
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
-		dtype=np.uint16, work_dtype=np.float32,
+		dtype=np.uint16, work_dtype=np.float32, angles=_uniform_angles(4),
 	)
 
 	assert dataset.physical_shape == ProjOrder(Theta=4, Y=1000, X=6)
@@ -321,6 +329,7 @@ def test_dataset_clips_padding_only_at_physical_boundaries():
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(0, 1000, 400), dtype=np.uint16, work_dtype=np.float32,
+		angles=_uniform_angles(4),
 	)
 
 	windows = list(dataset.iter_with(wsize=Y(400), pad=Y(10)))
@@ -345,6 +354,7 @@ def test_nondivisible_selected_edge_keeps_short_output_when_padding_clips():
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(100, 1000, 400), dtype=np.uint16, work_dtype=np.float32,
+		angles=_uniform_angles(4),
 	)
 
 	final = list(dataset.iter_with(wsize=Y(400), pad=Y(10)))[-1]
@@ -360,6 +370,7 @@ def test_dataset_resolves_explicit_asymmetric_padding():
 	dataset = TomoDataSet(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(100, 500, 400), dtype=np.uint16, work_dtype=np.float32,
+		angles=_uniform_angles(4),
 	)
 
 	window = next(dataset.iter_with(wsize=Y(400), pad=Y(20), pad_after=Y(5)))
@@ -374,6 +385,7 @@ def test_selected_range_must_fit_physical_source_shape():
 		TomoDataSet(
 			CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 			Y.drange(100, 1001, 400), dtype=np.uint16, work_dtype=np.float32,
+			angles=_uniform_angles(4),
 		)
 
 
@@ -383,10 +395,11 @@ def test_from_disk_retains_physical_shape_for_selected_output(tmp_path):
 	with h5py.File(source, "w") as h5:
 		h5.create_dataset("exchange/data", shape=(4, 10, 6), dtype=np.uint16)
 
-	dataset = TomoDataSet.from_disk(
-		source, CTFov(4, 180, 1), ProjOrder, Y.drange(2, 9, 3),
-		work_dtype=np.float32,
-	)
+	with pytest.warns(DeprecationWarning, match="FOV angle synthesis"):
+		dataset = TomoDataSet.from_disk(
+			source, CTFov(4, 180, 1), ProjOrder, Y.drange(2, 9, 3),
+			work_dtype=np.float32,
+		)
 
 	assert dataset.physical_shape == ProjOrder(Theta=4, Y=10, X=6)
 	assert dataset.shape == ProjOrder(Theta=4, Y=7, X=6)
