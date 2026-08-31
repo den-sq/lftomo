@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import make_dataclass
 import inspect
 import json
 import multiprocessing
@@ -34,10 +35,12 @@ from lftomo.experiment import (
 	plan_common_prefixes,
 )
 from lftomo.experiment.runner import ExperimentInputs, TrialExecution
+from lftomo.experiment.prefix_cache import _fingerprint, _hash_document
 from lftomo.pipeline import BufferSpec, Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 from lftomo.util.shapes import ProjOrder, X
+from lftomo.util.window import CTFov, TomoDataSet
 
 
 class SourceStage(Stage):
@@ -360,6 +363,17 @@ def test_prefix_planning_is_deterministic_visible_and_fail_closed(tmp_path):
 	assert PrefixCachePolicy().verify_fraction == pytest.approx(0.05)
 	assert all(item.action == "independent" for item in disabled.decisions)
 	assert "disabled" in disabled.decisions[0].reason
+
+
+def test_fingerprints_retain_type_identity_and_accept_canonical_geometry():
+	left = make_dataclass("Left", [("value", int)])(3)
+	right = make_dataclass("Right", [("value", int)])(3)
+	assert _hash_document(left) != _hash_document(right)
+	dataset = TomoDataSet(
+		CTFov(2, 180, 1), ProjOrder(2, 3, 4), X(1),
+		angles=np.array([0, 1], dtype=np.float32),
+	)
+	assert _fingerprint(dataset)["value"] == _fingerprint(dataset.to_document())
 
 
 def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
