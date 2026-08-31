@@ -24,7 +24,7 @@ from lftomo.pipeline.core import (
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import ProjOrder, SinoOrder
-from lftomo.util.window import DataRef
+from lftomo.util.window import DataRef, TomoWindow
 
 
 class WorkerTimeoutError(TimeoutError):
@@ -89,9 +89,12 @@ def _buffer_ref(state: PipelineState, shape=None) -> DataRef:
 			name: source_step.get(name, value)
 			for name, value in step.as_dict().items()
 		})
-	return DataRef(
-		shape, shape.make_with(0), position, step, state.buffer_spec.dtype,
-	)
+	if isinstance(state.source_window, TomoWindow):
+		return TomoWindow(
+			shape, shape.make_with(0), position, step, state.buffer_spec.dtype,
+			state.source_window.internal.dtype,
+		)
+	return DataRef(shape, shape.make_with(0), position, step, state.buffer_spec.dtype)
 
 
 def _buffer_units(state: PipelineState, axis: str, shape=None) -> Iterator[DataRef]:
@@ -464,7 +467,7 @@ class PipelineExecutor:
 			if "flat_fields" in state.scan.metadata:
 				_managed_flat_fields(state)
 			working_state = state.with_array(
-				output, buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(np.float32)),
+				output, buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(output.dtype)),
 			)
 			air_mask_key = getattr(stage, "air_mask_artifact", "air_mask")
 			air_mask = working_state.artifacts.get(air_mask_key)
@@ -502,7 +505,7 @@ class PipelineExecutor:
 			merge_normalization_dispatch(stage, working_state, results)
 			result = commit_output(
 				original, output, retire_as="raw_staging",
-				buffer_spec=BufferSpec(original.buffer_spec.shape, np.dtype(np.float32)),
+				buffer_spec=BufferSpec(original.buffer_spec.shape, np.dtype(output.dtype)),
 			)
 			result.artifacts.update(working_state.artifacts)
 			return result

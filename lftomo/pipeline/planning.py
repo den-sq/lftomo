@@ -176,7 +176,11 @@ def stage_output_spec(
 	layout = stage.contract.output_layout(input_spec.layout)
 	dtype = input_spec.dtype
 	if stage.name.startswith("normalize.") or stage.name == "weighted-normalize":
-		dtype = np.dtype(np.float32)
+		# Fragment validation has no run geometry; the canonical run path derives
+		# this dtype from the source window rather than storing a parallel setting.
+		dtype = np.dtype(
+			np.float32 if source_window is None else source_window.internal.dtype
+		)
 	elif stage.name == "layout.convert":
 		shape = shape.to(layout)
 	elif stage.name == "geometry.affine_skew_movement" and getattr(stage, "target_layout", None) is not None:

@@ -12,6 +12,7 @@ from lftomo.pipeline.stages import (
 	HelicalIndexRemapStage,
 	ManualCenterStage,
 	MovementCorrectStage,
+	NegativeLogStage,
 	PaganinPhaseAbsorptionStage,
 	PaganinStage,
 	SkewCorrectStage,
@@ -105,6 +106,29 @@ def test_state_layout_drives_paganin_without_constructor_order():
 	PaganinStage(alpha=0.06).run(state(sinogram, SinoOrder))
 
 	np.testing.assert_allclose(projection, sinogram.transpose(1, 0, 2), rtol=1e-6, atol=1e-6)
+
+
+def test_serial_phase_units_preserve_strided_theta_positions(monkeypatch):
+	import lftomo.pipeline.stages.phase as phase_module
+
+	working = np.full((4, 2, 3), 0.5, dtype=np.float32)
+	current = state(working, ProjOrder)
+	attach_source_geometry(
+		current, theta_start=1, theta_stride=2, physical_theta=8,
+	)
+	positions = []
+	original = phase_module._buffer_units
+
+	def record_units(current_state, axis):
+		for unit in original(current_state, axis):
+			assert unit.internal.dtype == np.dtype(np.float32)
+			positions.append(unit.pos.Theta)
+			yield unit
+
+	monkeypatch.setattr(phase_module, "_buffer_units", record_units)
+	NegativeLogStage().run(current)
+
+	assert positions == [1, 3, 5, 7]
 
 
 def test_phase_contrast_canonical_plans_projection_order_without_injection():

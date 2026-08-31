@@ -33,14 +33,16 @@ from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
 
 
 def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
-	"""Return a float32 prospective output while the raw input remains live."""
+	"""Return a work-dtype output while the raw input remains live."""
 
 	source = np.asarray(state.working_array)
-	# Float32 arrays can be normalized in place; other dtypes require promotion.
-	if state.storage is None and source.dtype == np.dtype(np.float32):
+	if state.source_window is None:
+		raise RuntimeError("normalization requires PipelineState.source_window")
+	work_dtype = np.dtype(state.source_window.internal.dtype)
+	if state.storage is None and source.dtype == work_dtype:
 		return state.working_array, source
 	output, data = allocate_output(
-		state, state.buffer_spec.shape, np.float32, role="normalized",
+		state, state.buffer_spec.shape, work_dtype, role="normalized",
 		reuse_from=("normalized", "reconstruction"),
 	)
 	data[...] = source
@@ -50,7 +52,7 @@ def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 def _finish_normalization(state: PipelineState, output: object) -> PipelineState:
 	return commit_output(
 		state, output, retire_as="raw_staging",
-		buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(np.float32)),
+		buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(output.dtype)),
 	)
 
 

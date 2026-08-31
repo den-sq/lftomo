@@ -11,16 +11,15 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.execution import _buffer_units
 from lftomo.util.shapes import Proj, ProjOrder, SinoOrder
 
 
 class BilateralFilterStage(Stage):
 	"""Apply OpenCV edge-preserving bilateral filtering per projection.
 
-	OpenCV's bilateral implementation does not accept float64 images. Each
-	projection is therefore evaluated at float32 precision, then assigned back
-	into the original working array. A float64 working array remains float64,
-	but the filtered values have float32 computational precision.
+	OpenCV's bilateral implementation consumes the canonical float32 work buffer
+	selected by the source window.
 	"""
 
 	name = "filter.bilateral"
@@ -61,13 +60,12 @@ class BilateralFilterStage(Stage):
 			raise ValueError("filter.bilateral expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
-		count = data.shape[layout.axis_of("Theta")]
-		for projection in range(count):
-			image = data[layout.point_index(Theta=projection)]
-			# This conversion is intentional and is part of the Stage's public
-			# numerical behavior; cv2.bilateralFilter rejects float64 inputs.
+		if data.dtype != np.dtype(np.float32):
+			raise TypeError("filter.bilateral requires the canonical float32 work dtype")
+		for unit in _buffer_units(state, "Theta"):
+			image = data[unit.index][layout.point_index(Theta=0)]
 			image[:] = cv2.bilateralFilter(
-				image.astype(np.float32, copy=False),
+				image,
 				self.diameter,
 				self.sigma_color,
 				self.sigma_space,

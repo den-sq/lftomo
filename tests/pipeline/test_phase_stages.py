@@ -20,10 +20,11 @@ from lftomo.pipeline.stages import (
 	create_stage,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from tests.sample_data import attach_source_geometry
 
 
 def _state(array, config):
-	return PipelineState(
+	return attach_source_geometry(PipelineState(
 		working_array=array,
 		scan=Scan(
 			energy_keV=20,
@@ -37,7 +38,7 @@ def _state(array, config):
 		),
 		recon=Recon(pipeline=[config]),
 		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
-	)
+	))
 
 
 def _fixture():
