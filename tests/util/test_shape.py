@@ -218,6 +218,8 @@ def test_shape_func():
 	assert interval == (0, 5)
 	assert interval.start_stop("Y") == (0, 5)
 	assert interval.shape == Y(5)
+	assert DataRange.from_document(interval.to_document()) == interval
+	assert Y.from_document(Y(3).to_document()) == Y(3)
 	with pytest.raises(TypeError, match="no iteration stride"):
 		list(interval)
 

@@ -50,6 +50,7 @@ def test_creation():
 	assert tdr.pos == Y(0)
 	assert tdr.shape == shape
 	assert tdr.start_stop("Y") == (0, 2048)
+	assert DataRef.from_document(tdr.to_document()).to_document() == tdr.to_document()
 
 	tw = tds.full_window()
 
@@ -57,6 +58,10 @@ def test_creation():
 	assert tw.step == Y(24)
 	assert tw.shape == ProjOrder(1501, 1048, 2048)
 	assert tw.internal.dtype == np.dtype(work_dtype)
+	assert TomoWindow.from_document(tw.to_document()).to_document() == tw.to_document()
+	restored = TomoDataSet.from_document(tds.to_document())
+	assert restored.to_document() == tds.to_document()
+	assert not restored.angles.flags.writeable and not restored.acquisition_indices.flags.writeable
 
 	# Missing angle steps
 	with pytest.warns(DeprecationWarning, match="FOV angle synthesis"):

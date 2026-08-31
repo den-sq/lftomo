@@ -15,6 +15,30 @@ from .shapes import DataShape, DataRange, IntIter, ReconOrder, SliceIter, TFIter
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
 
 
+def _array_to_document(value: np.ndarray) -> dict[str, object]:
+	array = np.ascontiguousarray(value)
+	return {
+		"dtype": array.dtype.str,
+		"shape": [int(size) for size in array.shape],
+		"data": array.tobytes().hex(),
+	}
+
+
+def _array_from_document(document: dict[str, object]) -> np.ndarray:
+	if not isinstance(document, dict) or set(document) != {"dtype", "shape", "data"}:
+		raise ValueError("array document is incomplete")
+	if not isinstance(document["dtype"], str) or not isinstance(document["data"], str):
+		raise TypeError("array document dtype and data must be strings")
+	shape = document["shape"]
+	if not isinstance(shape, list) or any(type(size) is not int or size < 0 for size in shape):
+		raise TypeError("array document shape must contain non-negative integers")
+	array = np.frombuffer(bytes.fromhex(document["data"]), dtype=np.dtype(document["dtype"]))
+	try:
+		return array.reshape(shape).copy()
+	except ValueError as error:
+		raise ValueError("array document payload does not match its shape") from error
+
+
 class DataRef(object):
 	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape,
 					step: DataShape, dtype: type = None, offset: int = 0,
@@ -88,6 +112,76 @@ class DataRef(object):
 		self.shape.axis_of(name)
 		start = int(getattr(self.pos, name, 0))
 		return start, start + int(getattr(self.shape, name))
+
+	def _base_document(self) -> dict[str, object]:
+		return {
+			"type": type(self).__name__,
+			"shape": self.shape.to_document(),
+			"pad_before": self.pad_before.to_document(),
+			"pad_after": self.pad_after.to_document(),
+			"pos": self.pos.to_document(),
+			"step": self.step.to_document(),
+			"dtype": None if self.dtype is None else np.dtype(self.dtype).str,
+			"offset": int(self.__offset),
+			"memory_index": None if self.__memory_index is None else [
+				{"start": item.start, "stop": item.stop, "step": item.step}
+				for item in self.__memory_index
+			],
+		}
+
+	def to_document(self) -> dict[str, object]:
+		return self._base_document()
+
+	@staticmethod
+	def _base_from_document(document: dict[str, object]) -> dict[str, object]:
+		required = {
+			"type", "shape", "pad_before", "pad_after", "pos", "step",
+			"dtype", "offset", "memory_index",
+		}
+		if not isinstance(document, dict) or not required.issubset(document):
+			raise ValueError("DataRef document is incomplete")
+		dtype = document["dtype"]
+		if dtype is not None and not isinstance(dtype, str):
+			raise TypeError("DataRef document dtype must be a string or null")
+		if type(document["offset"]) is not int:
+			raise TypeError("DataRef document offset must be an integer")
+		return {
+			"shape": DataShape.from_document(document["shape"]),
+			"pad": DataShape.from_document(document["pad_before"]),
+			"pad_after": DataShape.from_document(document["pad_after"]),
+			"pos": DataShape.from_document(document["pos"]),
+			"step": DataShape.from_document(document["step"]),
+			"dtype": None if dtype is None else np.dtype(dtype),
+			"offset": document["offset"],
+		}
+
+	def _restore_memory_index(self, document: dict[str, object]) -> None:
+		memory_index = document["memory_index"]
+		if memory_index is None:
+			return
+		if not isinstance(memory_index, list) or any(
+			not isinstance(item, dict) or set(item) != {"start", "stop", "step"}
+			for item in memory_index
+		):
+			raise ValueError("DataRef memory index is invalid")
+		self.__memory_index = tuple(slice(item["start"], item["stop"], item["step"])
+										for item in memory_index)
+
+	@classmethod
+	def from_document(cls, document: dict[str, object]) -> Self:
+		if cls is DataRef and document.get("type") != "DataRef":
+			target = globals().get(str(document.get("type")))
+			if isinstance(target, type) and issubclass(target, DataRef):
+				return target.from_document(document)
+		if document.get("type") != cls.__name__ or set(document) != {
+			"type", "shape", "pad_before", "pad_after", "pos", "step",
+			"dtype", "offset", "memory_index",
+		}:
+			raise ValueError(f"expected {cls.__name__} document")
+		values = cls._base_from_document(document)
+		result = cls(**values)
+		result._restore_memory_index(document)
+		return result
 
 	def nbytes(self) -> int:
 		return self.shape.nbytes(self.dtype)
@@ -286,6 +380,24 @@ class TomoWindow(DataRef):
 			shape, pad_before, pos, step, dtype, work_dtype, pad_after=pad_after,
 		)
 
+	def to_document(self) -> dict[str, object]:
+		document = self._base_document()
+		document["work_dtype"] = np.dtype(self.__work_dtype).str
+		return document
+
+	@classmethod
+	def from_document(cls, document: dict[str, object]) -> Self:
+		if document.get("type") != cls.__name__ or set(document) != {
+			"type", "shape", "pad_before", "pad_after", "pos", "step",
+			"dtype", "offset", "memory_index", "work_dtype",
+		}:
+			raise ValueError(f"expected {cls.__name__} document")
+		values = cls._base_from_document(document)
+		values.pop("offset")
+		result = cls(**values, work_dtype=np.dtype(document["work_dtype"]))
+		result._restore_memory_index(document)
+		return result
+
 	@property
 	def internal(self):
 		return self.rescope(pos=self.pad_before.extract(self.pos), dtype=self.__work_dtype)
@@ -440,6 +552,48 @@ class TomoDataSet(DataRef):
 	def physical_shape(self) -> DataShape:
 		"""Full source shape, independent of the selected output range in ``frange``."""
 		return self.__physical_shape
+
+	def to_document(self) -> dict[str, object]:
+		document = self._base_document()
+		document.update({
+			"physical_shape": self.physical_shape.to_document(),
+			"work_dtype": np.dtype(self.__work_dtype).str,
+			"fov": {
+				"theta": None if self.fov.Theta is None else int(self.fov.Theta),
+				"degrees": repr(float(self.fov.Degrees)),
+				"count": int(self.fov.Count),
+			},
+			"angles": _array_to_document(self.angles),
+			"acquisition_indices": _array_to_document(self.acquisition_indices),
+		})
+		return document
+
+	@classmethod
+	def from_document(cls, document: dict[str, object]) -> Self:
+		if document.get("type") != cls.__name__ or set(document) != {
+			"type", "shape", "pad_before", "pad_after", "pos", "step",
+			"dtype", "offset", "memory_index", "physical_shape", "work_dtype",
+			"fov", "angles", "acquisition_indices",
+		}:
+			raise ValueError(f"expected {cls.__name__} document")
+		values = cls._base_from_document(document)
+		result = cls.__new__(cls)
+		DataRef.__init__(result, **values)
+		result._restore_memory_index(document)
+		result.__physical_shape = DataShape.from_document(document["physical_shape"])
+		result.__work_dtype = np.dtype(document["work_dtype"])
+		fov = document["fov"]
+		if not isinstance(fov, dict) or set(fov) != {"theta", "degrees", "count"}:
+			raise ValueError("TomoDataSet FOV document is invalid")
+		result.__fov = CTFov(fov["theta"], float(fov["degrees"]), fov["count"])
+		result.__angles = _array_from_document(document["angles"])
+		result.__acquisition_indices = _array_from_document(document["acquisition_indices"])
+		if len(result.__angles) != result.shape.Theta \
+				or len(result.__acquisition_indices) != result.shape.Theta:
+			raise ValueError("TomoDataSet provenance length does not match its Theta shape")
+		result.__angles.setflags(write=False)
+		result.__acquisition_indices.setflags(write=False)
+		return result
 
 	def full_window(self) -> TomoWindow:
 		pad_before, pad_after = _resolved_padding(

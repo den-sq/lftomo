@@ -98,8 +98,9 @@ def test_asymmetric_stage_and_operator_requirements_compose_by_side():
 	assert windows[1].pad_before == ProjOrder(Theta=0, Y=2, X=0)
 	assert windows[1].pad_after == ProjOrder(Theta=0, Y=3, X=0)
 	record = plan.record()
-	assert record["effective_pad"] == {"theta": 0, "y": 2, "x": 0}
-	assert record["effective_pad_after"] == {"theta": 0, "y": 3, "x": 0}
+	assert record["effective_pad"] == ProjOrder(Theta=0, Y=2, X=0).to_document()
+	assert record["effective_pad_after"] == ProjOrder(Theta=0, Y=3, X=0).to_document()
+	assert type(plan).from_document(record).to_document() == record
 
 
 def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
