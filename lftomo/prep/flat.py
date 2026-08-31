@@ -164,7 +164,7 @@ def calculate_shift(flats: np.ndarray, scope: ImgSlice = ImgSlice(Y=20, X=20),
 
 	log.write("Flat Shift", "Linemap Calculated")
 
-	results = np.argsort(dist_stddev, axis=None).reshape(40, 40)
+	results = np.argsort(dist_stddev, axis=None).reshape(scope.Y * 2, scope.X * 2)
 
 	log.write("Flat Finding", f"{results.shape}")
 

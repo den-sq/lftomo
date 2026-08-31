@@ -183,9 +183,9 @@ class ProjOrder(DataShape): Theta: int; Y: int; X: int 	 # noqa: E701,E702
 @dataclass
 class SinoOrder(DataShape): Y: int; Theta: int; X: int 	 # noqa: E701,E702
 @dataclass
-class BackwardsSinoOrder(DataShape): X: int; Theta: int; Y: int 	 # noqa: E701,E702
+class ReverseSinoOrder(DataShape): X: int; Theta: int; Y: int 	 # noqa: E701,E702
 @dataclass
-class ImageStack(DataShape): Z: int; Y: int; Y: int 	 # noqa: E701,E702
+class ImageStack(DataShape): Z: int; Y: int; X: int 	 # noqa: E701,E702
 
 
 @dataclass
@@ -199,6 +199,10 @@ class ReconOrder(DataShape):
 		except AttributeError as ae:
 			ae.add_note("Source shape should have X and Y dimensions.")
 			raise ae
+
+
+@dataclass
+class ReverseReconOrder(DataShape): X: int; Z: int; Y: int 	 # noqa: E701,E702
 
 
 @dataclass
@@ -227,7 +231,8 @@ class Z(DataShape): Z: int 	 # noqa: E701,E702
 class GenericOrder(DataShape): A: int; B: int; C: int 	 # noqa: E701,E702
 
 
-# ????
+# Deprecated: retained for import compatibility only.
+# Removal: delete in the next breaking release; do not add new consumers.
 NPString = namedtuple("NPString", 'T')
 
 

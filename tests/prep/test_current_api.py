@@ -3,8 +3,8 @@ from uuid import uuid4
 import numpy as np
 
 from lftomo.prep.flat import weighted_normalize
-from lftomo.prep.phase import filter_create
-from lftomo.prep import stripe
+from lftomo.prep.phase import _phase_pad, _phase_retrieval, filter_create
+from lftomo.prep import flat, stripe
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import GenericOrder, ImgSlice, SinoOrder, Y
 from lftomo.util.window import TomoWindow
@@ -43,6 +43,14 @@ def test_weighted_normalize_uses_current_memory_and_window_api():
 		flats.shutdown()
 
 
+def test_calculate_shift_reshapes_for_asymmetric_scope(tmp_path, monkeypatch):
+	flats = np.ones((len(flat.FLAT), 8, 10), dtype=np.float32)
+	flats[flat.FLAT.POSTGAIN.index] = 2.0
+	monkeypatch.chdir(tmp_path)
+	monkeypatch.setattr(flat.tf, "imwrite", lambda *_args, **_kwargs: None)
+	flat.calculate_shift(flats, scope=ImgSlice(Y=2, X=3), interval=1, presub=True)
+
+
 def test_phase_filter_uses_current_shape_and_memory_api():
 	name = f"lftomo-test-{uuid4().hex}"
 	phase_filter = filter_create(
@@ -62,6 +70,37 @@ def test_phase_filter_uses_current_shape_and_memory_api():
 			assert values.max() == 1.0
 	finally:
 		phase_filter.shutdown()
+
+
+def test_phase_retrieval_uses_dist_then_energy_for_height_padding():
+	shape = SinoOrder(Y=4, Theta=1, X=4)
+	pixel_size, dist, energy = 1e-3, 2.0, 20.0
+	pad = _phase_pad(shape.Y, pixel_size, dist, energy)
+	assert (pad, _phase_pad(shape.Y, pixel_size, energy, dist)) == (1, 2)
+	work = _shared(shape)
+	phase_filter = filter_create(
+		f"lftomo-test-{uuid4().hex}", np.float32, shape,
+		1e-3, pixel_size, dist, energy, tp=True, height_pad=True,
+	)
+
+	try:
+		with work as values, phase_filter as filter_values:
+			values[:] = np.linspace(0.1, 0.9, num=16, dtype=np.float32).reshape(4, 1, 4)
+			padded = np.pad(values[:, 0, :], ((pad, pad), (0, 0)), mode="edge")
+			filtered = np.fft.fft2(padded) * filter_values
+			expected = np.real(np.fft.ifft2(filtered[pad:-pad, :]))
+
+		_phase_retrieval(
+			np.s_[:, 0, :], work, phase_filter,
+			pixel_size, energy, dist, tp=True, height_pad=True, thread_fallback=1,
+		)
+
+		assert phase_filter.shape == ImgSlice(Y=shape.Y + 2 * pad, X=shape.X)
+		with work as values:
+			np.testing.assert_allclose(values[:, 0, :], expected, rtol=1e-6, atol=1e-7)
+	finally:
+		phase_filter.shutdown()
+		work.shutdown()
 
 
 def test_stripe_window_dispatch_uses_current_internal_iteration(monkeypatch):

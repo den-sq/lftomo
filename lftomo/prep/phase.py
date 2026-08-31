@@ -135,7 +135,7 @@ def _phase_retrieval(y_slice, work_mem: SharedNPArray, phase_mem: SharedNPArray,
 
 	with work_mem as tomo, phase_mem as phase_filter:
 		if height_pad:
-			pad_height = _phase_pad(work_mem.shape.Y, pixel_size, energy, dist)
+			pad_height = _phase_pad(work_mem.shape.Y, pixel_size, dist, energy)
 		else:
 			pad_height = 0
 

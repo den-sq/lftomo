@@ -4,7 +4,7 @@ import numpy as np
 
 from dataclasses import astuple, asdict
 from functools import partial
-from lftomo.util.shapes import ProjOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
+from lftomo.util.shapes import ImageStack, ProjOrder, ReverseReconOrder, ReverseSinoOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
 from lftomo.util.shapes import IntIter, ContigMemIter, MemAddressIter, SliceIter
 
 
@@ -42,6 +42,15 @@ def test_shape_casting():
 	assert pj.Y == 12
 	assert pj.X == 100
 	assert "Theta" not in asdict(pj)
+
+
+def test_image_stack_has_spatial_xyz_fields():
+	assert astuple(ImageStack(Z=3, Y=5, X=7)) == (3, 5, 7)
+
+
+def test_reverse_orders_reverse_their_forward_twins():
+	assert SinoOrder(Y=5, Theta=7, X=11).transpose(ReverseSinoOrder) == [2, 1, 0]
+	assert ReconOrder(Y=5, Z=7, X=11).transpose(ReverseReconOrder) == [2, 1, 0]
 
 
 def test_cast_errors():
