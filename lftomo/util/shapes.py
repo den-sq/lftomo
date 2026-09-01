@@ -454,14 +454,14 @@ class TFIter(ABC):
 
 
 class IntIter(TFIter):
-	""" TODO: 1d only """
+	"""Return global integer positions for a single stepped axis."""
+
 	def __init__(self, dr: DataRange):
-		# Increment the first field by 1 to enable clean finishes.
-		# increment
-		self.__extended_block = (dr.length + dr.start).as_tuple()
+		if len(dr.step.names) != 1:
+			raise ValueError("IntIter requires exactly one stepped axis")
 
 	def __call__(self, pos) -> int:
-		return np.ravel_multi_index(pos, self.__extended_block)
+		return int(pos[0])
 
 
 class ContigMemIter(TFIter):

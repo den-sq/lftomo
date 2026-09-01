@@ -18,7 +18,6 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.execution import _buffer_units, _unit_index
 from lftomo.pipeline.runtime import tomopy_requirement
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -225,14 +224,9 @@ class EntropyLocalCenterStage(Stage):
 			raise RuntimeError("center.entropy_local requires PipelineState.source_window")
 		current_start = data.shape[layout.axis_of("X")] / 2 if self.start is None else self.start
 		angles = _angles(state, data.shape[layout.axis_of("Theta")])
-		unit, local_index = next(
-			pair for local, pair in enumerate(_buffer_units(state, "Y"))
-			if local == index
-		)
-		sinogram = data[_unit_index(unit, local_index, state.buffer_spec.shape)][
-			layout.point_index(Y=0)
-		]
-		source_slice = int(unit.pos.Y)
+		window = state.source_window.with_pad()
+		source_slice = int(window.pos.Y + index * window.step.Y)
+		sinogram = data[layout.point_index(Y=index)]
 		diagnostic_root = self._diagnostic_root(state) if self.diagnostic_images else None
 
 		import tomopy
@@ -462,17 +456,11 @@ class VoCenterStage(Stage):
 			raise RuntimeError("center.vo tilt fit requires PipelineState.source_window")
 		source_start = int(state.source_window.pos.Y)
 		source_step = int(state.source_window.step.Y)
-		selected = set(local_rows)
-		units = [
-			pair for local, pair in enumerate(_buffer_units(state, "Y"))
-			if local in selected
-		]
-		source_rows = np.asarray([unit.pos.Y for unit, _local_index in units])
+		window = state.source_window.with_pad()
+		source_rows = window.pos.Y + local_rows * window.step.Y
 		centers = np.asarray([
-			self._find(data[_unit_index(unit, local_index, state.buffer_spec.shape)][
-				layout.point_index(Y=0)
-			])
-			for unit, local_index in units
+			self._find(data[layout.point_index(Y=local)])
+			for local in local_rows
 		], dtype=np.float64)
 		coefficients, residuals, inliers, iterations, clipping_limited = self._robust_fit(
 			source_rows.astype(np.float64), centers,
@@ -537,13 +525,7 @@ class VoCenterStage(Stage):
 				index = row_count // 2 if self.ind is None else self.ind
 				if not 0 <= index < row_count:
 					raise ValueError("center.vo ind is outside the sinogram window")
-				unit, local_index = next(
-					pair for local, pair in enumerate(_buffer_units(state, "Y"))
-					if local == index
-				)
-				center = self._find(data[
-					_unit_index(unit, local_index, state.buffer_spec.shape)
-				][layout.point_index(Y=0)])
+				center = self._find(data[layout.point_index(Y=index)])
 		except (ValueError, RuntimeError, ArithmeticError) as error:
 			if self.fallback != "entropy_local":
 				raise

@@ -18,7 +18,7 @@ from lftomo.pipeline.core import (
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer
 from lftomo.util.io import np_convert
-from lftomo.util.shapes import ReconOrder, ReverseReconOrder, Y
+from lftomo.util.shapes import IntIter, ReconOrder, ReverseReconOrder, Y
 
 
 _CLOUDVOLUME_RUNTIME_REQUIREMENT = RuntimeRequirement(
@@ -105,22 +105,28 @@ class TIFFSlicesWriteStage(Stage):
 		output = Path(state.recon.output_path)
 		output.mkdir(parents=True, exist_ok=True)
 		sample_id = self._sample_id(state)
-		from lftomo.pipeline.execution import _buffer_units, _unit_index
 
-		units = list(_buffer_units(state, "Y"))
+		rows = list(
+			state.source_window.int_iter("Y") if state.source_window is not None
+			else Y.drange(0, working.shape[0], 1).get_iter(IntIter)
+		)
 		paths = []
-		for unit, _local_index in units:
-			slice_index = self.slice_start + int(unit.pos.Y)
+		for source_row in rows:
+			slice_index = self.slice_start + source_row
 			name = self.naming_template.format(sample_id=sample_id, slice=slice_index)
 			paths.append(output / (name if name.lower().endswith((".tif", ".tiff")) else f"{name}.tif"))
 
 		executor = state.executor or getattr(state.storage, "pipeline_executor", None)
 		if isinstance(state.working_array, ManagedBuffer):
-			from lftomo.pipeline.execution import _unit_handle, write_tiff_slice_kernel
+			from lftomo.pipeline.execution import write_tiff_slice_kernel
 
 			calls = [
-				(_unit_handle(state.working_array, unit, local_index), path, self.dtype)
-				for (unit, local_index), path in zip(units, paths, strict=True)
+				(
+					state.working_array[type(state.buffer_spec.shape).point_index(
+						Y=slice(local, local + 1),
+					)], path, self.dtype,
+				)
+				for local, path in enumerate(paths)
 			]
 			if self.processes > 1 and executor is not None:
 				executor.submit_all(write_tiff_slice_kernel, calls)
@@ -129,8 +135,8 @@ class TIFFSlicesWriteStage(Stage):
 					write_tiff_slice_kernel(*call)
 		else:
 			# ndarray-only hermetic tests remain serial; slices are never pickled.
-			for (unit, local_index), path in zip(units, paths, strict=True):
-				index = _unit_index(unit, local_index, state.buffer_spec.shape)
+			for local, path in enumerate(paths):
+				index = type(state.buffer_spec.shape).point_index(Y=slice(local, local + 1))
 				_write_array_slice(working[index][0], path, self.dtype)
 		_record_outputs(state, paths)
 		return state

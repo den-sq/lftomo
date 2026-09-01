@@ -375,6 +375,15 @@ def test_custom_iter_1d():
 	assert skip_contig_iter_list == [1024 + (2048 * 2) * i for i in range(1024, 1048, 2)]
 
 
+def test_int_iter_supports_nonzero_start_and_stride():
+	assert list(Y.drange(5, 12, 3).get_iter(IntIter)) == [5, 8, 11]
+
+
+def test_int_iter_rejects_multidimensional_steps():
+	with pytest.raises(ValueError, match="exactly one stepped axis"):
+		XSlice.drange((0, 2), (3, 6), (1, 2)).get_iter(IntIter)
+
+
 def test_custom_iter_2d():
 	shape = ProjOrder(Theta=1501, Y=2048, X=2048)
 	win_shape = ProjOrder(Theta=1501, Y=24, X=2048)
@@ -389,7 +398,6 @@ def test_custom_iter_2d():
 	stop = XSlice(Theta=1501, Y=1048)
 	step = XSlice(Theta=1, Y=1)
 
-	drange_int_iter = XSlice.drange(start, stop, step).get_iter(IntIter)
 	drange_slice_iter = XSlice.drange(start, stop, step).get_iter(partial(SliceIter, shape=win_shape))
 	drange_mem_iter = XSlice.drange(start, stop, step).get_iter(partial(MemAddressIter, offset=1024, stride=stride))
 	drange_contig_iter = XSlice.drange(start, stop, step).get_iter(
@@ -397,13 +405,10 @@ def test_custom_iter_2d():
 	drange_sino_contig_iter = XSlice.drange(start, stop, step).get_iter(
 							partial(ContigMemIter, offset=1024, stride=sino_stride, shape=sino_shape, jump=["Theta"]))
 
-	int_iter_list = list(drange_int_iter)
 	slice_iter_list = list(drange_slice_iter)
 	mem_iter_list = list(drange_mem_iter)
 	contig_iter_list = list(np.unique(list(drange_contig_iter)))
 	sino_contig_iter_list = list(np.unique(list(drange_sino_contig_iter)))
-
-	print(int_iter_list[:50])
 
 	assert slice_iter_list == list([np.s_[y, x, :] for y in range(0, 1501) for x in range(1024, 1048)])
 

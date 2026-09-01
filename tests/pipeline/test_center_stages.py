@@ -123,7 +123,7 @@ def test_vo_tilt_fit_rejects_center_outlier(monkeypatch):
 
 
 def test_vo_tilt_fit_uses_source_y_coordinates_and_row_span(monkeypatch):
-	working = np.zeros((5, 3, 8), dtype=np.float32)
+	working = np.zeros((7, 3, 8), dtype=np.float32)
 	config = StageConfig(
 		kind="center",
 		algorithm="vo",
@@ -132,21 +132,23 @@ def test_vo_tilt_fit_uses_source_y_coordinates_and_row_span(monkeypatch):
 	state = _state(working, [config])
 	state.source_window = TomoWindow(
 		ProjOrder(Theta=3, Y=5, X=8),
-		ProjOrder(Theta=0, Y=0, X=0),
+		ProjOrder(Theta=0, Y=1, X=0),
 		ProjOrder(Theta=0, Y=100, X=0),
 		ProjOrder(Theta=1, Y=2, X=1),
 		np.float32,
 		np.float32,
 	)
-	centers = iter([14.0, 14.4, 14.8])
+	centers = iter([13.9, 14.5, 15.1])
 	monkeypatch.setattr("tomopy.find_center_vo", lambda *_args, **_kwargs: next(centers))
 
 	result = Pipeline([create_stage(config)]).run(state)
 
-	np.testing.assert_allclose(result.artifacts["center"], [14, 14.2, 14.4, 14.6, 14.8])
+	np.testing.assert_allclose(
+		result.artifacts["center"], [14, 14.2, 14.4, 14.6, 14.8, 15, 15.2],
+	)
 	metadata = result.artifacts["center_fit"]
-	np.testing.assert_array_equal(metadata["sampled_source_rows"], [100, 104, 108])
-	assert metadata["row_span"] == 8
+	np.testing.assert_array_equal(metadata["sampled_source_rows"], [99, 105, 111])
+	assert metadata["row_span"] == 12
 
 
 def test_vo_tilt_fit_rejects_or_forces_failed_residual_qc(monkeypatch):
