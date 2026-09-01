@@ -27,8 +27,8 @@ from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
 from lftomo.util.converter import CONVERTER
-from lftomo.util.shapes import ChunkGrid, Interval, ProjOrder, Y
-from lftomo.util.window import TomoDataSet, TomoWindow
+from lftomo.util.shapes import ChunkGrid, Interval, ProjOrder, Theta, Y
+from lftomo.util.window import TomoDataSet
 
 
 class ReferenceNotReproducible(RuntimeError):
@@ -265,10 +265,8 @@ def _run_phase_contrast_projection_order(
 		volume = None
 		for theta_start in range(0, projection_count, theta_batch_size):
 			theta_stop = min(theta_start + theta_batch_size, projection_count)
-			window = TomoWindow.from_bounds(
-				dataset.physical_shape,
-				y=(y.start, y.stop), theta=(theta_start, theta_stop),
-				dtype=dataset.dtype, work_dtype=np.float32,
+			window = source_window.rescope(
+				pos=Theta(theta_start), shape=Theta(theta_stop - theta_start),
 			)
 			with PipelineRunContext() as run_context:
 				state = PipelineState(

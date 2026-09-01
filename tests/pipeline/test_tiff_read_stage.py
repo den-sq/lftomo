@@ -22,6 +22,7 @@ from lftomo.pipeline import (
 )
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.pipeline.domains import DataDomain
+from lftomo.pipeline.planning import _read_spec
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -188,6 +189,10 @@ def test_tiff_stack_stage_reads_strided_theta_window_with_matching_angles(tmp_pa
 	result = _run(_state(projection_dir, count, size, config), create_stage(config))
 
 	np.testing.assert_array_equal(result.working_array, stack[1:6:2])
+	planned = _read_spec(create_stage(config), result.scan)
+	read_window = result.dataset.full_window().with_pad(["Y"])
+	assert planned.shape == read_window.frange.length.to(ProjOrder)
+	assert planned.dtype == read_window.dtype
 	np.testing.assert_allclose(
 		result.dataset.angles[result.source_window.axis_slice("Theta")],
 		np.deg2rad([30, 90, 150]),
