@@ -85,7 +85,9 @@ def test_current_b10_driver_runs_a_global_row_selection(tmp_path):
 	assert [float(tf.imread(path)[0, 0]) for path in written] == [1.0, 1.5, 2.0, 2.5]
 
 
-def test_streaming_bac_matches_current_driver_at_fixed_window_extent(tmp_path, monkeypatch):
+def test_streaming_bac_matches_current_driver_at_fixed_window_extent(
+		tmp_path, monkeypatch, caplog,
+):
 	"""The FFT oracle is the legacy driver at the same window and zero pad."""
 
 	size = 8
@@ -179,7 +181,7 @@ def test_streaming_bac_matches_current_driver_at_fixed_window_extent(tmp_path, m
 		window_config=WindowConfig(rows=window_rows),
 	)[0]
 
-	assert "phase.bac_correction" in result.artifacts["window_plan"]["warnings"][0]
+	assert "phase.bac_correction" in caplog.text
 	for row in range(size):
 		np.testing.assert_allclose(
 			tf.imread(streaming_output / f"{row:05d}.tif"),

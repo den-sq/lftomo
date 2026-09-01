@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from statistics import median
-from typing import Callable, Iterable
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.pipeline.planning import ExecutionKind
+
+if TYPE_CHECKING:
+	from lftomo.util.window import TomoWindow
 
 
 class ExecutionSpanPhase(str, Enum):
@@ -123,6 +126,7 @@ class ExecutionSpanEvent:
 
 	phase: ExecutionSpanPhase
 	span: ExecutionSpan
+	source_window: TomoWindow | None = None
 	coordinator_wall_seconds: float | None = None
 	member_timings: tuple[MemberTiming, ...] = ()
 	managed_allocation_changes: tuple[ManagedAllocationChange, ...] = ()

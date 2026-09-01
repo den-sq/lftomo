@@ -16,7 +16,7 @@ from lftomo.pipeline.stages.normalize import TaperBlendedNormalizeStage, Weighte
 from lftomo.prep.flat import weighted_normalize
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
-from lftomo.util.window import TomoWindow
+from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 from tests.sample_data import attach_source_geometry
 
 
@@ -30,13 +30,13 @@ class PassThroughStage(Stage):
 		return state
 
 
-def _scan(flat_fields):
+def _scan(flat_fields, *, rows=2, columns=2):
 	return Scan(
 		energy_keV=20,
 		pixel_size_um=1.0,
 		n_projections=3,
 		degrees_per_fov=180,
-		detector=Detector(pixel_size_um=1.0, rows=2, columns=2),
+		detector=Detector(pixel_size_um=1.0, rows=rows, columns=columns),
 		acquisition=Acquisition(n_projections=3, rotation_end_deg=180),
 		projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		metadata={"flat_fields": flat_fields},
@@ -114,6 +114,35 @@ def test_weighted_normalize_promotes_integer_projections_to_float32():
 
 	assert result.working_array.dtype == np.float32
 	np.testing.assert_allclose(result.working_array, 0.5)
+
+
+def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window():
+	physical = ProjOrder(Theta=3, Y=6, X=2)
+	flats = np.stack([
+		np.repeat(np.array([[20], [40], [80], [160]], np.float32), 2, axis=1),
+		np.repeat(np.array([[20], [40], [80], [160]], np.float32), 2, axis=1),
+		np.zeros((4, 2), np.float32), np.zeros((4, 2), np.float32),
+	])
+	dataset = TomoDataSet.from_range(
+		CTFov(3, 180, 1), physical, Y.drange(1, 5, 2), dtype=np.uint16,
+		angles=np.linspace(0, np.pi, 3, endpoint=False), pad=Y(1),
+	)
+	window = TomoWindow.from_bounds(
+		physical, y=(1, 3), halo=(Y(0), Y(1)), dtype=np.uint16,
+	)
+	working = np.full((3, 3, 2), 10, dtype=np.uint16)
+	state = PipelineState(
+		working, _scan(flats, rows=6),
+		Recon(pipeline=[StageConfig(kind="normalize")]),
+		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
+		dataset=dataset, source_window=window,
+	)
+
+	result = WeightedNormalizeStage().run(state)
+
+	np.testing.assert_allclose(result.working_array[:, :, 0], [[0.5, 0.25, 0.125]] * 3)
+	assert result.artifacts["flat_fields"].shape == (4, 3, 2)
+	assert state.scan.metadata["flat_fields"].shape == (4, 4, 2)
 
 
 def test_float32_normalization_replaces_raw_handle_after_successful_handoff():

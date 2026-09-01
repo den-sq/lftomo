@@ -19,6 +19,7 @@ from lftomo.pipeline import (
 	StageContract,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder, X
+from lftomo.util.window import TomoWindow
 
 
 def _scan(theta=6, rows=3, columns=8):
@@ -123,10 +124,15 @@ def test_unobserved_pipeline_does_not_load_optional_stage_registry(monkeypatch):
 
 def test_sequential_span_reports_truthful_single_member_wall_time():
 	events = []
+	stage_events = []
+	state = _state(np.zeros((6, 3, 8), dtype=np.float32))
+	state.source_window = TomoWindow.from_bounds(
+		ProjOrder(Theta=6, Y=3, X=8), y=(0, 3), dtype=np.float32,
+	)
 	Pipeline(
 		[_PassStage()], validate=False, execution_observer=events.append,
-		stage_indices=(7,),
-	).run(_state(np.zeros((6, 3, 8), dtype=np.float32)))
+		observer=lambda *event: stage_events.append(event), stage_indices=(7,),
+	).run(state)
 
 	assert [event.phase for event in events] == [
 		ExecutionSpanPhase.STARTED, ExecutionSpanPhase.COMPLETED,
@@ -143,6 +149,8 @@ def test_sequential_span_reports_truthful_single_member_wall_time():
 	assert completed.member_timings[0].coordinator_wall_seconds == (
 		completed.coordinator_wall_seconds
 	)
+	assert all(event.source_window is state.source_window for event in events)
+	assert all(event[-1] is state.source_window for event in stage_events)
 
 
 def test_fused_process_span_returns_bounded_member_aggregates_once():

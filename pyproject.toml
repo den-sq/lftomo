@@ -22,6 +22,7 @@ dependencies = [
 	"opencv-python",
 	"scikit-image",
 	"pydantic>=2",
+	"cattrs>=24",
 	"PyYAML",
 	"packaging",
 ]

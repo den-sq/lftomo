@@ -15,7 +15,7 @@ def attach_source_geometry(
 	physical_y = y_start + shape.Y if physical_y is None else physical_y
 	physical = ProjOrder(physical_theta, physical_y, shape.X)
 	angles = np.linspace(0, np.pi, physical_theta, endpoint=False)
-	state.dataset = TomoDataSet(
+	state.dataset = TomoDataSet.from_range(
 		CTFov(physical_theta, 180, 1), physical, Y(physical.Y),
 		dtype=state.buffer_spec.dtype, angles=angles,
 	)
@@ -37,7 +37,7 @@ def generate_dataref():
 	dtype = np.int16
 	offset = 1024
 
-	return DataRef(shape, pad, pos, step, dtype, offset)
+	return DataRef(shape, pad, pos, step, dtype, offset=offset)
 
 
 def generate_dataset():
@@ -47,7 +47,7 @@ def generate_dataset():
 	dtype = np.int16
 	work_dtype = np.float32
 
-	return TomoDataSet(
+	return TomoDataSet.from_range(
 		fov, shape, over, dtype=dtype, work_dtype=work_dtype,
 		angles=np.linspace(0, np.deg2rad(fov.Degrees), shape.Theta, endpoint=False),
 	)

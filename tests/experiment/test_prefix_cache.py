@@ -36,6 +36,7 @@ from lftomo.experiment import (
 )
 from lftomo.experiment.runner import ExperimentInputs, TrialExecution
 from lftomo.experiment.prefix_cache import _fingerprint, _hash_document
+from lftomo.util.converter import CONVERTER
 from lftomo.pipeline import BufferSpec, Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
@@ -369,11 +370,11 @@ def test_fingerprints_retain_type_identity_and_accept_canonical_geometry():
 	left = make_dataclass("Left", [("value", int)])(3)
 	right = make_dataclass("Right", [("value", int)])(3)
 	assert _hash_document(left) != _hash_document(right)
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(2, 180, 1), ProjOrder(2, 3, 4), X(1),
 		angles=np.array([0, 1], dtype=np.float32),
 	)
-	assert _fingerprint(dataset)["value"] == _fingerprint(dataset.to_document())
+	assert _fingerprint(dataset)["value"] == _fingerprint(CONVERTER.unstructure(dataset))
 
 
 def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
@@ -383,7 +384,7 @@ def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
 	decisions = {item.candidate_id: item for item in plan.decisions}
 	shared = candidates[0].configs[0]
 	values = np.arange(24, dtype=np.float32).reshape(2, 3, 4) + 1
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(2, 180, 1), ProjOrder(*values.shape), Y(3),
 		angles=np.array([0, 1], dtype=np.float32),
 	)
@@ -419,8 +420,8 @@ def test_cached_forks_are_concurrent_deeply_isolated_and_failure_safe(tmp_path):
 		)
 		assert result.scan.metadata["nested"]["history"] == ["source", factor]
 		assert result.recon.metadata["nested"]["history"] == ["source", factor]
-		assert result.dataset.to_document() == dataset.to_document()
-		assert result.source_window.to_document() == source_window.to_document()
+		assert CONVERTER.unstructure(result.dataset) == CONVERTER.unstructure(dataset)
+		assert CONVERTER.unstructure(result.source_window) == CONVERTER.unstructure(source_window)
 		assert event.fork_strategy == "explicit_copy"
 
 	for failure, exception, terminal in (

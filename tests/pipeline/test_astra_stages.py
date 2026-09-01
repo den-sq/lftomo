@@ -4,7 +4,8 @@ import pytest
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import Backend, BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import AstraCudaStage, STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.window import TomoWindow
 
 
 ALGORITHMS = {
@@ -54,20 +55,25 @@ def test_astra_stage_passes_bridge_options_and_iterations(monkeypatch):
 		algorithm="sirt_cuda",
 		params={"center": 4, "iterations": 7, "circle_mask": False},
 	)
-	working = np.ones((2, 3, 8), dtype=np.float32)
+	working = np.arange(4 * 3 * 8, dtype=np.float32).reshape(4, 3, 8)
 	calls = {}
 
 	def recon(data, angles, **kwargs):
+		calls["data"] = data.copy()
 		calls.update(kwargs)
 		kwargs["init_recon"].fill(1)
 		return kwargs["init_recon"]
 
 	monkeypatch.setattr("tomopy.recon", recon)
 	backend = Backend("cuda", supports_gpu=True)
-	result = Pipeline([create_stage(config)], backend=backend).run(
-		_state(working, config, backend, SinoOrder)
+	state = _state(working, config, backend, SinoOrder)
+	state.source_window = TomoWindow(
+		ProjOrder(3, 2, 8), Y(1), Y(12), Y(1), np.float32, np.float32,
+		pad_after=Y(1),
 	)
+	result = Pipeline([create_stage(config)], backend=backend).run(state)
 
+	np.testing.assert_array_equal(calls["data"], working[1:3])
 	assert calls["algorithm"].__name__ == "astra"
 	assert calls["ncore"] == 1
 	assert calls["options"] == {
@@ -77,6 +83,7 @@ def test_astra_stage_passes_bridge_options_and_iterations(monkeypatch):
 		"num_iter": 7,
 	}
 	assert result.working_array.shape == (2, 8, 8)
+	assert result.source_window is state.source_window
 
 
 def test_astra_stage_rejects_cpu_backend_before_execution():

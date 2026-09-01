@@ -27,7 +27,9 @@ from lftomo.pipeline import (
 	LogicalStageMember,
 )
 from lftomo.runner import load_scan
+from lftomo.util.shapes import ProjOrder
 from lftomo.util.log import LOG, log
+from lftomo.util.window import TomoWindow
 
 
 class RecordingLogger:
@@ -36,6 +38,11 @@ class RecordingLogger:
 
 	def write(self, step, statement, log_level=LOG.TIME):
 		self.calls.append((step, statement, log_level))
+
+
+def _source_window(bounds=(1068, 1080)):
+	shape = ProjOrder(Theta=1, Y=1092, X=1)
+	return TomoWindow.from_bounds(shape, y=bounds, dtype=np.uint16)
 
 
 def test_acceptance_progress_uses_shared_logger_and_persists_structured_event(tmp_path):
@@ -58,23 +65,21 @@ def test_acceptance_stage_progress_names_the_independent_run_and_window(tmp_path
 		progress,
 		"windowed.current_oracle_reproduction",
 		"current-oracle reproduction",
-		y_start=1068,
-		y_stop=1092,
-		window_rows=12,
 	)
 	stage = type("Stage", (), {"name": "read.hdf5_dxchange"})()
 
-	observer("started", 0, stage, None)
-	observer("completed", 0, stage, None)
-	observer("started", 0, stage, None)
+	observer("started", 0, stage, None, _source_window())
+	observer("completed", 0, stage, None, _source_window())
+	observer("started", 0, stage, None, _source_window((1080, 1092)))
 
 	records = [json.loads(line) for line in progress.path.read_text().splitlines()]
 	assert records[0]["message"].startswith(
-		"current-oracle reproduction: window 1/2 [1068, 1080)"
+		"current-oracle reproduction: window [1068, 1080)"
 	)
 	assert records[0]["details"]["core_interval"] == [1068, 1080]
+	assert "window_index" not in records[0]["details"]
 	assert records[2]["message"].startswith(
-		"current-oracle reproduction: window 2/2 [1080, 1092)"
+		"current-oracle reproduction: window [1080, 1092)"
 	)
 
 
@@ -83,14 +88,12 @@ def _span_event(phase):
 	span = ExecutionSpan(
 		"run", "run:0", 0, 1, ExecutionKind.SEQUENTIAL, 0, 1, (member,),
 	)
-	return ExecutionSpanEvent(phase, span)
+	return ExecutionSpanEvent(phase, span, source_window=_source_window())
 
 
 def test_memory_sampler_records_each_span_without_turning_it_into_a_proof():
 	recorded = []
-	sampler = ProcessTreeMemorySampler(
-		y_start=1068, y_stop=1092, window_rows=12, on_record=recorded.append,
-	)
+	sampler = ProcessTreeMemorySampler(on_record=recorded.append)
 	snapshots = iter((
 		{1: 100},
 		{1: 140, 2: 25},
@@ -106,7 +109,7 @@ def test_memory_sampler_records_each_span_without_turning_it_into_a_proof():
 	observation = recorded[0]
 	assert observation["span_id"] == "run:0"
 	assert observation["members"][0]["stage"] == "read.test"
-	assert observation["window_index"] == 0
+	assert "window_index" not in observation
 	assert observation["core_interval"] == [1068, 1080]
 	assert observation["members"][0]["dispatch_kind"] == "thread"
 	assert observation["scope"] == "sampled execution span and process tree"
@@ -123,7 +126,6 @@ def test_stage_memory_observation_uses_shared_logger(tmp_path):
 	emit = _memory_record_logger(progress, "windowed.frozen", "frozen reproduction")
 
 	emit({
-		"window_index": 1,
 		"core_interval": [1080, 1092],
 		"members": [{"stage": "recon.gridrec"}],
 		"peak_process_tree_private_delta_bytes": 3 * 1024**2,

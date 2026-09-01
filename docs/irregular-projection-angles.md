@@ -33,11 +33,12 @@ observed interval ratios still round to their correct slot counts.  Use an
 `explicit` index or angle source when boundary-slot identity must be recovered
 independently of the first-record anchor.
 
-The full arrays remain on `TomoDataSet`. Theta start/stop/stride selection is
-recorded once by `TomoWindow`; center, reconstruction, and super-resolution
-derive their selected angles directly from that dataset/window pair. They are
-not republished as `PipelineState.artifacts`. No dummy projection is inserted
-for a missing slot.
+The full arrays remain on `TomoDataSet`. The same dataset owns the global Theta
+selection and sampling stride, and its iterator derives each `TomoWindow` from
+those facts. Center, reconstruction, and super-resolution select their angles
+from the full arrays with the emitted window. Selection geometry is not carried
+in a parallel plan window or republished as `PipelineState.artifacts`. No dummy
+projection is inserted for a missing slot.
 
 The historical `get_thetas` helper has no call sites and is not migrated.  The
 active historical `skip_adjustment` path is also not copied: it applied local

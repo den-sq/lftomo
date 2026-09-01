@@ -110,10 +110,9 @@ Stages consult `state.layout`/`state.domain` for axis mapping instead of hardcod
 `(Y, Theta, X)`. `PipelineState.with_array()` must preserve both fields unless a
 stage explicitly changes them. `None` is retained only as a legacy-fragment
 compatibility state; complete pipelines establish both axes at their read Stage,
-and a fragment requesting axis validation supplies them explicitly. A small
-`lftomo/pipeline/stages/_layout.py` provides the helpers
-(`projection_view`, `sinogram_view`, `sinogram_scratch`, `n_projections`,
-`n_rows`) so per-stage migrations are mechanical.
+and a fragment requesting axis validation supplies them explicitly. Stages use
+the named-axis operations on their canonical `DataShape` directly; the former
+compatibility helper module has been retired.
 
 Constructor `order` flags remain accepted during migration but are checked
 against `state.layout`; they do not override it silently. Canonical YAML should
@@ -420,7 +419,7 @@ injection and prove ordinary YAML execution selects the same layout.
 ## 8. Phasing → sub-issues
 
 - **A — mechanism:** contract fields (both axes, locality, row-identity flags) +
-  `PipelineState.layout/domain` + `_layout.py` helpers + complete/fragment
+	`PipelineState.layout/domain` + named-axis `DataShape` operations + complete/fragment
   validator modes (layout composition, domain monotonicity, exactly-once
   normalize + transmission→attenuation in complete mode) + `PipelinePlan` records
   and warnings + `layout.convert` stage + gridrec layout derivation. Every

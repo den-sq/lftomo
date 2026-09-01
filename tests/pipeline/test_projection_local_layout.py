@@ -1,14 +1,11 @@
-from pathlib import Path
-
 import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, DataDomain, MaterializationKind, Pipeline, PipelineState, validate_pipeline
+from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	BilateralFilterStage,
 	BronnikovAidedCorrectionStage,
-	FourierWaveletStripeStage,
 	HelicalIndexRemapStage,
 	ManualCenterStage,
 	MovementCorrectStage,
@@ -19,9 +16,7 @@ from lftomo.pipeline.stages import (
 	TaperBlendedNormalizeStage,
 	ThetaSwitchNormalizeStage,
 	WeightedNormalizeStage,
-	create_stage,
 )
-from lftomo.runner import load_recon
 from lftomo.util.shapes import ProjOrder, SinoOrder
 from tests.sample_data import attach_source_geometry
 
@@ -72,12 +67,6 @@ def test_projection_local_migrations_advertise_both_layouts(stage):
 	assert stage.contract.accepts == (ProjOrder, SinoOrder)
 
 
-def test_fourier_wavelet_declares_bounded_projection_view_capability():
-	contract = FourierWaveletStripeStage(level=2).contract
-	assert contract.accepts == (SinoOrder,)
-	assert contract.bounded_views_from == (ProjOrder,)
-
-
 def test_state_layout_drives_normalization_without_constructor_order():
 	projection = np.arange(24, dtype=np.float32).reshape(3, 2, 4) + 1
 	sinogram = projection.transpose(1, 0, 2).copy()
@@ -117,34 +106,20 @@ def test_serial_phase_units_preserve_strided_theta_positions(monkeypatch):
 		current, theta_start=1, theta_stride=2, physical_theta=8,
 	)
 	positions = []
-	original = phase_module._buffer_units
+	local_positions = []
+	original = phase_module._unit_index
 
-	def record_units(current_state, axis):
-		for unit in original(current_state, axis):
-			assert unit.internal.dtype == np.dtype(np.float32)
-			positions.append(unit.pos.Theta)
-			yield unit
+	def record_index(unit, local_index, shape):
+		assert unit.internal.dtype == np.dtype(np.float32)
+		positions.append(unit.pos.Theta)
+		local_positions.append(local_index[unit.shape.axis_of("Theta")].start)
+		return original(unit, local_index, shape)
 
-	monkeypatch.setattr(phase_module, "_buffer_units", record_units)
+	monkeypatch.setattr(phase_module, "_unit_index", record_index)
 	NegativeLogStage().run(current)
 
 	assert positions == [1, 3, 5, 7]
-
-
-def test_phase_contrast_canonical_plans_projection_order_without_injection():
-	path = Path(__file__).parents[2] / "lftomo" / "pipelines" / "phase-contrast-canonical.yaml"
-	recon, _ = load_recon(path)
-	stages = [create_stage(config) for config in recon.pipeline]
-	plan = validate_pipeline(stages, scan_config(1969, 4440, 5008), mode="complete")
-
-	recon_step = next(step for step in plan.steps if step.stage_name == "recon.gridrec")
-	assert all(
-		step.output_layout is ProjOrder
-		for step in plan.steps
-		if step.index < recon_step.index
-	)
-	assert recon_step.input_layout is ProjOrder
-	assert recon_step.materializations[0].kind is MaterializationKind.TOMOPY_BOUNDARY
+	assert local_positions == [0, 1, 2, 3]
 
 
 def test_pipeline_preserves_projection_layout_through_manual_center():

@@ -59,7 +59,6 @@ from lftomo.pipeline.sweep import (
 	parameter_domains,
 )
 from lftomo.pipeline.streaming import (
-	StreamingPlan,
 	WindowConfig,
 	WindowPlanError,
 	resolve_streaming_plan,
@@ -132,7 +131,6 @@ __all__ = [
 	"ManagedBuffer",
 	"PipelineRunContext",
 	"StorageBackend",
-	"StreamingPlan",
 	"WorkerTimeoutError",
 	"WindowConfig",
 	"WindowPlanError",

@@ -20,13 +20,13 @@ Before and after requirements compose independently by componentwise addition
 through the streaming segment.
 For example, filters requiring two and three Y rows require five rows when
 chained; `max(2, 3)` is insufficient because the second filter consumes the
-first filter's neighborhood-dependent output. Effective padding is the
-componentwise maximum of each composed side and the corresponding user padding.
-The resolved selection, window size, before/after records for required,
-operator, and effective padding, warnings, and every core/source interval are
-written to `recon_run.yaml`. Those serialized
-intervals are derived from the plan's canonical `TomoWindow` objects; they are
-records, not a second geometry authority.
+first filter's neighborhood-dependent output. The requested padding stored on
+`TomoDataSet` is the componentwise maximum of each composed side and the
+corresponding user padding. The dataset realizes that request against physical
+source bounds when it emits each window; the resolver does not calculate or
+carry a second "effective" value. The dataset's serialized document in
+`recon_run.yaml` records the selection, sampling stride, window schedule, and
+padding request as the single replayable streaming geometry.
 
 Source-context padding and generated output padding are distinct. Source
 padding is carried as `TomoWindow.pad_before` / `pad_after`, and is realized
@@ -34,11 +34,12 @@ against the physical source bounds by `TomoDataSet`. The fused affine stage's
 `pad_x` creates a wider published canvas instead; `with_output_padding()`
 derives that canvas without pretending it can read pixels outside the source.
 
-`StreamingPlan` reiterates the `TomoWindow` sequence from its physical
-`TomoDataSet`; it does not cache a second window collection. Every iteration
-reads `window.with_pad()` from the physical source, runs the normal managed
-Pipeline, uses `window.internal` to discard source-context rows before
-reconstruction, and exposes only the requested rows to writers. TIFF
+`TomoDataSet` is itself the reiterable window plan. Its global `pos`/`shape`
+own the selected source bounds, `step` owns the Y window schedule, and
+`sample_step` owns sampling within each emitted `TomoWindow`. There is no
+parallel selection window or adapter iterator. Every iteration reads
+`window.with_pad()` from the physical source and runs the normal managed
+Pipeline. TIFF
 names use global detector Y; HDF5 and Neuroglancer writers place each interior
 block at its output-row offset. Shared storage reserves the largest planned
 window capacity and reuses the same named physical roles, so edge-window sizes
@@ -62,5 +63,5 @@ warning. Their parity oracle is the same fixed window and padding: first
 `examples/b10_recon_current.py`, and then a frozen Tier-2 producer reference
 when that producer used the same extent. Windowed-vs-whole FFT equivalence is
 not claimed. Reference `metadata.yaml` should record `window_rows`, composed
-and effective padding, and the global source/core interval that produced each
+and requested padding, and the global source/core interval that produced each
 comparison.

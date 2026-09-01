@@ -398,7 +398,14 @@ class Stage(ABC):
 
 
 StageObserver = Callable[
-	[Literal["started", "completed", "failed"], int, Stage, BaseException | None], None,
+	[
+		Literal["started", "completed", "failed"],
+		int,
+		Stage,
+		BaseException | None,
+		"TomoWindow | None",
+	],
+	None,
 ]
 
 
@@ -537,6 +544,7 @@ class Pipeline:
 				self.execution_observer(ExecutionSpanEvent(
 					phase=ExecutionSpanPhase.STARTED,
 					span=span,
+					source_window=state.source_window,
 					unavailable_observations=tuple(unavailable),
 				))
 			if segment.kind is ExecutionKind.BOUNDED_SINOGRAM:
@@ -550,7 +558,7 @@ class Pipeline:
 				}
 				if self.observer is not None:
 					for offset, stage in enumerate(segment_stages, start=segment.start):
-						self.observer("started", offset, stage, None)
+						self.observer("started", offset, stage, None, state.source_window)
 				member_samples: tuple[tuple[float, ...], ...] = ()
 
 				def capture_timings(samples: tuple[tuple[float, ...], ...]) -> None:
@@ -569,6 +577,7 @@ class Pipeline:
 								stage_indices[id(stage)],
 								stage,
 								error,
+								state.source_window,
 							)
 						),
 						timing_observer=(
@@ -588,6 +597,7 @@ class Pipeline:
 						self.execution_observer(ExecutionSpanEvent(
 							phase=phase,
 							span=span,
+							source_window=state.source_window,
 							coordinator_wall_seconds=time.perf_counter() - span_started,
 							managed_allocation_changes=_allocation_changes(
 								state.storage, allocation_cursor,
@@ -599,7 +609,7 @@ class Pipeline:
 					raise
 				if self.observer is not None:
 					for offset, stage in enumerate(segment_stages, start=segment.start):
-						self.observer("completed", offset, stage, None)
+						self.observer("completed", offset, stage, None, state.source_window)
 				for stage in segment_stages:
 					expected_layout = stage.contract.output_layout(expected_layout)
 					expected_domain = stage.contract.output_domain(expected_domain)
@@ -620,6 +630,7 @@ class Pipeline:
 					self.execution_observer(ExecutionSpanEvent(
 						phase=ExecutionSpanPhase.COMPLETED,
 						span=span,
+						source_window=state.source_window,
 						coordinator_wall_seconds=wall_seconds,
 						member_timings=member_timings,
 						managed_allocation_changes=_allocation_changes(
@@ -632,7 +643,7 @@ class Pipeline:
 				input_layout = state.layout
 				input_domain = state.domain
 				if self.observer is not None:
-					self.observer("started", index, stage, None)
+					self.observer("started", index, stage, None, state.source_window)
 				span_started = time.perf_counter()
 				try:
 					if self.checkpoint is not None:
@@ -644,7 +655,7 @@ class Pipeline:
 					wall_seconds = time.perf_counter() - span_started
 				except BaseException as error:
 					if self.observer is not None:
-						self.observer("failed", index, stage, error)
+						self.observer("failed", index, stage, error, state.source_window)
 					if self.execution_observer is not None:
 						phase = (
 							ExecutionSpanPhase.INTERRUPTED
@@ -654,6 +665,7 @@ class Pipeline:
 						self.execution_observer(ExecutionSpanEvent(
 							phase=phase,
 							span=span,
+							source_window=state.source_window,
 							coordinator_wall_seconds=time.perf_counter() - span_started,
 							managed_allocation_changes=_allocation_changes(
 								state.storage, allocation_cursor,
@@ -664,7 +676,7 @@ class Pipeline:
 						))
 					raise
 				if self.observer is not None:
-					self.observer("completed", index, stage, None)
+					self.observer("completed", index, stage, None, state.source_window)
 				output_layout = stage.contract.output_layout(input_layout)
 				output_domain = stage.contract.output_domain(input_domain)
 				if output_layout is not None and state.layout is not output_layout:
@@ -682,6 +694,7 @@ class Pipeline:
 					self.execution_observer(ExecutionSpanEvent(
 						phase=ExecutionSpanPhase.COMPLETED,
 						span=span,
+						source_window=state.source_window,
 						coordinator_wall_seconds=wall_seconds,
 						member_timings=(MemberTiming(
 							member=member,

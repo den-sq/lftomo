@@ -6,7 +6,8 @@ from dataclasses import astuple, asdict
 from functools import partial
 from timeit import repeat
 import lftomo.util.shapes as shape_module
-from lftomo.util.shapes import ImageStack, ProjOrder, ReverseReconOrder, ReverseSinoOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
+from lftomo.util.converter import CONVERTER
+from lftomo.util.shapes import ChunkGrid, ImageStack, ProjOrder, ReverseReconOrder, ReverseSinoOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
 from lftomo.util.shapes import IntIter, ContigMemIter, MemAddressIter, SliceIter
 
 
@@ -217,9 +218,27 @@ def test_shape_func():
 	interval = Y.interval(0, 5)
 	assert interval == Y.interval(Y(0), Y(5))
 	assert interval.length == Y(5)
-	assert type(interval).from_document(interval.to_document()) == interval
-	assert DataRange.from_document(dr.to_document()) == dr
-	assert Y.from_document(Y(3).to_document()) == Y(3)
+	assert CONVERTER.structure(CONVERTER.unstructure(interval), type(interval)) == interval
+	assert CONVERTER.structure(CONVERTER.unstructure(dr), DataRange) == dr
+	assert CONVERTER.structure(CONVERTER.unstructure(Y(3)), Y) == Y(3)
+	assert type(CONVERTER.structure(CONVERTER.unstructure(ImgSlice(2, 3)), shape_module.DataShape)) is ImgSlice
+	assert type(CONVERTER.structure(CONVERTER.unstructure(Proj(2, 3)), shape_module.DataShape)) is Proj
+
+
+def test_chunk_grid_overlap_tail_halo_and_inverse_lookup():
+	clamped = ChunkGrid(size=6, stride=4, length=11, tail="clamp")
+	reanchored = ChunkGrid(size=6, stride=4, length=11, tail="reanchor")
+	assert list(clamped) == [slice(0, 6), slice(4, 10), slice(8, 11)]
+	assert list(reanchored) == [slice(0, 6), slice(4, 10), slice(5, 11)]
+	assert [reanchored.index_of(chunk.start) for chunk in reanchored] == [0, 1, 2]
+
+	haloed = ChunkGrid(size=6, stride=4, length=11, tail="clamp", halo=1)
+	assert list(haloed) == [
+		(slice(0, 6), slice(1, 5)),
+		(slice(4, 10), slice(5, 9)),
+		(slice(8, 11), slice(9, 10)),
+	]
+	assert [haloed.index_of(pos) for pos in (1, 5, 8, 9)] == [0, 1, 1, 2]
 
 
 def test_range_1D():
@@ -234,6 +253,9 @@ def test_range_1D():
 	pos_list_ext = [ProjOrder(Theta=30, Y=y, X=5) for y in range(10, 30, 2)]
 
 	assert dr_pos_list == pos_list_ext
+	bounded = DataRange(ProjOrder(2, 10, 0), ProjOrder(8, 30, 5), Y(4))
+	assert bounded.length == Y(5)
+	assert list(bounded) == [ProjOrder(2, y, 0) for y in range(10, 30, 4)]
 
 	extra_space = Y.drange(0, 12, 5)
 	extra_space_list = list(extra_space)

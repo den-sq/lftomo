@@ -30,6 +30,7 @@ from lftomo.runner import (
 	resolve_calibration,
 	run_reconstruction,
 )
+from lftomo.util.window import TomoWindow
 
 
 def write_yaml(path, value):
@@ -135,6 +136,20 @@ def normalization_recon(**params):
 	})
 
 
+def resolve_test_calibration(scan, recon, **kwargs):
+	read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
+	rows = scan.projection_shape().Y
+	window = TomoWindow.from_bounds(
+		scan.projection_shape(),
+		y=(
+			0 if read is None else int(read.params.get("y_start", 0)),
+			rows if read is None or read.params.get("y_stop") is None
+			else int(read.params["y_stop"]),
+		),
+	)
+	return resolve_calibration(scan, recon, source_window=window, **kwargs)
+
+
 def hdf5_scan(tmp_path, *, detector_id="camera-a"):
 	data_path = tmp_path / "scan.h5"
 	with h5py.File(data_path, "w") as handle:
@@ -209,7 +224,7 @@ def test_external_bundle_overrides_hdf5_and_reads_only_y_window(tmp_path):
 	scan = hdf5_scan(tmp_path)
 	recon = normalization_recon(calibration_manifest=manifest_path.name)
 
-	resolution = resolve_calibration(
+	resolution = resolve_test_calibration(
 		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path,
 	)
 
@@ -229,7 +244,7 @@ def test_direct_bundle_ref_and_yaml_must_identify_same_calibration(tmp_path):
 	_, ref = load_manifest(manifest_path)
 	scan = hdf5_scan(tmp_path)
 	recon = normalization_recon(calibration_manifest=manifest_path)
-	resolution = resolve_calibration(
+	resolution = resolve_test_calibration(
 		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path, seeded_bundle=ref,
 	)
 	assert resolution.bundle_ref == ref
@@ -238,7 +253,7 @@ def test_direct_bundle_ref_and_yaml_must_identify_same_calibration(tmp_path):
 		manifest_path=tmp_path / "other.yaml", calibration_id=ref.calibration_id,
 	)
 	with pytest.raises(ValueError, match="conflicts"):
-		resolve_calibration(
+		resolve_test_calibration(
 			hdf5_scan(tmp_path), normalization_recon(calibration_manifest=manifest_path),
 			pipeline_root=tmp_path, scan_root=tmp_path, seeded_bundle=other,
 		)
@@ -247,13 +262,13 @@ def test_direct_bundle_ref_and_yaml_must_identify_same_calibration(tmp_path):
 def test_compatibility_mismatch_defaults_to_error_and_override_is_provenance(tmp_path):
 	manifest_path = calibration_manifest(tmp_path)
 	with pytest.raises(CalibrationCompatibilityError, match="detector_id"):
-		resolve_calibration(
+		resolve_test_calibration(
 			hdf5_scan(tmp_path, detector_id="camera-b"),
 			normalization_recon(calibration_manifest=manifest_path),
 			pipeline_root=tmp_path, scan_root=tmp_path,
 		)
 
-	resolution = resolve_calibration(
+	resolution = resolve_test_calibration(
 		hdf5_scan(tmp_path, detector_id="camera-b"),
 		normalization_recon(
 			calibration_manifest=manifest_path,
@@ -274,7 +289,7 @@ def test_runner_reports_region_and_artifact_epoch_mismatches(tmp_path):
 	scan.metadata["static_artifact_epoch"] = "epoch-b"
 
 	with pytest.raises(CalibrationCompatibilityError) as caught:
-		resolve_calibration(
+		resolve_test_calibration(
 			scan, normalization_recon(calibration_manifest=manifest_path),
 			pipeline_root=tmp_path, scan_root=tmp_path,
 		)
@@ -293,7 +308,7 @@ def test_dynamic_normalizer_keeps_explicit_bundle_for_direct_stage_consumption(t
 	})
 	scan = hdf5_scan(tmp_path)
 
-	resolution = resolve_calibration(
+	resolution = resolve_test_calibration(
 		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path,
 	)
 
@@ -307,7 +322,7 @@ def test_explicit_legacy_maps_precede_embedded_hdf5(tmp_path):
 	scan = hdf5_scan(tmp_path)
 	scan.metadata["flat_fields"] = np.full((4, 2, 4), 7, dtype=np.float32)
 	recon = normalization_recon()
-	resolution = resolve_calibration(
+	resolution = resolve_test_calibration(
 		scan, recon, pipeline_root=tmp_path, scan_root=tmp_path,
 	)
 	assert resolution.source == "legacy_flat_fields"
@@ -318,7 +333,7 @@ def test_explicit_legacy_maps_precede_embedded_hdf5(tmp_path):
 def test_selected_bundle_is_integrity_checked_before_stages(tmp_path):
 	manifest_path = calibration_manifest(tmp_path, corrupt_hash=True)
 	with pytest.raises(ValueError, match="validation failed"):
-		resolve_calibration(
+		resolve_test_calibration(
 			hdf5_scan(tmp_path), normalization_recon(calibration_manifest=manifest_path),
 			pipeline_root=tmp_path, scan_root=tmp_path,
 		)
@@ -360,7 +375,7 @@ def test_normalization_without_any_calibration_source_fails(tmp_path):
 		},
 	})
 	with pytest.raises(ValueError, match="normalization requires"):
-		resolve_calibration(
+		resolve_test_calibration(
 			scan,
 			Recon.model_validate({
 				"pipeline": [{"kind": "normalize", "algorithm": "weighted"}],

@@ -46,9 +46,8 @@ def _write(path, data, calibration=True, **dataset_kwargs):
 
 def _run(state, *stages):
 	if state.dataset is None:
-		plan = resolve_streaming_plan(stages, state.scan)
-		state.dataset = plan.dataset
-		state.source_window = next(iter(plan))
+		state.dataset = resolve_streaming_plan(stages, state.scan)
+		state.source_window = next(iter(state.dataset))
 	with PipelineRunContext() as context:
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
@@ -91,24 +90,24 @@ def test_read_state_retains_the_planned_canonical_window(tmp_path):
 	path = tmp_path / "scan.h5"
 	_write(path, data)
 	config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={
-		"y_start": 0, "y_stop": 8,
+		"theta_start": 3, "theta_stop": 4, "y_start": 7, "y_stop": 9,
 	})
 	state = _state(path, count, size, config)
 	selection = create_stage(StageConfig(
 		kind="read", algorithm="hdf5_dxchange", params={"y_start": 2, "y_stop": 8},
 	))
-	plan = resolve_streaming_plan(
+	state.dataset = resolve_streaming_plan(
 		[selection], state.scan, WindowConfig(rows=4, extra_pad=Y(2)),
 	)
-	state.dataset = plan.dataset
-	state.source_window = next(iter(plan))
+	state.source_window = next(iter(state.dataset))
 	dataset = state.dataset
 
 	result = _run(state, create_stage(config))
 
 	assert result.dataset is dataset
 	assert result.dataset.physical_shape == ProjOrder(count, size, size)
-	assert result.dataset.frange == Y.drange(2, 8, 4)
+	assert result.dataset.interval("Y") == Y.interval(2, 8)
+	assert result.dataset.step == Y(4)
 	assert result.source_window.pos == ProjOrder(0, 2, 0)
 	assert result.source_window.shape == ProjOrder(count, 4, size)
 	assert result.source_window.pad_before == ProjOrder(0, 2, 0)
@@ -164,10 +163,12 @@ def test_plan_time_probe_opens_the_source_once(tmp_path, monkeypatch):
 		return original_file(*args, **kwargs)
 
 	monkeypatch.setattr(read_module.h5py, "File", counted_file)
-	plan = resolve_streaming_plan([create_stage(config)], _state(path, 2, 3, config).scan)
+	dataset = resolve_streaming_plan(
+		[create_stage(config)], _state(path, 2, 3, config).scan,
+	)
 
 	assert len(opens) == 1
-	assert plan.dataset.dtype == np.dtype(np.uint16)
+	assert dataset.dtype == np.dtype(np.uint16)
 
 
 def test_hdf5_stage_can_require_calibration(tmp_path):

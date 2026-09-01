@@ -11,7 +11,7 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.execution import _buffer_units
+from lftomo.pipeline.execution import _buffer_units, _unit_index
 from lftomo.util.shapes import Proj, ProjOrder, SinoOrder
 
 
@@ -62,8 +62,10 @@ class BilateralFilterStage(Stage):
 			return state
 		if data.dtype != np.dtype(np.float32):
 			raise TypeError("filter.bilateral requires the canonical float32 work dtype")
-		for unit in _buffer_units(state, "Theta"):
-			image = data[unit.index][layout.point_index(Theta=0)]
+		for unit, local_index in _buffer_units(state, "Theta"):
+			image = data[_unit_index(unit, local_index, state.buffer_spec.shape)][
+				layout.point_index(Theta=0)
+			]
 			image[:] = cv2.bilateralFilter(
 				image,
 				self.diameter,

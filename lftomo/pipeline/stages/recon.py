@@ -105,16 +105,30 @@ class GridrecStage(Stage):
 			raise ValueError(f"gridrec requires {theta_count} one-dimensional projection angles")
 		return angles
 
-	def _center(self, state: PipelineState, slice_count: int) -> float | np.ndarray:
+	def _center(
+		self, state: PipelineState, slice_count: int, input_y: slice,
+	) -> float | np.ndarray:
 		center = self.center if self.center is not None else state.artifacts.get("center")
 		if center is None:
 			raise ValueError("recon.gridrec requires a center parameter or center artifact")
 		values = np.asarray(center, dtype=np.float32)
 		if values.ndim == 0:
 			return float(values)
+		if self.center is None and values.ndim == 1 \
+				and len(values) == state.buffer_spec.shape.Y:
+			values = values[input_y]
 		if values.ndim != 1 or len(values) != slice_count:
 			raise ValueError(f"gridrec center array must contain one value for each of {slice_count} slices")
 		return values
+
+	def _input_view(
+		self, state: PipelineState, data: np.ndarray, layout, input_x: slice,
+	) -> tuple[np.ndarray, slice]:
+		input_y = (
+			slice(None) if state.source_window is None
+			else state.source_window.internal.axis_slice("Y")
+		)
+		return data[layout.point_index(Y=input_y, X=input_x)], input_y
 
 	def output_geometry(
 		self, source_shape: ProjOrder | SinoOrder,
@@ -209,10 +223,10 @@ class GridrecStage(Stage):
 		allocation_shape, output_shape, input_x, output_x = self.output_geometry(
 			state.buffer_spec.shape, state.source_window,
 		)
-		data = data[layout.point_index(X=input_x)]
+		data, input_y = self._input_view(state, data, layout, input_x)
 		sinogram_order = layout is SinoOrder
 		angles = self._angles(state, data.shape[layout.axis_of("Theta")])
-		center = self._center(state, data.shape[layout.axis_of("Y")])
+		center = self._center(state, data.shape[layout.axis_of("Y")], input_y)
 
 		import tomopy
 
@@ -304,10 +318,10 @@ class AstraCudaStage(GridrecStage):
 		allocation_shape, output_shape, input_x, output_x = self.output_geometry(
 			state.buffer_spec.shape, state.source_window,
 		)
-		data = data[layout.point_index(X=input_x)]
+		data, input_y = self._input_view(state, data, layout, input_x)
 		sinogram_order = layout is SinoOrder
 		angles = self._angles(state, data.shape[layout.axis_of("Theta")])
-		center = self._center(state, data.shape[layout.axis_of("Y")])
+		center = self._center(state, data.shape[layout.axis_of("Y")], input_y)
 
 		import tomopy
 

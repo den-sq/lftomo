@@ -4,7 +4,7 @@ import pytest
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import GridrecStage, STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder, X
+from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import TomoWindow
 
 
@@ -106,30 +106,36 @@ def test_gridrec_projection_order_accepts_center_param_and_crops(monkeypatch):
 	assert result.working_array.shape == (2, 3, 2)
 
 
-def test_gridrec_edge_buffers_crop_output_by_default(monkeypatch):
+def test_gridrec_uses_local_core_rows_and_keeps_global_window(monkeypatch):
 	config = StageConfig(
 		kind="recon", algorithm="gridrec",
-		params={"center": 2.0, "circle_mask": False,
+		params={"circle_mask": False,
 			"edge_buffer_left": 1, "edge_buffer_right": 1},
 	)
-	working = np.ones((3, 2, 7), dtype=np.float32)
+	working = np.arange(3 * 4 * 7, dtype=np.float32).reshape(3, 4, 7)
 	calls = {}
 
 	def recon(data, _angles, **kwargs):
-		calls["data_shape"] = data.shape
+		calls["data"] = data.copy()
+		calls["center"] = kwargs["center"]
 		kwargs["init_recon"].fill(1)
 		return kwargs["init_recon"]
 
 	monkeypatch.setattr("tomopy.recon", recon)
 	state = _state(working, config)
-	state.source_window = TomoWindow(
-		ProjOrder(3, 2, 5), X(1), X(1), X(1), np.float32, np.float32,
-		pad_after=X(1),
+	window = TomoWindow(
+		ProjOrder(3, 2, 5), ProjOrder(0, 1, 1), ProjOrder(0, 10, 1),
+		ProjOrder(1, 1, 1), np.float32, np.float32,
+		pad_after=ProjOrder(0, 1, 1),
 	)
+	state.source_window = window
+	state.artifacts["center"] = np.array([2.0, 2.1, 2.2, 2.3])
 	result = create_stage(config).run(state)
 
-	assert calls["data_shape"] == (3, 2, 5)
+	np.testing.assert_array_equal(calls["data"], working[:, 1:3, 1:6])
+	np.testing.assert_allclose(calls["center"], [2.1, 2.2])
 	assert result.working_array.shape == (2, 5, 3)
+	assert result.source_window is window
 
 
 def test_gridrec_rejects_missing_or_wrong_length_center(monkeypatch):

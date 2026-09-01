@@ -210,32 +210,10 @@ def probe_source_metadata(scan, stage: Stage) -> SourceMetadata:
 	raise TypeError(f"unsupported read stage for source probing: {stage.name}")
 
 
-def _read_window(state: PipelineState, stage: Stage) -> TomoWindow:
+def _read_window(state: PipelineState) -> TomoWindow:
 	if state.dataset is None or state.source_window is None:
 		raise RuntimeError("read stages require the plan-time dataset and source window")
-	dataset = state.dataset
-	planned_source = state.source_window.with_pad(["Y"])
-	theta_stop = (
-		dataset.physical_shape.Theta
-		if getattr(stage, "theta_stop", None) is None else stage.theta_stop
-	)
-	y_stop = (
-		dataset.physical_shape.Y
-		if getattr(stage, "y_stop", None) is None else stage.y_stop
-	)
-	expected = TomoWindow.from_bounds(
-		dataset.physical_shape,
-		y=(getattr(stage, "y_start", 0), y_stop),
-		theta=(
-			getattr(stage, "theta_start", 0), theta_stop,
-			getattr(stage, "theta_stride", 1),
-		),
-		dtype=dataset.dtype,
-		work_dtype=np.float32,
-	)
-	if planned_source.frange != expected.frange:
-		raise ValueError("read selection does not match the planned canonical window")
-	return planned_source
+	return state.source_window.with_pad(["Y"])
 
 
 def _bind_source_state(
@@ -296,7 +274,7 @@ class HDF5DxchangeReadStage(Stage):
 		source = state.scan.projections
 		if not isinstance(source, HDF5DxchangeProjections):
 			raise TypeError("read.hdf5_dxchange requires HDF5DxchangeProjections scan metadata")
-		read_window = _read_window(state, self)
+		read_window = _read_window(state)
 		dataset = state.dataset
 		layout = ProjOrder if self.order == "projection" else SinoOrder
 		shape = read_window.frange.length.to(layout)
@@ -428,7 +406,7 @@ class TIFFStackReadStage(Stage):
 			raise TypeError("read.tiff_stack requires TIFFStackProjections scan metadata")
 
 		files = self._source_files(state.scan.projections)
-		read_window = _read_window(state, self)
+		read_window = _read_window(state)
 		dataset = state.dataset
 		layout = ProjOrder if self.order == "projection" else SinoOrder
 		shape = read_window.frange.length.to(layout)

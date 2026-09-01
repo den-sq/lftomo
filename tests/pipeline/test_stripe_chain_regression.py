@@ -260,7 +260,7 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
 		"median_pad_bytes": 4 * 32 * 36 * 4,
 		"managed_bytes": 2 * 4 * 32 * 32 * 4 + 4 * 32 * 36 * 4,
 		"allocation_count": 3,
-		"indexing": "source_window_unit_index",
+		"indexing": "units_local_index",
 	}
 	work_events = [
 		event for event in events

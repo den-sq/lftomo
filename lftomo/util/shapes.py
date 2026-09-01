@@ -4,14 +4,12 @@ Module containing shapes of data.
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from dataclasses import dataclass, replace, make_dataclass, Field, InitVar
-from functools import cached_property, reduce
+from functools import cached_property, lru_cache, reduce
 import operator
 import sys
-from typing import ClassVar, Self, Sequence, Union
+from typing import ClassVar, Iterator, Literal, Self, Sequence, Union
 
 import numpy as np
-
-from .document import DocumentCodec, DocumentField, decode_document, encode_document
 
 
 class DataShape(ABC):
@@ -51,38 +49,6 @@ class DataShape(ABC):
 
 	def as_dict(self) -> dict[str, int]:
 		return dict(zip(self.names, self.as_tuple()))
-
-	def to_document(self) -> dict[str, object]:
-		return {
-			"type": type(self).__name__,
-			"fields": {name: int(getattr(self, name)) for name in self.names},
-		}
-
-	@classmethod
-	def from_document(cls, document: dict[str, object]) -> Self:
-		if not isinstance(document, dict) or set(document) != {"type", "fields"}:
-			raise ValueError("DataShape document must contain type and fields")
-		type_name, values = document["type"], document["fields"]
-		if not isinstance(type_name, str) or not isinstance(values, dict):
-			raise TypeError("DataShape document type and fields are invalid")
-
-		def descendants(shape_type):
-			for child in shape_type.__subclasses__():
-				yield child
-				yield from descendants(child)
-
-		targets = (cls,) if cls is not DataShape else tuple(descendants(DataShape))
-		target = next((item for item in targets if item.__name__ == type_name), None)
-		if target is None and cls is DataShape and type_name.startswith("_cg_"):
-			names = type_name.removeprefix("_cg_").split("_")
-			if set(names) == set(values):
-				target = cls.gen(names)
-		if target is None:
-			raise ValueError(f"unknown or incompatible DataShape type {type_name!r}")
-		if set(values) != set(target.names) \
-				or any(type(value) is not int for value in values.values()):
-			raise ValueError(f"fields do not match {type_name}")
-		return target(**values)
 
 	def as_tuple(self) -> tuple[int, ...]:
 		return tuple(getattr(self, name) for name in self.names)
@@ -244,12 +210,20 @@ class DataShape(ABC):
 		return cls.__param_op(max, *data_shapes)
 
 	@staticmethod
-	def gen(fields: list[Field] | list[str]) -> Self:
+	@lru_cache(maxsize=None)
+	def _gen(names: tuple[str, ...]) -> type["DataShape"]:
+		shape_type = make_dataclass(
+			"_cg_" + "_".join(names), [(name, int) for name in names],
+			bases=(DataShape,), slots=True,
+		)
+		shape_type._install_accessors(names)
+		return shape_type
+
+	@staticmethod
+	def gen(fields: list[Field] | list[str]) -> type["DataShape"]:
 		try:
-			names = fields if isinstance(fields[0], str) else [field.name for field in fields]
-			shape_type = make_dataclass("_cg_" + "_".join(names), names, bases=(DataShape,))
-			shape_type._install_accessors(names)
-			return shape_type
+			names = tuple(fields if isinstance(fields[0], str) else [field.name for field in fields])
+			return DataShape._gen(names)
 		except IndexError as ie:
 			ie.add_note(f"{sys._getframe(0).f_code.co_name}: Must leave at least 1 field.")
 			raise ie
@@ -345,18 +319,6 @@ class GenericOrder(DataShape): A: int; B: int; C: int 	 # noqa: E701,E702
 NPString = namedtuple("NPString", 'T')
 
 
-_SHAPE_DOCUMENT_CODEC = DocumentCodec(
-	lambda value: value.to_document(), DataShape.from_document,
-)
-_INTERVAL_DOCUMENT_FIELDS = (
-	DocumentField("start", _SHAPE_DOCUMENT_CODEC, "start"),
-	DocumentField("stop", _SHAPE_DOCUMENT_CODEC, "stop"),
-)
-_RANGE_DOCUMENT_FIELDS = _INTERVAL_DOCUMENT_FIELDS + (
-	DocumentField("step", _SHAPE_DOCUMENT_CODEC, "step"),
-)
-
-
 @dataclass(frozen=True)
 class Interval(object):
 	"""Half-open bounds without the iteration semantics of :class:`DataRange`."""
@@ -367,13 +329,64 @@ class Interval(object):
 	def length(self) -> DataShape:
 		return self.stop - self.start
 
-	def to_document(self) -> dict[str, object]:
-		return encode_document(self, _INTERVAL_DOCUMENT_FIELDS)
+@dataclass(frozen=True)
+class ChunkGrid:
+	"""One-dimensional overlapping chunks with an explicit tail policy."""
 
-	@classmethod
-	def from_document(cls, document: dict[str, object]) -> Self:
-		return decode_document(cls, document, _INTERVAL_DOCUMENT_FIELDS)
+	size: int
+	stride: int
+	length: int
+	tail: Literal["clamp", "reanchor"]
+	halo: int | None = None
 
+	def __post_init__(self):
+		if self.size < 1 or self.stride < 1 or self.length < 1:
+			raise ValueError("chunk size, stride, and length must be positive")
+		if self.tail not in ("clamp", "reanchor"):
+			raise ValueError("chunk tail must be 'clamp' or 'reanchor'")
+		if self.halo is not None and (self.halo < 0 or self.size <= 2 * self.halo):
+			raise ValueError("chunk size must be larger than its two halos")
+
+	def _starts(self) -> tuple[int, ...]:
+		if self.tail == "clamp":
+			return tuple(range(0, self.length, self.stride))
+		if self.length <= self.size:
+			return (0,)
+		last = self.length - self.size
+		starts = tuple(range(0, last + 1, self.stride))
+		return starts if starts[-1] == last else (*starts, last)
+
+	def __len__(self) -> int:
+		return len(self._starts())
+
+	def _chunk(self, start: int) -> slice | tuple[slice, slice]:
+		window = slice(start, min(start + self.size, self.length))
+		if self.halo is None:
+			return window
+		return window, slice(window.start + self.halo, window.stop - self.halo)
+
+	def __getitem__(self, index: int) -> slice | tuple[slice, slice]:
+		return self._chunk(self._starts()[index])
+
+	def __iter__(self) -> Iterator[slice | tuple[slice, slice]]:
+		return (self._chunk(start) for start in self._starts())
+
+	def index_of(self, pos: int) -> int:
+		"""Return the chunk whose stride cell (or retained core) owns ``pos``."""
+
+		if not 0 <= pos < self.length:
+			raise ValueError("chunk lookup position is outside the grid")
+		starts = self._starts()
+		index = (pos - (0 if self.halo is None else self.halo)) // self.stride
+		if self.tail == "reanchor" and pos >= starts[-1]:
+			index = len(starts) - 1
+		if not 0 <= index < len(starts):
+			raise ValueError("position is outside the chunks' owned intervals")
+		chunk = self[index]
+		owned = chunk if isinstance(chunk, slice) else chunk[1]
+		if not owned.start <= pos < owned.stop:
+			raise ValueError("position is outside the chunks' owned intervals")
+		return index
 
 @dataclass
 class DataRange(object):
@@ -382,13 +395,6 @@ class DataRange(object):
 	def __post_init__(self):
 		if not (self.step.is_sub(self.stop) and self.stop.is_sub(self.start)):
 			raise ValueError("Step and Stop fields must be in Start.")
-
-	def to_document(self) -> dict[str, object]:
-		return encode_document(self, _RANGE_DOCUMENT_FIELDS)
-
-	@classmethod
-	def from_document(cls, document: dict[str, object]) -> Self:
-		return decode_document(cls, document, _RANGE_DOCUMENT_FIELDS)
 
 	def get_iter(self, conv: 'TFIter' = None):
 		return _DataRangeIter(self.start, self.stop, self.step, conv)
@@ -401,7 +407,7 @@ class DataRange(object):
 	@cached_property
 	def length(self) -> DataShape:
 		""" Number of steps in each dimension of the iteration. """
-		return -(self.shape // -self.step)
+		return -(self.shape.extract(self.step) // -self.step)
 
 	def __len__(self) -> int:
 		""" Total number of steps in the iteration. """
