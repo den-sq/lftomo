@@ -65,6 +65,25 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 
 		return buffer_view(existing)
 	fields = np.asarray(state.scan.metadata["flat_fields"])
+	if fields.ndim == 3:
+		if state.source_window is None or state.dataset is None:
+			raise RuntimeError("flat-field slicing requires canonical source geometry")
+		source = state.source_window.with_pad(["Y"])
+		selection = state.dataset.interval("Y")
+		if fields.shape[1] == selection.length.Y:
+			start = source.pos.Y - selection.start.Y
+		elif fields.shape[1] == state.dataset.physical_shape.Y:
+			start = source.pos.Y
+		else:
+			raise ValueError(
+				"resolved flat_fields do not cover the canonical padded source window"
+			)
+		stop = start + source.shape.Y
+		if start < 0 or stop > fields.shape[1]:
+			raise ValueError(
+				"selected flat_fields do not cover the canonical padded source window"
+			)
+		fields = fields[:, start:stop]
 	if state.storage is None:
 		state.artifacts["flat_fields"] = fields
 		return fields
@@ -185,10 +204,8 @@ def _tracking_fields(
 			bundle.read_component(component_names[name], y_start=start, y_stop=stop).astype(np.float32)
 			for name in ("pre_gain", "post_gain", "pre_dark", "post_dark")
 		)
-	if "flat_fields" in state.artifacts:
-		fields = np.asarray(buffer_view(state.artifacts["flat_fields"]))
-	elif "flat_fields" in state.scan.metadata:
-		fields = np.asarray(state.scan.metadata["flat_fields"])
+	if "flat_fields" in state.artifacts or "flat_fields" in state.scan.metadata:
+		fields = _managed_flat_fields(state)
 	else:
 		raise ValueError("normalize.beam_tracking requires a calibration bundle or legacy flat_fields")
 	if fields.shape != (4, y_size, np.asarray(state.working_array).shape[2]):

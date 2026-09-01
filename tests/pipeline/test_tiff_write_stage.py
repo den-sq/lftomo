@@ -83,11 +83,12 @@ def test_tiff_writer_uses_global_source_window_y_position(tmp_path):
 	state = _state(array, tmp_path, config)
 	state.source_window = TomoWindow(
 		ProjOrder(Theta=3, Y=2, X=5),
-		ProjOrder(Theta=0, Y=0, X=0),
+		ProjOrder(Theta=0, Y=1, X=0),
 		ProjOrder(Theta=0, Y=11, X=0),
 		ProjOrder(Theta=1, Y=1, X=1),
 		np.uint16,
 		np.float32,
+		pad_after=ProjOrder(Theta=0, Y=1, X=0),
 	)
 
 	result = Pipeline([create_stage(config)]).run(state)

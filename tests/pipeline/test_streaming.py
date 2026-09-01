@@ -163,11 +163,14 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 	tmp_path, monkeypatch,
 ):
 	import lftomo.pipeline.stages.read as read_module
+	import lftomo.runner as runner_module
 
 	bound_datasets = []
 	read_stage_ids = []
 	original_bind = read_module._bind_source_state
 	original_read = read_module.HDF5DxchangeReadStage.run
+	original_planned_pipeline = runner_module._planned_pipeline
+	planned_scans = []
 
 	def record_bind(state, working, read_window):
 		result = original_bind(state, working, read_window)
@@ -178,8 +181,13 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 		read_stage_ids.append(id(stage))
 		return original_read(stage, state)
 
+	def record_planned_pipeline(stages, scan, *args, **kwargs):
+		planned_scans.append(scan)
+		return original_planned_pipeline(stages, scan, *args, **kwargs)
+
 	monkeypatch.setattr(read_module, "_bind_source_state", record_bind)
 	monkeypatch.setattr(read_module.HDF5DxchangeReadStage, "run", record_read)
+	monkeypatch.setattr(runner_module, "_planned_pipeline", record_planned_pipeline)
 	data_path = tmp_path / "scan.h5"
 	rows, theta, columns = 6, 3, 6
 	projections = 20 + 20 * projection_stack(size=rows, n_projections=theta)
@@ -230,6 +238,7 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 	whole_output = tmp_path / "whole"
 	window_output = tmp_path / "windowed"
 	whole = run_reconstruction(pipeline_path, scan_path, whole_output)[0]
+	planned_scans.clear()
 	bound_datasets.clear()
 	read_stage_ids.clear()
 	windowed = run_reconstruction(
@@ -240,6 +249,7 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 	assert len(set(read_stage_ids)) == 1
 	assert len({id(before) for before, _after in bound_datasets}) == 1
 	assert all(before is after for before, after in bound_datasets)
+	assert len({id(scan) for scan in planned_scans}) == 1
 	assert reconstruction_inputs == [(theta, rows, columns)] + [
 		(theta, 2, columns), (theta, 2, columns), (theta, 2, columns),
 	]

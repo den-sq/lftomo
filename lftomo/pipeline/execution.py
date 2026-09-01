@@ -23,7 +23,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.storage import ManagedBuffer
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import DataRef, TomoWindow
 
 
@@ -79,7 +79,11 @@ def _buffer_ref(state: PipelineState, shape=None) -> DataRef:
 	position = shape.make_with(0)
 	step = shape.make_with(1)
 	if state.source_window is not None:
-		source_position = state.source_window.with_pad().pos.as_dict()
+		source = (
+			state.source_window if state.layout is ReconOrder
+			else state.source_window.with_pad()
+		)
+		source_position = source.pos.as_dict()
 		source_step = state.source_window.step.as_dict()
 		position = type(shape)(**{
 			name: source_position.get(name, value)

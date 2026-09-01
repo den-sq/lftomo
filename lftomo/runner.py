@@ -34,7 +34,6 @@ from lftomo.config import (
 )
 from lftomo.pipeline import (
 	Backend,
-	BufferSpec,
 	CandidateLimitError,
 	NumpyBackend,
 	Pipeline,
@@ -51,7 +50,7 @@ from lftomo.pipeline import (
 from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.storage import ManagedBuffer, buffer_view
-from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.shapes import Y
 from lftomo.util.window import TomoDataSet, TomoWindow
 
 
@@ -413,34 +412,6 @@ class _ReplayCenterArtifactStage(Stage):
 		return state
 
 
-def _window_scan(scan: Scan, dataset: TomoDataSet, window: TomoWindow) -> Scan:
-	resolved = scan.model_copy(deep=False)
-	resolved.metadata = dict(scan.metadata)
-	source = window.with_pad(["Y"])
-	source_start = source.pos.Y
-	source_stop = source_start + source.shape.Y
-	fields = resolved.metadata.get("flat_fields")
-	if fields is not None:
-		values = np.asarray(fields)
-		if values.ndim == 3:
-			selection = dataset.interval("Y")
-			if values.shape[1] == selection.length.Y:
-				start = source_start - selection.start.Y
-				stop = source_stop - selection.start.Y
-				if start < 0 or stop > values.shape[1]:
-					raise ValueError(
-						"selected flat_fields do not cover the canonical padded source window"
-					)
-			elif values.shape[1] == scan.detector.rows:
-				start, stop = source_start, source_stop
-			else:
-				raise ValueError(
-					"resolved flat_fields do not cover the canonical padded source window"
-				)
-			resolved.metadata["flat_fields"] = values[:, start:stop]
-	return resolved
-
-
 def _detached_artifact(value: Any) -> Any:
 	if isinstance(value, ManagedBuffer):
 		return buffer_view(value).copy()
@@ -453,32 +424,6 @@ def _detached_artifact(value: Any) -> Any:
 	if isinstance(value, np.ndarray):
 		return value.copy()
 	return deepcopy(value)
-
-
-def _crop_to_window_interior(state: PipelineState, window) -> PipelineState:
-	"""Discard source-context rows before reconstruction and publish core coordinates."""
-
-	interior = window.internal.axis_slice("Y")
-	working = state.working_array
-	values = working if isinstance(working, ManagedBuffer) else np.asarray(working)
-	if state.layout not in (ProjOrder, SinoOrder):
-		raise TypeError("window interior cropping requires projection or sinogram order")
-	view = values[state.layout.point_index(Y=interior)]
-	shape = type(state.buffer_spec.shape)(**{
-		**state.buffer_spec.shape.as_dict(), "Y": len(range(*interior.indices(state.buffer_spec.shape.Y))),
-	})
-	result = state.with_array(view, buffer_spec=BufferSpec(shape, state.buffer_spec.dtype))
-	if state.source_window is not None:
-		result.source_window = state.source_window.with_pad(["Y"]).rescope(
-			pos=Y(window.pos.Y), shape=Y(window.shape.Y),
-		)
-	center = result.artifacts.get("center")
-	if center is not None:
-		center_values = np.asarray(center)
-		row_count = state.buffer_spec.shape.Y
-		if center_values.ndim == 1 and len(center_values) == row_count:
-			result.artifacts["center"] = center_values[interior]
-	return result
 
 
 def _retire_window_state(state: PipelineState) -> None:
@@ -546,13 +491,12 @@ def _run_streaming_pipeline(
 			dataset,
 			key=lambda item: item.with_pad(["Y"]).shape.Y,
 		)
-		reserve_scan = _window_scan(run_scan, dataset, largest)
 		reserve_writer = next((
 			index for index, stage in enumerate(stages)
 			if stage.name.startswith("write.")
 		), len(stages))
 		reserve_pipeline = _planned_pipeline(
-			stages[:reserve_writer], reserve_scan, backend,
+			stages[:reserve_writer], run_scan, backend,
 			initial_artifacts, None, concrete,
 			execution_observer=None,
 			dataset=dataset, source_window=largest,
@@ -560,7 +504,6 @@ def _run_streaming_pipeline(
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
 	for window in dataset:
-		window_scan = _window_scan(run_scan, dataset, window)
 		window_stages = list(stages)
 		window_initial = dict(initial_artifacts)
 		center_artifacts = {}
@@ -572,13 +515,13 @@ def _run_streaming_pipeline(
 			last_center = max(auto_centers)
 			prepass_stages = window_stages[:last_center + 1]
 			prepass_state = PipelineState(
-				np.empty((0,), dtype=np.float32), window_scan, concrete,
+				np.empty((0,), dtype=np.float32), run_scan, concrete,
 				artifacts=dict(window_initial), backend=backend,
 				storage=run_context.storage, executor=run_context.executor,
 				dataset=dataset, source_window=window,
 			)
 			prepass = _planned_pipeline(
-				prepass_stages, window_scan, backend, window_initial, stage_observer,
+				prepass_stages, run_scan, backend, window_initial, stage_observer,
 				concrete, execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
 			)
@@ -599,7 +542,7 @@ def _run_streaming_pipeline(
 		compute_stages = window_stages[:writer_start]
 		writer_stages = window_stages[writer_start:]
 		state = PipelineState(
-			np.empty((0,), dtype=np.float32), window_scan, concrete,
+			np.empty((0,), dtype=np.float32), run_scan, concrete,
 			artifacts=dict(window_initial), backend=backend,
 			storage=run_context.storage, executor=run_context.executor,
 			dataset=dataset, source_window=window,
@@ -610,22 +553,21 @@ def _run_streaming_pipeline(
 		), None)
 		if reconstruction_start is None:
 			compute = _planned_pipeline(
-				compute_stages, window_scan, backend, window_initial, stage_observer,
+				compute_stages, run_scan, backend, window_initial, stage_observer,
 				concrete, execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
 			)
 			state = compute.run(state)
 		else:
 			prefix = _planned_pipeline(
-				compute_stages[:reconstruction_start], window_scan, backend,
+				compute_stages[:reconstruction_start], run_scan, backend,
 				window_initial, stage_observer, concrete,
 				execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
 			)
 			state = prefix.run(state)
-			state = _crop_to_window_interior(state, window)
 			reconstruction = _planned_pipeline(
-				compute_stages[reconstruction_start:], window_scan, backend,
+				compute_stages[reconstruction_start:], run_scan, backend,
 				state.artifacts, stage_observer, concrete,
 				execution_observer=execution_observer,
 				stage_index_offset=reconstruction_start,
