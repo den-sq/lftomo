@@ -55,6 +55,12 @@ def test_aaa523_keeps_nonzero_warp_in_projection_order_before_stripe():
 	assert plan.steps[skew_index].output_layout is ProjOrder
 	assert plan.steps[skew_index + 2].stage_name == "stripe.fw"
 	assert not any(step.stage_name == "layout.convert" for step in plan.steps)
+	assert all(
+		step.output_layout is ProjOrder
+		for step in plan.steps
+		if step.index < recon_step.index
+	)
+	assert recon_step.input_layout is ProjOrder
 	assert recon_step.materializations[0].kind is MaterializationKind.TOMOPY_BOUNDARY
 
 
