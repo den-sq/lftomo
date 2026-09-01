@@ -66,6 +66,10 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 		return buffer_view(existing)
 	fields = np.asarray(state.scan.metadata["flat_fields"])
 	if fields.ndim == 3:
+		# Legacy flat_fields carries values but no source geometry. Until its
+		# detector interval is explicit, infer one of the two historical origins
+		# from Y extent so this consumer can derive the current padded-window view.
+		# Binding the array to a DataRef would remove this inference and offset code.
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError("flat-field slicing requires canonical source geometry")
 		source = state.source_window.with_pad(["Y"])
