@@ -116,7 +116,7 @@ def resolve_streaming_plan(
 		LOGGER.warning(message)
 	selection_start_shape = ProjOrder(theta_start, selection_start, 0)
 	selection_stop_shape = ProjOrder(theta_stop, selection_stop, columns)
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(physical_shape.Theta, scan.degrees_per_fov, 1),
 		physical_shape,
 		DataRange(selection_start_shape, selection_stop_shape, Y(window_rows)),

@@ -117,18 +117,20 @@ def test_serial_phase_units_preserve_strided_theta_positions(monkeypatch):
 		current, theta_start=1, theta_stride=2, physical_theta=8,
 	)
 	positions = []
-	original = phase_module._buffer_units
+	local_positions = []
+	original = phase_module._unit_index
 
-	def record_units(current_state, axis):
-		for unit in original(current_state, axis):
-			assert unit.internal.dtype == np.dtype(np.float32)
-			positions.append(unit.pos.Theta)
-			yield unit
+	def record_index(unit, local_index, shape):
+		assert unit.internal.dtype == np.dtype(np.float32)
+		positions.append(unit.pos.Theta)
+		local_positions.append(local_index[unit.shape.axis_of("Theta")].start)
+		return original(unit, local_index, shape)
 
-	monkeypatch.setattr(phase_module, "_buffer_units", record_units)
+	monkeypatch.setattr(phase_module, "_unit_index", record_index)
 	NegativeLogStage().run(current)
 
 	assert positions == [1, 3, 5, 7]
+	assert local_positions == [0, 1, 2, 3]
 
 
 def test_phase_contrast_canonical_plans_projection_order_without_injection():

@@ -1,6 +1,5 @@
 from collections import namedtuple
-from copy import copy
-from dataclasses import asdict, replace, fields
+from dataclasses import InitVar, asdict, dataclass, field, fields, replace
 from functools import partial
 from os import PathLike
 from pathlib import Path
@@ -9,142 +8,41 @@ import warnings
 
 import numpy as np
 
-from .document import (
-	DocumentCodec,
-	DocumentField,
-	array_from_document,
-	array_to_document,
-	decode_document,
-	encode_document,
-)
 from .shapes import DataShape, DataRange, Interval, IntIter, ReconOrder, SliceIter, TFIter, Y
 
 # Field of view during data acquisition.
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
 
 
-def _dtype_to_document(value) -> str | None:
-	return None if value is None else np.dtype(value).str
-
-
-def _dtype_from_document(value) -> np.dtype | None:
-	if value is not None and not isinstance(value, str):
-		raise TypeError("dtype document must be a string or null")
-	return None if value is None else np.dtype(value)
-
-
-def _slices_to_document(value) -> list[dict[str, int | None]] | None:
-	return None if value is None else [
-		{"start": item.start, "stop": item.stop, "step": item.step} for item in value
-	]
-
-
-def _slices_from_document(value) -> tuple[slice, ...] | None:
-	if value is None:
-		return None
-	if not isinstance(value, list) or any(
-		not isinstance(item, dict) or set(item) != {"start", "stop", "step"}
-		or any(component is not None and type(component) is not int for component in item.values())
-		for item in value
-	):
-		raise ValueError("memory-index document is invalid")
-	return tuple(slice(item["start"], item["stop"], item["step"]) for item in value)
-
-
-def _fov_to_document(value: CTFov) -> dict[str, int | str | None]:
-	return {
-		"theta": None if value.Theta is None else int(value.Theta),
-		"degrees": repr(float(value.Degrees)),
-		"count": int(value.Count),
-	}
-
-
-def _fov_from_document(value) -> CTFov:
-	if not isinstance(value, dict) or set(value) != {"theta", "degrees", "count"} \
-			or not isinstance(value["degrees"], str) or type(value["count"]) is not int \
-			or value["theta"] is not None and type(value["theta"]) is not int:
-		raise ValueError("FOV document is invalid")
-	return CTFov(value["theta"], float(value["degrees"]), value["count"])
-
-
-def _readonly_array_from_document(value) -> np.ndarray:
-	result = array_from_document(value)
-	result.setflags(write=False)
-	return result
-
-
-def _int_from_document(value) -> int:
-	if type(value) is not int:
-		raise TypeError("integer document field is invalid")
-	return value
-
-
-_SHAPE_CODEC = DocumentCodec(lambda value: value.to_document(), DataShape.from_document)
-_DTYPE_CODEC = DocumentCodec(_dtype_to_document, _dtype_from_document)
-_SLICES_CODEC = DocumentCodec(_slices_to_document, _slices_from_document)
-_FOV_CODEC = DocumentCodec(_fov_to_document, _fov_from_document)
-_ARRAY_CODEC = DocumentCodec(array_to_document, _readonly_array_from_document)
-_INT_CODEC = DocumentCodec(int, _int_from_document)
-
-_DATA_REF_DOCUMENT_FIELDS = (
-	DocumentField("shape", _SHAPE_CODEC, "_DataRef__shape"),
-	DocumentField("pad_before", _SHAPE_CODEC, "_DataRef__pad_before"),
-	DocumentField("pad_after", _SHAPE_CODEC, "_DataRef__pad_after"),
-	DocumentField("pos", _SHAPE_CODEC, "_DataRef__pos"),
-	DocumentField("step", _SHAPE_CODEC, "_DataRef__step"),
-	DocumentField("dtype", _DTYPE_CODEC, "_DataRef__dtype"),
-	DocumentField("offset", _INT_CODEC, "_DataRef__offset"),
-	DocumentField("memory_index", _SLICES_CODEC, "_DataRef__memory_index"),
-)
-_TOMO_WINDOW_DOCUMENT_FIELDS = _DATA_REF_DOCUMENT_FIELDS + (
-	DocumentField("work_dtype", _DTYPE_CODEC, "_TomoWindow__work_dtype"),
-)
-_TOMO_DATASET_DOCUMENT_FIELDS = _DATA_REF_DOCUMENT_FIELDS + (
-	DocumentField("physical_shape", _SHAPE_CODEC, "_TomoDataSet__physical_shape"),
-	DocumentField("sample_step", _SHAPE_CODEC, "_TomoDataSet__sample_step"),
-	DocumentField("work_dtype", _DTYPE_CODEC, "_TomoDataSet__work_dtype"),
-	DocumentField("fov", _FOV_CODEC, "_TomoDataSet__fov"),
-	DocumentField("angles", _ARRAY_CODEC, "_TomoDataSet__angles"),
-	DocumentField("acquisition_indices", _ARRAY_CODEC, "_TomoDataSet__acquisition_indices"),
-)
-
-
+@dataclass(frozen=True, eq=False)
 class DataRef(object):
-	_document_fields = _DATA_REF_DOCUMENT_FIELDS
+	"""A globally positioned reference to typed data geometry."""
 
-	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape,
-					step: DataShape, dtype: type = None, offset: int = 0,
-					*, pad_after: DataShape = None):
-		self.__pos = pos
-		self.__shape = shape
-		self.__pad_before = pad
-		self.__pad_after = pad if pad_after is None else type(pad)(**asdict(pad_after))
-		self.__step = step
-		self.__dtype = dtype
-		self.__offset = offset
-		self.__memory_index = None
+	shape: DataShape
+	pad_before: DataShape
+	pos: DataShape
+	step: DataShape
+	dtype: np.dtype | None = None
+	offset: int = field(default=0, kw_only=True)
+	pad_after: DataShape | None = field(default=None, kw_only=True)
+
+	def __post_init__(self):
+		object.__setattr__(self, "dtype", None if self.dtype is None else np.dtype(self.dtype))
+		object.__setattr__(
+			self, "pad_after",
+			self.pad_before if self.pad_after is None
+			else type(self.pad_before)(**self.pad_after.as_dict()),
+		)
+		if type(self.offset) is not int:
+			raise TypeError("data offset must be an integer")
 
 	@property
 	def index(self) -> tuple[slice]:
-		if self.__memory_index is not None:
-			return self.__memory_index
-		start = list(asdict(self.pos.merge(self.shape.make_with(0))).values())
-		stop = list(asdict(self.shape + self.pos).values())
-		step = list(asdict(self.step.merge(self.shape.make_with(1))).values())
+		start = list(self.pos.merge(self.shape.make_with(0)).as_dict().values())
+		stop = list((self.shape + self.pos).as_dict().values())
+		step = list(self.step.merge(self.shape.make_with(1)).as_dict().values())
 
 		return tuple([slice(start[i], stop[i], step[i]) for i in range(len(start))])
-
-	@property
-	def shape(self) -> DataShape:
-		return self.__shape
-
-	@property
-	def pos(self) -> DataShape:
-		return self.__pos
-
-	@property
-	def step(self) -> DataShape:
-		return self.__step
 
 	@property
 	def frange(self) -> DataRange:
@@ -157,20 +55,9 @@ class DataRef(object):
 			raise ValueError("asymmetric padding has no single value; use pad_before and pad_after")
 		return self.pad_before
 
-	@property
-	def pad_before(self) -> DataShape:
-		return self.__pad_before
-
-	@property
-	def pad_after(self) -> DataShape:
-		return self.__pad_after
-
-	@property
-	def dtype(self) -> type:
-		return self.__dtype
-
 	def __str__(self) -> str:
-		return f"{self.shape} ({self.dtype}) at {self.pos} stepping by {self.step}"
+		dtype = None if self.dtype is None else self.dtype.type
+		return f"{self.shape} ({dtype}) at {self.pos} stepping by {self.step}"
 
 	@property
 	def itemsize(self) -> int:
@@ -189,24 +76,6 @@ class DataRef(object):
 		start = int(getattr(self.pos, name, 0))
 		return Interval(axis_type(start), axis_type(start + int(getattr(self.shape, name))))
 
-	def to_document(self) -> dict[str, object]:
-		return encode_document(self, type(self)._document_fields)
-
-	@classmethod
-	def from_document(cls, document: dict[str, object]) -> Self:
-		if not isinstance(document, dict) or not isinstance(document.get("type"), str):
-			raise ValueError(f"expected {cls.__name__} document")
-		targets = (cls,) if cls is not DataRef else (DataRef, TomoWindow, TomoDataSet)
-		target = next((item for item in targets if item.__name__ == document["type"]), None)
-		if target is None:
-			raise ValueError(f"unknown or incompatible DataRef type {document['type']!r}")
-		result = decode_document(target, document, target._document_fields)
-		result._validate_document()
-		return result
-
-	def _validate_document(self) -> None:
-		pass
-
 	def nbytes(self) -> int:
 		return self.shape.nbytes(self.dtype)
 
@@ -221,10 +90,6 @@ class DataRef(object):
 		return type(self.shape)(*[self.itemsize * np.prod(vals[x + 1:]) for x in range(len(vals) - 1)])
 
 	def with_pad(self, pad_dim: Sequence = None, shrink=False) -> Self:
-		# DataShape values are immutable by convention; re-init replaces every
-		# DataRef field while retaining the concrete subclass.
-		new_ref = copy(self)
-
 		if pad_dim is None:
 			pad_dim = [field.name for field in fields(self.pad_before)]
 		try:
@@ -236,15 +101,16 @@ class DataRef(object):
 			te.add_note("No padding found for dimension.")
 			raise te
 
-		DataRef.__init__(new_ref, self.shape + shift_before + shift_after, kept_before,
-						self.pos - shift_before.extract(self.pos), self.step, self.dtype, self.__offset,
-						pad_after=kept_after)
-		return new_ref
+		return replace(
+			self,
+			shape=self.shape + shift_before + shift_after,
+			pad_before=kept_before,
+			pad_after=kept_after,
+			pos=self.pos - shift_before.extract(self.pos),
+		)
 
 	def rescope(self, pos: DataShape = None, pad: DataShape = None, dtype: type = None,
 					shape: DataShape = None, *, pad_after: DataShape = None) -> Self:
-		new_ref = copy(self)
-
 		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape
 		new_pos = (
 			pos if pos is not None and set(self.pos.names) < set(pos.names)
@@ -268,9 +134,10 @@ class DataRef(object):
 		})
 		new_shape -= (pad_shift_before + pad_shift_after)
 
-		DataRef.__init__(new_ref, new_shape, new_pad_before, new_pos, self.step, new_dtype, self.__offset,
-						pad_after=new_pad_after)
-		return new_ref
+		return replace(
+			self, shape=new_shape, pad_before=new_pad_before, pad_after=new_pad_after,
+			pos=new_pos, dtype=new_dtype,
+		)
 
 	def with_output_padding(self, padding: DataShape) -> Self:
 		"""Expand published output coordinates; unlike source padding, do not clip."""
@@ -306,8 +173,8 @@ class DataRef(object):
 	def slice_iter(self) -> Iterator:
 		return self.frange.get_iter(conv=partial(SliceIter, shape=self.shape))
 
-	def units(self, axis: str) -> Iterator[Self]:
-		"""Yield one-sample refs with local memory indices and global positions."""
+	def units(self, axis: str) -> Iterator[tuple[Self, tuple[slice, ...]]]:
+		"""Yield globally positioned units with their source-buffer-local slices."""
 
 		axis_index = self.shape.axis_of(axis)
 		position = self.pos.as_dict()
@@ -324,17 +191,16 @@ class DataRef(object):
 			)
 			index = [slice(None)] * len(self.shape.names)
 			index[axis_index] = slice(memory_position, memory_position + 1)
-			unit.__memory_index = tuple(index)
-			yield unit
+			yield unit, tuple(index)
 
 
+@dataclass(frozen=True, eq=False)
 class TomoWindow(DataRef):
-	_document_fields = _TOMO_WINDOW_DOCUMENT_FIELDS
+	work_dtype: np.dtype = np.dtype(np.float32)
 
-	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape, step: DataShape,
-				dtype: type, work_dtype: type, *, pad_after: DataShape = None):
-		super().__init__(shape, pad, pos, step, dtype, pad_after=pad_after)
-		self.__work_dtype = work_dtype
+	def __post_init__(self):
+		super().__post_init__()
+		object.__setattr__(self, "work_dtype", np.dtype(self.work_dtype))
 
 	@classmethod
 	def from_bounds(
@@ -408,7 +274,7 @@ class TomoWindow(DataRef):
 
 	@property
 	def internal(self):
-		return self.rescope(pos=self.pad_before.extract(self.pos), dtype=self.__work_dtype)
+		return self.rescope(pos=self.pad_before.extract(self.pos), dtype=self.work_dtype)
 
 	def recon_shape(self) -> ReconOrder:
 		"""Return the square physical reconstruction shape for the core window.
@@ -476,18 +342,68 @@ class TomoWindowIter(TFIter):
 						pad_after=pad_after)
 
 
+@dataclass(frozen=True, eq=False)
 class TomoDataSet(DataRef):
 	""" Set of windows for slicing data into smaller portions.
 
 		Iterable for grabbing each window in order.
 	"""
-	_document_fields = _TOMO_DATASET_DOCUMENT_FIELDS
+	work_dtype: np.dtype = np.dtype(np.float32)
+	physical_shape: DataShape = field(kw_only=True)
+	sample_step: DataShape = field(kw_only=True)
+	fov: CTFov = field(kw_only=True)
+	angles: np.ndarray | None = field(default=None, kw_only=True)
+	acquisition_indices: np.ndarray | None = field(default=None, kw_only=True)
+	angle_steps: InitVar[np.ndarray | None] = field(default=None, kw_only=True)
 
-	def __init__(self, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
-					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32,
-					*, angles: np.ndarray = None, acquisition_indices: np.ndarray = None,
-					pad: DataShape = None, pad_after: DataShape = None,
-					sample_step: DataShape = None):
+	def __post_init__(self, angle_steps: np.ndarray | None):
+		super().__post_init__()
+		object.__setattr__(self, "work_dtype", np.dtype(self.work_dtype))
+		if any(value < 1 for value in self.sample_step.as_tuple()):
+			raise ValueError("source sampling steps must be positive")
+		for axis, start in self.pos.as_dict().items():
+			if start < 0 or not hasattr(self.physical_shape, axis):
+				raise ValueError(f"output range starts outside physical axis {axis}")
+		for axis, stop in (self.pos + self.shape).as_dict().items():
+			if not hasattr(self.physical_shape, axis) or stop > getattr(self.physical_shape, axis):
+				raise ValueError(f"output range stops outside physical axis {axis}")
+
+		if self.angles is not None:
+			if angle_steps is not None:
+				raise ValueError("angles and angle_steps are mutually exclusive")
+			angles = np.asarray(self.angles)
+		elif angle_steps is None:
+			warnings.warn(
+				"TomoDataSet FOV angle synthesis is deprecated; pass acquisition-model angles",
+				DeprecationWarning,
+				stacklevel=3,
+			)
+			if self.physical_shape.Theta != self.fov.Theta * self.fov.Count:
+				raise Exception("Missing Angle Steps for handling Missing Frames")
+			angles = np.linspace(
+				0, np.deg2rad(self.fov.Degrees), self.fov.Theta, endpoint=False,
+			)
+		else:
+			angles = np.asarray(angle_steps) * np.deg2rad(self.fov.Degrees) / self.fov.Count
+		acquisition_indices = (
+			np.arange(self.physical_shape.Theta, dtype=np.int64)
+			if self.acquisition_indices is None
+			else np.asarray(self.acquisition_indices, dtype=np.int64)
+		)
+		if len(angles) != self.physical_shape.Theta \
+				or len(acquisition_indices) != self.physical_shape.Theta:
+			raise ValueError("TomoDataSet provenance length does not match its physical Theta shape")
+		angles.setflags(write=False)
+		acquisition_indices.setflags(write=False)
+		object.__setattr__(self, "angles", angles)
+		object.__setattr__(self, "acquisition_indices", acquisition_indices)
+
+	@classmethod
+	def from_range(cls, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
+					angle_steps: np.ndarray = None, dtype: type = np.int16,
+					work_dtype: type = np.float32, *, angles: np.ndarray = None,
+					acquisition_indices: np.ndarray = None, pad: DataShape = None,
+					pad_after: DataShape = None, sample_step: DataShape = None) -> Self:
 		""" Initializes DataWindowSet.
 
 			:param ds_shape: Shape of the overall dataset.
@@ -496,115 +412,55 @@ class TomoDataSet(DataRef):
 			:param dtype: Type of data being iterated over.
 			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
 		"""
-		self.__physical_shape = shape
+		physical_shape = shape
 		unit_step = shape.make_with(1)
-		self.__sample_step = (
+		sample_step = (
 			unit_step if sample_step is None
 			else replace(unit_step, **asdict(sample_step))
 		)
-		if any(value < 1 for value in self.__sample_step.as_tuple()):
-			raise ValueError("source sampling steps must be positive")
 
 		if isinstance(over, DataShape):
 			pos = over.make_with(0)
-			shape = shape
+			selected_shape = shape
 			step = over
 		elif isinstance(over, DataRange):
 			for axis, start in asdict(over.start).items():
-				if start < 0 or not hasattr(self.physical_shape, axis):
+				if start < 0 or not hasattr(physical_shape, axis):
 					raise ValueError(f"output range starts outside physical axis {axis}")
 			for axis, stop in asdict(over.stop).items():
-				if not hasattr(self.physical_shape, axis) or stop > getattr(self.physical_shape, axis):
+				if not hasattr(physical_shape, axis) or stop > getattr(physical_shape, axis):
 					raise ValueError(f"output range stops outside physical axis {axis}")
 			pos = over.start
-			shape = replace(shape, **asdict(over.stop - over.start))
+			selected_shape = replace(shape, **asdict(over.stop - over.start))
 			step = over.step
 		else:
-			print(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
 			raise TypeError(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
 
-		zero = shape.make_with(0)
+		zero = selected_shape.make_with(0)
 		pad_before = zero if pad is None else replace(zero, **asdict(pad))
 		resolved_pad_after = (
 			pad_before if pad_after is None else replace(zero, **asdict(pad_after))
 		)
-		super().__init__(
-			shape=shape, pad=pad_before, pos=pos, step=step, dtype=dtype,
-			pad_after=resolved_pad_after,
+
+		return cls(
+			selected_shape, pad_before, pos, step, dtype, work_dtype,
+			pad_after=resolved_pad_after, physical_shape=physical_shape,
+			sample_step=sample_step, fov=fov,
+			angles=None if angles is None else np.asarray(angles, dtype=np.float32),
+			angle_steps=angle_steps, acquisition_indices=acquisition_indices,
 		)
-
-		self.__work_dtype = work_dtype
-
-		self.__fov = fov
-
-		if angles is not None:
-			if angle_steps is not None:
-				raise ValueError("angles and angle_steps are mutually exclusive")
-			if len(angles) != self.physical_shape.Theta:
-				raise ValueError("one source angle is required for every projection")
-			self.__angles = np.asarray(angles, dtype=np.float32)
-		elif angle_steps is None:
-			warnings.warn(
-				"TomoDataSet FOV angle synthesis is deprecated; pass acquisition-model angles",
-				DeprecationWarning,
-				stacklevel=2,
-			)
-			if self.physical_shape.Theta == fov.Theta * fov.Count:
-				self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
-			else:
-				raise Exception("Missing Angle Steps for handling Missing Frames")
-		else:
-			self.__angles = np.array([step * np.deg2rad(fov.Degrees) / fov.Count for step in angle_steps])
-		if acquisition_indices is None:
-			acquisition_indices = np.arange(self.physical_shape.Theta, dtype=np.int64)
-		if len(acquisition_indices) != self.physical_shape.Theta:
-			raise ValueError("one acquisition index is required for every projection")
-		self.__acquisition_indices = np.asarray(acquisition_indices, dtype=np.int64)
-		# Geometry copies share these arrays, so construction makes their
-		# immutability convention enforceable instead of cloning them per rescope.
-		self.__angles.setflags(write=False)
-		self.__acquisition_indices.setflags(write=False)
-
-	@property
-	def angles(self):
-		return self.__angles
-
-	@property
-	def acquisition_indices(self):
-		return self.__acquisition_indices
-
-	@property
-	def fov(self):
-		return self.__fov
-
-	@property
-	def sample_step(self) -> DataShape:
-		"""Sampling within each emitted window, distinct from its Y schedule."""
-		return self.__sample_step
-
-	@property
-	def physical_shape(self) -> DataShape:
-		"""Full source shape, independent of the selected output range in ``frange``."""
-		return self.__physical_shape
-
-	def _validate_document(self) -> None:
-		if any(value < 1 for value in self.sample_step.as_tuple()):
-			raise ValueError("source sampling steps must be positive")
-		if len(self.angles) != self.physical_shape.Theta \
-				or len(self.acquisition_indices) != self.physical_shape.Theta:
-			raise ValueError("TomoDataSet provenance length does not match its physical Theta shape")
 
 	def full_window(self) -> TomoWindow:
 		pad_before, pad_after = _resolved_padding(
 			self.pos, self.shape, self.pad_before, self.pad_after, self.physical_shape,
 		)
-		return TomoWindow(self.shape, pad_before, self.pos, self.sample_step, self.dtype, self.__work_dtype,
+		return TomoWindow(self.shape, pad_before, self.pos, self.sample_step, self.dtype, self.work_dtype,
 						pad_after=pad_after)
 
 	def __iter__(self) -> Iterator:
 		partial_twi = partial(TomoWindowIter, shape=self.step_shape, pad=self.pad_before,
 								pad_after=self.pad_after, physical_shape=self.physical_shape,
-								dtype=self.dtype, work_dtype=self.__work_dtype,
+								dtype=self.dtype, work_dtype=self.work_dtype,
 								substep=self.sample_step)
 		return self.frange.get_iter(partial_twi)
 
@@ -626,7 +482,7 @@ class TomoDataSet(DataRef):
 
 		return frange.get_iter(partial(TomoWindowIter, shape=window, pad=pad_before,
 											pad_after=resolved_pad_after, physical_shape=self.physical_shape,
-											dtype=self.dtype, work_dtype=self.__work_dtype,
+											dtype=self.dtype, work_dtype=self.work_dtype,
 											substep=self.sample_step if substep is None else substep))
 
 	@classmethod
@@ -674,4 +530,4 @@ class TomoDataSet(DataRef):
 				fov = fov._replace(Theta=length)
 
 		new_shape = shape_type(length, *img_shape)
-		return cls(fov, new_shape, over, angle_steps, img_dtype, work_dtype)
+		return cls.from_range(fov, new_shape, over, angle_steps, img_dtype, work_dtype)

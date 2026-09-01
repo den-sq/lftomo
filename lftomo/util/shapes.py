@@ -4,14 +4,12 @@ Module containing shapes of data.
 from abc import ABC, abstractmethod
 from collections import namedtuple
 from dataclasses import dataclass, replace, make_dataclass, Field, InitVar
-from functools import cached_property, reduce
+from functools import cached_property, lru_cache, reduce
 import operator
 import sys
 from typing import ClassVar, Iterator, Literal, Self, Sequence, Union
 
 import numpy as np
-
-from .document import DocumentCodec, DocumentField, decode_document, encode_document
 
 
 class DataShape(ABC):
@@ -51,38 +49,6 @@ class DataShape(ABC):
 
 	def as_dict(self) -> dict[str, int]:
 		return dict(zip(self.names, self.as_tuple()))
-
-	def to_document(self) -> dict[str, object]:
-		return {
-			"type": type(self).__name__,
-			"fields": {name: int(getattr(self, name)) for name in self.names},
-		}
-
-	@classmethod
-	def from_document(cls, document: dict[str, object]) -> Self:
-		if not isinstance(document, dict) or set(document) != {"type", "fields"}:
-			raise ValueError("DataShape document must contain type and fields")
-		type_name, values = document["type"], document["fields"]
-		if not isinstance(type_name, str) or not isinstance(values, dict):
-			raise TypeError("DataShape document type and fields are invalid")
-
-		def descendants(shape_type):
-			for child in shape_type.__subclasses__():
-				yield child
-				yield from descendants(child)
-
-		targets = (cls,) if cls is not DataShape else tuple(descendants(DataShape))
-		target = next((item for item in targets if item.__name__ == type_name), None)
-		if target is None and cls is DataShape and type_name.startswith("_cg_"):
-			names = type_name.removeprefix("_cg_").split("_")
-			if set(names) == set(values):
-				target = cls.gen(names)
-		if target is None:
-			raise ValueError(f"unknown or incompatible DataShape type {type_name!r}")
-		if set(values) != set(target.names) \
-				or any(type(value) is not int for value in values.values()):
-			raise ValueError(f"fields do not match {type_name}")
-		return target(**values)
 
 	def as_tuple(self) -> tuple[int, ...]:
 		return tuple(getattr(self, name) for name in self.names)
@@ -244,12 +210,20 @@ class DataShape(ABC):
 		return cls.__param_op(max, *data_shapes)
 
 	@staticmethod
-	def gen(fields: list[Field] | list[str]) -> Self:
+	@lru_cache(maxsize=None)
+	def _gen(names: tuple[str, ...]) -> type["DataShape"]:
+		shape_type = make_dataclass(
+			"_cg_" + "_".join(names), [(name, int) for name in names],
+			bases=(DataShape,), slots=True,
+		)
+		shape_type._install_accessors(names)
+		return shape_type
+
+	@staticmethod
+	def gen(fields: list[Field] | list[str]) -> type["DataShape"]:
 		try:
-			names = fields if isinstance(fields[0], str) else [field.name for field in fields]
-			shape_type = make_dataclass("_cg_" + "_".join(names), names, bases=(DataShape,))
-			shape_type._install_accessors(names)
-			return shape_type
+			names = tuple(fields if isinstance(fields[0], str) else [field.name for field in fields])
+			return DataShape._gen(names)
 		except IndexError as ie:
 			ie.add_note(f"{sys._getframe(0).f_code.co_name}: Must leave at least 1 field.")
 			raise ie
@@ -345,18 +319,6 @@ class GenericOrder(DataShape): A: int; B: int; C: int 	 # noqa: E701,E702
 NPString = namedtuple("NPString", 'T')
 
 
-_SHAPE_DOCUMENT_CODEC = DocumentCodec(
-	lambda value: value.to_document(), DataShape.from_document,
-)
-_INTERVAL_DOCUMENT_FIELDS = (
-	DocumentField("start", _SHAPE_DOCUMENT_CODEC, "start"),
-	DocumentField("stop", _SHAPE_DOCUMENT_CODEC, "stop"),
-)
-_RANGE_DOCUMENT_FIELDS = _INTERVAL_DOCUMENT_FIELDS + (
-	DocumentField("step", _SHAPE_DOCUMENT_CODEC, "step"),
-)
-
-
 @dataclass(frozen=True)
 class Interval(object):
 	"""Half-open bounds without the iteration semantics of :class:`DataRange`."""
@@ -366,14 +328,6 @@ class Interval(object):
 	@property
 	def length(self) -> DataShape:
 		return self.stop - self.start
-
-	def to_document(self) -> dict[str, object]:
-		return encode_document(self, _INTERVAL_DOCUMENT_FIELDS)
-
-	@classmethod
-	def from_document(cls, document: dict[str, object]) -> Self:
-		return decode_document(cls, document, _INTERVAL_DOCUMENT_FIELDS)
-
 
 @dataclass(frozen=True)
 class ChunkGrid:
@@ -441,13 +395,6 @@ class DataRange(object):
 	def __post_init__(self):
 		if not (self.step.is_sub(self.stop) and self.stop.is_sub(self.start)):
 			raise ValueError("Step and Stop fields must be in Start.")
-
-	def to_document(self) -> dict[str, object]:
-		return encode_document(self, _RANGE_DOCUMENT_FIELDS)
-
-	@classmethod
-	def from_document(cls, document: dict[str, object]) -> Self:
-		return decode_document(cls, document, _RANGE_DOCUMENT_FIELDS)
 
 	def get_iter(self, conv: 'TFIter' = None):
 		return _DataRangeIter(self.start, self.stop, self.step, conv)

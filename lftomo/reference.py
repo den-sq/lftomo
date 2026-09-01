@@ -26,6 +26,7 @@ from lftomo.pipeline import (
 from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
+from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import ChunkGrid, Interval, ProjOrder, Y
 from lftomo.util.window import TomoDataSet, TomoWindow
 
@@ -93,8 +94,8 @@ class ReferenceReport:
 
 	def as_dict(self) -> dict[str, Any]:
 		result = asdict(self)
-		result["window"] = self.window.to_document()
-		result["core_window"] = self.core_window.to_document()
+		result["window"] = CONVERTER.unstructure(self.window)
+		result["core_window"] = CONVERTER.unstructure(self.core_window)
 		result["passed"] = self.passed
 		return result
 

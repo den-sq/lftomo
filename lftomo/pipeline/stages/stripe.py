@@ -30,6 +30,22 @@ VO_INDEX_WORK_ARTIFACT = "_vo_index_work"
 VO_MEDIAN_PAD_WORK_ARTIFACT = "_vo_median_pad_work"
 
 
+def _scope_vo_work_to_unit(
+	state: PipelineState, unit, local_index: tuple[slice, ...],
+) -> None:
+	"""Bind bounded-segment scratch handles to one iterator-produced row slice."""
+
+	from lftomo.pipeline.execution import _unit_handle
+
+	for key in (
+		VO_FLOAT_WORK_ARTIFACT, VO_INDEX_WORK_ARTIFACT, VO_MEDIAN_PAD_WORK_ARTIFACT,
+	):
+		if key in state.artifacts:
+			state.artifacts[key] = _unit_handle(
+				state.artifacts[key], unit, local_index,
+			)
+
+
 def _vo_work_planes(
 	state: PipelineState, sinogram: np.ndarray,
 ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
@@ -44,14 +60,17 @@ def _vo_work_planes(
 		raise ValueError("Vo reusable work requires both floating-point and index planes")
 	if state.source_window is None or state.source_window.shape.Y != 1:
 		raise ValueError("Vo reusable work requires a dispatched Y unit")
-	row = state.source_window.axis_slice("Y").start
-	float_work = float_buffer.array()[row]
-	index_work = index_buffer.array()[row]
+	if float_buffer.shape.Y != 1 or index_buffer.shape.Y != 1:
+		raise ValueError("Vo reusable work must be scoped to its dispatched Y unit")
+	float_work = float_buffer.array()[0]
+	index_work = index_buffer.array()[0]
 	if float_work.shape != sinogram.shape or index_work.shape != sinogram.shape:
 		raise ValueError("Vo reusable work does not match the dispatched sinogram shape")
 	median_pad_work = None
 	if median_pad_buffer is not None:
-		median_pad_work = median_pad_buffer.array()[row]
+		if median_pad_buffer.shape.Y != 1:
+			raise ValueError("Vo median-pad work must be scoped to its dispatched Y unit")
+		median_pad_work = median_pad_buffer.array()[0]
 		if (
 			median_pad_work.shape[0] != sinogram.shape[0]
 			or median_pad_work.shape[1] < sinogram.shape[1]
@@ -81,10 +100,10 @@ def _run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
 	layout = type(state.buffer_spec.shape)
 	if data.ndim != 3:
 		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
-	from lftomo.pipeline.execution import _buffer_units
+	from lftomo.pipeline.execution import _buffer_units, _unit_index
 
-	for unit in _buffer_units(state, "Y"):
-		row_data = data[unit.index]
+	for unit, local_index in _buffer_units(state, "Y"):
+		row_data = data[_unit_index(unit, local_index, state.buffer_spec.shape)]
 		row_state = state.with_array(
 			row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
 		)

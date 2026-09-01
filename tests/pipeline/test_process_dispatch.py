@@ -188,12 +188,15 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 		assert all(isinstance(task[2].artifacts["flat_fields"], ManagedBuffer) for task in captured)
 		assert all("flat_fields" not in task[2].scan.metadata for task in captured)
 		assert [task[2].source_window.pos.Theta for task in captured] == [1, 3, 5, 7, 9, 11]
+		assert [task[3][0].start for task in captured] == list(range(6))
 		assert all(task[0].shape == task[2].source_window.shape == ProjOrder(1, 2, 8)
 				for task in captured)
 		for task in captured:
-			handle, unit = pickle.loads(pickle.dumps((task[0], task[2].source_window)))
+			handle, unit, local_index = pickle.loads(pickle.dumps(
+				(task[0], task[2].source_window, task[3]),
+			))
 			assert handle.shape == unit.shape
-			assert unit.index == task[2].source_window.index
+			assert local_index == task[3]
 		assert "projection_start" not in result.artifacts
 		assert "projection_count" not in result.artifacts
 		expected = np.empty((6, 2, 8), dtype=np.float32)

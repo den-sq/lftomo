@@ -49,7 +49,8 @@ from lftomo.reference import NumericalTolerance, checksum_manifest, compare_slic
 from lftomo.runner import load_recon, load_scan, run_reconstruction
 from lftomo.util.log import LOG, Logger, log as shared_log
 from lftomo.util.mem import SharedNPManager
-from lftomo.util.window import TomoDataSet
+from lftomo.util.converter import CONVERTER
+from lftomo.util.window import DataRef
 
 
 _SCHEMA_VERSION = 1
@@ -1115,7 +1116,7 @@ def run_experiment_acceptance(
 	])
 	whole_volume = {
 		"passed": all(
-			len(TomoDataSet.from_document(window["streaming_dataset"]).frange) == 1
+			len(CONVERTER.structure(window["streaming_dataset"], DataRef).frange) == 1
 			for attempt in cached.attempts
 			for window in attempt.observations.get("artifacts", {}).get("windows", {}).values()
 			if isinstance(window, dict) and "streaming_dataset" in window

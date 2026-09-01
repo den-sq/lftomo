@@ -101,31 +101,38 @@ def _buffer_ref(state: PipelineState, shape=None) -> DataRef:
 	return DataRef(shape, shape.make_with(0), position, step, state.buffer_spec.dtype)
 
 
-def _buffer_units(state: PipelineState, axis: str, shape=None) -> Iterator[DataRef]:
+def _buffer_units(
+	state: PipelineState, axis: str, shape=None,
+) -> Iterator[tuple[DataRef, tuple[slice, ...]]]:
 	return _buffer_ref(state, shape).units(axis)
 
 
-def _unit_index(unit: DataRef, shape) -> tuple[slice, ...]:
-	by_name = dict(zip(unit.shape.names, unit.index, strict=True))
+def _unit_index(
+	unit: DataRef, local_index: tuple[slice, ...], shape,
+) -> tuple[slice, ...]:
+	by_name = dict(zip(unit.shape.names, local_index, strict=True))
 	return type(shape).point_index(**{
 		name: by_name[name] for name in shape.names if name in by_name
 	})
 
 
-def _unit_handle(buffer: ManagedBuffer, unit: DataRef) -> ManagedBuffer:
-	return buffer[_unit_index(unit, buffer.shape)]
+def _unit_handle(
+	buffer: ManagedBuffer, unit: DataRef, local_index: tuple[slice, ...],
+) -> ManagedBuffer:
+	return buffer[_unit_index(unit, local_index, buffer.shape)]
 
 
 def run_projection_kernel(
 	handle: ManagedBuffer,
 	stage: Stage,
 	payload: _WorkerState,
+	local_index: tuple[slice, ...],
 ) -> dict[str, Any]:
 	"""Module-level adapter that mutates one shared projection view."""
 
 	state = _worker_state(handle, payload)
 	unit = payload.source_window
-	index = unit.axis_slice("Theta").start
+	index = local_index[unit.shape.axis_of("Theta")].start
 	projection_times = state.artifacts.get("projection_times")
 	if isinstance(projection_times, ManagedBuffer):
 		projection_times = projection_times.array()
@@ -136,7 +143,7 @@ def run_projection_kernel(
 	air_mask_key = getattr(stage, "air_mask_artifact", "air_mask")
 	air_mask = state.artifacts.get(air_mask_key)
 	if isinstance(air_mask, ManagedBuffer) and air_mask.array().ndim == 3:
-		state.artifacts[air_mask_key] = _unit_handle(air_mask, unit)
+		state.artifacts[air_mask_key] = _unit_handle(air_mask, unit, local_index)
 	before = set(state.artifacts)
 	result = stage.run(state)
 	return {
@@ -149,11 +156,15 @@ def run_sinogram_chain_kernel(
 	handle: ManagedBuffer,
 	stages: tuple[Stage, ...],
 	payload: _WorkerState,
+	local_index: tuple[slice, ...],
 	collect_timings: bool = False,
 ) -> tuple[float, ...]:
 	"""Process one unit-shaped row through a complete bounded Stage chain."""
 
 	state = _worker_state(handle, payload)
+	from lftomo.pipeline.stages.stripe import _scope_vo_work_to_unit
+
+	_scope_vo_work_to_unit(state, payload.source_window, local_index)
 	data = np.asarray(state.working_array)
 	layout = state.layout
 	working = data[layout.point_index(Y=0)]
@@ -251,7 +262,7 @@ def _prepare_vo_work(
 		"median_pad_bytes": median_pad_bytes,
 		"managed_bytes": float_bytes + index_bytes + median_pad_bytes,
 		"allocation_count": 2 + int(median_pad_work is not None),
-		"indexing": "source_window_unit_index",
+		"indexing": "units_local_index",
 	}
 	state.artifacts.setdefault("vo_scratch_allocations", []).append(report)
 	return tuple(allocated)
@@ -498,10 +509,10 @@ class PipelineExecutor:
 			return stage.run(state)
 		results = self.submit_all(run_projection_kernel, (
 			(
-				_unit_handle(working_state.working_array, unit), stage,
-				_payload(working_state, unit),
+				_unit_handle(working_state.working_array, unit, local_index), stage,
+				_payload(working_state, unit), local_index,
 			)
-			for unit in _buffer_units(working_state, "Theta")
+			for unit, local_index in _buffer_units(working_state, "Theta")
 		))
 		if stage.name.startswith("normalize."):
 			from lftomo.pipeline.stages.normalize import merge_normalization_dispatch
@@ -535,8 +546,11 @@ class PipelineExecutor:
 				state, shape, data.dtype, role=f"layout:{stage.target.__name__}",
 			)
 			self.submit_all(run_layout_fill_kernel, (
-				(_unit_handle(state.working_array, unit), _unit_handle(output, unit))
-				for unit in _buffer_units(state, "Theta")
+				(
+					_unit_handle(state.working_array, unit, local_index),
+					_unit_handle(output, unit, local_index),
+				)
+				for unit, local_index in _buffer_units(state, "Theta")
 			))
 			return commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
@@ -549,10 +563,10 @@ class PipelineExecutor:
 					return stage.run(state)
 				self.submit_all(run_projection_kernel, (
 					(
-						_unit_handle(state.working_array, unit), stage,
-						_payload(state, unit),
+						_unit_handle(state.working_array, unit, local_index), stage,
+						_payload(state, unit), local_index,
 					)
-					for unit in _buffer_units(state, "Theta")
+					for unit, local_index in _buffer_units(state, "Theta")
 				))
 				return state
 			input_layout = state.layout
@@ -566,10 +580,10 @@ class PipelineExecutor:
 			)
 			self.submit_all(run_affine_fill_kernel, (
 				(
-					_unit_handle(state.working_array, unit),
-					_unit_handle(output, unit), stage, _payload(state, unit),
+					_unit_handle(state.working_array, unit, local_index),
+					_unit_handle(output, unit, local_index), stage, _payload(state, unit),
 				)
-				for unit in _buffer_units(state, "Theta")
+				for unit, local_index in _buffer_units(state, "Theta")
 			))
 			result = commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
@@ -596,15 +610,14 @@ class PipelineExecutor:
 			)
 			if not stage.crop_valid:
 				target.fill(stage.fill_value)
-			units = _buffer_units(state, "Theta")
 			self.submit_all(run_helical_fill_kernel, (
 				(
-					_unit_handle(state.working_array, unit),
-					_unit_handle(output, unit),
+					_unit_handle(state.working_array, unit, local_index),
+					_unit_handle(output, unit, local_index),
 					int(shifts[index]),
 					start, stop, stage.crop_valid,
 				)
-				for index, unit in enumerate(units)
+				for index, (unit, local_index) in enumerate(_buffer_units(state, "Theta"))
 			))
 			result = commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
@@ -678,10 +691,10 @@ def run_bounded_sinogram_segment(
 			try:
 				rows = executor.submit_all(run_sinogram_chain_kernel, (
 					(
-						_unit_handle(state.working_array, unit), tuple(stages),
-						_payload(state, unit), timing_observer is not None,
+						_unit_handle(state.working_array, unit, local_index), tuple(stages),
+						_payload(state, unit), local_index, timing_observer is not None,
 					)
-					for unit in _buffer_units(state, "Y")
+					for unit, local_index in _buffer_units(state, "Y")
 				))
 			except BaseException as error:
 				if failure_observer is not None:
@@ -695,8 +708,8 @@ def run_bounded_sinogram_segment(
 						member_samples[member_index].append(elapsed)
 		else:
 			# ndarray-only hermetic execution is deliberately serial.
-			for unit in _buffer_units(state, "Y"):
-				row_data = data[unit.index]
+			for unit, local_index in _buffer_units(state, "Y"):
+				row_data = data[_unit_index(unit, local_index, state.buffer_spec.shape)]
 				row_state = state.with_array(
 					row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
 				)

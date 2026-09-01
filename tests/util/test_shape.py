@@ -6,6 +6,7 @@ from dataclasses import astuple, asdict
 from functools import partial
 from timeit import repeat
 import lftomo.util.shapes as shape_module
+from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import ChunkGrid, ImageStack, ProjOrder, ReverseReconOrder, ReverseSinoOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
 from lftomo.util.shapes import IntIter, ContigMemIter, MemAddressIter, SliceIter
 
@@ -217,9 +218,11 @@ def test_shape_func():
 	interval = Y.interval(0, 5)
 	assert interval == Y.interval(Y(0), Y(5))
 	assert interval.length == Y(5)
-	assert type(interval).from_document(interval.to_document()) == interval
-	assert DataRange.from_document(dr.to_document()) == dr
-	assert Y.from_document(Y(3).to_document()) == Y(3)
+	assert CONVERTER.structure(CONVERTER.unstructure(interval), type(interval)) == interval
+	assert CONVERTER.structure(CONVERTER.unstructure(dr), DataRange) == dr
+	assert CONVERTER.structure(CONVERTER.unstructure(Y(3)), Y) == Y(3)
+	assert type(CONVERTER.structure(CONVERTER.unstructure(ImgSlice(2, 3)), shape_module.DataShape)) is ImgSlice
+	assert type(CONVERTER.structure(CONVERTER.unstructure(Proj(2, 3)), shape_module.DataShape)) is Proj
 
 
 def test_chunk_grid_overlap_tail_halo_and_inverse_lookup():

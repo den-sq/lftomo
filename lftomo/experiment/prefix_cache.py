@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import copy
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, is_dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import fcntl
@@ -33,9 +33,9 @@ from lftomo.pipeline import (
 )
 from lftomo.pipeline.domains import DataDomain
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
-from lftomo.util.document import array_from_document, array_to_document
-from lftomo.util.shapes import DataShape
-from lftomo.util.window import TomoDataSet, TomoWindow
+from lftomo.util.converter import CONVERTER
+from lftomo.util.shapes import DataRange, DataShape, Interval
+from lftomo.util.window import DataRef, TomoDataSet, TomoWindow
 
 from .models import canonical_json
 
@@ -91,7 +91,7 @@ def _fingerprint(value: Any) -> Any:
 		return {
 			"kind": "dataclass",
 			"type": f"{type(value).__module__}.{type(value).__qualname__}",
-			"value": _fingerprint(asdict(value)),
+			"value": _fingerprint(CONVERTER.unstructure(value)),
 		}
 	if isinstance(value, np.ndarray):
 		if value.dtype.hasobject:
@@ -135,7 +135,7 @@ def _state_value_to_document(value: Any) -> Any:
 	"""Encode an ordinary snapshot value without persisting an object graph."""
 
 	if isinstance(value, np.ndarray):
-		return {"kind": "ndarray", "value": array_to_document(value)}
+		return {"kind": "ndarray", "value": CONVERTER.unstructure(value)}
 	if isinstance(value, np.generic):
 		return _state_value_to_document(value.item())
 	if isinstance(value, Path):
@@ -185,7 +185,7 @@ def _state_value_from_document(document: Any) -> Any:
 		raise TypeError("snapshot value document is invalid")
 	kind = document["kind"]
 	if kind == "ndarray":
-		return array_from_document(document["value"])
+		return CONVERTER.structure(document["value"], np.ndarray)
 	if kind == "path":
 		return Path(document["value"])
 	if kind in {"enum", "model"}:
@@ -202,15 +202,11 @@ def _state_value_from_document(document: Any) -> Any:
 
 
 def _buffer_spec_to_document(value: BufferSpec | None) -> dict[str, Any] | None:
-	return None if value is None else {
-		"shape": value.shape.to_document(), "dtype": value.dtype.str,
-	}
+	return None if value is None else CONVERTER.unstructure(value)
 
 
 def _buffer_spec_from_document(document: dict[str, Any] | None) -> BufferSpec | None:
-	return None if document is None else BufferSpec(
-		DataShape.from_document(document["shape"]), np.dtype(document["dtype"]),
-	)
+	return None if document is None else CONVERTER.structure(document, BufferSpec)
 
 
 def _clone_state_value(value: Any) -> Any:
@@ -224,7 +220,7 @@ def _clone_state_value(value: Any) -> Any:
 		return [_clone_state_value(item) for item in value]
 	if isinstance(value, tuple):
 		return tuple(_clone_state_value(item) for item in value)
-	if hasattr(value, "to_document") or isinstance(value, BufferSpec):
+	if isinstance(value, (BufferSpec, DataRange, DataRef, DataShape, Interval)):
 		return value
 	return copy.deepcopy(value)
 
@@ -773,12 +769,16 @@ class PrefixCacheStore:
 			recon_metadata = _state_value_from_document(payload["recon_metadata"])
 			dataset = (
 				None if payload.get("dataset") is None
-				else TomoDataSet.from_document(payload["dataset"])
+				else CONVERTER.structure(payload["dataset"], DataRef)
 			)
 			source_window = (
 				None if payload.get("source_window") is None
-				else TomoWindow.from_document(payload["source_window"])
+				else CONVERTER.structure(payload["source_window"], DataRef)
 			)
+			if dataset is not None and not isinstance(dataset, TomoDataSet):
+				raise TypeError("snapshot dataset is not a TomoDataSet")
+			if source_window is not None and not isinstance(source_window, TomoWindow):
+				raise TypeError("snapshot source window is not a TomoWindow")
 			buffer_spec = _buffer_spec_from_document(payload.get("buffer_spec"))
 			artifact_specs = {
 				name: _buffer_spec_from_document(payload["managed_artifact_specs"][name])
@@ -896,9 +896,9 @@ class PrefixCacheStore:
 				"artifacts": _state_value_to_document(ordinary_artifacts),
 				"scan": _state_value_to_document(state.scan.model_dump(mode="python")),
 				"recon_metadata": _state_value_to_document(state.recon.metadata),
-				"dataset": None if state.dataset is None else state.dataset.to_document(),
+				"dataset": None if state.dataset is None else CONVERTER.unstructure(state.dataset),
 				"source_window": (
-					None if state.source_window is None else state.source_window.to_document()
+					None if state.source_window is None else CONVERTER.unstructure(state.source_window)
 				),
 				"buffer_spec": _buffer_spec_to_document(state.buffer_spec),
 				"managed_artifact_specs": managed_artifact_specs,

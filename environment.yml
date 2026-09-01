@@ -20,6 +20,7 @@ dependencies:
   - opencv
   - scikit-image
   - pydantic>=2
+  - cattrs>=24
   - pyyaml
   - packaging
   - pytest

@@ -1,7 +1,9 @@
+from dataclasses import FrozenInstanceError
 from functools import partial
 import numpy as np
 import pytest
 
+from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder, Y, X, ImgSlice, IntIter, SliceIter, Proj
 from lftomo.util.window import TomoWindow, TomoWindowIter, CTFov, TomoDataSet, DataRef
 from tests.sample_data import generate_dataref, generate_dataset, disk_dataset
@@ -36,7 +38,7 @@ def test_creation():
 	dtype = np.int16
 	work_dtype = np.float32
 
-	tds = TomoDataSet(
+	tds = TomoDataSet.from_range(
 		fov, shape, over, dtype=dtype, work_dtype=work_dtype,
 		angles=_uniform_angles(shape.Theta),
 	)
@@ -50,7 +52,8 @@ def test_creation():
 	assert tdr.pos == Y(0)
 	assert tdr.shape == shape
 	assert tdr.interval("Y") == Y.interval(0, 2048)
-	assert DataRef.from_document(tdr.to_document()).to_document() == tdr.to_document()
+	tdr_document = CONVERTER.unstructure(tdr)
+	assert CONVERTER.unstructure(CONVERTER.structure(tdr_document, DataRef)) == tdr_document
 
 	tw = tds.full_window()
 
@@ -58,24 +61,30 @@ def test_creation():
 	assert tw.step == ProjOrder(1, 1, 1)
 	assert tw.shape == ProjOrder(1501, 1048, 2048)
 	assert tw.internal.dtype == np.dtype(work_dtype)
-	assert TomoWindow.from_document(tw.to_document()).to_document() == tw.to_document()
-	restored = TomoDataSet.from_document(tds.to_document())
-	assert restored.to_document() == tds.to_document()
+	tw_document = CONVERTER.unstructure(tw)
+	assert CONVERTER.unstructure(CONVERTER.structure(tw_document, DataRef)) == tw_document
+	tds_document = CONVERTER.unstructure(tds)
+	restored = CONVERTER.structure(tds_document, DataRef)
+	assert isinstance(restored, TomoDataSet)
+	assert CONVERTER.unstructure(restored) == tds_document
 	assert not restored.angles.flags.writeable and not restored.acquisition_indices.flags.writeable
+	assert restored is not tds and restored != tds and isinstance(hash(restored), int)
+	with pytest.raises(FrozenInstanceError):
+		restored.pos = Y(1)
 
 	# Missing angle steps
 	with pytest.warns(DeprecationWarning, match="FOV angle synthesis"):
 		with pytest.raises(Exception):
-			TomoDataSet(CTFov(1969, 180, 1), shape, over, dtype=dtype, work_dtype=work_dtype)
+			TomoDataSet.from_range(CTFov(1969, 180, 1), shape, over, dtype=dtype, work_dtype=work_dtype)
 
 	# Passing Angles
-	tds = TomoDataSet(fov, shape, over, angle_steps=np.arange(0, 1501, 2),
+	tds = TomoDataSet.from_range(fov, shape, over, angle_steps=np.arange(1501),
 						dtype=dtype, work_dtype=work_dtype)
 
-	assert all(tds.angles == [i * np.deg2rad(fov.Degrees) for i in range(0, 1501, 2)])
+	assert all(tds.angles == [i * np.deg2rad(fov.Degrees) for i in range(1501)])
 
 	with pytest.raises(TypeError):
-		tds = TomoDataSet(fov, shape, 24, dtype=dtype, work_dtype=work_dtype)
+		tds = TomoDataSet.from_range(fov, shape, 24, dtype=dtype, work_dtype=work_dtype)
 
 
 def test_dataset_methods():
@@ -184,11 +193,15 @@ def test_tomo_window():
 def test_data_ref_units_pair_local_indices_with_global_strided_positions(
 	shape, axis, pos, step, positions, indices,
 ):
-	units = list(DataRef(shape, shape.make_with(0), pos, step, np.float32).units(axis))
+	ref = DataRef(shape, shape.make_with(0), pos, step, np.float32)
+	units = list(ref.units(axis))
 
-	assert [getattr(unit.pos, axis) for unit in units] == positions
-	assert [unit.index for unit in units] == indices
-	assert all(unit.step == step and getattr(unit.shape, axis) == 1 for unit in units)
+	assert [getattr(unit.pos, axis) for unit, _local_index in units] == positions
+	assert [local_index for _unit, local_index in units] == indices
+	assert all(
+		unit.step == step and getattr(unit.shape, axis) == 1
+		for unit, _local_index in units
+	)
 
 
 def test_window_from_bounds_records_edge_clamped_halo_and_theta_stride():
@@ -257,7 +270,7 @@ def test_window_coordinate_operations_share_the_existing_dataref_model():
 
 def test_nondivisible_selection_emits_a_short_final_unpadded_window():
 	selection = Y.drange(100, 1000, 400)
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
 		dtype=np.uint16, work_dtype=np.float32, angles=_uniform_angles(4),
 	)
@@ -315,7 +328,7 @@ def test_output_padding_expands_coordinates_without_becoming_source_padding():
 
 def test_dataset_keeps_physical_shape_separate_from_output_range():
 	selection = Y.drange(100, 900, 400)
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6), selection,
 		dtype=np.uint16, work_dtype=np.float32, angles=_uniform_angles(4),
 	)
@@ -335,7 +348,7 @@ def test_dataset_keeps_physical_shape_separate_from_output_range():
 
 
 def test_dataset_clips_padding_only_at_physical_boundaries():
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(0, 1000, 400), dtype=np.uint16, work_dtype=np.float32,
 		angles=_uniform_angles(4),
@@ -360,7 +373,7 @@ def test_dataset_clips_padding_only_at_physical_boundaries():
 
 
 def test_nondivisible_selected_edge_keeps_short_output_when_padding_clips():
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(100, 1000, 400), dtype=np.uint16, work_dtype=np.float32,
 		angles=_uniform_angles(4),
@@ -376,7 +389,7 @@ def test_nondivisible_selected_edge_keeps_short_output_when_padding_clips():
 
 
 def test_dataset_resolves_explicit_asymmetric_padding():
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 		Y.drange(100, 500, 400), dtype=np.uint16, work_dtype=np.float32,
 		angles=_uniform_angles(4),
@@ -391,7 +404,7 @@ def test_dataset_resolves_explicit_asymmetric_padding():
 
 def test_selected_range_must_fit_physical_source_shape():
 	with pytest.raises(ValueError, match="stops outside physical axis Y"):
-		TomoDataSet(
+		TomoDataSet.from_range(
 			CTFov(4, 180, 1), ProjOrder(Theta=4, Y=1000, X=6),
 			Y.drange(100, 1001, 400), dtype=np.uint16, work_dtype=np.float32,
 			angles=_uniform_angles(4),

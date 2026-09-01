@@ -50,6 +50,7 @@ from lftomo.pipeline import (
 from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.storage import ManagedBuffer, buffer_view
+from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import Y
 from lftomo.util.window import TomoDataSet, TomoWindow
 
@@ -482,7 +483,7 @@ def _run_streaming_pipeline(
 	"""Execute one whole-volume or multi-window run through the same driver."""
 
 	aggregated = dict(initial_artifacts)
-	aggregated["streaming_dataset"] = dataset.to_document()
+	aggregated["streaming_dataset"] = CONVERTER.unstructure(dataset)
 	window_records = []
 	output_files = []
 	reserve = getattr(run_context.storage, "reserve", None)
@@ -590,7 +591,7 @@ def _run_streaming_pipeline(
 		files = window_artifacts.get("output_files", [])
 		output_files.extend(path for path in files if path not in output_files)
 		window_records.append({
-			"window": window.to_document(),
+			"window": CONVERTER.unstructure(window),
 			"center_artifacts": center_artifacts,
 			"artifacts": window_artifacts,
 		})
@@ -705,7 +706,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		dataset,
 	) in prepared:
 		resolved_metadata = resolved_document.setdefault("metadata", {})
-		resolved_metadata["streaming_dataset"] = dataset.to_document()
+		resolved_metadata["streaming_dataset"] = CONVERTER.unstructure(dataset)
 		with PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
@@ -724,7 +725,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					recon=concrete,
 					artifacts={
 						**initial_artifacts,
-						"streaming_dataset": dataset.to_document(),
+						"streaming_dataset": CONVERTER.unstructure(dataset),
 					},
 					backend=backend,
 					storage=run_context.storage,
@@ -778,7 +779,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			with manifest_path.open("w", encoding="utf-8") as stream:
 				yaml.safe_dump({
 					"resolved_recon": resolved_document,
-					"streaming_dataset": dataset.to_document(),
+					"streaming_dataset": CONVERTER.unstructure(dataset),
 				}, stream, sort_keys=False)
 			artifacts["recon_run"] = manifest_path
 	return results

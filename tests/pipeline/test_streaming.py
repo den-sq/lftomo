@@ -25,8 +25,9 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.prep.phase import _phase_pad
 from lftomo.runner import run_reconstruction
+from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import ProjOrder, Y
-from lftomo.util.window import TomoDataSet, TomoWindow
+from lftomo.util.window import DataRef, TomoDataSet, TomoWindow
 from tests.fixtures.tier1 import projection_stack
 
 
@@ -91,8 +92,8 @@ def test_asymmetric_stage_and_operator_requirements_compose_by_side():
 	assert windows[0].pad_after == ProjOrder(Theta=0, Y=3, X=0)
 	assert windows[1].pad_before == ProjOrder(Theta=0, Y=2, X=0)
 	assert windows[1].pad_after == ProjOrder(Theta=0, Y=3, X=0)
-	record = dataset.to_document()
-	assert TomoDataSet.from_document(record).to_document() == record
+	record = CONVERTER.unstructure(dataset)
+	assert CONVERTER.unstructure(CONVERTER.structure(record, DataRef)) == record
 
 
 def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent(caplog):
@@ -265,11 +266,12 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 		item["center_artifacts"]["center"] == 2.0
 		for item in windowed.artifacts["window_results"]
 	)
-	restored_dataset = TomoDataSet.from_document(windowed.artifacts["streaming_dataset"])
+	restored_dataset = CONVERTER.structure(windowed.artifacts["streaming_dataset"], DataRef)
+	assert isinstance(restored_dataset, TomoDataSet)
 	assert restored_dataset.interval("Y") == Y.interval(0, rows)
 	assert restored_dataset.step == Y(2)
 	assert windowed.artifacts["measured_shared_memory_bytes"] > 0
 	manifest = yaml.safe_load((window_output / "recon_run.yaml").read_text())
-	assert TomoDataSet.from_document(manifest["streaming_dataset"]).step == Y(2)
+	assert CONVERTER.structure(manifest["streaming_dataset"], DataRef).step == Y(2)
 	assert "streaming_dataset" in windowed.resolved_recon["metadata"]
 	assert "source_window" not in windowed.resolved_recon["metadata"]

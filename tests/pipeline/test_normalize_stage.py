@@ -123,7 +123,7 @@ def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window():
 		np.repeat(np.array([[20], [40], [80], [160]], np.float32), 2, axis=1),
 		np.zeros((4, 2), np.float32), np.zeros((4, 2), np.float32),
 	])
-	dataset = TomoDataSet(
+	dataset = TomoDataSet.from_range(
 		CTFov(3, 180, 1), physical, Y.drange(1, 5, 2), dtype=np.uint16,
 		angles=np.linspace(0, np.pi, 3, endpoint=False), pad=Y(1),
 	)

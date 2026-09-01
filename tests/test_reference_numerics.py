@@ -17,6 +17,7 @@ from lftomo.reference import (
 	run_reference_archive,
 	sha256_file,
 )
+from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import ChunkGrid, Interval, Y
 
 
@@ -64,8 +65,8 @@ def test_reference_report_serializes_canonical_intervals():
 	)
 	document = report.as_dict()
 
-	assert Interval.from_document(document["window"]) == report.window
-	assert Interval.from_document(document["core_window"]) == report.core_window
+	assert CONVERTER.structure(document["window"], Interval) == report.window
+	assert CONVERTER.structure(document["core_window"], Interval) == report.core_window
 
 
 def test_reference_with_post_run_unversioned_producer_is_not_reproducible(tmp_path):

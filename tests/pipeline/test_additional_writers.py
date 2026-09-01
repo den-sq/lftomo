@@ -31,7 +31,7 @@ def _state(array, config, output):
 def _streaming_state(array, config, output, *, start, total_rows):
 	state = _state(array, config, output)
 	physical = ProjOrder(Theta=1, Y=total_rows, X=array.shape[2])
-	state.dataset = TomoDataSet(
+	state.dataset = TomoDataSet.from_range(
 		CTFov(1, 180, 1), physical, Y.drange(0, total_rows, array.shape[0]),
 		dtype=array.dtype, angles=np.array([0], dtype=np.float32),
 	)

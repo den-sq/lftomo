@@ -14,7 +14,7 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.execution import _buffer_units
+from lftomo.pipeline.execution import _buffer_units, _unit_index
 from lftomo.storage import buffer_view
 from lftomo.util.shapes import ImgSlice, ProjOrder, SinoOrder
 
@@ -215,8 +215,8 @@ class PaganinFilterStage(Stage):
 				data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
 			), self.alpha,
 		)
-		for unit in _buffer_units(state, "Theta"):
-			image = data[unit.index][layout.point_index(Theta=0)]
+		for unit, local_index in _buffer_units(state, "Theta"):
+			image = data[_unit_index(unit, local_index, state.buffer_spec.shape)][layout.point_index(Theta=0)]
 			image[:] = _paganin_filter(image, transfer)
 		return state
 
@@ -265,8 +265,8 @@ class NegativeLogStage(Stage):
 			raise ValueError("phase.negative_log expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		for unit in _buffer_units(state, "Theta"):
-			image = data[unit.index][layout.point_index(Theta=0)]
+		for unit, local_index in _buffer_units(state, "Theta"):
+			image = data[_unit_index(unit, local_index, state.buffer_spec.shape)][layout.point_index(Theta=0)]
 			image[:] = _negative_log(
 				image, epsilon=self.epsilon, maximum=self.maximum, invert=self.invert,
 			)
@@ -375,8 +375,8 @@ class PaganinStage(Stage):
 				data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
 			), self.alpha,
 		)
-		for unit in _buffer_units(state, "Theta"):
-			image = data[unit.index][layout.point_index(Theta=0)]
+		for unit, local_index in _buffer_units(state, "Theta"):
+			image = data[_unit_index(unit, local_index, state.buffer_spec.shape)][layout.point_index(Theta=0)]
 			filtered = _paganin_filter(image, transfer)
 			image[:] = _negative_log(filtered, epsilon=self.epsilon, maximum=None)
 		return state
@@ -441,8 +441,8 @@ class PaganinPhaseAbsorptionStage(Stage):
 				data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
 			), self.alpha,
 		)
-		for unit in _buffer_units(state, "Theta"):
-			image = data[unit.index][layout.point_index(Theta=0)]
+		for unit, local_index in _buffer_units(state, "Theta"):
+			image = data[_unit_index(unit, local_index, state.buffer_spec.shape)][layout.point_index(Theta=0)]
 			# Corrected-paper branch from dan_scripts/prep/phase.py:22-144.
 			transmission = _paganin_filter(image, transfer)
 			absorption = _negative_log(
@@ -511,8 +511,8 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 			raise ValueError("phase.bac_correction expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		for unit in _buffer_units(state, "Theta"):
-			image = data[unit.index][layout.point_index(Theta=0)]
+		for unit, local_index in _buffer_units(state, "Theta"):
+			image = data[_unit_index(unit, local_index, state.buffer_spec.shape)][layout.point_index(Theta=0)]
 			image[:] = self._correct(image)
 		return state
 
@@ -597,7 +597,7 @@ class BronnikovAidedCorrectionStage(Stage):
 			raise ValueError("phase.bac expects a three-dimensional tomography array")
 		if not self.enabled:
 			return state
-		for unit in _buffer_units(state, "Theta"):
-			image = data[unit.index][layout.point_index(Theta=0)]
+		for unit, local_index in _buffer_units(state, "Theta"):
+			image = data[_unit_index(unit, local_index, state.buffer_spec.shape)][layout.point_index(Theta=0)]
 			image[:] = self._correct(image)
 		return state
