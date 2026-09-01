@@ -6,7 +6,7 @@ from dataclasses import astuple, asdict
 from functools import partial
 from timeit import repeat
 import lftomo.util.shapes as shape_module
-from lftomo.util.shapes import ImageStack, ProjOrder, ReverseReconOrder, ReverseSinoOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
+from lftomo.util.shapes import ChunkGrid, ImageStack, ProjOrder, ReverseReconOrder, ReverseSinoOrder, SinoOrder, ImgSlice, Y, DataRange, ReconOrder, Proj, Theta, YSlice, XSlice
 from lftomo.util.shapes import IntIter, ContigMemIter, MemAddressIter, SliceIter
 
 
@@ -220,6 +220,22 @@ def test_shape_func():
 	assert type(interval).from_document(interval.to_document()) == interval
 	assert DataRange.from_document(dr.to_document()) == dr
 	assert Y.from_document(Y(3).to_document()) == Y(3)
+
+
+def test_chunk_grid_overlap_tail_halo_and_inverse_lookup():
+	clamped = ChunkGrid(size=6, stride=4, length=11, tail="clamp")
+	reanchored = ChunkGrid(size=6, stride=4, length=11, tail="reanchor")
+	assert list(clamped) == [slice(0, 6), slice(4, 10), slice(8, 11)]
+	assert list(reanchored) == [slice(0, 6), slice(4, 10), slice(5, 11)]
+	assert [reanchored.index_of(chunk.start) for chunk in reanchored] == [0, 1, 2]
+
+	haloed = ChunkGrid(size=6, stride=4, length=11, tail="clamp", halo=1)
+	assert list(haloed) == [
+		(slice(0, 6), slice(1, 5)),
+		(slice(4, 10), slice(5, 9)),
+		(slice(8, 11), slice(9, 10)),
+	]
+	assert [haloed.index_of(pos) for pos in (1, 5, 8, 9)] == [0, 1, 1, 2]
 
 
 def test_range_1D():

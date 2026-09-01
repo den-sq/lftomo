@@ -7,7 +7,7 @@ from dataclasses import dataclass, replace, make_dataclass, Field, InitVar
 from functools import cached_property, reduce
 import operator
 import sys
-from typing import ClassVar, Self, Sequence, Union
+from typing import ClassVar, Iterator, Literal, Self, Sequence, Union
 
 import numpy as np
 
@@ -374,6 +374,65 @@ class Interval(object):
 	def from_document(cls, document: dict[str, object]) -> Self:
 		return decode_document(cls, document, _INTERVAL_DOCUMENT_FIELDS)
 
+
+@dataclass(frozen=True)
+class ChunkGrid:
+	"""One-dimensional overlapping chunks with an explicit tail policy."""
+
+	size: int
+	stride: int
+	length: int
+	tail: Literal["clamp", "reanchor"]
+	halo: int | None = None
+
+	def __post_init__(self):
+		if self.size < 1 or self.stride < 1 or self.length < 1:
+			raise ValueError("chunk size, stride, and length must be positive")
+		if self.tail not in ("clamp", "reanchor"):
+			raise ValueError("chunk tail must be 'clamp' or 'reanchor'")
+		if self.halo is not None and (self.halo < 0 or self.size <= 2 * self.halo):
+			raise ValueError("chunk size must be larger than its two halos")
+
+	def _starts(self) -> tuple[int, ...]:
+		if self.tail == "clamp":
+			return tuple(range(0, self.length, self.stride))
+		if self.length <= self.size:
+			return (0,)
+		last = self.length - self.size
+		starts = tuple(range(0, last + 1, self.stride))
+		return starts if starts[-1] == last else (*starts, last)
+
+	def __len__(self) -> int:
+		return len(self._starts())
+
+	def _chunk(self, start: int) -> slice | tuple[slice, slice]:
+		window = slice(start, min(start + self.size, self.length))
+		if self.halo is None:
+			return window
+		return window, slice(window.start + self.halo, window.stop - self.halo)
+
+	def __getitem__(self, index: int) -> slice | tuple[slice, slice]:
+		return self._chunk(self._starts()[index])
+
+	def __iter__(self) -> Iterator[slice | tuple[slice, slice]]:
+		return (self._chunk(start) for start in self._starts())
+
+	def index_of(self, pos: int) -> int:
+		"""Return the chunk whose stride cell (or retained core) owns ``pos``."""
+
+		if not 0 <= pos < self.length:
+			raise ValueError("chunk lookup position is outside the grid")
+		starts = self._starts()
+		index = (pos - (0 if self.halo is None else self.halo)) // self.stride
+		if self.tail == "reanchor" and pos >= starts[-1]:
+			index = len(starts) - 1
+		if not 0 <= index < len(starts):
+			raise ValueError("position is outside the chunks' owned intervals")
+		chunk = self[index]
+		owned = chunk if isinstance(chunk, slice) else chunk[1]
+		if not owned.start <= pos < owned.stop:
+			raise ValueError("position is outside the chunks' owned intervals")
+		return index
 
 @dataclass
 class DataRange(object):
