@@ -27,15 +27,16 @@ identifiers from the breakout; they do not imply order — the waves do.
 - **Wave D** — experiment subsystem: B23 → B24
 - **Wave E** — optional tail: B26, B27
 
-Waves 0, A, B, and Track C-early are filed; later waves are filed as their
-predecessors near completion. One GitHub milestone per wave. **B8 (ChunkGrid)
+Waves 0, A, B, Track C-early, and Wave C-late are filed; later waves are filed
+as their predecessors near completion. One GitHub milestone per wave. **B8 (ChunkGrid)
 moved to Wave C-late (decided 2026-08-31):** it is built with its only
 consumers, B20/B22, not a wave ahead of them — building it in C-early would be
 speculative front-load and would land C-early net-LOC-positive with no in-wave
 deletions to offset it.
 
-Filed so far (2026-08-31; Wave B briefings grounded against `670eca8`, Track
-C-early briefings against `f0e4e89` — re-grounded per wave, not copied):
+Filed so far (Wave B briefings grounded against `670eca8`, Track C-early against
+`f0e4e89`, Wave C-late against `f7f3ac3` — re-grounded per wave, not copied).
+**Wave C-late briefings live inline in the issue bodies**, not under `briefings/`:
 
 | B-id | issue | milestone |
 |---|---|---|
@@ -57,6 +58,11 @@ C-early briefings against `f0e4e89` — re-grounded per wave, not copied):
 | B7 | #277 | Wave C-early |
 | B9 | #278 | Wave C-early |
 | B25 | #279 | Wave C-early |
+| B8 | #287 | Wave C-late |
+| B19 | #289 | Wave C-late |
+| B20 | #290 | Wave C-late |
+| B21 | #288 | Wave C-late |
+| B22 | #291 | Wave C-late |
 
 ```
 B1,B2,B3 (parallel, alongside Wave A)
