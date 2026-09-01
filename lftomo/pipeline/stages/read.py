@@ -233,7 +233,7 @@ def _read_window(state: PipelineState, stage: Stage) -> TomoWindow:
 		dtype=dataset.dtype,
 		work_dtype=np.float32,
 	)
-	if planned_source.index != expected.index:
+	if planned_source.frange != expected.frange:
 		raise ValueError("read selection does not match the planned canonical window")
 	return planned_source
 

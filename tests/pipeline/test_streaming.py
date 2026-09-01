@@ -98,8 +98,9 @@ def test_asymmetric_stage_and_operator_requirements_compose_by_side():
 	assert windows[1].pad_before == ProjOrder(Theta=0, Y=2, X=0)
 	assert windows[1].pad_after == ProjOrder(Theta=0, Y=3, X=0)
 	record = plan.record()
-	assert record["effective_pad"] == {"theta": 0, "y": 2, "x": 0}
-	assert record["effective_pad_after"] == {"theta": 0, "y": 3, "x": 0}
+	assert record["effective_pad"] == ProjOrder(Theta=0, Y=2, X=0).to_document()
+	assert record["effective_pad_after"] == ProjOrder(Theta=0, Y=3, X=0).to_document()
+	assert type(plan).from_document(record).to_document() == record
 
 
 def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
@@ -129,6 +130,8 @@ def test_streaming_plan_reiterates_the_canonical_dataset_without_a_window_cache(
 	first_pass = tuple(plan)
 	second_pass = tuple(plan)
 	assert plan.window_count == 4
+	assert plan.selection == Y.interval(0, 10)
+	assert not plan.whole_volume
 	assert all(isinstance(window, TomoWindow) for window in first_pass)
 	assert [window.index for window in first_pass] == [
 		window.index for window in second_pass

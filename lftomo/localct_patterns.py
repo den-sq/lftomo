@@ -7,7 +7,7 @@ runtime bootstrap checks into lftomo-owned interfaces.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from importlib.util import find_spec
 import json
 from pathlib import Path
@@ -24,6 +24,24 @@ class ReconstructionRequest:
 	scan_config: Path | None = None
 	metadata: dict[str, Any] = field(default_factory=dict)
 
+	def to_document(self) -> dict[str, Any]:
+		return {
+			"session_path": str(self.session_path), "recon_config": str(self.recon_config),
+			"output_path": str(self.output_path),
+			"scan_config": None if self.scan_config is None else str(self.scan_config),
+			"metadata": self.metadata,
+		}
+
+	@classmethod
+	def from_document(cls, document: dict[str, Any]) -> "ReconstructionRequest":
+		return cls(
+			session_path=Path(document["session_path"]),
+			recon_config=Path(document["recon_config"]),
+			output_path=Path(document["output_path"]),
+			scan_config=None if document["scan_config"] is None else Path(document["scan_config"]),
+			metadata=document["metadata"],
+		)
+
 
 @dataclass(frozen=True)
 class ReconstructionResult:
@@ -33,6 +51,21 @@ class ReconstructionResult:
 	artifacts: dict[str, Path] = field(default_factory=dict)
 	metrics: dict[str, float] = field(default_factory=dict)
 	status: str = "success"
+
+	def to_document(self) -> dict[str, Any]:
+		return {
+			"output_path": str(self.output_path),
+			"artifacts": {key: str(value) for key, value in self.artifacts.items()},
+			"metrics": self.metrics, "status": self.status,
+		}
+
+	@classmethod
+	def from_document(cls, document: dict[str, Any]) -> "ReconstructionResult":
+		return cls(
+			output_path=Path(document["output_path"]),
+			artifacts={key: Path(value) for key, value in document["artifacts"].items()},
+			metrics=document["metrics"], status=document["status"],
+		)
 
 
 @dataclass(frozen=True)
@@ -63,30 +96,29 @@ class RunSummary:
 	result: ReconstructionResult
 	metadata: dict[str, Any] = field(default_factory=dict)
 
+	def to_document(self) -> dict[str, Any]:
+		return {
+			"request": self.request.to_document(),
+			"result": self.result.to_document(),
+			"metadata": self.metadata,
+		}
+
+	@classmethod
+	def from_document(cls, document: dict[str, Any]) -> "RunSummary":
+		return cls(
+			request=ReconstructionRequest.from_document(document["request"]),
+			result=ReconstructionResult.from_document(document["result"]),
+			metadata=document["metadata"],
+		)
+
 	def to_json(self) -> str:
-		"""Serialize the run summary to JSON."""
-		return json.dumps(_json_ready(asdict(self)), indent=2, sort_keys=True)
+		"""Serialize the stable run-summary document to JSON."""
+		return json.dumps(self.to_document(), indent=2, sort_keys=True)
 
 	@classmethod
 	def from_json(cls, text: str) -> "RunSummary":
 		"""Deserialize a run summary from JSON."""
-		data = json.loads(text)
-		return cls(
-			request=ReconstructionRequest(
-				session_path=Path(data["request"]["session_path"]),
-				recon_config=Path(data["request"]["recon_config"]),
-				output_path=Path(data["request"]["output_path"]),
-				scan_config=None if data["request"]["scan_config"] is None else Path(data["request"]["scan_config"]),
-				metadata=data["request"]["metadata"],
-			),
-			result=ReconstructionResult(
-				output_path=Path(data["result"]["output_path"]),
-				artifacts={key: Path(value) for key, value in data["result"]["artifacts"].items()},
-				metrics=data["result"]["metrics"],
-				status=data["result"]["status"],
-			),
-			metadata=data["metadata"],
-		)
+		return cls.from_document(json.loads(text))
 
 
 def inspect_scan_folder(root: Path) -> ScanFolderInspection:
@@ -138,13 +170,3 @@ def _collect_tiffs(roots: list[Path], include: tuple[str, ...], fallback_all: bo
 		if root.exists():
 			matches.extend(path for path in root.glob("*.tif*") if path.is_file())
 	return sorted(dict.fromkeys(matches))
-
-
-def _json_ready(value):
-	if isinstance(value, Path):
-		return str(value)
-	if isinstance(value, dict):
-		return {key: _json_ready(item) for key, item in value.items()}
-	if isinstance(value, list):
-		return [_json_ready(item) for item in value]
-	return value
