@@ -461,9 +461,7 @@ def _detached_artifact(value: Any) -> Any:
 	return deepcopy(value)
 
 
-def _crop_to_window_interior(
-	state: PipelineState, window, plan: StreamingPlan, *, index: int,
-) -> PipelineState:
+def _crop_to_window_interior(state: PipelineState, window) -> PipelineState:
 	"""Discard source-context rows before reconstruction and publish core coordinates."""
 
 	interior = window.internal.axis_slice("Y")
@@ -486,18 +484,6 @@ def _crop_to_window_interior(
 		row_count = state.buffer_spec.shape.Y
 		if center_values.ndim == 1 and len(center_values) == row_count:
 			result.artifacts["center"] = center_values[interior]
-	core = window.axis_slice("Y")
-	selection = plan.dataset.interval("Y")
-	result.artifacts["streaming_window"] = {
-		"index": index,
-		"core_start": core.start,
-		"core_stop": core.stop,
-		"output_start": core.start - selection.start.Y,
-		"output_stop": core.stop - selection.start.Y,
-		"total_rows": selection.length.Y,
-		"first": index == 0,
-		"last": index == plan.window_count - 1,
-	}
 	return result
 
 
@@ -640,9 +626,7 @@ def _run_streaming_pipeline(
 				dataset=window_plan.dataset, source_window=window,
 			)
 			state = prefix.run(state)
-			state = _crop_to_window_interior(
-				state, window, window_plan, index=index,
-			)
+			state = _crop_to_window_interior(state, window)
 			reconstruction = _planned_pipeline(
 				compute_stages[reconstruction_start:], window_scan, backend,
 				state.artifacts, stage_observer, concrete,

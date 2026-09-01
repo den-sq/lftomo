@@ -18,7 +18,7 @@ from lftomo.pipeline.core import (
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer
 from lftomo.util.io import np_convert
-from lftomo.util.shapes import ReconOrder
+from lftomo.util.shapes import ReconOrder, ReverseReconOrder, Y
 
 
 _CLOUDVOLUME_RUNTIME_REQUIREMENT = RuntimeRequirement(
@@ -177,8 +177,7 @@ class HDF5VolumeWriteStage(Stage):
 			raise ValueError("write.hdf5_volume expects a (Y, Z, X) reconstruction array")
 		path = self._path(state)
 		path.parent.mkdir(parents=True, exist_ok=True)
-		streaming = state.artifacts.get("streaming_window")
-		if streaming is None:
+		if state.dataset is None or state.source_window is None:
 			if path.exists() and not self.overwrite:
 				raise FileExistsError(f"HDF5 output already exists: {path}")
 			with h5py.File(path, "w") as handle:
@@ -190,7 +189,9 @@ class HDF5VolumeWriteStage(Stage):
 					chunks=self.chunks,
 				)
 		else:
-			first = bool(streaming["first"])
+			output_start = state.source_window.pos.Y - state.dataset.pos.Y
+			output_stop = output_start + state.source_window.shape.Y
+			first = output_start == 0
 			if first and path.exists() and not self.overwrite:
 				raise FileExistsError(f"HDF5 output already exists: {path}")
 			mode = "w" if first else "r+"
@@ -198,15 +199,13 @@ class HDF5VolumeWriteStage(Stage):
 				if first:
 					handle.create_dataset(
 						self.dataset,
-						shape=(int(streaming["total_rows"]), data.shape[1], data.shape[2]),
+						shape=(state.dataset.shape.Y, data.shape[1], data.shape[2]),
 						dtype=data.dtype,
 						compression=self.compression,
 						compression_opts=self.compression_opts if self.compression else None,
 						chunks=self.chunks,
 					)
-				handle[self.dataset][
-					int(streaming["output_start"]):int(streaming["output_stop"])
-				] = data
+				handle[self.dataset][output_start:output_stop] = data
 		_record_outputs(state, [path])
 		return state
 
@@ -259,8 +258,8 @@ class NeuroglancerWriteStage(Stage):
 		if root is None:
 			raise ValueError("write.neuroglancer requires a path or Recon.output_path")
 		layer = Path(root) / self.layer_name
-		streaming = state.artifacts.get("streaming_window")
-		first = streaming is None or bool(streaming["first"])
+		output_start = 0 if state.dataset is None else state.source_window.pos.Y - state.dataset.pos.Y
+		first = output_start == 0
 		if first and layer.exists():
 			if not self.overwrite:
 				raise FileExistsError(f"Neuroglancer layer already exists: {layer}")
@@ -277,7 +276,7 @@ class NeuroglancerWriteStage(Stage):
 		resolution = self.resolution_nm_xyz or (int(state.scan.pixel_size_um * 1000),) * 3
 		cloudpath = f"precomputed://file://{layer.as_posix()}"
 		if first:
-			total_rows = data.shape[0] if streaming is None else int(streaming["total_rows"])
+			total_rows = data.shape[0] if state.dataset is None else state.dataset.shape.Y
 			volume_size = (data.shape[2], data.shape[1], total_rows)
 			info = CloudVolume.create_new_info(
 				num_channels=1,
@@ -299,11 +298,11 @@ class NeuroglancerWriteStage(Stage):
 				cloudpath, mip=0, compress=False, progress=False,
 				parallel=1, cache=False, fill_missing=False, bounded=True,
 			)
-		output_start = 0 if streaming is None else int(streaming["output_start"])
-		for start in range(0, data.shape[0], self.block_slices):
-			stop = min(data.shape[0], start + self.block_slices)
-			volume[:, :, output_start + start:output_start + stop] = np.transpose(
-				data[start:stop], (2, 1, 0),
+		for position in Y.drange(0, data.shape[0], self.block_slices):
+			block = data[position.Y:position.Y + self.block_slices]
+			start = output_start + position.Y
+			volume[:, :, start:start + block.shape[0]] = ReconOrder(*block.shape).transposed_view(
+				block, ReverseReconOrder,
 			)
 		_record_outputs(state, [layer / "info"])
 		state.artifacts["neuroglancer_source"] = cloudpath

@@ -7,7 +7,8 @@ import numpy as np
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import HDF5VolumeWriteStage, NeuroglancerWriteStage, STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import ReconOrder
+from lftomo.util.shapes import ProjOrder, ReconOrder, Y
+from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
 def _state(array, config, output):
@@ -25,6 +26,19 @@ def _state(array, config, output):
 		),
 		recon=Recon(pipeline=[config], output_path=output),
 	)
+
+
+def _streaming_state(array, config, output, *, start, total_rows):
+	state = _state(array, config, output)
+	physical = ProjOrder(Theta=1, Y=total_rows, X=array.shape[2])
+	state.dataset = TomoDataSet(
+		CTFov(1, 180, 1), physical, Y.drange(0, total_rows, array.shape[0]),
+		dtype=array.dtype, angles=np.array([0], dtype=np.float32),
+	)
+	state.source_window = TomoWindow.from_bounds(
+		physical, y=(start, start + array.shape[0]), dtype=array.dtype,
+	)
+	return state
 
 
 def test_hdf5_writer_writes_volume_and_records_output(tmp_path):
@@ -50,16 +64,12 @@ def test_hdf5_writer_places_streaming_interiors_at_global_output_rows(tmp_path):
 		params={"dataset": "recon", "compression": None},
 	)
 	stage = create_stage(config)
-	first = _state(np.full((2, 3, 4), 1, np.float32), config, tmp_path)
-	first.artifacts["streaming_window"] = {
-		"first": True, "last": False, "total_rows": 4,
-		"output_start": 0, "output_stop": 2,
-	}
-	second = _state(np.full((2, 3, 4), 2, np.float32), config, tmp_path)
-	second.artifacts["streaming_window"] = {
-		"first": False, "last": True, "total_rows": 4,
-		"output_start": 2, "output_stop": 4,
-	}
+	first = _streaming_state(
+		np.full((2, 3, 4), 1, np.float32), config, tmp_path, start=0, total_rows=4,
+	)
+	second = _streaming_state(
+		np.full((2, 3, 4), 2, np.float32), config, tmp_path, start=2, total_rows=4,
+	)
 	stage.run(first)
 	stage.run(second)
 	with h5py.File(tmp_path / "reconstruction.h5") as handle:
@@ -99,6 +109,10 @@ def test_neuroglancer_writer_transposes_blocks_for_cloudvolume(tmp_path, monkeyp
 	assert calls["info"]["volume_size"] == [4, 3, 2]
 	assert calls["info"]["resolution"] == [700, 700, 700]
 	assert calls["writes"][0][1].shape == (4, 3, 1)
+	np.testing.assert_array_equal(
+		np.concatenate([value for _key, value in calls["writes"]], axis=2),
+		np.transpose(working, (2, 1, 0)),
+	)
 	assert result.artifacts["neuroglancer_source"].endswith("/ct")
 
 
@@ -126,12 +140,11 @@ def test_neuroglancer_writer_offsets_streaming_blocks(tmp_path, monkeypatch):
 		params={"layer_name": "ct", "block_slices": 2},
 	)
 	stage = create_stage(config)
-	for first, start, value in ((True, 0, 1), (False, 2, 2)):
-		state = _state(np.full((2, 3, 4), value, np.uint16), config, tmp_path)
-		state.artifacts["streaming_window"] = {
-			"first": first, "last": not first, "total_rows": 4,
-			"output_start": start, "output_stop": start + 2,
-		}
+	for start, value in ((0, 1), (2, 2)):
+		state = _streaming_state(
+			np.full((2, 3, 4), value, np.uint16), config, tmp_path,
+			start=start, total_rows=4,
+		)
 		stage.run(state)
 	assert calls["info"]["volume_size"] == [4, 3, 4]
 	assert calls["writes"][0][0][2] == slice(0, 2)
