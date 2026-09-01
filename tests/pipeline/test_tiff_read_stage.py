@@ -18,7 +18,6 @@ from lftomo.pipeline import (
 	PipelineState,
 	Stage,
 	StageContract,
-	iter_streaming_windows,
 	resolve_streaming_plan,
 )
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
@@ -96,8 +95,8 @@ def _write_irregular_fixture(tmp_path, size=4):
 
 def _run(state, *stages):
 	if state.dataset is None:
-		state.dataset, source_window = resolve_streaming_plan(stages, state.scan)
-		state.source_window = next(iter_streaming_windows(state.dataset, source_window))
+		state.dataset = resolve_streaming_plan(stages, state.scan)
+		state.source_window = next(iter(state.dataset))
 	with PipelineRunContext() as context:
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
@@ -196,6 +195,9 @@ def test_tiff_stack_stage_reads_strided_theta_window_with_matching_angles(tmp_pa
 	assert result.source_window.shape.Theta == 5
 	assert result.working_array.shape[0] == 3
 	assert result.source_window.step == ProjOrder(Theta=2, Y=1, X=1)
+	assert result.dataset.pos == ProjOrder(Theta=1, Y=0, X=0)
+	assert result.dataset.shape == ProjOrder(Theta=5, Y=size, X=size)
+	assert result.dataset.sample_step == result.source_window.step
 
 
 def test_irregular_indices_and_angles_share_theta_selection_and_stride(tmp_path):
@@ -251,10 +253,10 @@ def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch)
 		state = _irregular_state(
 			projection_dir, scanlog, 4, [read_config, center_config, recon_config],
 		)
-		state.dataset, source_window = resolve_streaming_plan(
+		state.dataset = resolve_streaming_plan(
 			[create_stage(read_config)], state.scan,
 		)
-		state.source_window = next(iter_streaming_windows(state.dataset, source_window))
+		state.source_window = next(iter(state.dataset))
 		state.storage = context.storage
 		state = Pipeline([create_stage(read_config)], backend=NumpyBackend()).run(state)
 		state.domain = DataDomain.ATTENUATION

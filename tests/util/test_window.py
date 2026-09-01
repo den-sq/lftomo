@@ -55,7 +55,7 @@ def test_creation():
 	tw = tds.full_window()
 
 	assert tw.pos == Y(0)
-	assert tw.step == Y(24)
+	assert tw.step == ProjOrder(1, 1, 1)
 	assert tw.shape == ProjOrder(1501, 1048, 2048)
 	assert tw.internal.dtype == np.dtype(work_dtype)
 	assert TomoWindow.from_document(tw.to_document()).to_document() == tw.to_document()

@@ -13,7 +13,6 @@ from lftomo.config import (
 )
 from lftomo.pipeline import (
 	NumpyBackend, Pipeline, PipelineRunContext, PipelineState, WindowConfig,
-	iter_streaming_windows,
 	resolve_streaming_plan,
 )
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
@@ -47,8 +46,8 @@ def _write(path, data, calibration=True, **dataset_kwargs):
 
 def _run(state, *stages):
 	if state.dataset is None:
-		state.dataset, source_window = resolve_streaming_plan(stages, state.scan)
-		state.source_window = next(iter_streaming_windows(state.dataset, source_window))
+		state.dataset = resolve_streaming_plan(stages, state.scan)
+		state.source_window = next(iter(state.dataset))
 	with PipelineRunContext() as context:
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
@@ -97,17 +96,18 @@ def test_read_state_retains_the_planned_canonical_window(tmp_path):
 	selection = create_stage(StageConfig(
 		kind="read", algorithm="hdf5_dxchange", params={"y_start": 2, "y_stop": 8},
 	))
-	state.dataset, source_window = resolve_streaming_plan(
+	state.dataset = resolve_streaming_plan(
 		[selection], state.scan, WindowConfig(rows=4, extra_pad=Y(2)),
 	)
-	state.source_window = next(iter_streaming_windows(state.dataset, source_window))
+	state.source_window = next(iter(state.dataset))
 	dataset = state.dataset
 
 	result = _run(state, create_stage(config))
 
 	assert result.dataset is dataset
 	assert result.dataset.physical_shape == ProjOrder(count, size, size)
-	assert result.dataset.frange == Y.drange(2, 8, 4)
+	assert result.dataset.interval("Y") == Y.interval(2, 8)
+	assert result.dataset.step == Y(4)
 	assert result.source_window.pos == ProjOrder(0, 2, 0)
 	assert result.source_window.shape == ProjOrder(count, 4, size)
 	assert result.source_window.pad_before == ProjOrder(0, 2, 0)
@@ -163,7 +163,7 @@ def test_plan_time_probe_opens_the_source_once(tmp_path, monkeypatch):
 		return original_file(*args, **kwargs)
 
 	monkeypatch.setattr(read_module.h5py, "File", counted_file)
-	dataset, _source_window = resolve_streaming_plan(
+	dataset = resolve_streaming_plan(
 		[create_stage(config)], _state(path, 2, 3, config).scan,
 	)
 

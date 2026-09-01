@@ -250,6 +250,9 @@ def test_range_1D():
 	pos_list_ext = [ProjOrder(Theta=30, Y=y, X=5) for y in range(10, 30, 2)]
 
 	assert dr_pos_list == pos_list_ext
+	bounded = DataRange(ProjOrder(2, 10, 0), ProjOrder(8, 30, 5), Y(4))
+	assert bounded.length == Y(5)
+	assert list(bounded) == [ProjOrder(2, y, 0) for y in range(10, 30, 4)]
 
 	extra_space = Y.drange(0, 12, 5)
 	extra_space_list = list(extra_space)

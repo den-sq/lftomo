@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import logging
-from typing import Any, Iterator, Sequence
+from typing import Any, Sequence
 
 import numpy as np
 
 from lftomo.pipeline.core import _canonical_pad, Stage
-from lftomo.util.shapes import DataShape, ProjOrder, Y
-from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
+from lftomo.util.shapes import DataRange, DataShape, ProjOrder, Y
+from lftomo.util.window import CTFov, TomoDataSet
 
 
 LOGGER = logging.getLogger(__name__)
@@ -39,22 +39,9 @@ class WindowConfig:
 			_canonical_pad(self.extra_pad_after)
 
 
-def iter_streaming_windows(
-	dataset: TomoDataSet, source_window: TomoWindow,
-) -> Iterator[TomoWindow]:
-	"""Apply a dataset's Y schedule to its selected source-coordinate window."""
-
-	for scheduled in dataset.iter_with(substep=source_window.step):
-		y = scheduled.axis_slice("Y")
-		yield scheduled.rescope(
-			pos=replace(source_window.pos, Y=y.start),
-			shape=replace(source_window.shape, Y=y.stop - y.start),
-		)
-
-
 def resolve_streaming_plan(
 	stages: Sequence[Stage], scan: Any, config: WindowConfig | None = None,
-) -> tuple[TomoDataSet, TomoWindow]:
+) -> TomoDataSet:
 	"""Resolve composed Stage padding and global row windows before allocation."""
 
 	config = config or WindowConfig()
@@ -91,58 +78,54 @@ def resolve_streaming_plan(
 		else int(read.theta_stop)
 	)
 	theta_stride = int(getattr(read, "theta_stride", 1))
-	source_window = TomoWindow.from_bounds(
-		physical_shape,
-		y=(selection_start, selection_stop),
-		theta=(theta_start, theta_stop, theta_stride),
-		dtype=metadata.dtype,
-		work_dtype=np.float32,
-	)
-	theta_count = source_window.frange.length.Theta
+	if not 0 <= theta_start < theta_stop <= physical_shape.Theta or theta_stride < 1:
+		raise WindowPlanError("read Stage has an invalid projection selection")
+	theta_count = len(range(theta_start, theta_stop, theta_stride))
 	input_shape = ProjOrder(theta_count, window_rows, columns)
-	required = ProjOrder(0, 0, 0)
-	required_after = ProjOrder(0, 0, 0)
+	pad_before = ProjOrder(0, 0, 0)
+	pad_after = ProjOrder(0, 0, 0)
+	multiple = window_rows < selected_rows
+	sensitive = []
+	seen_sensitive = set()
 	for stage in stages:
 		stage_before, stage_after = stage.contract.required_pad.resolve(scan, input_shape)
-		required = required + stage_before
-		required_after = required_after + stage_after
+		pad_before = pad_before + stage_before
+		pad_after = pad_after + stage_after
+		if multiple and "Y" in stage.contract.requires_full_axes:
+			raise WindowPlanError(
+				f"{stage.name} requires the full Y axis and cannot run with "
+				f"window_rows={window_rows}; select whole-volume mode",
+			)
+		if multiple and stage.name in {
+			"phase.paganin", "phase.paganin_filter",
+			"phase.paganin_phase_absorption", "phase.bac",
+			"phase.bac_correction", "phase.bronnikov_aided",
+		} and stage.name not in seen_sensitive:
+			sensitive.append(stage.name)
+			seen_sensitive.add(stage.name)
 	extra = _canonical_pad(config.extra_pad)
 	extra_after = extra if config.extra_pad_after is None \
 		else _canonical_pad(config.extra_pad_after)
-	effective = ProjOrder.param_max(required, extra)
-	effective_after = ProjOrder.param_max(required_after, extra_after)
-	multiple = window_rows < selected_rows
-	if multiple:
-		for stage in stages:
-			if "Y" in stage.contract.requires_full_axes:
-				raise WindowPlanError(
-					f"{stage.name} requires the full Y axis and cannot run with "
-					f"window_rows={window_rows}; select whole-volume mode",
-				)
-	if multiple:
-		sensitive = tuple(dict.fromkeys(
-			stage.name for stage in stages
-			if stage.name in {
-				"phase.paganin", "phase.paganin_filter",
-				"phase.paganin_phase_absorption", "phase.bac",
-				"phase.bac_correction", "phase.bronnikov_aided",
-			}
-		))
-		if sensitive:
-			message = (
-				"FFT-extent-sensitive windowed Stages use fixed window+padding parity, "
-				"not whole-volume equivalence: " + ", ".join(sensitive)
-			)
-			LOGGER.warning(message)
+	pad_before = ProjOrder.param_max(pad_before, extra)
+	pad_after = ProjOrder.param_max(pad_after, extra_after)
+	if sensitive:
+		message = (
+			"FFT-extent-sensitive windowed Stages use fixed window+padding parity, "
+			"not whole-volume equivalence: " + ", ".join(sensitive)
+		)
+		LOGGER.warning(message)
+	selection_start_shape = ProjOrder(theta_start, selection_start, 0)
+	selection_stop_shape = ProjOrder(theta_stop, selection_stop, columns)
 	dataset = TomoDataSet(
 		CTFov(physical_shape.Theta, scan.degrees_per_fov, 1),
 		physical_shape,
-		Y.drange(selection_start, selection_stop, window_rows),
+		DataRange(selection_start_shape, selection_stop_shape, Y(window_rows)),
 		dtype=metadata.dtype,
 		work_dtype=np.float32,
 		angles=metadata.angles,
 		acquisition_indices=metadata.acquisition_indices,
-		pad=effective,
-		pad_after=effective_after,
+		pad=pad_before,
+		pad_after=pad_after,
+		sample_step=ProjOrder(theta_stride, 1, 1),
 	)
-	return dataset, source_window
+	return dataset

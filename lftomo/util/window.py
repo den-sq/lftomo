@@ -101,6 +101,7 @@ _TOMO_WINDOW_DOCUMENT_FIELDS = _DATA_REF_DOCUMENT_FIELDS + (
 )
 _TOMO_DATASET_DOCUMENT_FIELDS = _DATA_REF_DOCUMENT_FIELDS + (
 	DocumentField("physical_shape", _SHAPE_CODEC, "_TomoDataSet__physical_shape"),
+	DocumentField("sample_step", _SHAPE_CODEC, "_TomoDataSet__sample_step"),
 	DocumentField("work_dtype", _DTYPE_CODEC, "_TomoDataSet__work_dtype"),
 	DocumentField("fov", _FOV_CODEC, "_TomoDataSet__fov"),
 	DocumentField("angles", _ARRAY_CODEC, "_TomoDataSet__angles"),
@@ -449,13 +450,16 @@ class TomoWindowIter(TFIter):
 		self.pad_after = pad if pad_after is None else type(pad)(**asdict(pad_after))
 		self.dtype = dtype
 		self.work_dtype = work_dtype
+		self.start = dr.start
 		self.stop = dr.stop
 		self.substep = substep if substep is not None else dr.step.make_with(1)
 		self.physical_shape = physical_shape
 		self.__step_class = type(dr.step)
 
 	def __call__(self, pos) -> tuple:
-		pos = self.__step_class(*pos)
+		# DataRange iteration supplies only the scheduled axes.  Retain the
+		# selected coordinates on every other axis in each emitted window.
+		pos = replace(self.start, **asdict(self.__step_class(*pos)))
 		step_end = (self.shape + pos).extract(pos)
 
 		if step_end < self.stop:
@@ -482,7 +486,8 @@ class TomoDataSet(DataRef):
 	def __init__(self, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
 					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32,
 					*, angles: np.ndarray = None, acquisition_indices: np.ndarray = None,
-					pad: DataShape = None, pad_after: DataShape = None):
+					pad: DataShape = None, pad_after: DataShape = None,
+					sample_step: DataShape = None):
 		""" Initializes DataWindowSet.
 
 			:param ds_shape: Shape of the overall dataset.
@@ -492,6 +497,13 @@ class TomoDataSet(DataRef):
 			:param angle_steps: # of angle steps to take for each projection, handling dropped frames.
 		"""
 		self.__physical_shape = shape
+		unit_step = shape.make_with(1)
+		self.__sample_step = (
+			unit_step if sample_step is None
+			else replace(unit_step, **asdict(sample_step))
+		)
+		if any(value < 1 for value in self.__sample_step.as_tuple()):
+			raise ValueError("source sampling steps must be positive")
 
 		if isinstance(over, DataShape):
 			pos = over.make_with(0)
@@ -528,7 +540,7 @@ class TomoDataSet(DataRef):
 		if angles is not None:
 			if angle_steps is not None:
 				raise ValueError("angles and angle_steps are mutually exclusive")
-			if len(angles) != shape.Theta:
+			if len(angles) != self.physical_shape.Theta:
 				raise ValueError("one source angle is required for every projection")
 			self.__angles = np.asarray(angles, dtype=np.float32)
 		elif angle_steps is None:
@@ -537,15 +549,15 @@ class TomoDataSet(DataRef):
 				DeprecationWarning,
 				stacklevel=2,
 			)
-			if shape.Theta == fov.Theta * fov.Count:
+			if self.physical_shape.Theta == fov.Theta * fov.Count:
 				self.__angles = np.array(np.linspace(0, np.deg2rad(fov.Degrees), fov.Theta, False))
 			else:
 				raise Exception("Missing Angle Steps for handling Missing Frames")
 		else:
 			self.__angles = np.array([step * np.deg2rad(fov.Degrees) / fov.Count for step in angle_steps])
 		if acquisition_indices is None:
-			acquisition_indices = np.arange(shape.Theta, dtype=np.int64)
-		if len(acquisition_indices) != shape.Theta:
+			acquisition_indices = np.arange(self.physical_shape.Theta, dtype=np.int64)
+		if len(acquisition_indices) != self.physical_shape.Theta:
 			raise ValueError("one acquisition index is required for every projection")
 		self.__acquisition_indices = np.asarray(acquisition_indices, dtype=np.int64)
 		# Geometry copies share these arrays, so construction makes their
@@ -566,26 +578,34 @@ class TomoDataSet(DataRef):
 		return self.__fov
 
 	@property
+	def sample_step(self) -> DataShape:
+		"""Sampling within each emitted window, distinct from its Y schedule."""
+		return self.__sample_step
+
+	@property
 	def physical_shape(self) -> DataShape:
 		"""Full source shape, independent of the selected output range in ``frange``."""
 		return self.__physical_shape
 
 	def _validate_document(self) -> None:
-		if len(self.angles) != self.shape.Theta \
-				or len(self.acquisition_indices) != self.shape.Theta:
-			raise ValueError("TomoDataSet provenance length does not match its Theta shape")
+		if any(value < 1 for value in self.sample_step.as_tuple()):
+			raise ValueError("source sampling steps must be positive")
+		if len(self.angles) != self.physical_shape.Theta \
+				or len(self.acquisition_indices) != self.physical_shape.Theta:
+			raise ValueError("TomoDataSet provenance length does not match its physical Theta shape")
 
 	def full_window(self) -> TomoWindow:
 		pad_before, pad_after = _resolved_padding(
 			self.pos, self.shape, self.pad_before, self.pad_after, self.physical_shape,
 		)
-		return TomoWindow(self.shape, pad_before, self.pos, self.step, self.dtype, self.__work_dtype,
+		return TomoWindow(self.shape, pad_before, self.pos, self.sample_step, self.dtype, self.__work_dtype,
 						pad_after=pad_after)
 
 	def __iter__(self) -> Iterator:
 		partial_twi = partial(TomoWindowIter, shape=self.step_shape, pad=self.pad_before,
 								pad_after=self.pad_after, physical_shape=self.physical_shape,
-								dtype=self.dtype, work_dtype=self.__work_dtype)
+								dtype=self.dtype, work_dtype=self.__work_dtype,
+								substep=self.sample_step)
 		return self.frange.get_iter(partial_twi)
 
 	def iter_with(self, *, wsize: DataShape = None, substep: DataShape = None,
@@ -606,7 +626,8 @@ class TomoDataSet(DataRef):
 
 		return frange.get_iter(partial(TomoWindowIter, shape=window, pad=pad_before,
 											pad_after=resolved_pad_after, physical_shape=self.physical_shape,
-											dtype=self.dtype, work_dtype=self.__work_dtype, substep=substep))
+											dtype=self.dtype, work_dtype=self.__work_dtype,
+											substep=self.sample_step if substep is None else substep))
 
 	@classmethod
 	def from_disk(cls, source: PathLike, fov: CTFov, shape_type: type, over: DataRange | DataShape,

@@ -45,7 +45,6 @@ from lftomo.pipeline import (
 	StageObserver,
 	WindowConfig,
 	expand_recon_sweeps,
-	iter_streaming_windows,
 	resolve_streaming_plan,
 	validate_pipeline,
 )
@@ -392,12 +391,12 @@ def _resolve_flat_fields(scan: Scan, recon: Recon, source_window: TomoWindow) ->
 	)
 
 
-def _estimated_output_bytes(recon: Recon, source_window: TomoWindow) -> int:
+def _estimated_output_bytes(recon: Recon, dataset: TomoDataSet) -> int:
 	"""Estimate float32 reconstructed-volume output without reading projection data."""
 
 	if recon.output_path is None:
 		return 0
-	return source_window.recon_shape().nbytes(np.float32)
+	return dataset.full_window().recon_shape().nbytes(np.float32)
 
 
 class _ReplayCenterArtifactStage(Stage):
@@ -531,7 +530,7 @@ def _center_artifacts(state: PipelineState) -> dict[str, Any]:
 def _run_streaming_pipeline(
 	*, stages: list[Stage], concrete: Recon, run_scan: Scan,
 	initial_artifacts: dict[str, Any], backend: Backend, run_context,
-	dataset: TomoDataSet, source_window: TomoWindow,
+	dataset: TomoDataSet,
 	stage_observer: StageObserver | None,
 	execution_observer: ExecutionSpanObserver | None,
 ) -> dict[str, Any]:
@@ -539,13 +538,12 @@ def _run_streaming_pipeline(
 
 	aggregated = dict(initial_artifacts)
 	aggregated["streaming_dataset"] = dataset.to_document()
-	aggregated["source_window"] = source_window.to_document()
 	window_records = []
 	output_files = []
 	reserve = getattr(run_context.storage, "reserve", None)
 	if reserve is not None:
 		largest = max(
-			iter_streaming_windows(dataset, source_window),
+			dataset,
 			key=lambda item: item.with_pad(["Y"]).shape.Y,
 		)
 		reserve_scan = _window_scan(run_scan, dataset, largest)
@@ -561,7 +559,7 @@ def _run_streaming_pipeline(
 		)
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
-	for window in iter_streaming_windows(dataset, source_window):
+	for window in dataset:
 		window_scan = _window_scan(run_scan, dataset, window)
 		window_stages = list(stages)
 		window_initial = dict(initial_artifacts)
@@ -706,15 +704,13 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		# Candidates may add metadata keys but must treat shared detector-sized
 		# arrays as immutable. Copy only the mapping.
 		run_scan.metadata = dict(scan.metadata)
-		dataset, source_window = resolve_streaming_plan(
-			planning_stages, run_scan, window_config,
-		)
+		dataset = resolve_streaming_plan(planning_stages, run_scan, window_config)
 		planned.append((
-			run, concrete, resolved_document, run_scan, dataset, source_window,
+			run, concrete, resolved_document, run_scan, dataset,
 		))
 	estimates = [
-		_estimated_output_bytes(concrete, source_window)
-		for _run, concrete, _document, _scan, _dataset, source_window in planned
+		_estimated_output_bytes(concrete, dataset)
+		for _run, concrete, _document, _scan, dataset in planned
 	]
 	total_output = sum(estimates)
 	limit = recon.candidate_limits.max_estimated_output_bytes
@@ -725,11 +721,11 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			"or raise the configured limit explicitly"
 		)
 	prepared = []
-	for run, concrete, resolved_document, run_scan, dataset, source_window in planned:
+	for run, concrete, resolved_document, run_scan, dataset in planned:
 		resolution = resolve_calibration(
 			run_scan,
 			concrete,
-			source_window=source_window,
+			source_window=dataset.full_window(),
 			pipeline_root=resolved_pipeline_path.parent,
 			scan_root=resolved_scan_path.parent,
 			seeded_bundle=calibration_bundle,
@@ -755,20 +751,19 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
 			dataset=dataset,
-			source_window=source_window,
+			source_window=dataset.full_window(),
 		)
 		prepared.append((
 			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
-			dataset, source_window,
+			dataset,
 		))
 	results = []
 	for (
 		run, concrete, resolved_document, run_scan, initial_artifacts, stages,
-		dataset, source_window,
+		dataset,
 	) in prepared:
 		resolved_metadata = resolved_document.setdefault("metadata", {})
 		resolved_metadata["streaming_dataset"] = dataset.to_document()
-		resolved_metadata["source_window"] = source_window.to_document()
 		with PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
@@ -788,13 +783,12 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					artifacts={
 						**initial_artifacts,
 						"streaming_dataset": dataset.to_document(),
-						"source_window": source_window.to_document(),
 					},
 					backend=backend,
 					storage=run_context.storage,
 					executor=run_context.executor,
 					dataset=dataset,
-					source_window=next(iter_streaming_windows(dataset, source_window)),
+					source_window=next(iter(dataset)),
 				)
 				state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
 				# Experiment-managed arrays belong to the run context. Do not return
@@ -820,7 +814,6 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					stages=stages, concrete=concrete, run_scan=run_scan,
 					initial_artifacts=initial_artifacts, backend=backend,
 					run_context=run_context, dataset=dataset,
-					source_window=source_window,
 					stage_observer=stage_observer,
 					execution_observer=execution_observer,
 				)
@@ -844,7 +837,6 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 				yaml.safe_dump({
 					"resolved_recon": resolved_document,
 					"streaming_dataset": dataset.to_document(),
-					"source_window": source_window.to_document(),
 				}, stream, sort_keys=False)
 			artifacts["recon_run"] = manifest_path
 	return results

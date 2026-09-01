@@ -460,7 +460,7 @@ class DataRange(object):
 	@cached_property
 	def length(self) -> DataShape:
 		""" Number of steps in each dimension of the iteration. """
-		return -(self.shape // -self.step)
+		return -(self.shape.extract(self.step) // -self.step)
 
 	def __len__(self) -> int:
 		""" Total number of steps in the iteration. """

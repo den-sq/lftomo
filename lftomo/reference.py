@@ -233,7 +233,7 @@ def aligned_producer_window(selected: list[int] | tuple[int, ...], row_count: in
 
 
 def _run_phase_contrast_projection_order(
-		scan, recon, dataset: TomoDataSet, source_window: TomoWindow,
+		scan, recon, dataset: TomoDataSet,
 		selected: list[int], theta_batch_size: int,
 ) -> np.ndarray:
 	"""Execute AAA523 in bounded Theta batches backed by a projection-order memmap."""
@@ -241,6 +241,7 @@ def _run_phase_contrast_projection_order(
 		raise ValueError("Theta batch size must be positive")
 	configs = [config for config in recon.pipeline if config.kind != "write"]
 	stages = [create_stage(config) for config in configs]
+	source_window = dataset.full_window()
 	validate_pipeline(
 		stages, scan, NumpyBackend(),
 		dataset=dataset, source_window=source_window,
@@ -376,20 +377,18 @@ def run_reference_archive(root: str | Path, producer: str,
 	planning_stages = [
 		create_stage(config) for config in recon.pipeline if config.kind != "write"
 	]
-	dataset, source_window = resolve_streaming_plan(planning_stages, scan)
+	dataset = resolve_streaming_plan(planning_stages, scan)
 	window_length = window.length.Y
 	dataset = dataset.rescope(
 		pos=Y(window.start.Y), shape=Y(window_length),
 	)
-	source_window = source_window.rescope(
-		pos=Y(window.start.Y), shape=Y(window_length),
-	)
+	source_window = dataset.full_window()
 	_resolve_flat_fields(scan, recon, source_window)
 
 	if producer == "phase_contrast":
 		batch_size = theta_batch_size or int(os.environ.get("LFTOMO_REFERENCE_THETA_BATCH", "4"))
 		generated = _run_phase_contrast_projection_order(
-			scan, recon, dataset, source_window, selected, batch_size,
+			scan, recon, dataset, selected, batch_size,
 		)
 		layout = "projection"
 	else:
