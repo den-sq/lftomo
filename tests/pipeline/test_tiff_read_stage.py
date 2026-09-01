@@ -18,6 +18,7 @@ from lftomo.pipeline import (
 	PipelineState,
 	Stage,
 	StageContract,
+	iter_streaming_windows,
 	resolve_streaming_plan,
 )
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
@@ -95,9 +96,8 @@ def _write_irregular_fixture(tmp_path, size=4):
 
 def _run(state, *stages):
 	if state.dataset is None:
-		plan = resolve_streaming_plan(stages, state.scan)
-		state.dataset = plan.dataset
-		state.source_window = next(iter(plan))
+		state.dataset, source_window = resolve_streaming_plan(stages, state.scan)
+		state.source_window = next(iter_streaming_windows(state.dataset, source_window))
 	with PipelineRunContext() as context:
 		state.storage = context.storage
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
@@ -251,9 +251,10 @@ def test_irregular_angles_reach_center_and_reconstruction(tmp_path, monkeypatch)
 		state = _irregular_state(
 			projection_dir, scanlog, 4, [read_config, center_config, recon_config],
 		)
-		plan = resolve_streaming_plan([create_stage(read_config)], state.scan)
-		state.dataset = plan.dataset
-		state.source_window = next(iter(plan))
+		state.dataset, source_window = resolve_streaming_plan(
+			[create_stage(read_config)], state.scan,
+		)
+		state.source_window = next(iter_streaming_windows(state.dataset, source_window))
 		state.storage = context.storage
 		state = Pipeline([create_stage(read_config)], backend=NumpyBackend()).run(state)
 		state.domain = DataDomain.ATTENUATION

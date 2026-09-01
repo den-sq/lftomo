@@ -13,6 +13,7 @@ from lftomo.pipeline import (
 	StageContract,
 	WindowConfig,
 	WindowPlanError,
+	iter_streaming_windows,
 	resolve_streaming_plan,
 )
 from lftomo.pipeline.stages import (
@@ -26,7 +27,7 @@ from lftomo.pipeline.stages import (
 from lftomo.prep.phase import _phase_pad
 from lftomo.runner import run_reconstruction
 from lftomo.util.shapes import ProjOrder, Y
-from lftomo.util.window import TomoWindow
+from lftomo.util.window import TomoDataSet, TomoWindow
 from tests.fixtures.tier1 import projection_stack
 
 
@@ -58,60 +59,52 @@ class _AsymmetricStage(Stage):
 		return state
 
 
-def test_pad_quantities_are_separate_and_neighborhood_stages_compose():
+def test_stage_and_operator_padding_compose_into_the_canonical_dataset():
 	stages = [
 		BilateralFilterStage(diameter=5),
 		BilateralFilterStage(diameter=5),
 		MovementCorrectStage(y=3),
 	]
-	plan = resolve_streaming_plan(
+	dataset, _source_window = resolve_streaming_plan(
 		stages, _scan(), WindowConfig(rows=3, extra_pad=Y(5)),
 	)
-	assert plan.window_rows == 3
-	assert plan.required_pad == ProjOrder(Theta=0, Y=7, X=4)
-	assert plan.required_pad_after == ProjOrder(Theta=0, Y=7, X=4)
-	assert plan.extra_pad == ProjOrder(Theta=0, Y=5, X=0)
-	assert plan.extra_pad_after == ProjOrder(Theta=0, Y=5, X=0)
-	assert plan.effective_pad == ProjOrder(Theta=0, Y=7, X=4)
-	assert plan.effective_pad_after == ProjOrder(Theta=0, Y=7, X=4)
+	assert dataset.step == Y(3)
+	assert dataset.pad_before == ProjOrder(Theta=0, Y=7, X=4)
+	assert dataset.pad_after == ProjOrder(Theta=0, Y=7, X=4)
 
-	user_dominates = resolve_streaming_plan(
+	user_dataset, _source_window = resolve_streaming_plan(
 		stages, _scan(), WindowConfig(rows=3, extra_pad=Y(10)),
 	)
-	assert user_dominates.required_pad.Y == 7
-	assert user_dominates.effective_pad.Y == 10
+	assert user_dataset.pad_before.Y == 10
+	assert user_dataset.pad_after.Y == 10
 
 
 def test_asymmetric_stage_and_operator_requirements_compose_by_side():
-	plan = resolve_streaming_plan(
+	dataset, source_window = resolve_streaming_plan(
 		[_AsymmetricStage()], _scan(),
 		WindowConfig(rows=4, extra_pad=Y(2), extra_pad_after=Y(1)),
 	)
 
-	assert plan.required_pad == ProjOrder(Theta=0, Y=1, X=0)
-	assert plan.required_pad_after == ProjOrder(Theta=0, Y=3, X=0)
-	assert plan.effective_pad == ProjOrder(Theta=0, Y=2, X=0)
-	assert plan.effective_pad_after == ProjOrder(Theta=0, Y=3, X=0)
-	windows = tuple(plan)
+	assert dataset.pad_before == ProjOrder(Theta=0, Y=2, X=0)
+	assert dataset.pad_after == ProjOrder(Theta=0, Y=3, X=0)
+	windows = tuple(iter_streaming_windows(dataset, source_window))
 	assert windows[0].pad_before == ProjOrder(Theta=0, Y=0, X=0)
 	assert windows[0].pad_after == ProjOrder(Theta=0, Y=3, X=0)
 	assert windows[1].pad_before == ProjOrder(Theta=0, Y=2, X=0)
 	assert windows[1].pad_after == ProjOrder(Theta=0, Y=3, X=0)
-	record = plan.record()
-	assert record["effective_pad"] == ProjOrder(Theta=0, Y=2, X=0).to_document()
-	assert record["effective_pad_after"] == ProjOrder(Theta=0, Y=3, X=0).to_document()
-	assert type(plan).from_document(record).to_document() == record
+	record = dataset.to_document()
+	assert TomoDataSet.from_document(record).to_document() == record
 
 
-def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent():
+def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent(caplog):
 	scan = _scan(rows=32)
-	plan = resolve_streaming_plan(
+	dataset, _source_window = resolve_streaming_plan(
 		[PaganinFilterStage(), NegativeLogStage()], scan, WindowConfig(rows=8),
 	)
-	assert plan.required_pad.Y == _phase_pad(8, 1e-4, 10, 20)
-	assert plan.required_pad_after.Y == _phase_pad(8, 1e-4, 10, 20)
-	assert "phase.paganin_filter" in plan.warnings[0]
-	assert "whole-volume equivalence" in plan.warnings[0]
+	assert dataset.pad_before.Y == _phase_pad(8, 1e-4, 10, 20)
+	assert dataset.pad_after.Y == _phase_pad(8, 1e-4, 10, 20)
+	assert "phase.paganin_filter" in caplog.text
+	assert "whole-volume equivalence" in caplog.text
 
 
 def test_full_axis_contract_rejects_silent_window_degradation():
@@ -123,15 +116,14 @@ def test_full_axis_contract_rejects_silent_window_degradation():
 		], _scan(), WindowConfig(rows=4))
 
 
-def test_streaming_plan_reiterates_the_canonical_dataset_without_a_window_cache():
-	plan = resolve_streaming_plan(
+def test_canonical_dataset_reiterates_without_a_window_cache():
+	dataset, source_window = resolve_streaming_plan(
 		[BilateralFilterStage(diameter=5)], _scan(rows=10), WindowConfig(rows=3),
 	)
-	first_pass = tuple(plan)
-	second_pass = tuple(plan)
-	assert plan.window_count == 4
-	assert plan.selection == Y.interval(0, 10)
-	assert not plan.whole_volume
+	first_pass = tuple(iter_streaming_windows(dataset, source_window))
+	second_pass = tuple(iter_streaming_windows(dataset, source_window))
+	assert len(dataset.frange) == 4
+	assert dataset.interval("Y") == Y.interval(0, 10)
 	assert all(isinstance(window, TomoWindow) for window in first_pass)
 	assert [window.index for window in first_pass] == [
 		window.index for window in second_pass
@@ -150,23 +142,16 @@ def test_streaming_windows_read_physical_neighbors_outside_selection(tmp_path):
 		params={"y_start": 2, "y_stop": 10},
 	)
 	stages = [create_stage(read), BilateralFilterStage(diameter=5)]
-	plan = resolve_streaming_plan(stages, scan, WindowConfig(rows=4))
+	dataset, source_window = resolve_streaming_plan(stages, scan, WindowConfig(rows=4))
+	windows = tuple(iter_streaming_windows(dataset, source_window))
 
-	assert plan.dataset.physical_shape == ProjOrder(Theta=4, Y=12, X=8)
-	assert plan.dataset.frange == Y.drange(2, 10, 4)
-	assert [window.index[1] for window in plan] == [
+	assert dataset.physical_shape == ProjOrder(Theta=4, Y=12, X=8)
+	assert dataset.frange == Y.drange(2, 10, 4)
+	assert [window.index[1] for window in windows] == [
 		slice(2, 6, 1), slice(6, 10, 1),
 	]
-	assert [window.with_pad(["Y"]).index[1] for window in plan] == [
+	assert [window.with_pad(["Y"]).index[1] for window in windows] == [
 		slice(0, 8, 1), slice(4, 12, 1),
-	]
-	assert plan.record()["windows"] == [
-		{
-			"index": 0, "core": [2, 6], "source": [0, 8], "interior": [2, 6],
-		},
-		{
-			"index": 1, "core": [6, 10], "source": [4, 12], "interior": [2, 6],
-		},
 	]
 
 
@@ -270,10 +255,12 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 		item["center_artifacts"]["center"] == 2.0
 		for item in windowed.artifacts["window_results"]
 	)
-	assert windowed.artifacts["window_plan"]["center_prepass"] == (
-		"replay_processed_prefix_per_window"
-	)
+	assert TomoDataSet.from_document(
+		windowed.artifacts["streaming_dataset"]
+	).frange == Y.drange(0, rows, 2)
 	assert windowed.artifacts["measured_shared_memory_bytes"] > 0
 	manifest = yaml.safe_load((window_output / "recon_run.yaml").read_text())
-	assert manifest["window_plan"]["window_rows"] == 2
-	assert "resolved_window" in windowed.resolved_recon["metadata"]
+	assert TomoDataSet.from_document(manifest["streaming_dataset"]).step == Y(2)
+	assert set(windowed.resolved_recon["metadata"]) >= {
+		"streaming_dataset", "source_window",
+	}

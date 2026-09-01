@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import logging
-from typing import Any, Sequence
+from typing import Any, Iterator, Sequence
 
 import numpy as np
 
 from lftomo.pipeline.core import _canonical_pad, Stage
-from lftomo.util.shapes import DataShape, Interval, ProjOrder, Y
+from lftomo.util.shapes import DataShape, ProjOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
-
-
-_PLAN_PAD_FIELDS = (
-	"required_pad", "required_pad_after", "extra_pad", "extra_pad_after",
-	"effective_pad", "effective_pad_after",
-)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -45,99 +39,22 @@ class WindowConfig:
 			_canonical_pad(self.extra_pad_after)
 
 
-@dataclass(frozen=True)
-class StreamingPlan:
-	"""Resolved padding plus the canonical iterable physical dataset."""
+def iter_streaming_windows(
+	dataset: TomoDataSet, source_window: TomoWindow,
+) -> Iterator[TomoWindow]:
+	"""Apply a dataset's Y schedule to its selected source-coordinate window."""
 
-	selection: Interval
-	window_rows: int
-	required_pad: ProjOrder
-	required_pad_after: ProjOrder
-	extra_pad: ProjOrder
-	extra_pad_after: ProjOrder
-	effective_pad: ProjOrder
-	effective_pad_after: ProjOrder
-	dataset: TomoDataSet
-	source_window: TomoWindow
-	warnings: tuple[str, ...] = ()
-	center_prepass: str | None = None
-
-	def __iter__(self):
-		theta = self.source_window.axis_slice("Theta")
-		for y_window in self.dataset.iter_with(wsize=Y(self.window_rows)):
-			y = y_window.axis_slice("Y")
-			yield TomoWindow.from_bounds(
-				self.dataset.physical_shape,
-				y=(y.start, y.stop),
-				theta=(theta.start, theta.stop, theta.step),
-				halo=(self.effective_pad, self.effective_pad_after),
-				dtype=self.dataset.dtype,
-				work_dtype=np.float32,
-			)
-
-	@property
-	def window_count(self) -> int:
-		return len(self.dataset.frange)
-
-	@property
-	def whole_volume(self) -> bool:
-		return self.window_count == 1 and self.dataset.interval("Y") == self.selection
-
-	def record(self) -> dict[str, Any]:
-		"""Compatibility name for the canonical document writer."""
-		return self.to_document()
-
-	def to_document(self) -> dict[str, Any]:
-		document = {
-			"type": type(self).__name__,
-			"selection": self.selection.to_document(),
-			"window_rows": self.window_rows,
-			**{name: getattr(self, name).to_document() for name in _PLAN_PAD_FIELDS},
-			"dataset": self.dataset.to_document(),
-			"source_window": self.source_window.to_document(),
-			"whole_volume": self.whole_volume,
-			"center_prepass": self.center_prepass,
-			"warnings": list(self.warnings),
-			"windows": [],
-		}
-		for index, window in enumerate(self):
-			core = window.axis_slice("Y")
-			source = window.with_pad(["Y"]).axis_slice("Y")
-			interior = window.internal.axis_slice("Y")
-			document["windows"].append({
-				"index": index,
-				"core": [core.start, core.stop],
-				"source": [source.start, source.stop],
-				"interior": [interior.start, interior.stop],
-			})
-		return document
-
-	@classmethod
-	def from_document(cls, document: dict[str, Any]) -> "StreamingPlan":
-		if not isinstance(document, dict) or document.get("type") != cls.__name__:
-			raise ValueError(f"expected {cls.__name__} document")
-		pads = {
-			name: DataShape.from_document(document[name]) for name in _PLAN_PAD_FIELDS
-		}
-		if any(not isinstance(value, ProjOrder) for value in pads.values()):
-			raise ValueError("StreamingPlan padding must use ProjOrder")
-		result = cls(
-			selection=Interval.from_document(document["selection"]),
-			window_rows=document["window_rows"],
-			**pads,
-			dataset=TomoDataSet.from_document(document["dataset"]),
-			source_window=TomoWindow.from_document(document["source_window"]),
-			warnings=tuple(document["warnings"]),
-			center_prepass=document["center_prepass"],
+	for scheduled in dataset.iter_with(substep=source_window.step):
+		y = scheduled.axis_slice("Y")
+		yield scheduled.rescope(
+			pos=replace(source_window.pos, Y=y.start),
+			shape=replace(source_window.shape, Y=y.stop - y.start),
 		)
-		if result.to_document() != document:
-			raise ValueError("StreamingPlan document contains inconsistent derived fields")
-		return result
 
 
 def resolve_streaming_plan(
 	stages: Sequence[Stage], scan: Any, config: WindowConfig | None = None,
-) -> StreamingPlan:
+) -> tuple[TomoDataSet, TomoWindow]:
 	"""Resolve composed Stage padding and global row windows before allocation."""
 
 	config = config or WindowConfig()
@@ -202,7 +119,6 @@ def resolve_streaming_plan(
 					f"{stage.name} requires the full Y axis and cannot run with "
 					f"window_rows={window_rows}; select whole-volume mode",
 				)
-	warnings = []
 	if multiple:
 		sensitive = tuple(dict.fromkeys(
 			stage.name for stage in stages
@@ -217,7 +133,6 @@ def resolve_streaming_plan(
 				"FFT-extent-sensitive windowed Stages use fixed window+padding parity, "
 				"not whole-volume equivalence: " + ", ".join(sensitive)
 			)
-			warnings.append(message)
 			LOGGER.warning(message)
 	dataset = TomoDataSet(
 		CTFov(physical_shape.Theta, scan.degrees_per_fov, 1),
@@ -227,17 +142,7 @@ def resolve_streaming_plan(
 		work_dtype=np.float32,
 		angles=metadata.angles,
 		acquisition_indices=metadata.acquisition_indices,
+		pad=effective,
+		pad_after=effective_after,
 	)
-	center_prepass = (
-		"replay_processed_prefix_per_window"
-		if any(stage.name.startswith("center.") and stage.name != "center.manual" for stage in stages)
-		else None
-	)
-	return StreamingPlan(
-		selection=Y.interval(selection_start, selection_stop), window_rows=window_rows,
-		required_pad=required, required_pad_after=required_after,
-		extra_pad=extra, extra_pad_after=extra_after,
-		effective_pad=effective, effective_pad_after=effective_after,
-		dataset=dataset, source_window=source_window,
-		warnings=tuple(warnings), center_prepass=center_prepass,
-	)
+	return dataset, source_window

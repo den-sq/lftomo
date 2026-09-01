@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 import hashlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 import os
@@ -20,7 +20,6 @@ from lftomo.pipeline import (
 	NumpyBackend,
 	PipelineRunContext,
 	PipelineState,
-	StreamingPlan,
 	resolve_streaming_plan,
 	validate_pipeline,
 )
@@ -28,7 +27,7 @@ from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
 from lftomo.util.shapes import ChunkGrid, Interval, ProjOrder, Y
-from lftomo.util.window import TomoWindow
+from lftomo.util.window import TomoDataSet, TomoWindow
 
 
 class ReferenceNotReproducible(RuntimeError):
@@ -233,8 +232,10 @@ def aligned_producer_window(selected: list[int] | tuple[int, ...], row_count: in
 	return Y.interval(window_start, window_stop), Y.interval(core_start, core_stop)
 
 
-def _run_phase_contrast_projection_order(scan, recon, plan: StreamingPlan,
-			selected: list[int], theta_batch_size: int) -> np.ndarray:
+def _run_phase_contrast_projection_order(
+		scan, recon, dataset: TomoDataSet, source_window: TomoWindow,
+		selected: list[int], theta_batch_size: int,
+) -> np.ndarray:
 	"""Execute AAA523 in bounded Theta batches backed by a projection-order memmap."""
 	if theta_batch_size < 1:
 		raise ValueError("Theta batch size must be positive")
@@ -242,7 +243,7 @@ def _run_phase_contrast_projection_order(scan, recon, plan: StreamingPlan,
 	stages = [create_stage(config) for config in configs]
 	validate_pipeline(
 		stages, scan, NumpyBackend(),
-		dataset=plan.dataset, source_window=plan.source_window,
+		dataset=dataset, source_window=source_window,
 	)
 	stripe_index = next(
 		(index for index, config in enumerate(configs) if config.kind == "stripe")
@@ -254,7 +255,7 @@ def _run_phase_contrast_projection_order(scan, recon, plan: StreamingPlan,
 	stripe_stage = stages[stripe_index]
 	post_stages = stages[stripe_index + 1:]
 	projection_count = scan.n_projections
-	y = plan.source_window.axis_slice("Y")
+	y = source_window.axis_slice("Y")
 
 	scratch_root = Path(os.environ.get("LFTOMO_TIER2_SCRATCH", gettempdir()))
 	scratch_root.mkdir(parents=True, exist_ok=True)
@@ -263,15 +264,15 @@ def _run_phase_contrast_projection_order(scan, recon, plan: StreamingPlan,
 		for theta_start in range(0, projection_count, theta_batch_size):
 			theta_stop = min(theta_start + theta_batch_size, projection_count)
 			window = TomoWindow.from_bounds(
-				plan.dataset.physical_shape,
+				dataset.physical_shape,
 				y=(y.start, y.stop), theta=(theta_start, theta_stop),
-				dtype=plan.dataset.dtype, work_dtype=np.float32,
+				dtype=dataset.dtype, work_dtype=np.float32,
 			)
 			with PipelineRunContext() as run_context:
 				state = PipelineState(
 					working_array=np.empty((0,), dtype=np.float32), scan=scan, recon=recon,
 					backend=NumpyBackend(), storage=run_context.storage,
-					dataset=plan.dataset, source_window=window,
+					dataset=dataset, source_window=window,
 				)
 				state = read_stage.run(state)
 				for stage in pre_stages:
@@ -292,8 +293,8 @@ def _run_phase_contrast_projection_order(scan, recon, plan: StreamingPlan,
 			working_array=volume, scan=scan, recon=recon, backend=NumpyBackend(),
 			buffer_spec=BufferSpec(ProjOrder(*volume.shape), volume.dtype),
 			domain=DataDomain.ATTENUATION,
-			dataset=plan.dataset,
-			source_window=plan.source_window,
+			dataset=dataset,
+			source_window=source_window,
 		)
 		state = stripe_stage.run(state)
 		volume.flush()
@@ -375,25 +376,20 @@ def run_reference_archive(root: str | Path, producer: str,
 	planning_stages = [
 		create_stage(config) for config in recon.pipeline if config.kind != "write"
 	]
-	plan = resolve_streaming_plan(planning_stages, scan)
+	dataset, source_window = resolve_streaming_plan(planning_stages, scan)
 	window_length = window.length.Y
-	plan = replace(
-		plan,
-		selection=window,
-		window_rows=window_length,
-		dataset=plan.dataset.rescope(
-			pos=Y(window.start.Y), shape=Y(window_length),
-		),
-		source_window=plan.source_window.rescope(
-			pos=Y(window.start.Y), shape=Y(window_length),
-		),
+	dataset = dataset.rescope(
+		pos=Y(window.start.Y), shape=Y(window_length),
 	)
-	_resolve_flat_fields(scan, recon, plan.source_window)
+	source_window = source_window.rescope(
+		pos=Y(window.start.Y), shape=Y(window_length),
+	)
+	_resolve_flat_fields(scan, recon, source_window)
 
 	if producer == "phase_contrast":
 		batch_size = theta_batch_size or int(os.environ.get("LFTOMO_REFERENCE_THETA_BATCH", "4"))
 		generated = _run_phase_contrast_projection_order(
-			scan, recon, plan, selected, batch_size,
+			scan, recon, dataset, source_window, selected, batch_size,
 		)
 		layout = "projection"
 	else:
@@ -401,7 +397,7 @@ def run_reference_archive(root: str | Path, producer: str,
 		stages = [create_stage(config) for config in configs]
 		validate_pipeline(
 			stages, scan, NumpyBackend(),
-			dataset=plan.dataset, source_window=plan.source_window,
+			dataset=dataset, source_window=source_window,
 		)
 		with PipelineRunContext() as run_context:
 			state = PipelineState(
@@ -410,8 +406,8 @@ def run_reference_archive(root: str | Path, producer: str,
 				recon=recon,
 				backend=NumpyBackend(),
 				storage=run_context.storage,
-				dataset=plan.dataset,
-				source_window=plan.source_window,
+				dataset=dataset,
+				source_window=source_window,
 			)
 			cropped = False
 			for config, stage in zip(configs, stages, strict=True):

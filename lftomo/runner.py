@@ -41,11 +41,11 @@ from lftomo.pipeline import (
 	PipelineRunContext,
 	PipelineState,
 	ExecutionSpanObserver,
-	StreamingPlan,
 	Stage,
 	StageObserver,
 	WindowConfig,
 	expand_recon_sweeps,
+	iter_streaming_windows,
 	resolve_streaming_plan,
 	validate_pipeline,
 )
@@ -53,7 +53,7 @@ from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.storage import ManagedBuffer, buffer_view
 from lftomo.util.shapes import ProjOrder, SinoOrder, Y
-from lftomo.util.window import TomoWindow
+from lftomo.util.window import TomoDataSet, TomoWindow
 
 
 PipelineStateExecutor = Callable[
@@ -392,12 +392,12 @@ def _resolve_flat_fields(scan: Scan, recon: Recon, source_window: TomoWindow) ->
 	)
 
 
-def _estimated_output_bytes(recon: Recon, plan: StreamingPlan) -> int:
+def _estimated_output_bytes(recon: Recon, source_window: TomoWindow) -> int:
 	"""Estimate float32 reconstructed-volume output without reading projection data."""
 
 	if recon.output_path is None:
 		return 0
-	return plan.source_window.recon_shape().nbytes(np.float32)
+	return source_window.recon_shape().nbytes(np.float32)
 
 
 class _ReplayCenterArtifactStage(Stage):
@@ -414,7 +414,7 @@ class _ReplayCenterArtifactStage(Stage):
 		return state
 
 
-def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
+def _window_scan(scan: Scan, dataset: TomoDataSet, window: TomoWindow) -> Scan:
 	resolved = scan.model_copy(deep=False)
 	resolved.metadata = dict(scan.metadata)
 	source = window.with_pad(["Y"])
@@ -424,7 +424,7 @@ def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
 	if fields is not None:
 		values = np.asarray(fields)
 		if values.ndim == 3:
-			selection = plan.dataset.interval("Y")
+			selection = dataset.interval("Y")
 			if values.shape[1] == selection.length.Y:
 				start = source_start - selection.start.Y
 				stop = source_stop - selection.start.Y
@@ -531,20 +531,24 @@ def _center_artifacts(state: PipelineState) -> dict[str, Any]:
 def _run_streaming_pipeline(
 	*, stages: list[Stage], concrete: Recon, run_scan: Scan,
 	initial_artifacts: dict[str, Any], backend: Backend, run_context,
-	window_plan: StreamingPlan, stage_observer: StageObserver | None,
+	dataset: TomoDataSet, source_window: TomoWindow,
+	stage_observer: StageObserver | None,
 	execution_observer: ExecutionSpanObserver | None,
 ) -> dict[str, Any]:
 	"""Execute one whole-volume or multi-window run through the same driver."""
 
 	aggregated = dict(initial_artifacts)
-	window_plan_record = window_plan.record()
-	aggregated["window_plan"] = window_plan_record
+	aggregated["streaming_dataset"] = dataset.to_document()
+	aggregated["source_window"] = source_window.to_document()
 	window_records = []
 	output_files = []
 	reserve = getattr(run_context.storage, "reserve", None)
 	if reserve is not None:
-		largest = max(window_plan, key=lambda item: item.with_pad(["Y"]).shape.Y)
-		reserve_scan = _window_scan(run_scan, window_plan, largest)
+		largest = max(
+			iter_streaming_windows(dataset, source_window),
+			key=lambda item: item.with_pad(["Y"]).shape.Y,
+		)
+		reserve_scan = _window_scan(run_scan, dataset, largest)
 		reserve_writer = next((
 			index for index, stage in enumerate(stages)
 			if stage.name.startswith("write.")
@@ -553,12 +557,12 @@ def _run_streaming_pipeline(
 			stages[:reserve_writer], reserve_scan, backend,
 			initial_artifacts, None, concrete,
 			execution_observer=None,
-			dataset=window_plan.dataset, source_window=largest,
+			dataset=dataset, source_window=largest,
 		)
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
-	for index, window in enumerate(window_plan):
-		window_scan = _window_scan(run_scan, window_plan, window)
+	for window in iter_streaming_windows(dataset, source_window):
+		window_scan = _window_scan(run_scan, dataset, window)
 		window_stages = list(stages)
 		window_initial = dict(initial_artifacts)
 		center_artifacts = {}
@@ -573,12 +577,12 @@ def _run_streaming_pipeline(
 				np.empty((0,), dtype=np.float32), window_scan, concrete,
 				artifacts=dict(window_initial), backend=backend,
 				storage=run_context.storage, executor=run_context.executor,
-				dataset=window_plan.dataset, source_window=window,
+				dataset=dataset, source_window=window,
 			)
 			prepass = _planned_pipeline(
 				prepass_stages, window_scan, backend, window_initial, stage_observer,
 				concrete, execution_observer=execution_observer,
-				dataset=window_plan.dataset, source_window=window,
+				dataset=dataset, source_window=window,
 			)
 			prepass_state = prepass.run(prepass_state)
 			center_artifacts = _center_artifacts(prepass_state)
@@ -600,7 +604,7 @@ def _run_streaming_pipeline(
 			np.empty((0,), dtype=np.float32), window_scan, concrete,
 			artifacts=dict(window_initial), backend=backend,
 			storage=run_context.storage, executor=run_context.executor,
-			dataset=window_plan.dataset, source_window=window,
+			dataset=dataset, source_window=window,
 		)
 		reconstruction_start = next((
 			stage_index for stage_index, stage in enumerate(compute_stages)
@@ -610,7 +614,7 @@ def _run_streaming_pipeline(
 			compute = _planned_pipeline(
 				compute_stages, window_scan, backend, window_initial, stage_observer,
 				concrete, execution_observer=execution_observer,
-				dataset=window_plan.dataset, source_window=window,
+				dataset=dataset, source_window=window,
 			)
 			state = compute.run(state)
 		else:
@@ -618,7 +622,7 @@ def _run_streaming_pipeline(
 				compute_stages[:reconstruction_start], window_scan, backend,
 				window_initial, stage_observer, concrete,
 				execution_observer=execution_observer,
-				dataset=window_plan.dataset, source_window=window,
+				dataset=dataset, source_window=window,
 			)
 			state = prefix.run(state)
 			state = _crop_to_window_interior(state, window)
@@ -628,7 +632,7 @@ def _run_streaming_pipeline(
 				execution_observer=execution_observer,
 				stage_index_offset=reconstruction_start,
 				mode="fragment", initial_layout=state.layout, initial_domain=state.domain,
-				dataset=window_plan.dataset, source_window=window,
+				dataset=dataset, source_window=window,
 			)
 			state = reconstruction.run(state)
 		if writer_stages and state.domain is not DataDomain.RECON:
@@ -646,7 +650,7 @@ def _run_streaming_pipeline(
 		files = window_artifacts.get("output_files", [])
 		output_files.extend(path for path in files if path not in output_files)
 		window_records.append({
-			"window": window_plan_record["windows"][index],
+			"window": window.to_document(),
 			"center_artifacts": center_artifacts,
 			"artifacts": window_artifacts,
 		})
@@ -702,11 +706,15 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		# Candidates may add metadata keys but must treat shared detector-sized
 		# arrays as immutable. Copy only the mapping.
 		run_scan.metadata = dict(scan.metadata)
-		window_plan = resolve_streaming_plan(planning_stages, run_scan, window_config)
-		planned.append((run, concrete, resolved_document, run_scan, window_plan))
+		dataset, source_window = resolve_streaming_plan(
+			planning_stages, run_scan, window_config,
+		)
+		planned.append((
+			run, concrete, resolved_document, run_scan, dataset, source_window,
+		))
 	estimates = [
-		_estimated_output_bytes(concrete, window_plan)
-		for _run, concrete, _document, _scan, window_plan in planned
+		_estimated_output_bytes(concrete, source_window)
+		for _run, concrete, _document, _scan, _dataset, source_window in planned
 	]
 	total_output = sum(estimates)
 	limit = recon.candidate_limits.max_estimated_output_bytes
@@ -717,11 +725,11 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			"or raise the configured limit explicitly"
 		)
 	prepared = []
-	for run, concrete, resolved_document, run_scan, window_plan in planned:
+	for run, concrete, resolved_document, run_scan, dataset, source_window in planned:
 		resolution = resolve_calibration(
 			run_scan,
 			concrete,
-			source_window=window_plan.source_window,
+			source_window=source_window,
 			pipeline_root=resolved_pipeline_path.parent,
 			scan_root=resolved_scan_path.parent,
 			seeded_bundle=calibration_bundle,
@@ -746,18 +754,21 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			mode="complete",
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
-			dataset=window_plan.dataset,
-			source_window=window_plan.source_window,
+			dataset=dataset,
+			source_window=source_window,
 		)
 		prepared.append((
 			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
-			window_plan,
+			dataset, source_window,
 		))
 	results = []
 	for (
-		run, concrete, resolved_document, run_scan, initial_artifacts, stages, window_plan,
+		run, concrete, resolved_document, run_scan, initial_artifacts, stages,
+		dataset, source_window,
 	) in prepared:
-		resolved_document.setdefault("metadata", {})["resolved_window"] = window_plan.record()
+		resolved_metadata = resolved_document.setdefault("metadata", {})
+		resolved_metadata["streaming_dataset"] = dataset.to_document()
+		resolved_metadata["source_window"] = source_window.to_document()
 		with PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
@@ -765,7 +776,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			worker_timeout_seconds=concrete.worker_timeout_seconds,
 		) as run_context:
 			if state_executor is not None:
-				if not window_plan.whole_volume:
+				if len(dataset.frange) != 1:
 					raise ValueError(
 						"custom state executors are whole-volume-only; windowed prefix-cache "
 						"semantics remain deferred",
@@ -774,12 +785,16 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 					working_array=np.empty((0,), dtype=np.float32),
 					scan=run_scan,
 					recon=concrete,
-					artifacts={**initial_artifacts, "window_plan": window_plan.record()},
+					artifacts={
+						**initial_artifacts,
+						"streaming_dataset": dataset.to_document(),
+						"source_window": source_window.to_document(),
+					},
 					backend=backend,
 					storage=run_context.storage,
 					executor=run_context.executor,
-					dataset=window_plan.dataset,
-					source_window=next(iter(window_plan)),
+					dataset=dataset,
+					source_window=next(iter_streaming_windows(dataset, source_window)),
 				)
 				state = state_executor(state, tuple(stages), tuple(concrete.pipeline))
 				# Experiment-managed arrays belong to the run context. Do not return
@@ -804,7 +819,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 				artifacts = _run_streaming_pipeline(
 					stages=stages, concrete=concrete, run_scan=run_scan,
 					initial_artifacts=initial_artifacts, backend=backend,
-					run_context=run_context, window_plan=window_plan,
+					run_context=run_context, dataset=dataset,
+					source_window=source_window,
 					stage_observer=stage_observer,
 					execution_observer=execution_observer,
 				)
@@ -827,7 +843,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			with manifest_path.open("w", encoding="utf-8") as stream:
 				yaml.safe_dump({
 					"resolved_recon": resolved_document,
-					"window_plan": window_plan.record(),
+					"streaming_dataset": dataset.to_document(),
+					"source_window": source_window.to_document(),
 				}, stream, sort_keys=False)
 			artifacts["recon_run"] = manifest_path
 	return results

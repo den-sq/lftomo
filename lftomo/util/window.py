@@ -481,7 +481,8 @@ class TomoDataSet(DataRef):
 
 	def __init__(self, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
 					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32,
-					*, angles: np.ndarray = None, acquisition_indices: np.ndarray = None):
+					*, angles: np.ndarray = None, acquisition_indices: np.ndarray = None,
+					pad: DataShape = None, pad_after: DataShape = None):
 		""" Initializes DataWindowSet.
 
 			:param ds_shape: Shape of the overall dataset.
@@ -510,7 +511,15 @@ class TomoDataSet(DataRef):
 			print(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
 			raise TypeError(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
 
-		super().__init__(shape=shape, pad=shape.make_with(0), pos=pos, step=step, dtype=dtype)
+		zero = shape.make_with(0)
+		pad_before = zero if pad is None else replace(zero, **asdict(pad))
+		resolved_pad_after = (
+			pad_before if pad_after is None else replace(zero, **asdict(pad_after))
+		)
+		super().__init__(
+			shape=shape, pad=pad_before, pos=pos, step=step, dtype=dtype,
+			pad_after=resolved_pad_after,
+		)
 
 		self.__work_dtype = work_dtype
 
