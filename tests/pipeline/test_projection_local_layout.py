@@ -97,7 +97,7 @@ def test_state_layout_drives_paganin_without_constructor_order():
 	np.testing.assert_allclose(projection, sinogram.transpose(1, 0, 2), rtol=1e-6, atol=1e-6)
 
 
-def test_serial_phase_units_preserve_strided_theta_positions(monkeypatch):
+def test_serial_phase_uses_local_slice_iteration_for_strided_source(monkeypatch):
 	import lftomo.pipeline.stages.phase as phase_module
 
 	working = np.full((4, 2, 3), 0.5, dtype=np.float32)
@@ -105,21 +105,18 @@ def test_serial_phase_units_preserve_strided_theta_positions(monkeypatch):
 	attach_source_geometry(
 		current, theta_start=1, theta_stride=2, physical_theta=8,
 	)
-	positions = []
-	local_positions = []
-	original = phase_module._unit_index
+	indices = []
+	original = phase_module.SliceIter.__call__
 
-	def record_index(unit, local_index, shape):
-		assert unit.internal.dtype == np.dtype(np.float32)
-		positions.append(unit.pos.Theta)
-		local_positions.append(local_index[unit.shape.axis_of("Theta")].start)
-		return original(unit, local_index, shape)
+	def record(self, position):
+		index = original(self, position)
+		indices.append(index)
+		return index
 
-	monkeypatch.setattr(phase_module, "_unit_index", record_index)
+	monkeypatch.setattr(phase_module.SliceIter, "__call__", record)
 	NegativeLogStage().run(current)
 
-	assert positions == [1, 3, 5, 7]
-	assert local_positions == [0, 1, 2, 3]
+	assert indices == [ProjOrder.point_index(Theta=index) for index in range(4)]
 
 
 def test_pipeline_preserves_projection_layout_through_manual_center():
