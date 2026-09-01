@@ -82,10 +82,10 @@ def test_tiff_writer_uses_global_source_window_y_position(tmp_path):
 	config = StageConfig(kind="write", algorithm="tiff_slices")
 	state = _state(array, tmp_path, config)
 	state.source_window = TomoWindow(
-		ProjOrder(Theta=3, Y=2, X=5),
+		ProjOrder(Theta=3, Y=4, X=5),
 		ProjOrder(Theta=0, Y=1, X=0),
 		ProjOrder(Theta=0, Y=11, X=0),
-		ProjOrder(Theta=1, Y=1, X=1),
+		ProjOrder(Theta=1, Y=2, X=1),
 		np.uint16,
 		np.float32,
 		pad_after=ProjOrder(Theta=0, Y=1, X=0),
@@ -94,5 +94,5 @@ def test_tiff_writer_uses_global_source_window_y_position(tmp_path):
 	result = Pipeline([create_stage(config)]).run(state)
 
 	assert [path.name for path in result.artifacts["output_files"]] == [
-		"sample-a_00011.tif", "sample-a_00012.tif"
+		"sample-a_00011.tif", "sample-a_00013.tif"
 	]

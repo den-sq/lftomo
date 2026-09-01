@@ -164,8 +164,15 @@ class DataRef(object):
 		position = self.pos + before.extract(self.pos)
 		return self.rescope(pos=position, shape=shape)
 
-	def int_iter(self) -> Iterator:
-		return self.frange.get_iter(conv=IntIter)
+	def int_iter(self, axis: str | None = None) -> Iterator[int]:
+		"""Iterate one semantic axis across this reference's sample positions."""
+
+		if axis is None:
+			if len(self.step.names) != 1:
+				return self.frange.get_iter(conv=IntIter)
+			axis = self.step.names[0]
+		bounds = self.interval(axis)
+		return DataRange(bounds.start, bounds.stop, self.step.extract(bounds.start)).get_iter(IntIter)
 
 	def step_iter(self) -> Iterator:
 		return self.frange.get_iter()

@@ -223,6 +223,7 @@ def test_window_from_bounds_records_edge_clamped_halo_and_theta_stride():
 	assert (bottom.pad_before, bottom.pad_after) == (ProjOrder(0, 4, 0), ProjOrder(0, 0, 0))
 	assert (full.pad_before, full.pad_after) == (physical.make_with(0), physical.make_with(0))
 	assert top.frange.length == ProjOrder(3, 4, 8)
+	assert list(top.int_iter("Theta")) == [2, 5, 8]
 
 
 def test_recon_shape_uses_unpadded_core_geometry():
