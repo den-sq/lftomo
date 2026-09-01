@@ -69,10 +69,26 @@ def _fingerprint(value: Any) -> Any:
 
 	if isinstance(value, ManagedBuffer):
 		return _fingerprint(value.array())
+	if isinstance(value, type):
+		return {"kind": "type", "value": f"{value.__module__}.{value.__qualname__}"}
+	if hasattr(value, "to_document"):
+		return {
+			"kind": "document",
+			"type": f"{type(value).__module__}.{type(value).__qualname__}",
+			"value": _fingerprint(value.to_document()),
+		}
 	if hasattr(value, "model_dump"):
-		return _fingerprint(value.model_dump(mode="python"))
+		return {
+			"kind": "model",
+			"type": f"{type(value).__module__}.{type(value).__qualname__}",
+			"value": _fingerprint(value.model_dump(mode="python")),
+		}
 	if is_dataclass(value) and not isinstance(value, type):
-		return _fingerprint(asdict(value))
+		return {
+			"kind": "dataclass",
+			"type": f"{type(value).__module__}.{type(value).__qualname__}",
+			"value": _fingerprint(asdict(value)),
+		}
 	if isinstance(value, np.ndarray):
 		if value.dtype.hasobject:
 			raise TypeError("object arrays do not have a safe cache identity")
@@ -87,8 +103,6 @@ def _fingerprint(value: Any) -> Any:
 		return value.item()
 	if isinstance(value, Path):
 		return {"kind": "path", "value": str(value)}
-	if isinstance(value, type):
-		return {"kind": "type", "value": f"{value.__module__}.{value.__qualname__}"}
 	if isinstance(value, Enum):
 		return {
 			"kind": "enum",

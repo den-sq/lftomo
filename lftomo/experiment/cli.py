@@ -262,7 +262,7 @@ class PipelineTrialExecutor:
 		return f"{identity.trial_id.value}:{window.id}"
 
 	@staticmethod
-	def _prefix_runtime_identity(identity, window) -> dict[str, Any]:
+	def _prefix_share_identity(identity, window) -> dict[str, Any]:
 		return {
 			"dataset": identity.dataset,
 			"configuration": identity.configuration,
@@ -270,6 +270,16 @@ class PipelineTrialExecutor:
 			"environment": identity.environment,
 			"fidelity": identity.fidelity,
 			"window": window,
+		}
+
+	@staticmethod
+	def _prefix_runtime_identity(identity) -> dict[str, Any]:
+		"""Return non-geometry identity; resolved state owns runtime geometry."""
+		return {
+			"dataset": identity.dataset,
+			"configuration": identity.configuration,
+			"code": identity.code,
+			"environment": identity.environment,
 		}
 
 	@staticmethod
@@ -347,7 +357,7 @@ class PipelineTrialExecutor:
 					candidate_id=self._prefix_candidate_id(trial.identity, window),
 					configs=tuple(recon.pipeline),
 					stages=stages,
-					share_identity=self._prefix_runtime_identity(trial.identity, window),
+					share_identity=self._prefix_share_identity(trial.identity, window),
 					estimated_snapshot_bytes=self._estimated_snapshot_bytes(
 						scan, trial.identity, window,
 					),
@@ -400,7 +410,7 @@ class PipelineTrialExecutor:
 						state,
 						stages,
 						configs,
-						runtime_identity=self._prefix_runtime_identity(identity, _window),
+						runtime_identity=self._prefix_runtime_identity(identity),
 						execution_observer=observer,
 						cache_build_execution_observer=self._execution_observer(
 							configs, cache_state="cache_build",
