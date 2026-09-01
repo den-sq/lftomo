@@ -129,6 +129,8 @@ def test_streaming_plan_reiterates_the_canonical_dataset_without_a_window_cache(
 	first_pass = tuple(plan)
 	second_pass = tuple(plan)
 	assert plan.window_count == 4
+	assert plan.selection == Y.interval(0, 10)
+	assert not plan.whole_volume
 	assert all(isinstance(window, TomoWindow) for window in first_pass)
 	assert [window.index for window in first_pass] == [
 		window.index for window in second_pass

@@ -9,7 +9,7 @@ import warnings
 
 import numpy as np
 
-from .shapes import DataShape, DataRange, IntIter, ReconOrder, SliceIter, TFIter, Y
+from .shapes import DataShape, DataRange, Interval, IntIter, ReconOrder, SliceIter, TFIter, Y
 
 # Field of view during data acquisition.
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
@@ -82,6 +82,16 @@ class DataRef(object):
 
 	def axis_slice(self, name: str) -> slice:
 		return self.index[self.shape.axis_of(name)]
+
+	def interval(self, name: str) -> Interval:
+		"""Return the half-open covered interval for one semantic axis."""
+		self.shape.axis_of(name)
+		axis_type = next(
+			shape_type for shape_type in DataShape.__subclasses__()
+			if shape_type.names == (name,)
+		)
+		start = int(getattr(self.pos, name, 0))
+		return Interval(axis_type(start), axis_type(start + int(getattr(self.shape, name))))
 
 	def nbytes(self) -> int:
 		return self.shape.nbytes(self.dtype)

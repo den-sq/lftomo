@@ -444,9 +444,9 @@ def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
 	if fields is not None:
 		values = np.asarray(fields)
 		if values.ndim == 3:
-			if values.shape[1] == plan.selection[1] - plan.selection[0]:
-				start = source_start - plan.selection[0]
-				stop = source_stop - plan.selection[0]
+			if values.shape[1] == plan.selection.length.Y:
+				start = source_start - plan.selection.start.Y
+				stop = source_stop - plan.selection.start.Y
 				if start < 0 or stop > values.shape[1]:
 					raise ValueError(
 						"selected flat_fields do not cover the canonical padded source window"
@@ -505,9 +505,9 @@ def _crop_to_window_interior(
 		"index": index,
 		"core_start": core.start,
 		"core_stop": core.stop,
-		"output_start": core.start - plan.selection[0],
-		"output_stop": core.stop - plan.selection[0],
-		"total_rows": plan.selection[1] - plan.selection[0],
+		"output_start": core.start - plan.selection.start.Y,
+		"output_stop": core.stop - plan.selection.start.Y,
+		"total_rows": plan.selection.length.Y,
 		"first": index == 0,
 		"last": index == plan.window_count - 1,
 	}

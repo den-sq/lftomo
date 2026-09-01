@@ -214,6 +214,9 @@ def test_shape_func():
 
 	daft_seq = Y.drange(Y(0), Y(5), Y(1))
 	assert daft_seq == dr
+	interval = Y.interval(0, 5)
+	assert interval == Y.interval(Y(0), Y(5))
+	assert interval.length == Y(5)
 
 
 def test_range_1D():

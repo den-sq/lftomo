@@ -234,6 +234,15 @@ class DataShape(ABC):
 				step if isinstance(step, cls) else cls(*step) if isinstance(step, Sequence) else cls.make_with(step))
 
 	@classmethod
+	def interval(cls, start: Self | int | Sequence[int],
+					 stop: Self | int | Sequence[int]):
+		"""Construct non-iterable half-open bounds in this semantic shape."""
+		return Interval(
+			start if isinstance(start, cls) else cls(*start) if isinstance(start, Sequence) else cls.make_with(start),
+			stop if isinstance(stop, cls) else cls(*stop) if isinstance(stop, Sequence) else cls.make_with(stop),
+		)
+
+	@classmethod
 	def range_at_interval(cls, start: Self | int | Sequence[int],
 					stop: Self | int | Sequence[int],
 					interval: Self | int | Sequence[int]):
@@ -300,6 +309,17 @@ class GenericOrder(DataShape): A: int; B: int; C: int 	 # noqa: E701,E702
 # Deprecated: retained for import compatibility only.
 # Removal: delete in the next breaking release; do not add new consumers.
 NPString = namedtuple("NPString", 'T')
+
+
+@dataclass(frozen=True)
+class Interval(object):
+	"""Half-open bounds without the iteration semantics of :class:`DataRange`."""
+	start: DataShape
+	stop: DataShape
+
+	@property
+	def length(self) -> DataShape:
+		return self.stop - self.start
 
 
 @dataclass

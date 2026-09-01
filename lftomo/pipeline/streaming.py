@@ -9,7 +9,7 @@ from typing import Any, Sequence
 import numpy as np
 
 from lftomo.pipeline.core import _canonical_pad, Stage
-from lftomo.util.shapes import DataShape, ProjOrder, Y
+from lftomo.util.shapes import DataShape, Interval, ProjOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
@@ -43,7 +43,7 @@ class WindowConfig:
 class StreamingPlan:
 	"""Resolved padding plus the canonical iterable physical dataset."""
 
-	selection: tuple[int, int]
+	selection: Interval
 	window_rows: int
 	required_pad: ProjOrder
 	required_pad_after: ProjOrder
@@ -75,15 +75,13 @@ class StreamingPlan:
 
 	@property
 	def whole_volume(self) -> bool:
-		return self.window_count == 1 and (
-			int(self.dataset.pos.Y), int(self.dataset.pos.Y + self.dataset.shape.Y)
-		) == self.selection
+		return self.window_count == 1 and self.dataset.interval("Y") == self.selection
 
 	def record(self) -> dict[str, Any]:
 		"""Serialize derived plan geometry for the run manifest."""
 
 		record = {
-			"selection": list(self.selection),
+			"selection": [int(self.selection.start.Y), int(self.selection.stop.Y)],
 			"window_rows": self.window_rows,
 			"required_pad": _pad_record(self.required_pad),
 			"required_pad_after": _pad_record(self.required_pad_after),
@@ -217,7 +215,7 @@ def resolve_streaming_plan(
 		else None
 	)
 	return StreamingPlan(
-		selection=(selection_start, selection_stop), window_rows=window_rows,
+		selection=Y.interval(selection_start, selection_stop), window_rows=window_rows,
 		required_pad=required, required_pad_after=required_after,
 		extra_pad=extra, extra_pad_after=extra_after,
 		effective_pad=effective, effective_pad_after=effective_after,
