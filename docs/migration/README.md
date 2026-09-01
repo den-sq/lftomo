@@ -104,7 +104,7 @@ The point of the unification is *net code reduction*.
 
 Every stage PR additionally carries a **provenance test** — an assertion that
 the canonical seam was exercised (e.g. no `projection_start` key in
-artifacts; layout.py imports gone), not just output equivalence — plus the
+artifacts; compatibility-helper imports gone), not just output equivalence — plus the
 existing numerical tests unchanged.
 
 ## Data-copy ledger
@@ -114,8 +114,8 @@ drop silently. Every item, with its owning issue:
 
 | copy item | issue |
 |---|---|
-| per-row `sinogram_scratch` gather/scatter (stripe + shared execution machinery) | B6/B15 |
-| `sinogram_scratch` gather/scatter (center) | B17 |
+| per-row contiguous sinogram gather/scatter (stripe + shared execution machinery) | B6/B15 |
+| per-row contiguous sinogram gather/scatter (center) | B17 |
 | full-volume transpose round-trip: stripe `AllOfTheStripe:342-352` | B15 |
 | full-volume transpose round-trip: super_resolve `_store_result` | B20 |
 | full-volume transpose round-trip: write.py per-block | B19 |

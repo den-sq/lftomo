@@ -19,13 +19,6 @@ from lftomo.pipeline import (
 	validate_pipeline,
 )
 from lftomo.pipeline.stages import LayoutConvertStage, create_stage
-from lftomo.pipeline.layout import (
-	n_projections,
-	n_rows,
-	projection_view,
-	sinogram_scratch,
-	sinogram_view,
-)
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 
 
@@ -105,19 +98,6 @@ def test_with_array_binds_new_spec_and_preserves_domain():
 	assert "layout" not in result.__dict__
 	assert not hasattr(result, "sync_buffer_spec")
 	assert result.domain is DataDomain.TRANSMISSION
-
-
-def test_axis_helpers_return_views_and_contiguous_scratch():
-	projection_order = np.arange(24).reshape(3, 2, 4)
-	sinogram_order = projection_order.transpose(1, 0, 2).copy()
-
-	assert np.array_equal(projection_view(projection_order, ProjOrder, 1), projection_order[1])
-	assert np.array_equal(projection_view(sinogram_order, SinoOrder, 1), projection_order[1])
-	assert np.array_equal(sinogram_view(projection_order, ProjOrder, 1), projection_order[:, 1])
-	assert np.array_equal(sinogram_view(sinogram_order, SinoOrder, 1), projection_order[:, 1])
-	assert sinogram_scratch(projection_order, ProjOrder, 1).flags.c_contiguous
-	assert n_projections(projection_order, ProjOrder) == 3
-	assert n_rows(sinogram_order, SinoOrder) == 2
 
 
 def test_layout_convert_is_explicit_contiguous_and_visible_in_plan():
