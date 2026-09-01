@@ -91,7 +91,7 @@ def test_read_state_retains_the_planned_canonical_window(tmp_path):
 	path = tmp_path / "scan.h5"
 	_write(path, data)
 	config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={
-		"y_start": 0, "y_stop": 8,
+		"theta_start": 3, "theta_stop": 4, "y_start": 7, "y_stop": 9,
 	})
 	state = _state(path, count, size, config)
 	selection = create_stage(StageConfig(

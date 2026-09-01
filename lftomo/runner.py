@@ -53,6 +53,7 @@ from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.storage import ManagedBuffer, buffer_view
 from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.window import TomoWindow
 
 
 PipelineStateExecutor = Callable[
@@ -167,14 +168,6 @@ def _normalization_stage(recon: Recon):
 	return next((stage for stage in recon.pipeline if stage.kind == "normalize"), None)
 
 
-def _read_window(recon: Recon) -> tuple[int, int | None]:
-	read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
-	return (
-		int(read.params.get("y_start", 0)) if read else 0,
-		read.params.get("y_stop") if read else None,
-	)
-
-
 def _disable_embedded_calibration(recon: Recon) -> None:
 	read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
 	if read is not None and read.algorithm == "hdf5_dxchange":
@@ -199,12 +192,11 @@ def _detector_shape(scan: Scan) -> tuple[int, int]:
 	return detector.projection_shape().as_tuple()
 
 
-def calibration_target(scan: Scan, recon: Recon) -> CalibrationTarget:
-	"""Build component-compatibility facts from one resolved Scan and Recon."""
+def calibration_target(scan: Scan, source_window: TomoWindow) -> CalibrationTarget:
+	"""Build compatibility facts from the canonical source selection."""
 
-	rows, columns = _detector_shape(scan)
-	y_start, y_stop = _read_window(recon)
-	y_stop = rows if y_stop is None else int(y_stop)
+	columns = _detector_shape(scan)[1]
+	selection = source_window.interval("Y")
 	metadata = scan.metadata
 	return CalibrationTarget(
 		detector_id=metadata.get("detector_id") or scan.detector.name,
@@ -214,7 +206,8 @@ def calibration_target(scan: Scan, recon: Recon) -> CalibrationTarget:
 		exposure_ms=scan.acquisition.exposure_ms,
 		temperature_c=metadata.get("temperature_c"),
 		region=DetectorRegion(
-			y_start=y_start, x_start=0, height=y_stop - y_start, width=columns,
+			y_start=selection.start.Y, x_start=0,
+			height=selection.length.Y, width=columns,
 			binning_y=int(metadata.get("binning_y", 1)),
 			binning_x=int(metadata.get("binning_x", 1)),
 			orientation=metadata.get("orientation", "identity"),
@@ -277,6 +270,7 @@ def resolve_calibration(
 	scan: Scan,
 	recon: Recon,
 	*,
+	source_window: TomoWindow,
 	pipeline_root: str | Path,
 	scan_root: str | Path,
 	seeded_bundle: CalibrationBundleRef | None = None,
@@ -286,6 +280,8 @@ def resolve_calibration(
 
 	pipeline_root = Path(pipeline_root).resolve()
 	scan_root = Path(scan_root).resolve()
+	selection = source_window.interval("Y")
+	y_start, y_stop = selection.start.Y, selection.stop.Y
 	normalize = _normalization_stage(recon)
 	manifest_path, options = _manifest_selection(recon, pipeline_root)
 	if manifest_path is not None and seeded_bundle is not None:
@@ -306,12 +302,11 @@ def resolve_calibration(
 			raise ValueError("runner compatibility_policy must be 'error' or 'override'")
 		report = check_compatibility(
 			bundle,
-			calibration_target(scan, recon),
+			calibration_target(scan, source_window),
 			components=names,
 			policy=policy,
 			override_reason=options.get("compatibility_override_reason"),
 		)
-		y_start, y_stop = _read_window(recon)
 		fields = _bundle_flat_fields(bundle, names, y_start, y_stop)
 		if normalize is not None and normalize.algorithm in ("weighted", "theta_switch", "taper_blended"):
 			if fields is None:
@@ -332,7 +327,6 @@ def resolve_calibration(
 	_strip_resolution_params(recon)
 	if normalize is None:
 		return CalibrationResolution(source="none")
-	y_start, y_stop = _read_window(recon)
 	if "flat_fields" in scan.metadata:
 		fields = scan.metadata["flat_fields"]
 		paths: tuple[Path, ...] = ()
@@ -344,9 +338,8 @@ def resolve_calibration(
 		else:
 			values = np.asarray(fields)
 			rows, columns = _detector_shape(scan)
-			stop = rows if y_stop is None else int(y_stop)
 			if values.shape == (4, rows, columns):
-				scan.metadata["flat_fields"] = values[:, y_start:stop]
+				scan.metadata["flat_fields"] = values[:, y_start:y_stop]
 		_disable_embedded_calibration(recon)
 		return CalibrationResolution(source="legacy_flat_fields", legacy_paths=paths)
 
@@ -393,21 +386,23 @@ def _resolve_flat_fields(scan: Scan, recon: Recon) -> None:
 	"""
 
 	root = Path(scan.projections.path).parent
-	resolve_calibration(scan, recon, pipeline_root=root, scan_root=root)
+	planning = recon.model_copy(deep=True)
+	_strip_resolution_params(planning)
+	plan = resolve_streaming_plan(
+		[create_stage(config) for config in planning.pipeline], scan,
+	)
+	resolve_calibration(
+		scan, recon, source_window=plan.source_window,
+		pipeline_root=root, scan_root=root,
+	)
 
 
-def _estimated_output_bytes(scan: Scan, recon: Recon) -> int | None:
+def _estimated_output_bytes(recon: Recon, plan: StreamingPlan) -> int:
 	"""Estimate float32 reconstructed-volume output without reading projection data."""
 
 	if recon.output_path is None:
 		return 0
-	detector = scan.detector.projection_shape()
-	rows, columns = detector.Y, detector.X
-	read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
-	y_start = int(read.params.get("y_start", 0)) if read is not None else 0
-	y_stop = int(read.params.get("y_stop", rows)) if read is not None else rows
-	selected_rows = max(0, min(rows, y_stop) - max(0, y_start))
-	return selected_rows * columns * columns * np.dtype(np.float32).itemsize
+	return plan.source_window.recon_shape().nbytes(np.float32)
 
 
 class _ReplayCenterArtifactStage(Stage):
@@ -424,16 +419,6 @@ class _ReplayCenterArtifactStage(Stage):
 		return state
 
 
-def _window_recon(recon: Recon, window) -> Recon:
-	resolved = recon.model_copy(deep=True)
-	source = window.with_pad(["Y"])
-	for config in resolved.pipeline:
-		if config.kind == "read":
-			config.params["y_start"] = source.pos.Y
-			config.params["y_stop"] = source.pos.Y + source.shape.Y
-	return resolved
-
-
 def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
 	resolved = scan.model_copy(deep=False)
 	resolved.metadata = dict(scan.metadata)
@@ -444,9 +429,10 @@ def _window_scan(scan: Scan, plan: StreamingPlan, window) -> Scan:
 	if fields is not None:
 		values = np.asarray(fields)
 		if values.ndim == 3:
-			if values.shape[1] == plan.selection.length.Y:
-				start = source_start - plan.selection.start.Y
-				stop = source_stop - plan.selection.start.Y
+			selection = plan.dataset.interval("Y")
+			if values.shape[1] == selection.length.Y:
+				start = source_start - selection.start.Y
+				stop = source_stop - selection.start.Y
 				if start < 0 or stop > values.shape[1]:
 					raise ValueError(
 						"selected flat_fields do not cover the canonical padded source window"
@@ -501,13 +487,14 @@ def _crop_to_window_interior(
 		if center_values.ndim == 1 and len(center_values) == row_count:
 			result.artifacts["center"] = center_values[interior]
 	core = window.axis_slice("Y")
+	selection = plan.dataset.interval("Y")
 	result.artifacts["streaming_window"] = {
 		"index": index,
 		"core_start": core.start,
 		"core_stop": core.stop,
-		"output_start": core.start - plan.selection.start.Y,
-		"output_stop": core.stop - plan.selection.start.Y,
-		"total_rows": plan.selection.length.Y,
+		"output_start": core.start - selection.start.Y,
+		"output_stop": core.stop - selection.start.Y,
+		"total_rows": selection.length.Y,
 		"first": index == 0,
 		"last": index == plan.window_count - 1,
 	}
@@ -576,25 +563,22 @@ def _run_streaming_pipeline(
 	reserve = getattr(run_context.storage, "reserve", None)
 	if reserve is not None:
 		largest = max(window_plan, key=lambda item: item.with_pad(["Y"]).shape.Y)
-		reserve_recon = _window_recon(concrete, largest)
 		reserve_scan = _window_scan(run_scan, window_plan, largest)
-		reserve_stages = [create_stage(config) for config in reserve_recon.pipeline]
 		reserve_writer = next((
-			index for index, stage in enumerate(reserve_stages)
+			index for index, stage in enumerate(stages)
 			if stage.name.startswith("write.")
-		), len(reserve_stages))
+		), len(stages))
 		reserve_pipeline = _planned_pipeline(
-			reserve_stages[:reserve_writer], reserve_scan, backend,
-			initial_artifacts, None, reserve_recon,
+			stages[:reserve_writer], reserve_scan, backend,
+			initial_artifacts, None, concrete,
 			execution_observer=None,
 			dataset=window_plan.dataset, source_window=largest,
 		)
 		for event in reserve_pipeline.plan.allocation_schedule:
 			reserve(event.role, event.bytes)
 	for index, window in enumerate(window_plan):
-		window_recon = _window_recon(concrete, window)
 		window_scan = _window_scan(run_scan, window_plan, window)
-		window_stages = [create_stage(config) for config in window_recon.pipeline]
+		window_stages = list(stages)
 		window_initial = dict(initial_artifacts)
 		center_artifacts = {}
 		auto_centers = [
@@ -605,14 +589,14 @@ def _run_streaming_pipeline(
 			last_center = max(auto_centers)
 			prepass_stages = window_stages[:last_center + 1]
 			prepass_state = PipelineState(
-				np.empty((0,), dtype=np.float32), window_scan, window_recon,
+				np.empty((0,), dtype=np.float32), window_scan, concrete,
 				artifacts=dict(window_initial), backend=backend,
 				storage=run_context.storage, executor=run_context.executor,
 				dataset=window_plan.dataset, source_window=window,
 			)
 			prepass = _planned_pipeline(
 				prepass_stages, window_scan, backend, window_initial, stage_observer,
-				window_recon, execution_observer=execution_observer,
+				concrete, execution_observer=execution_observer,
 				dataset=window_plan.dataset, source_window=window,
 			)
 			prepass_state = prepass.run(prepass_state)
@@ -632,7 +616,7 @@ def _run_streaming_pipeline(
 		compute_stages = window_stages[:writer_start]
 		writer_stages = window_stages[writer_start:]
 		state = PipelineState(
-			np.empty((0,), dtype=np.float32), window_scan, window_recon,
+			np.empty((0,), dtype=np.float32), window_scan, concrete,
 			artifacts=dict(window_initial), backend=backend,
 			storage=run_context.storage, executor=run_context.executor,
 			dataset=window_plan.dataset, source_window=window,
@@ -644,14 +628,14 @@ def _run_streaming_pipeline(
 		if reconstruction_start is None:
 			compute = _planned_pipeline(
 				compute_stages, window_scan, backend, window_initial, stage_observer,
-				window_recon, execution_observer=execution_observer,
+				concrete, execution_observer=execution_observer,
 				dataset=window_plan.dataset, source_window=window,
 			)
 			state = compute.run(state)
 		else:
 			prefix = _planned_pipeline(
 				compute_stages[:reconstruction_start], window_scan, backend,
-				window_initial, stage_observer, window_recon,
+				window_initial, stage_observer, concrete,
 				execution_observer=execution_observer,
 				dataset=window_plan.dataset, source_window=window,
 			)
@@ -661,7 +645,7 @@ def _run_streaming_pipeline(
 			)
 			reconstruction = _planned_pipeline(
 				compute_stages[reconstruction_start:], window_scan, backend,
-				state.artifacts, stage_observer, window_recon,
+				state.artifacts, stage_observer, concrete,
 				execution_observer=execution_observer,
 				stage_index_offset=reconstruction_start,
 				mode="fragment", initial_layout=state.layout, initial_domain=state.domain,
@@ -722,22 +706,13 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 	# Construct every resolved Stage before touching calibration or projection
 	# payloads. This rejects invalid structures and algorithm-specific parameters
 	# for the entire candidate set as one preflight operation.
+	preflight_stages = []
 	for run in runs:
 		preflight = run.recon.model_copy(deep=True)
 		_strip_resolution_params(preflight)
-		[create_stage(config) for config in preflight.pipeline]
-	estimates = [_estimated_output_bytes(scan, run.recon) for run in runs]
-	if all(value is not None for value in estimates):
-		total_output = sum(value for value in estimates if value is not None)
-		limit = recon.candidate_limits.max_estimated_output_bytes
-		if total_output > limit:
-			raise CandidateLimitError(
-				f"candidate outputs are estimated at {total_output} bytes, exceeding "
-				f"max_estimated_output_bytes={limit}; narrow the space/output window "
-				"or raise the configured limit explicitly"
-			)
-	prepared = []
-	for run in runs:
+		preflight_stages.append([create_stage(config) for config in preflight.pipeline])
+	planned = []
+	for run, planning_stages in zip(runs, preflight_stages, strict=True):
 		concrete = run.recon.model_copy(deep=True)
 		if len(runs) > 1 and concrete.output_path is not None:
 			concrete.output_path = concrete.output_path / run.output_key
@@ -748,9 +723,26 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		# Candidates may add metadata keys but must treat shared detector-sized
 		# arrays as immutable. Copy only the mapping.
 		run_scan.metadata = dict(scan.metadata)
+		window_plan = resolve_streaming_plan(planning_stages, run_scan, window_config)
+		planned.append((run, concrete, resolved_document, run_scan, window_plan))
+	estimates = [
+		_estimated_output_bytes(concrete, window_plan)
+		for _run, concrete, _document, _scan, window_plan in planned
+	]
+	total_output = sum(estimates)
+	limit = recon.candidate_limits.max_estimated_output_bytes
+	if total_output > limit:
+		raise CandidateLimitError(
+			f"candidate outputs are estimated at {total_output} bytes, exceeding "
+			f"max_estimated_output_bytes={limit}; narrow the space/output window "
+			"or raise the configured limit explicitly"
+		)
+	prepared = []
+	for run, concrete, resolved_document, run_scan, window_plan in planned:
 		resolution = resolve_calibration(
 			run_scan,
 			concrete,
+			source_window=window_plan.source_window,
 			pipeline_root=resolved_pipeline_path.parent,
 			scan_root=resolved_scan_path.parent,
 			seeded_bundle=calibration_bundle,
@@ -764,7 +756,6 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		if resolution.compatibility is not None:
 			initial_artifacts["calibration_compatibility"] = resolution.compatibility
 		stages = [create_stage(config) for config in concrete.pipeline]
-		window_plan = resolve_streaming_plan(stages, run_scan, window_config)
 		# Validate every selected complete structure before the first projection
 		# Stage runs. Candidate N cannot fail contract validation after candidate
 		# N-1 has already produced output.
