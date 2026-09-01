@@ -13,6 +13,12 @@ from lftomo.util.shapes import DataShape, Interval, ProjOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
+_PLAN_PAD_FIELDS = (
+	"required_pad", "required_pad_after", "extra_pad", "extra_pad_after",
+	"effective_pad", "effective_pad_after",
+)
+
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -78,17 +84,17 @@ class StreamingPlan:
 		return self.window_count == 1 and self.dataset.interval("Y") == self.selection
 
 	def record(self) -> dict[str, Any]:
-		"""Serialize derived plan geometry for the run manifest."""
+		"""Compatibility name for the canonical document writer."""
+		return self.to_document()
 
-		record = {
-			"selection": [int(self.selection.start.Y), int(self.selection.stop.Y)],
+	def to_document(self) -> dict[str, Any]:
+		document = {
+			"type": type(self).__name__,
+			"selection": self.selection.to_document(),
 			"window_rows": self.window_rows,
-			"required_pad": _pad_record(self.required_pad),
-			"required_pad_after": _pad_record(self.required_pad_after),
-			"extra_pad": _pad_record(self.extra_pad),
-			"extra_pad_after": _pad_record(self.extra_pad_after),
-			"effective_pad": _pad_record(self.effective_pad),
-			"effective_pad_after": _pad_record(self.effective_pad_after),
+			**{name: getattr(self, name).to_document() for name in _PLAN_PAD_FIELDS},
+			"dataset": self.dataset.to_document(),
+			"source_window": self.source_window.to_document(),
 			"whole_volume": self.whole_volume,
 			"center_prepass": self.center_prepass,
 			"warnings": list(self.warnings),
@@ -98,22 +104,35 @@ class StreamingPlan:
 			core = window.axis_slice("Y")
 			source = window.with_pad(["Y"]).axis_slice("Y")
 			interior = window.internal.axis_slice("Y")
-			record["windows"].append({
+			document["windows"].append({
 				"index": index,
 				"core": [core.start, core.stop],
 				"source": [source.start, source.stop],
 				"interior": [interior.start, interior.stop],
 			})
-		return record
+		return document
 
-
-def _pad_record(value: DataShape) -> dict[str, int]:
-	canonical = _canonical_pad(value)
-	return {
-		"theta": int(canonical.Theta),
-		"y": int(canonical.Y),
-		"x": int(canonical.X),
-	}
+	@classmethod
+	def from_document(cls, document: dict[str, Any]) -> "StreamingPlan":
+		if not isinstance(document, dict) or document.get("type") != cls.__name__:
+			raise ValueError(f"expected {cls.__name__} document")
+		pads = {
+			name: DataShape.from_document(document[name]) for name in _PLAN_PAD_FIELDS
+		}
+		if any(not isinstance(value, ProjOrder) for value in pads.values()):
+			raise ValueError("StreamingPlan padding must use ProjOrder")
+		result = cls(
+			selection=Interval.from_document(document["selection"]),
+			window_rows=document["window_rows"],
+			**pads,
+			dataset=TomoDataSet.from_document(document["dataset"]),
+			source_window=TomoWindow.from_document(document["source_window"]),
+			warnings=tuple(document["warnings"]),
+			center_prepass=document["center_prepass"],
+		)
+		if result.to_document() != document:
+			raise ValueError("StreamingPlan document contains inconsistent derived fields")
+		return result
 
 
 def resolve_streaming_plan(

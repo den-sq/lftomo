@@ -217,6 +217,9 @@ def test_shape_func():
 	interval = Y.interval(0, 5)
 	assert interval == Y.interval(Y(0), Y(5))
 	assert interval.length == Y(5)
+	assert type(interval).from_document(interval.to_document()) == interval
+	assert DataRange.from_document(dr.to_document()) == dr
+	assert Y.from_document(Y(3).to_document()) == Y(3)
 
 
 def test_range_1D():

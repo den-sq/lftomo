@@ -9,13 +9,108 @@ import warnings
 
 import numpy as np
 
+from .document import (
+	DocumentCodec,
+	DocumentField,
+	array_from_document,
+	array_to_document,
+	decode_document,
+	encode_document,
+)
 from .shapes import DataShape, DataRange, Interval, IntIter, ReconOrder, SliceIter, TFIter, Y
 
 # Field of view during data acquisition.
 CTFov = namedtuple("CTFov", ['Theta', 'Degrees', "Count"])
 
 
+def _dtype_to_document(value) -> str | None:
+	return None if value is None else np.dtype(value).str
+
+
+def _dtype_from_document(value) -> np.dtype | None:
+	if value is not None and not isinstance(value, str):
+		raise TypeError("dtype document must be a string or null")
+	return None if value is None else np.dtype(value)
+
+
+def _slices_to_document(value) -> list[dict[str, int | None]] | None:
+	return None if value is None else [
+		{"start": item.start, "stop": item.stop, "step": item.step} for item in value
+	]
+
+
+def _slices_from_document(value) -> tuple[slice, ...] | None:
+	if value is None:
+		return None
+	if not isinstance(value, list) or any(
+		not isinstance(item, dict) or set(item) != {"start", "stop", "step"}
+		or any(component is not None and type(component) is not int for component in item.values())
+		for item in value
+	):
+		raise ValueError("memory-index document is invalid")
+	return tuple(slice(item["start"], item["stop"], item["step"]) for item in value)
+
+
+def _fov_to_document(value: CTFov) -> dict[str, int | str | None]:
+	return {
+		"theta": None if value.Theta is None else int(value.Theta),
+		"degrees": repr(float(value.Degrees)),
+		"count": int(value.Count),
+	}
+
+
+def _fov_from_document(value) -> CTFov:
+	if not isinstance(value, dict) or set(value) != {"theta", "degrees", "count"} \
+			or not isinstance(value["degrees"], str) or type(value["count"]) is not int \
+			or value["theta"] is not None and type(value["theta"]) is not int:
+		raise ValueError("FOV document is invalid")
+	return CTFov(value["theta"], float(value["degrees"]), value["count"])
+
+
+def _readonly_array_from_document(value) -> np.ndarray:
+	result = array_from_document(value)
+	result.setflags(write=False)
+	return result
+
+
+def _int_from_document(value) -> int:
+	if type(value) is not int:
+		raise TypeError("integer document field is invalid")
+	return value
+
+
+_SHAPE_CODEC = DocumentCodec(lambda value: value.to_document(), DataShape.from_document)
+_DTYPE_CODEC = DocumentCodec(_dtype_to_document, _dtype_from_document)
+_SLICES_CODEC = DocumentCodec(_slices_to_document, _slices_from_document)
+_FOV_CODEC = DocumentCodec(_fov_to_document, _fov_from_document)
+_ARRAY_CODEC = DocumentCodec(array_to_document, _readonly_array_from_document)
+_INT_CODEC = DocumentCodec(int, _int_from_document)
+
+_DATA_REF_DOCUMENT_FIELDS = (
+	DocumentField("shape", _SHAPE_CODEC, "_DataRef__shape"),
+	DocumentField("pad_before", _SHAPE_CODEC, "_DataRef__pad_before"),
+	DocumentField("pad_after", _SHAPE_CODEC, "_DataRef__pad_after"),
+	DocumentField("pos", _SHAPE_CODEC, "_DataRef__pos"),
+	DocumentField("step", _SHAPE_CODEC, "_DataRef__step"),
+	DocumentField("dtype", _DTYPE_CODEC, "_DataRef__dtype"),
+	DocumentField("offset", _INT_CODEC, "_DataRef__offset"),
+	DocumentField("memory_index", _SLICES_CODEC, "_DataRef__memory_index"),
+)
+_TOMO_WINDOW_DOCUMENT_FIELDS = _DATA_REF_DOCUMENT_FIELDS + (
+	DocumentField("work_dtype", _DTYPE_CODEC, "_TomoWindow__work_dtype"),
+)
+_TOMO_DATASET_DOCUMENT_FIELDS = _DATA_REF_DOCUMENT_FIELDS + (
+	DocumentField("physical_shape", _SHAPE_CODEC, "_TomoDataSet__physical_shape"),
+	DocumentField("work_dtype", _DTYPE_CODEC, "_TomoDataSet__work_dtype"),
+	DocumentField("fov", _FOV_CODEC, "_TomoDataSet__fov"),
+	DocumentField("angles", _ARRAY_CODEC, "_TomoDataSet__angles"),
+	DocumentField("acquisition_indices", _ARRAY_CODEC, "_TomoDataSet__acquisition_indices"),
+)
+
+
 class DataRef(object):
+	_document_fields = _DATA_REF_DOCUMENT_FIELDS
+
 	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape,
 					step: DataShape, dtype: type = None, offset: int = 0,
 					*, pad_after: DataShape = None):
@@ -92,6 +187,24 @@ class DataRef(object):
 		)
 		start = int(getattr(self.pos, name, 0))
 		return Interval(axis_type(start), axis_type(start + int(getattr(self.shape, name))))
+
+	def to_document(self) -> dict[str, object]:
+		return encode_document(self, type(self)._document_fields)
+
+	@classmethod
+	def from_document(cls, document: dict[str, object]) -> Self:
+		if not isinstance(document, dict) or not isinstance(document.get("type"), str):
+			raise ValueError(f"expected {cls.__name__} document")
+		targets = (cls,) if cls is not DataRef else (DataRef, TomoWindow, TomoDataSet)
+		target = next((item for item in targets if item.__name__ == document["type"]), None)
+		if target is None:
+			raise ValueError(f"unknown or incompatible DataRef type {document['type']!r}")
+		result = decode_document(target, document, target._document_fields)
+		result._validate_document()
+		return result
+
+	def _validate_document(self) -> None:
+		pass
 
 	def nbytes(self) -> int:
 		return self.shape.nbytes(self.dtype)
@@ -215,6 +328,8 @@ class DataRef(object):
 
 
 class TomoWindow(DataRef):
+	_document_fields = _TOMO_WINDOW_DOCUMENT_FIELDS
+
 	def __init__(self, shape: DataShape, pad: DataShape, pos: DataShape, step: DataShape,
 				dtype: type, work_dtype: type, *, pad_after: DataShape = None):
 		super().__init__(shape, pad, pos, step, dtype, pad_after=pad_after)
@@ -362,6 +477,7 @@ class TomoDataSet(DataRef):
 
 		Iterable for grabbing each window in order.
 	"""
+	_document_fields = _TOMO_DATASET_DOCUMENT_FIELDS
 
 	def __init__(self, fov: CTFov, shape: DataShape, over: DataRange | DataShape,
 					angle_steps: np.ndarray = None, dtype: type = np.int16, work_dtype: type = np.float32,
@@ -444,6 +560,11 @@ class TomoDataSet(DataRef):
 	def physical_shape(self) -> DataShape:
 		"""Full source shape, independent of the selected output range in ``frange``."""
 		return self.__physical_shape
+
+	def _validate_document(self) -> None:
+		if len(self.angles) != self.shape.Theta \
+				or len(self.acquisition_indices) != self.shape.Theta:
+			raise ValueError("TomoDataSet provenance length does not match its Theta shape")
 
 	def full_window(self) -> TomoWindow:
 		pad_before, pad_after = _resolved_padding(
