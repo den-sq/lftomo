@@ -7,6 +7,7 @@ import tifffile as tf
 import lftomo.reference as reference_module
 from lftomo.reference import (
 	NumericalTolerance,
+	ReferenceReport,
 	ReferenceNotReproducible,
 	RuntimeEnvironmentError,
 	_validate_tomopy_numpy_runtime,
@@ -16,6 +17,7 @@ from lftomo.reference import (
 	run_reference_archive,
 	sha256_file,
 )
+from lftomo.util.shapes import ChunkGrid, Interval, Y
 
 
 @pytest.mark.parametrize(("numpy_version", "tomopy_version", "compatible"), (
@@ -36,13 +38,34 @@ def test_reference_runtime_rejects_only_incompatible_tomopy_numpy_pair(
 			_validate_tomopy_numpy_runtime()
 
 
-def test_phase_contrast_rows_use_aligned_inclusive_producer_chunk():
+def test_phase_contrast_rows_use_chunk_grid_inverse_and_interval_bounds(monkeypatch):
+	lookups = []
+	index_of = ChunkGrid.index_of
+	monkeypatch.setattr(
+		ChunkGrid,
+		"index_of",
+		lambda grid, row: (lookups.append(row), index_of(grid, row))[1],
+	)
 	window, core = aligned_producer_window(
 		list(range(2000, 2010)), row_count=4440, chunk_size=140, overlap=30,
 	)
 
-	assert window == (1920, 2060)
-	assert core == (1950, 2030)
+	assert window == Y.interval(1920, 2060)
+	assert core == Y.interval(1950, 2030)
+	assert lookups == [2000]
+
+
+def test_reference_report_serializes_canonical_intervals():
+	report = ReferenceReport(
+		dataset="test", producer="test", pipeline="test.yaml",
+		window=Y.interval(10, 20), core_window=Y.interval(12, 18),
+		layout="sinogram", theta_batch_size=None,
+		tolerance=NumericalTolerance(), comparisons=(),
+	)
+	document = report.as_dict()
+
+	assert Interval.from_document(document["window"]) == report.window
+	assert Interval.from_document(document["core_window"]) == report.core_window
 
 
 def test_reference_with_post_run_unversioned_producer_is_not_reproducible(tmp_path):

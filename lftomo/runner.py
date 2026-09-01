@@ -377,7 +377,7 @@ def resolve_calibration(
 	)
 
 
-def _resolve_flat_fields(scan: Scan, recon: Recon) -> None:
+def _resolve_flat_fields(scan: Scan, recon: Recon, source_window: TomoWindow) -> None:
 	"""Retain the private reference-generation compatibility path.
 
 	Reference archives predate separate scan/pipeline roots and keep legacy map
@@ -386,13 +386,8 @@ def _resolve_flat_fields(scan: Scan, recon: Recon) -> None:
 	"""
 
 	root = Path(scan.projections.path).parent
-	planning = recon.model_copy(deep=True)
-	_strip_resolution_params(planning)
-	plan = resolve_streaming_plan(
-		[create_stage(config) for config in planning.pipeline], scan,
-	)
 	resolve_calibration(
-		scan, recon, source_window=plan.source_window,
+		scan, recon, source_window=source_window,
 		pipeline_root=root, scan_root=root,
 	)
 

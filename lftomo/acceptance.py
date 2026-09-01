@@ -38,7 +38,12 @@ from lftomo.experiment import (
 	collect_environment_identity,
 )
 from lftomo.experiment.cli import PipelineTrialExecutor, build_experiment_inputs
-from lftomo.pipeline import ExecutionSpanEvent, ExecutionSpanPhase, WindowConfig, Y
+from lftomo.pipeline import (
+	ExecutionSpanEvent,
+	ExecutionSpanPhase,
+	WindowConfig,
+	Y,
+)
 from lftomo.prep.flat import FLAT
 from lftomo.reference import NumericalTolerance, checksum_manifest, compare_slice, sha256_file
 from lftomo.runner import load_recon, load_scan, run_reconstruction
@@ -158,18 +163,10 @@ class ProcessTreeMemorySampler(AbstractContextManager):
 	measurements, not estimates or upper-bound proofs.
 	"""
 
-	def __init__(self, *, y_start: int, y_stop: int, window_rows: int,
-			interval_seconds: float = 0.05,
+	def __init__(self, *, interval_seconds: float = 0.05,
 			on_record: Callable[[dict[str, Any]], None] | None = None):
-		if y_stop <= y_start or window_rows <= 0:
-			raise ValueError("memory sampling requires a non-empty selection and window")
 		self.interval_seconds = interval_seconds
 		self._root = psutil.Process()
-		self._windows = tuple(
-			(start, min(start + window_rows, y_stop))
-			for start in range(y_start, y_stop, window_rows)
-		)
-		self._window_index = -1
 		self._sequence = 0
 		self._active: dict[str, Any] | None = None
 		self._records: list[dict[str, Any]] = []
@@ -248,11 +245,12 @@ class ProcessTreeMemorySampler(AbstractContextManager):
 	def observer(self, event: ExecutionSpanEvent) -> None:
 		if event.phase is ExecutionSpanPhase.STARTED:
 			self._finish_active("superseded")
-			if any(member.stage_name.startswith("read.") for member in event.span.members):
-				self._window_index += 1
-			window_index = max(self._window_index, 0)
-			window_index = min(window_index, len(self._windows) - 1)
-			start, stop = self._windows[window_index]
+			if event.source_window is None:
+				raise RuntimeError(
+					"memory sampling requires execution source-window telemetry"
+				)
+			window = event.source_window.interval("Y")
+			start, stop = window.start.Y, window.stop.Y
 			baseline = self._snapshot()
 			with self._lock:
 				self._sequence += 1
@@ -269,7 +267,6 @@ class ProcessTreeMemorySampler(AbstractContextManager):
 						}
 						for member in event.span.members
 					],
-					"window_index": window_index,
 					"core_interval": [start, stop],
 					"scope": "sampled execution span and process tree",
 					"attribution": "observed",
@@ -533,44 +530,22 @@ def _frozen_b10_reproduction_pipeline(
 	return path
 
 
-def _compose_observers(*observers: Callable | None) -> Callable:
-	def observe(phase, index, stage, error):
-		for observer in observers:
-			if observer is not None:
-				observer(phase, index, stage, error)
-	return observe
-
-
 def _progress_observer(
 		log: AcceptanceProgressRecorder,
 		event_prefix: str,
 		run_label: str,
-		*,
-		y_start: int,
-		y_stop: int,
-		window_rows: int,
 ) -> Callable:
-	windows = tuple(
-		(start, min(start + window_rows, y_stop))
-		for start in range(y_start, y_stop, window_rows)
-	)
-	window_index = -1
-
-	def observe(phase, index, stage, error):
-		nonlocal window_index
-		if phase == "started" and stage.name.startswith("read."):
-			window_index += 1
-		active_index = max(window_index, 0)
-		start, stop = windows[min(active_index, len(windows) - 1)]
-		window_message = (
-			f"{run_label}: window {active_index + 1}/{len(windows)} "
-			f"[{start}, {stop})"
-		)
+	def observe(phase, index, stage, error, source_window):
+		if source_window is None:
+			raise RuntimeError(
+				"acceptance progress requires stage source-window telemetry"
+			)
+		window = source_window.interval("Y")
+		start, stop = window.start.Y, window.stop.Y
+		window_message = f"{run_label}: window [{start}, {stop})"
 		details = {
 			"stage": stage.name,
 			"stage_index": index,
-			"window_index": active_index,
-			"window_count": len(windows),
 			"core_interval": [start, stop],
 		}
 		if phase == "started":
@@ -594,7 +569,6 @@ def _progress_observer(
 			)
 	return observe
 
-
 def _memory_record_logger(
 		log: AcceptanceProgressRecorder, event_prefix: str, run_label: str,
 ) -> Callable[[dict[str, Any]], None]:
@@ -604,7 +578,7 @@ def _memory_record_logger(
 		members = " -> ".join(item["stage"] for item in record["members"])
 		log.emit(
 			f"{event_prefix}.window.segment.memory_observed",
-			f"{run_label}: window {record['window_index'] + 1} [{start}, {stop}) "
+			f"{run_label}: window [{start}, {stop}) "
 			f"{members} observed {peak / 1024**2:.1f} MiB peak "
 			"process-tree private delta",
 			**record,
@@ -724,6 +698,7 @@ def run_windowed_acceptance(
 		configs / "frozen-b10-reproduction.yaml",
 		y_start=y_start, y_stop=y_stop, workers=workers,
 	)
+	window_config = WindowConfig(rows=window_rows, extra_pad=Y(0))
 	oracle_output = root / "outputs" / "current-oracle-script"
 	current_reproduction_output = root / "outputs" / "current-oracle-reproduction"
 	frozen_reproduction_output = root / "outputs" / "frozen-b10-reproduction"
@@ -753,14 +728,11 @@ def run_windowed_acceptance(
 		current_reproduction_pipeline,
 		scan_path,
 		current_reproduction_output,
-		window_config=WindowConfig(rows=window_rows, extra_pad=Y(0)),
+		window_config=window_config,
 		stage_observer=_progress_observer(
 			log,
 			"windowed.current_oracle_reproduction",
 			"current-oracle reproduction",
-			y_start=y_start,
-			y_stop=y_stop,
-			window_rows=window_rows,
 		),
 	)[0]
 	current_parity = _strict_tiff_parity(
@@ -778,9 +750,6 @@ def run_windowed_acceptance(
 		"frozen-B10 reproduction: starting independent canonical lineage run",
 	)
 	with ProcessTreeMemorySampler(
-		y_start=y_start,
-		y_stop=y_stop,
-		window_rows=window_rows,
 		on_record=_memory_record_logger(
 			log,
 			"windowed.frozen_b10_reproduction",
@@ -791,14 +760,11 @@ def run_windowed_acceptance(
 			frozen_reproduction_pipeline,
 			scan_path,
 			frozen_reproduction_output,
-			window_config=WindowConfig(rows=window_rows, extra_pad=Y(0)),
+			window_config=window_config,
 			stage_observer=_progress_observer(
 				log,
 				"windowed.frozen_b10_reproduction",
 				"frozen-B10 reproduction",
-				y_start=y_start,
-				y_stop=y_stop,
-				window_rows=window_rows,
 			),
 			execution_observer=sampler.observer,
 		)[0]

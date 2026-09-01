@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 import os
@@ -20,13 +20,14 @@ from lftomo.pipeline import (
 	NumpyBackend,
 	PipelineRunContext,
 	PipelineState,
+	StreamingPlan,
 	resolve_streaming_plan,
 	validate_pipeline,
 )
 from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
-from lftomo.util.shapes import ProjOrder
+from lftomo.util.shapes import ChunkGrid, Interval, ProjOrder, Y
 from lftomo.util.window import TomoWindow
 
 
@@ -80,8 +81,8 @@ class ReferenceReport:
 	dataset: str
 	producer: str
 	pipeline: str
-	window: tuple[int, int]
-	core_window: tuple[int, int]
+	window: Interval
+	core_window: Interval
 	layout: str
 	theta_batch_size: int | None
 	tolerance: NumericalTolerance
@@ -93,6 +94,8 @@ class ReferenceReport:
 
 	def as_dict(self) -> dict[str, Any]:
 		result = asdict(self)
+		result["window"] = self.window.to_document()
+		result["core_window"] = self.core_window.to_document()
 		result["passed"] = self.passed
 		return result
 
@@ -206,69 +209,52 @@ def _processing_halo(recon) -> int:
 
 
 def aligned_producer_window(selected: list[int] | tuple[int, ...], row_count: int,
-			chunk_size: int, overlap: int, start: int = 0) -> tuple[tuple[int, int], tuple[int, int]]:
+			chunk_size: int, overlap: int, start: int = 0) -> tuple[Interval, Interval]:
 	"""Return the producer chunk and retained core containing selected detector rows."""
-	if chunk_size <= 0 or overlap < 0 or chunk_size <= 2 * overlap:
-		raise ValueError("producer chunk must be larger than its two overlaps")
 	if not selected:
 		raise ValueError("selected detector rows cannot be empty")
 	first, last = min(selected), max(selected)
-	stride = chunk_size - 2 * overlap
-	index = (first - start - overlap) // stride
-	if index < 0:
-		raise ValueError("selected rows precede the first retained producer core")
-	window_start = start + index * stride
-	window_stop = min(window_start + chunk_size, row_count)
-	core_start = window_start + overlap
-	core_stop = window_stop - overlap
+	grid = ChunkGrid(
+		size=chunk_size,
+		stride=chunk_size - 2 * overlap,
+		length=row_count - start,
+		tail="clamp",
+		halo=overlap,
+	)
+	index = grid.index_of(first - start)
+	window, core = grid[index]
+	window_start, window_stop = start + window.start, start + window.stop
+	core_start, core_stop = start + core.start, start + core.stop
 	if first < core_start or last >= core_stop:
 		raise ValueError(
 			f"selected rows [{first}, {last + 1}) do not fit one producer core "
 			f"[{core_start}, {core_stop})"
 		)
-	return (window_start, window_stop), (core_start, core_stop)
+	return Y.interval(window_start, window_stop), Y.interval(core_start, core_stop)
 
 
-def _phase_contrast_configs(recon, window: tuple[int, int]):
-	"""Apply only the bounded AAA523 row-window configuration."""
-	result = recon.model_copy(deep=True)
-	window_start, window_stop = window
-	for stage in result.pipeline:
-		if stage.kind == "read":
-			# Frozen producer metadata carried its machine window in Stage params;
-			# current execution receives the selected global rows from this helper.
-			stage.params.pop("window_size", None)
-			stage.params.update({
-				"y_start": window_start, "y_stop": window_stop,
-			})
-		elif stage.kind == "geometry":
-			if stage.algorithm == "affine_skew":
-				stage.params["center_y_px"] = -window_start
-	return result
-
-
-def _run_phase_contrast_projection_order(root: Path, scan, recon,
+def _run_phase_contrast_projection_order(scan, recon, plan: StreamingPlan,
 			selected: list[int], theta_batch_size: int) -> np.ndarray:
 	"""Execute AAA523 in bounded Theta batches backed by a projection-order memmap."""
 	if theta_batch_size < 1:
 		raise ValueError("Theta batch size must be positive")
 	configs = [config for config in recon.pipeline if config.kind != "write"]
 	stages = [create_stage(config) for config in configs]
-	source_plan = resolve_streaming_plan(stages, scan)
 	validate_pipeline(
 		stages, scan, NumpyBackend(),
-		dataset=source_plan.dataset, source_window=source_plan.source_window,
+		dataset=plan.dataset, source_window=plan.source_window,
 	)
 	stripe_index = next(
 		(index for index, config in enumerate(configs) if config.kind == "stripe")
 	)
-	read_config = configs[0]
-	if read_config.kind != "read":
+	read_stage = stages[0]
+	if configs[0].kind != "read":
 		raise ValueError("phase-contrast pipeline must begin with a read Stage")
-	pre_configs = configs[1:stripe_index]
-	stripe_config = configs[stripe_index]
-	post_configs = configs[stripe_index + 1:]
+	pre_stages = stages[1:stripe_index]
+	stripe_stage = stages[stripe_index]
+	post_stages = stages[stripe_index + 1:]
 	projection_count = scan.n_projections
+	y = plan.source_window.axis_slice("Y")
 
 	scratch_root = Path(os.environ.get("LFTOMO_TIER2_SCRATCH", gettempdir()))
 	scratch_root.mkdir(parents=True, exist_ok=True)
@@ -276,23 +262,20 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 		volume = None
 		for theta_start in range(0, projection_count, theta_batch_size):
 			theta_stop = min(theta_start + theta_batch_size, projection_count)
-			batch_read = read_config.model_copy(deep=True)
-			batch_read.params.update({"theta_start": theta_start, "theta_stop": theta_stop})
-			y = source_plan.source_window.axis_slice("Y")
 			window = TomoWindow.from_bounds(
-				source_plan.dataset.physical_shape,
+				plan.dataset.physical_shape,
 				y=(y.start, y.stop), theta=(theta_start, theta_stop),
-				dtype=source_plan.dataset.dtype, work_dtype=np.float32,
+				dtype=plan.dataset.dtype, work_dtype=np.float32,
 			)
 			with PipelineRunContext() as run_context:
 				state = PipelineState(
 					working_array=np.empty((0,), dtype=np.float32), scan=scan, recon=recon,
 					backend=NumpyBackend(), storage=run_context.storage,
-					dataset=source_plan.dataset, source_window=window,
+					dataset=plan.dataset, source_window=window,
 				)
-				state = create_stage(batch_read).run(state)
-				for config in pre_configs:
-					state = create_stage(config).run(state)
+				state = read_stage.run(state)
+				for stage in pre_stages:
+					state = stage.run(state)
 				batch = np.asarray(state.working_array).astype(np.float32, copy=True)
 			if volume is None:
 				shape = (projection_count, batch.shape[1], batch.shape[2])
@@ -309,20 +292,19 @@ def _run_phase_contrast_projection_order(root: Path, scan, recon,
 			working_array=volume, scan=scan, recon=recon, backend=NumpyBackend(),
 			buffer_spec=BufferSpec(ProjOrder(*volume.shape), volume.dtype),
 			domain=DataDomain.ATTENUATION,
-			dataset=source_plan.dataset,
-			source_window=source_plan.source_window.with_pad(["Y"]),
+			dataset=plan.dataset,
+			source_window=plan.source_window,
 		)
-		state = create_stage(stripe_config).run(state)
+		state = stripe_stage.run(state)
 		volume.flush()
-		read_start = int(read_config.params["y_start"])
-		local_start = min(selected) - read_start
-		local_stop = max(selected) - read_start + 1
+		local_start = min(selected) - y.start
+		local_stop = max(selected) - y.start + 1
 		cropped = volume[:, local_start:local_stop, :]
 		state = state.with_array(
 			cropped, buffer_spec=BufferSpec(ProjOrder(*cropped.shape), cropped.dtype),
 		)
-		for config in post_configs:
-			state = create_stage(config).run(state)
+		for stage in post_stages:
+			state = stage.run(state)
 		return np.asarray(state.working_array).astype(np.float32, copy=True)
 
 
@@ -373,30 +355,54 @@ def run_reference_archive(root: str | Path, producer: str,
 		read = next(config for config in recon.pipeline if config.kind == "read")
 		chunk_size = int(read.params["sinogram_chunk_size"])
 		overlap = int(read.params.get("chunk_overlap", 0))
-		(window_start, window_stop), core_window = aligned_producer_window(
+		window, core_window = aligned_producer_window(
 			selected, scan.detector.projection_shape().Y, chunk_size, overlap,
 		)
-		recon = _phase_contrast_configs(recon, (window_start, window_stop))
-		_resolve_flat_fields(scan, recon)
+		for config in recon.pipeline:
+			if config.kind == "geometry" and config.algorithm == "affine_skew":
+				config.params["center_y_px"] = -window.start.Y
+	else:
+		halo = _processing_halo(recon)
+		window = Y.interval(
+			max(0, min(selected) - halo),
+			min(scan.detector.projection_shape().Y, max(selected) + halo + 1),
+		)
+		core_window = Y.interval(min(selected), max(selected) + 1)
+		for config in recon.pipeline:
+			if config.kind == "read":
+				config.params["order"] = "sinogram"
+
+	planning_stages = [
+		create_stage(config) for config in recon.pipeline if config.kind != "write"
+	]
+	plan = resolve_streaming_plan(planning_stages, scan)
+	window_length = window.length.Y
+	plan = replace(
+		plan,
+		selection=window,
+		window_rows=window_length,
+		dataset=plan.dataset.rescope(
+			pos=Y(window.start.Y), shape=Y(window_length),
+		),
+		source_window=plan.source_window.rescope(
+			pos=Y(window.start.Y), shape=Y(window_length),
+		),
+	)
+	_resolve_flat_fields(scan, recon, plan.source_window)
+
+	if producer == "phase_contrast":
 		batch_size = theta_batch_size or int(os.environ.get("LFTOMO_REFERENCE_THETA_BATCH", "4"))
 		generated = _run_phase_contrast_projection_order(
-			root, scan, recon, selected, batch_size,
+			scan, recon, plan, selected, batch_size,
 		)
 		layout = "projection"
 	else:
-		halo = _processing_halo(recon)
-		window_start = max(0, min(selected) - halo)
-		window_stop = min(
-			scan.detector.projection_shape().Y, max(selected) + halo + 1,
-		)
-		core_window = (min(selected), max(selected) + 1)
-		for config in recon.pipeline:
-			if config.kind == "read":
-				config.params.update({"y_start": window_start, "y_stop": window_stop, "order": "sinogram"})
-		_resolve_flat_fields(scan, recon)
 		configs = [config for config in recon.pipeline if config.kind != "write"]
 		stages = [create_stage(config) for config in configs]
-		validate_pipeline(stages, scan, NumpyBackend())
+		validate_pipeline(
+			stages, scan, NumpyBackend(),
+			dataset=plan.dataset, source_window=plan.source_window,
+		)
 		with PipelineRunContext() as run_context:
 			state = PipelineState(
 				working_array=np.empty((0,), dtype=np.float32),
@@ -404,12 +410,14 @@ def run_reference_archive(root: str | Path, producer: str,
 				recon=recon,
 				backend=NumpyBackend(),
 				storage=run_context.storage,
+				dataset=plan.dataset,
+				source_window=plan.source_window,
 			)
 			cropped = False
 			for config, stage in zip(configs, stages, strict=True):
 				if not cropped and config.kind in {"center", "recon"}:
-					start = min(selected) - window_start
-					stop = max(selected) - window_start + 1
+					start = min(selected) - window.start.Y
+					stop = max(selected) - window.start.Y + 1
 					values = np.asarray(state.working_array)[start:stop].copy()
 					shape = type(state.buffer_spec.shape)(**{
 						**state.buffer_spec.shape.as_dict(), "Y": stop - start,
@@ -453,7 +461,7 @@ def run_reference_archive(root: str | Path, producer: str,
 		dataset=str(metadata["dataset"]),
 		producer=producer,
 		pipeline=str(pipeline_path),
-		window=(window_start, window_stop),
+		window=window,
 		core_window=core_window,
 		layout=layout,
 		theta_batch_size=batch_size,
