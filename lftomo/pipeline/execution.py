@@ -23,7 +23,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.storage import ManagedBuffer
-from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+from lftomo.util.shapes import IntIter, ProjOrder, ReconOrder, SinoOrder, Theta
 from lftomo.util.window import DataRef, TomoWindow
 
 
@@ -308,9 +308,7 @@ def run_layout_fill_kernel(
 ) -> None:
 	"""Copy one projection between manager-owned layout buffers."""
 
-	source_values = source.array()
-	target_values = target.array()
-	target_values[...] = source.shape.transposed_view(source_values, target.shape)
+	target.array()[...] = source.array()
 
 
 def run_affine_fill_kernel(
@@ -343,10 +341,8 @@ def run_helical_fill_kernel(
 ) -> None:
 	"""Fill one projection of a manager-owned helical-remap output."""
 
-	source_values = source.array()
-	target_values = target.array()
-	source_image = source_values[type(source.shape).point_index(Theta=0)]
-	target_image = target_values[type(target.shape).point_index(Theta=0)]
+	source_image = source.array()
+	target_image = target.array()
 	if crop_valid:
 		target_image[:] = source_image[row_start + shift_px:row_stop + shift_px]
 		return
@@ -545,12 +541,13 @@ class PipelineExecutor:
 			output, _target = allocate_output(
 				state, shape, data.dtype, role=f"layout:{stage.target.__name__}",
 			)
+			positions = Theta.drange(0, shape.Theta, 1).get_iter(IntIter)
 			self.submit_all(run_layout_fill_kernel, (
 				(
-					_unit_handle(state.working_array, unit, local_index),
-					_unit_handle(output, unit, local_index),
+					state.working_array[type(state.buffer_spec.shape).point_index(Theta=index)],
+					output[type(shape).point_index(Theta=index)],
 				)
-				for unit, local_index in _buffer_units(state, "Theta")
+				for index in positions
 			))
 			return commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
@@ -610,14 +607,15 @@ class PipelineExecutor:
 			)
 			if not stage.crop_valid:
 				target.fill(stage.fill_value)
+			positions = Theta.drange(0, source_shape.Theta, 1).get_iter(IntIter)
 			self.submit_all(run_helical_fill_kernel, (
 				(
-					_unit_handle(state.working_array, unit, local_index),
-					_unit_handle(output, unit, local_index),
+					state.working_array[type(source_shape).point_index(Theta=index)],
+					output[type(shape).point_index(Theta=index)],
 					int(shifts[index]),
 					start, stop, stage.crop_valid,
 				)
-				for index, (unit, local_index) in enumerate(_buffer_units(state, "Theta"))
+				for index in positions
 			))
 			result = commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),

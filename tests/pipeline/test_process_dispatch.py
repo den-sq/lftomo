@@ -31,7 +31,7 @@ from lftomo.pipeline.stages import (
 	_build_stage_dispatch,
 )
 from lftomo.storage import ManagedBuffer
-from lftomo.util.shapes import ProjOrder, ReconOrder, X
+from lftomo.util.shapes import Proj, ProjOrder, ReconOrder, X
 from tests.sample_data import attach_source_geometry
 
 
@@ -351,6 +351,9 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		assert isinstance(result.working_array, ManagedBuffer)
 		assert all(isinstance(task[0], ManagedBuffer) for task in captured)
 		assert all(isinstance(task[1], ManagedBuffer) for task in captured)
+		if isinstance(stage, (LayoutConvertStage, HelicalIndexRemapStage)):
+			assert all(type(task[0].shape) is Proj for task in captured)
+			assert all(type(task[1].shape) is Proj for task in captured)
 		np.testing.assert_allclose(
 			np.asarray(result.working_array), np.asarray(expected.working_array),
 		)

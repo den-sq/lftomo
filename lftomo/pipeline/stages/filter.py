@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import cv2
 import numpy as np
 
@@ -11,8 +13,7 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.execution import _buffer_units, _unit_index
-from lftomo.util.shapes import Proj, ProjOrder, SinoOrder
+from lftomo.util.shapes import Proj, ProjOrder, SinoOrder, SliceIter, Theta
 
 
 class BilateralFilterStage(Stage):
@@ -55,17 +56,15 @@ class BilateralFilterStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BilateralFilterStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = type(state.buffer_spec.shape)
+		shape = state.buffer_spec.shape
 		if data.ndim != 3:
 			raise ValueError("filter.bilateral expects a (Y, Theta, X) sinogram array")
 		if not self.enabled:
 			return state
 		if data.dtype != np.dtype(np.float32):
 			raise TypeError("filter.bilateral requires the canonical float32 work dtype")
-		for unit, local_index in _buffer_units(state, "Theta"):
-			image = data[_unit_index(unit, local_index, state.buffer_spec.shape)][
-				layout.point_index(Theta=0)
-			]
+		for index in Theta.drange(0, shape.Theta, 1).get_iter(partial(SliceIter, shape=shape)):
+			image = data[index]
 			image[:] = cv2.bilateralFilter(
 				image,
 				self.diameter,
