@@ -26,8 +26,7 @@ from lftomo.pipeline.core import (
 	allocate_output,
 	commit_output,
 )
-from lftomo.storage import ManagedBuffer
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ChunkGrid, ProjOrder, SinoOrder, YSlice
 
 
 _TORCH_RUNTIME_REQUIREMENT = RuntimeRequirement(
@@ -36,6 +35,11 @@ _TORCH_RUNTIME_REQUIREMENT = RuntimeRequirement(
 	module="torch",
 	probe_attributes=("load", "no_grad"),
 	corrective_action="install lftomo with the super-resolution extra",
+)
+
+_DRHT_SCRATCH_NAMES = (
+	"output", "count", "l1", "l1_count", "kl_row", "kl_row_count",
+	"kl_col", "kl_col_count",
 )
 
 
@@ -105,28 +109,7 @@ def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> P
 	values = np.asarray(volume, dtype=np.float32)
 	shape = SinoOrder(Y=values.shape[1], Theta=values.shape[0], X=values.shape[2])
 	output, target = allocate_output(state, shape, np.float32, role="super_resolution")
-	if (
-		isinstance(output, ManagedBuffer)
-		and state.storage is not None
-		and state.executor is not None
-	):
-		from lftomo.pipeline.execution import (
-			_buffer_units, _unit_handle, run_layout_fill_kernel,
-		)
-
-		source = state.storage.allocate(
-			ProjOrder(*values.shape), np.float32, role="super_resolution_assembly",
-		)
-		try:
-			source.array()[...] = values
-			state.executor.submit_all(run_layout_fill_kernel, (
-				(_unit_handle(source, unit), _unit_handle(output, unit))
-				for unit in _buffer_units(state, "Theta", shape=source.shape)
-			))
-		finally:
-			state.storage.retire(source, role=None)
-	else:
-		target[...] = np.transpose(values, (1, 0, 2))
+	target[...] = ProjOrder(*values.shape).transposed_view(values, SinoOrder)
 	result = commit_output(
 		state, output, retire_as=None, buffer_spec=BufferSpec(shape, np.dtype(np.float32)),
 	)
@@ -202,29 +185,50 @@ class DRHTStage(Stage):
 			sys.path[:] = old_path
 		return model.to(device).eval()
 
-	def _infer(self, model, image: np.ndarray, torch, device) -> tuple[np.ndarray, dict]:
+	def _infer(
+		self, model, image: np.ndarray, torch, device,
+		scratch: dict[str, np.ndarray],
+	) -> tuple[np.ndarray, dict]:
 		normalized, offset, scale = normalize01(image)
 		stride = max(1, round(self.patch_size * (1 - self.patch_overlap)))
-		patches, locations = extract_patches(normalized, self.patch_size, stride)
-		output = np.zeros_like(normalized)
-		count = np.zeros_like(normalized)
-		attention = {name: np.zeros_like(normalized) for name in ("l1", "kl_row", "kl_col")}
-		attention_count = {name: np.zeros_like(normalized) for name in attention}
+		y_grid = ChunkGrid(self.patch_size, stride, normalized.shape[0], "reanchor")
+		x_grid = ChunkGrid(self.patch_size, stride, normalized.shape[1], "reanchor")
+		for values in scratch.values():
+			values.fill(0)
+		output, count = scratch["output"], scratch["count"]
+		attention = {name: scratch[name] for name in ("l1", "kl_row", "kl_col")}
+		attention_count = {name: scratch[f"{name}_count"] for name in attention}
 		with torch.no_grad():
-			for patch, location in zip(patches, locations):
-				tensor = torch.from_numpy(patch[None, None]).to(device=device, dtype=torch.float32)
-				prediction, l1, kl_row, kl_col = model(tensor)
-				pred = prediction[0, 0].detach().cpu().numpy().astype(np.float32)
-				merge_patch(output, count, pred, *location)
-				for name, values in zip(attention, (l1, kl_row, kl_col)):
-					expanded = expand_attention(values[0, 0].detach().cpu().numpy(), pred.shape)
-					merge_patch(attention[name], attention_count[name], expanded, *location)
-		output = np.divide(output, np.clip(count, 1, None), where=count > 0)
+			for y_window in y_grid:
+				for x_window in x_grid:
+					chunk = normalized[y_window, x_window]
+					patch = np.pad(
+						chunk,
+						((0, self.patch_size - chunk.shape[0]), (0, self.patch_size - chunk.shape[1])),
+						mode="edge",
+					).astype(np.float32)
+					tensor = torch.from_numpy(patch[None, None]).to(
+						device=device, dtype=torch.float32,
+					)
+					prediction, l1, kl_row, kl_col = model(tensor)
+					pred = prediction[0, 0].detach().cpu().numpy().astype(np.float32)
+					merge_patch(output, count, pred, y_window, x_window)
+					for name, values in zip(attention, (l1, kl_row, kl_col)):
+						expanded = expand_attention(
+							values[0, 0].detach().cpu().numpy(), pred.shape,
+						)
+						merge_patch(
+							attention[name], attention_count[name], expanded,
+							y_window, x_window,
+						)
+		np.maximum(count, 1, out=count)
+		np.divide(output, count, out=output)
+		output *= scale
+		output += offset
 		for name in attention:
-			attention[name] = np.divide(
-				attention[name], np.clip(attention_count[name], 1, None), where=attention_count[name] > 0
-			)
-		return output * scale + offset, attention
+			np.maximum(attention_count[name], 1, out=attention_count[name])
+			np.divide(attention[name], attention_count[name], out=attention[name])
+		return output, attention
 
 	def run(self, state: PipelineState) -> PipelineState:
 		volume, mask, theta = _dense_inputs(state)
@@ -241,10 +245,29 @@ class DRHTStage(Stage):
 		model = self._load_model(torch, device)
 		restored = np.empty_like(seed)
 		attention_volumes = {name: np.empty_like(seed) for name in ("l1", "kl_row", "kl_col")}
-		for index in range(seed.shape[1]):
-			restored[:, index], maps = self._infer(model, seed[:, index], torch, device)
-			for name, values in maps.items():
-				attention_volumes[name][:, index] = values
+		scratch_shape = YSlice(Theta=seed.shape[0], X=seed.shape[2])
+		scratch_handles = []
+		scratch = {}
+		try:
+			for name in _DRHT_SCRATCH_NAMES:
+				if state.storage is None:
+					scratch[name] = np.empty(scratch_shape.as_tuple(), dtype=np.float32)
+				else:
+					handle = state.storage.allocate(
+						scratch_shape, np.float32, role=f"drht_{name}_scratch",
+					)
+					scratch_handles.append(handle)
+					scratch[name] = handle.array()
+			for index in range(seed.shape[1]):
+				restored[:, index], maps = self._infer(
+					model, seed[:, index], torch, device, scratch,
+				)
+				for name, values in maps.items():
+					attention_volumes[name][:, index] = values
+		finally:
+			if state.storage is not None:
+				for handle in scratch_handles:
+					state.storage.retire(handle)
 		result = _store_result(state, restored, {"method": "drht", "device": str(device)})
 		result.artifacts["drht_attention"] = attention_volumes
 		return result
@@ -319,33 +342,9 @@ def normalize01(image: np.ndarray) -> tuple[np.ndarray, float, float]:
 	return (array - low) / scale, low, scale
 
 
-def patch_positions(length: int, patch_size: int, stride: int) -> list[int]:
-	if length <= patch_size:
-		return [0]
-	positions = list(range(0, length - patch_size + 1, stride))
-	if positions[-1] != length - patch_size:
-		positions.append(length - patch_size)
-	return positions
-
-
-def extract_patches(image: np.ndarray, patch_size: int, stride: int):
-	patches, locations = [], []
-	for y in patch_positions(image.shape[0], patch_size, stride):
-		for x in patch_positions(image.shape[1], patch_size, stride):
-			chunk = image[y:y + patch_size, x:x + patch_size]
-			patch = np.pad(
-				chunk,
-				((0, patch_size - chunk.shape[0]), (0, patch_size - chunk.shape[1])),
-				mode="edge",
-			)
-			patches.append(patch.astype(np.float32))
-			locations.append((y, x, chunk.shape[0], chunk.shape[1]))
-	return patches, locations
-
-
-def merge_patch(target, count, patch, y, x, height, width):
-	target[y:y + height, x:x + width] += patch[:height, :width]
-	count[y:y + height, x:x + width] += 1
+def merge_patch(target, count, patch, y: slice, x: slice):
+	target[y, x] += patch[:y.stop - y.start, :x.stop - x.start]
+	count[y, x] += 1
 
 
 def expand_attention(attention: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
