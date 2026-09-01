@@ -128,6 +128,14 @@ class DataShape(ABC):
 	def nbytes(self, dtype: type | np.dtype) -> int:
 		return self.prod() * np.dtype(dtype).itemsize
 
+	def stride(self, dtype: type | np.dtype) -> Self:
+		itemsize = np.dtype(dtype).itemsize
+		strides = []
+		for extent in reversed(self.as_tuple()):
+			strides.append(itemsize)
+			itemsize *= extent
+		return type(self)(*reversed(strides))
+
 	def is_sub(self, target: type | Self) -> Self:
 		target_type = self._shape_type(target)
 		return set(self.names).issubset(target_type.names)

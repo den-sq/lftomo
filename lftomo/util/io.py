@@ -139,8 +139,8 @@ def _tiff_read_geometry(
 			f"target must have shape {expected} and dtype {dtype}, "
 			f"got {target_mem.shape} and {target_mem.dtype}"
 		)
-	source_stride = TomoWindow.from_bounds(physical_shape, dtype=dtype).stride
-	target_stride = TomoWindow.from_bounds(expected, dtype=dtype).stride
+	source_stride = physical_shape.stride(dtype)
+	target_stride = expected.stride(dtype)
 	y = window.axis_slice("Y")
 	source_rows = Y.drange(y.start, y.stop, y.step)
 	target_rows = Y.drange(0, expected.Y, 1)
