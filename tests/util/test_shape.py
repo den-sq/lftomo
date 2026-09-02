@@ -73,6 +73,7 @@ def test_shape_aggregates_and_transposed_view_share_the_named_axis_model():
 	assert shape.as_dict() == {"Theta": 2, "Y": 3, "X": 4}
 	assert shape.max_field() == 4
 	assert shape.nbytes(np.float32) == 96
+	assert shape.stride(np.float32) == ProjOrder(Theta=48, Y=16, X=4)
 	assert view.shape == SinoOrder(Y=3, Theta=2, X=4).as_tuple()
 	assert np.shares_memory(array, view)
 	assert not hasattr(shape, "__dict__")

@@ -144,7 +144,7 @@ def test_vo_tilt_fit_uses_source_y_coordinates_and_row_span(monkeypatch):
 	result = Pipeline([create_stage(config)]).run(state)
 
 	np.testing.assert_allclose(
-		result.artifacts["center"], [14, 14.2, 14.4, 14.6, 14.8, 15, 15.2],
+		result.artifacts["center"], [13.9, 14.1, 14.3, 14.5, 14.7, 14.9, 15.1],
 	)
 	metadata = result.artifacts["center_fit"]
 	np.testing.assert_array_equal(metadata["sampled_source_rows"], [99, 105, 111])

@@ -454,8 +454,6 @@ class VoCenterStage(Stage):
 			raise ValueError("center.vo needs more sampled rows than the polynomial degree")
 		if state.source_window is None:
 			raise RuntimeError("center.vo tilt fit requires PipelineState.source_window")
-		source_start = int(state.source_window.pos.Y)
-		source_step = int(state.source_window.step.Y)
 		window = state.source_window.with_pad()
 		source_rows = window.pos.Y + local_rows * window.step.Y
 		centers = np.asarray([
@@ -465,7 +463,7 @@ class VoCenterStage(Stage):
 		coefficients, residuals, inliers, iterations, clipping_limited = self._robust_fit(
 			source_rows.astype(np.float64), centers,
 		)
-		evaluation_rows = source_start + np.arange(row_count) * source_step
+		evaluation_rows = window.pos.Y + np.arange(row_count) * window.step.Y
 		unquantized = np.polyval(coefficients, evaluation_rows)
 		center = unquantized
 		if self.tilt_quantization_px is not None:

@@ -118,23 +118,6 @@ def _read_spec(
 		raise ValueError("read planning requires dataset and source_window together")
 	if source_window is None:
 		physical_shape = scan.projection_shape()
-		window = TomoWindow.from_bounds(
-			physical_shape,
-			y=(
-				getattr(stage, "y_start", 0),
-				physical_shape.Y if getattr(stage, "y_stop", None) is None else stage.y_stop,
-			),
-			theta=(
-				getattr(stage, "theta_start", 0),
-				physical_shape.Theta
-				if getattr(stage, "theta_stop", None) is None else stage.theta_stop,
-				getattr(stage, "theta_stride", 1),
-			),
-		)
-	else:
-		window = source_window.with_pad(["Y"])
-	layout = ProjOrder if getattr(stage, "order", "projection") == "projection" else SinoOrder
-	shape = window.frange.length.to(layout)
 	dtype = None if dataset is None else dataset.dtype
 	dtype = scan.metadata.get("raw_dtype") if dtype is None else dtype
 	if dtype is None:
@@ -155,6 +138,14 @@ def _read_spec(
 				with tf.TiffFile(files[0]) as handle:
 					dtype = handle.series[0].dtype
 	dtype = np.dtype("uint16" if dtype is None else dtype)
+	if source_window is None:
+		from lftomo.pipeline.streaming import _read_source_window
+
+		window = _read_source_window(stage, physical_shape, dtype=dtype)
+	else:
+		window = source_window.with_pad(["Y"])
+	layout = ProjOrder if getattr(stage, "order", "projection") == "projection" else SinoOrder
+	shape = window.frange.length.to(layout)
 	return BufferSpec(shape, dtype)
 
 

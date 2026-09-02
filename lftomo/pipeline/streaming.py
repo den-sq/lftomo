@@ -10,7 +10,7 @@ import numpy as np
 
 from lftomo.pipeline.core import _canonical_pad, Stage
 from lftomo.util.shapes import DataRange, DataShape, ProjOrder, Y
-from lftomo.util.window import CTFov, TomoDataSet
+from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +39,27 @@ class WindowConfig:
 			_canonical_pad(self.extra_pad_after)
 
 
+def _read_source_window(
+	stage: Stage | None, physical_shape: ProjOrder, *, dtype=None,
+) -> TomoWindow:
+	"""Resolve the source selection declared by a read Stage."""
+
+	return TomoWindow.from_bounds(
+		physical_shape,
+		y=(
+			getattr(stage, "y_start", 0),
+			physical_shape.Y if getattr(stage, "y_stop", None) is None else stage.y_stop,
+		),
+		theta=(
+			getattr(stage, "theta_start", 0),
+			physical_shape.Theta
+			if getattr(stage, "theta_stop", None) is None else stage.theta_stop,
+			getattr(stage, "theta_stride", 1),
+		),
+		dtype=dtype,
+	)
+
+
 def resolve_streaming_plan(
 	stages: Sequence[Stage], scan: Any, config: WindowConfig | None = None,
 ) -> TomoDataSet:
@@ -62,26 +83,14 @@ def resolve_streaming_plan(
 
 		metadata = probe_source_metadata(scan, read)
 		physical_shape = metadata.physical_shape
-	rows = physical_shape.Y
-	columns = physical_shape.X
-	selection_start = int(getattr(read, "y_start", 0))
-	selection_stop = rows if read is None or getattr(read, "y_stop", None) is None \
-		else int(read.y_stop)
-	if not 0 <= selection_start < selection_stop <= rows:
-		raise WindowPlanError("read Stage has an invalid detector-row selection")
-	selected_rows = selection_stop - selection_start
+	try:
+		selected = _read_source_window(read, physical_shape, dtype=metadata.dtype)
+	except ValueError as error:
+		raise WindowPlanError(str(error)) from error
+	selected_rows = selected.shape.Y
 	window_rows = selected_rows if config.rows is None else min(config.rows, selected_rows)
-	theta_start = int(getattr(read, "theta_start", 0))
-	theta_stop = (
-		physical_shape.Theta
-		if read is None or getattr(read, "theta_stop", None) is None
-		else int(read.theta_stop)
-	)
-	theta_stride = int(getattr(read, "theta_stride", 1))
-	if not 0 <= theta_start < theta_stop <= physical_shape.Theta or theta_stride < 1:
-		raise WindowPlanError("read Stage has an invalid projection selection")
-	theta_count = len(range(theta_start, theta_stop, theta_stride))
-	input_shape = ProjOrder(theta_count, window_rows, columns)
+	selected_samples = selected.frange.length
+	input_shape = ProjOrder(selected_samples.Theta, window_rows, selected_samples.X)
 	pad_before = ProjOrder(0, 0, 0)
 	pad_after = ProjOrder(0, 0, 0)
 	multiple = window_rows < selected_rows
@@ -114,18 +123,16 @@ def resolve_streaming_plan(
 			"not whole-volume equivalence: " + ", ".join(sensitive)
 		)
 		LOGGER.warning(message)
-	selection_start_shape = ProjOrder(theta_start, selection_start, 0)
-	selection_stop_shape = ProjOrder(theta_stop, selection_stop, columns)
 	dataset = TomoDataSet.from_range(
 		CTFov(physical_shape.Theta, scan.degrees_per_fov, 1),
 		physical_shape,
-		DataRange(selection_start_shape, selection_stop_shape, Y(window_rows)),
+		DataRange(selected.pos, selected.pos + selected.shape, Y(window_rows)),
 		dtype=metadata.dtype,
 		work_dtype=np.float32,
 		angles=metadata.angles,
 		acquisition_indices=metadata.acquisition_indices,
 		pad=pad_before,
 		pad_after=pad_after,
-		sample_step=ProjOrder(theta_stride, 1, 1),
+		sample_step=selected.step,
 	)
 	return dataset

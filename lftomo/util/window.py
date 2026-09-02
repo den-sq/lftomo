@@ -86,8 +86,7 @@ class DataRef(object):
 
 	@property
 	def stride(self) -> DataShape:
-		vals = list(asdict(self.shape).values()) + [1]
-		return type(self.shape)(*[self.itemsize * np.prod(vals[x + 1:]) for x in range(len(vals) - 1)])
+		return self.shape.stride(self.dtype)
 
 	def with_pad(self, pad_dim: Sequence = None, shrink=False) -> Self:
 		if pad_dim is None:
