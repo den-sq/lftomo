@@ -63,6 +63,10 @@ Filed so far (Wave B briefings grounded against `670eca8`, Track C-early against
 | B20 | #290 | Wave C-late |
 | B21 | #288 | Wave C-late |
 | B22 | #291 | Wave C-late |
+| B23 | #324 | Wave D |
+| B24 | #325 | Wave D |
+| B26 | #326 | Wave E |
+| B27 | #327 | Wave E |
 
 ```
 B1,B2,B3 (parallel, alongside Wave A)
