@@ -340,8 +340,21 @@ def _remove_stripe_fw(sino_mem, i, level, wname, sigma, zero_pad=False):
 
 
 def _remove_stripe_fw_array(sino: np.ndarray, level: int, wname: str = "db5",
-							sigma: float = 2.0, zero_pad: bool = False) -> None:
-	"""Apply Fourier-wavelet stripe suppression to one ``(Theta, X)`` sinogram."""
+							sigma: float = 2.0, zero_pad: bool = False,
+							theta_mirror: bool = False) -> None:
+	"""Apply Fourier-wavelet stripe suppression to one ``(Theta, X)`` sinogram.
+
+	The Theta damping uses an FFT, which treats the first and last projections
+	as neighbours. Stripes that drift during the scan then jump at that seam and
+	reconstruct as straight streaks along the first projection's ray direction.
+	``theta_mirror`` filters the sinogram followed by its Theta-reversed copy,
+	which is continuous at both ends and keeps every stripe in its column.
+	"""
+	if theta_mirror:
+		extended = np.concatenate([sino, sino[::-1]], axis=0)
+		_remove_stripe_fw_array(extended, level, wname, sigma, zero_pad)
+		sino[:, :] = extended[: sino.shape[0]]
+		return
 	extension_mode = "zero" if zero_pad else "symmetric"
 	sino_indexing = np.s_[0:sino.shape[0], 0:sino.shape[1]]
 	sli = sino[:, :]

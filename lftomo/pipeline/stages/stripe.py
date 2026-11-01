@@ -269,7 +269,8 @@ class FourierWaveletStripeStage(Stage):
 
 	def __init__(self, level: int | None = None, wname: str = "db5",
 				sigma: float = 2.0, zero_pad: bool = False,
-				wavelet: str | None = None, ncore: int | None = None):
+				wavelet: str | None = None, ncore: int | None = None,
+				theta_mirror: bool = False):
 		if level is not None and level < 1:
 			raise ValueError("Fourier-wavelet level must be positive")
 		if sigma <= 0:
@@ -288,6 +289,7 @@ class FourierWaveletStripeStage(Stage):
 		self.sigma = sigma
 		self.zero_pad = zero_pad
 		self.ncore = ncore
+		self.theta_mirror = theta_mirror
 
 	@classmethod
 	def from_config(cls, config: StageConfig) -> "FourierWaveletStripeStage":
@@ -301,6 +303,7 @@ class FourierWaveletStripeStage(Stage):
 		_remove_stripe_fw_array(
 			sinogram, level=level, wname=self.wname,
 			sigma=self.sigma, zero_pad=self.zero_pad,
+			theta_mirror=self.theta_mirror,
 		)
 
 
