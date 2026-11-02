@@ -349,10 +349,12 @@ def _remove_stripe_fw_array(sino: np.ndarray, level: int, wname: str = "db5",
 	reconstruct as straight streaks along the first projection's ray direction.
 	``theta_mirror`` filters the sinogram followed by its Theta-reversed copy,
 	which is continuous at both ends and keeps every stripe in its column.
+	The extension doubles the Theta length, so ``sigma`` (in FFT-index units)
+	is doubled with it to keep the damping band at the same Theta frequency.
 	"""
 	if theta_mirror:
 		extended = np.concatenate([sino, sino[::-1]], axis=0)
-		_remove_stripe_fw_array(extended, level, wname, sigma, zero_pad)
+		_remove_stripe_fw_array(extended, level, wname, 2 * sigma, zero_pad)
 		sino[:, :] = extended[: sino.shape[0]]
 		return
 	extension_mode = "zero" if zero_pad else "symmetric"

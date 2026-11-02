@@ -63,9 +63,23 @@ def test_theta_mirror_suppresses_drifting_stripe_seam_at_scan_ends():
 
 	ends, middle = np.r_[0:12, -12:0], slice(40, 88)
 	assert error(mirrored, ends, slice(28, 33)) < 0.9 * error(plain, ends, slice(28, 33))
-	# Away from the scan ends and for stationary stripes the result is unchanged.
+	# Away from the scan ends and for stationary stripes it is no worse.
 	assert error(mirrored, middle, slice(28, 33)) < 1.05 * error(plain, middle, slice(28, 33))
-	np.testing.assert_allclose(error(mirrored, slice(None), 45), error(plain, slice(None), 45), rtol=0.01)
+	assert error(mirrored, slice(None), 45) < 1.01 * error(plain, slice(None), 45)
+
+
+def test_theta_mirror_keeps_damping_strength_for_periodic_stripes():
+	from lftomo.prep.stripe import _remove_stripe_fw_array
+
+	theta, x = np.meshgrid(np.arange(256), np.linspace(0, 1, 64), indexing="ij")
+	truth = (1 + 0.1 * np.sin(6 * x)).astype(np.float64)
+	striped = truth.copy()
+	striped[:, 30] += 0.2 * np.cos(2 * np.pi * theta[:, 0] / 256)   # varies, but continuous at the seam
+	plain, mirrored = striped.copy(), striped.copy()
+	_remove_stripe_fw_array(plain, level=4, wname="db5", sigma=2.0)
+	_remove_stripe_fw_array(mirrored, level=4, wname="db5", sigma=2.0, theta_mirror=True)
+	residual = lambda r: np.abs(r - truth)[:, 28:33].mean()
+	assert residual(mirrored) < 1.1 * residual(plain)
 
 
 def test_fourier_wavelet_stage_forwards_theta_mirror():
