@@ -20,7 +20,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
 from lftomo.pipeline.dispatch import DispatchKind, DispatchSpec
-from lftomo.pipeline.execution import PipelineExecutor, WorkerTimeoutError
+from lftomo.pipeline.execution import PipelineExecutor, WorkerTimeoutError, run_sinogram_stage
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.pipeline.planning import (
 	BufferAction,
@@ -147,5 +147,6 @@ __all__ = [
 	"has_continuous_domains",
 	"parameter_domains",
 	"resolve_streaming_plan",
+	"run_sinogram_stage",
 	"validate_pipeline",
 ]

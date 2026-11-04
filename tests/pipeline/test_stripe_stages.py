@@ -2,9 +2,12 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineState, run_sinogram_stage
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
+from lftomo.storage import PipelineRunContext
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.window import DataRef
+from tests.sample_data import attach_source_geometry
 
 
 def _state(array, layout, config):
@@ -73,3 +76,60 @@ def test_fourier_wavelet_projection_order_matches_sinogram_order():
 
 	assert proj_stage.contract.accepted_layouts == (SinoOrder,)
 	np.testing.assert_allclose(projection_order, np.transpose(sinogram_order, (1, 0, 2)))
+
+
+def test_public_sinogram_helper_uses_canonical_units_and_copies_returned_values(
+	monkeypatch,
+):
+	config = StageConfig(kind="stripe", algorithm="vo_sort", params={"size": 3})
+	expected = _striped_fixture()
+	stage = create_stage(config)
+	expected_state = _state(expected, SinoOrder, config)
+	for row in expected:
+		stage.run_sinogram(row, expected_state)
+	values = _striped_fixture().transpose(1, 0, 2).copy()
+	units = []
+	canonical_units = DataRef.units
+
+	def record_units(reference, axis):
+		assert axis == "Y"
+		for unit, local_index in canonical_units(reference, axis):
+			units.append(unit)
+			yield unit, local_index
+
+	monkeypatch.setattr(DataRef, "units", record_units)
+	with PipelineRunContext() as context:
+		working = context.storage.allocate(
+			ProjOrder(*values.shape), values.dtype, role="normalized",
+		)
+		working.array()[...] = values
+		state = _state(values, ProjOrder, config)
+		state.working_array = working
+		state.storage = context.storage
+		state = attach_source_geometry(state, y_start=7, physical_y=10)
+		source_window = state.source_window
+		buffer_spec = state.buffer_spec
+		events_before = context.storage.allocation_events
+		kernel = stage.run_sinogram
+
+		def return_corrected_row(row, row_state):
+			assert row_state.source_window is units[-1]
+			assert row_state.buffer_spec.shape is units[-1].shape
+			assert row_state.buffer_spec.dtype == state.buffer_spec.dtype
+			assert row_state.artifacts is state.artifacts
+			assert not row.flags.c_contiguous
+			assert np.shares_memory(row, np.asarray(working))
+			assert np.shares_memory(row_state.working_array, row)
+			replacement = row.copy()
+			kernel(replacement, row_state)
+			return replacement
+
+		monkeypatch.setattr(stage, "run_sinogram", return_corrected_row)
+		assert run_sinogram_stage(stage, state) is state
+		assert state.working_array is working
+		assert state.source_window is source_window
+		assert state.buffer_spec is buffer_spec
+		assert [unit.pos.Y for unit in units] == [7, 8, 9]
+		assert all(unit.shape.Y == 1 for unit in units)
+		assert context.storage.allocation_events == events_before
+		np.testing.assert_allclose(np.asarray(working), expected.transpose(1, 0, 2))

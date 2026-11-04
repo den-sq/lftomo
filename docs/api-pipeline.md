@@ -4,6 +4,9 @@ The pipeline layer composes tomography reconstruction work as an ordered list
 of `Stage` objects. Stage ordering remains sequential; a run-scoped executor
 dispatches each Stage's independent locality units without changing that order.
 
+For a worked implementation, registration edits, and a runnable test, see
+[Adding a Stage](adding-a-stage.md).
+
 Each Stage declares a `StageContract` before it runs:
 
 - shape consumed and produced, usually one of `ProjOrder`, `SinoOrder`, or

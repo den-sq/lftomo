@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import h5py
@@ -16,11 +17,16 @@ from lftomo.pipeline import (
 	resolve_streaming_plan,
 )
 from lftomo.pipeline.stages import (
+	BetaScaleStage,
 	BilateralFilterStage,
+	BronnikovAidedCorrectionFilterStage,
+	BronnikovAidedCorrectionStage,
 	HelicalIndexRemapStage,
 	MovementCorrectStage,
 	NegativeLogStage,
 	PaganinFilterStage,
+	PaganinPhaseAbsorptionStage,
+	PaganinStage,
 	create_stage,
 )
 from lftomo.prep.phase import _phase_pad
@@ -105,6 +111,43 @@ def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent(caplog):
 	assert dataset.pad_after.Y == _phase_pad(8, 1e-4, 10, 20)
 	assert "phase.paganin_filter" in caplog.text
 	assert "whole-volume equivalence" in caplog.text
+
+
+@pytest.mark.parametrize("stage", [
+	PaganinStage(),
+	PaganinPhaseAbsorptionStage(),
+	BronnikovAidedCorrectionFilterStage(alpha=2.0),
+	BronnikovAidedCorrectionStage(alpha=2.0),
+	PaganinStage(enabled=False),
+	BronnikovAidedCorrectionStage(alpha=2.0, enabled=False),
+])
+def test_phase_extent_warning_is_preserved(stage, caplog):
+	resolve_streaming_plan([stage], _scan(), WindowConfig(rows=4))
+	assert "Extent-sensitive" in caplog.text
+	assert stage.name in caplog.text
+
+
+def test_extent_warning_uses_partitioned_axis_and_instance_contract(caplog):
+	stage = PaganinFilterStage()
+	stage.name = "filter.extent_dependent"
+	resolve_streaming_plan([stage], _scan(), WindowConfig())
+	assert "Extent-sensitive" not in caplog.text
+	resolve_streaming_plan(
+		[stage, stage, NegativeLogStage(), BetaScaleStage()], _scan(), WindowConfig(rows=4),
+	)
+	assert caplog.text.count("filter.extent_dependent") == 1
+	assert "phase.negative_log" not in caplog.text
+	assert "phase.beta_scale" not in caplog.text
+
+	caplog.clear()
+	stage.name = "phase.paganin_filter"
+	stage.contract = replace(stage.contract, extent_sensitive_axes=("X",))
+	resolve_streaming_plan([stage], _scan(), WindowConfig(rows=4))
+	assert "Extent-sensitive" not in caplog.text
+
+	stage.contract = replace(stage.contract, extent_sensitive_axes=())
+	resolve_streaming_plan([stage], _scan(), WindowConfig(rows=4))
+	assert "Extent-sensitive" not in caplog.text
 
 
 def test_full_axis_contract_rejects_silent_window_degradation():

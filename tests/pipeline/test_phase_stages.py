@@ -13,6 +13,7 @@ from lftomo.pipeline import (
 	validate_pipeline,
 )
 from lftomo.pipeline.stages import (
+	BronnikovAidedCorrectionFilterStage,
 	BronnikovAidedCorrectionStage,
 	PaganinPhaseAbsorptionStage,
 	PaganinStage,
@@ -45,6 +46,27 @@ def _fixture():
 	data = np.full((16, 3, 16), 0.8, dtype=np.float32)
 	data[6:10, :, 6:10] = 0.4
 	return data
+
+
+@pytest.mark.parametrize("key", sorted(
+	key for key in STAGE_REGISTRY if key.startswith("phase.")
+))
+def test_registered_phase_stages_explicitly_declare_extent_sensitive_axes(key):
+	# Only constructor inputs live here, not a second classification of sensitive
+	# algorithms. A newly registered phase Stage automatically joins this test.
+	required_params = {
+		BronnikovAidedCorrectionStage: {"alpha": 2.0},
+		BronnikovAidedCorrectionFilterStage: {"alpha": 2.0},
+	}
+	kind, algorithm = key.split(".", 1)
+	stage = create_stage(StageConfig(
+		kind=kind, algorithm=algorithm,
+		params=required_params.get(STAGE_REGISTRY[key], {}),
+	))
+	assert stage.contract.extent_sensitive_axes is not None, (
+		f"{key} must explicitly declare StageContract.extent_sensitive_axes "
+		"as axis names or (); omission would silently skip the windowed-parity warning"
+	)
 
 
 def test_standard_paganin_stage_is_registered_and_filters_tier1_fixture():

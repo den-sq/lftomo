@@ -141,6 +141,11 @@ class StageContract:
 	required_pad: PadRequirement = PadRequirement()
 	requires_full_axes: tuple[str, ...] = ()
 	runtime_requirements: tuple[RuntimeRequirement, ...] = ()
+	# Axes whose extent affects this algorithm's numerical result. An empty
+	# tuple explicitly declares no sensitivity; None means undeclared so
+	# registry tests can catch missing declarations. This describes the
+	# algorithm, including when a configured instance is disabled.
+	extent_sensitive_axes: tuple[str, ...] | None = None
 
 	def __post_init__(self):
 		undeclared = set(self.managed_artifacts) - set(self.produces_artifacts)
