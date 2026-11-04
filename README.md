@@ -52,6 +52,11 @@ python -m mkdocs build --strict
 
 ## Run a pipeline
 
+New to lftomo? The [Quickstart](docs/quickstart.md) walks a scan from raw
+projections to slices; [Configuration](docs/configuration.md) explains the Scan
+and pipeline files; [Using lftomo from Python](docs/library.md) covers
+`run_reconstruction()`.
+
 Pass a pipeline YAML (or a bundled canonical template name) and a Scan YAML to
 the runner. Relative projection paths in the Scan are resolved from the Scan
 file, and `--output` overrides the pipeline's output directory.
