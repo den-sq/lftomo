@@ -12,8 +12,9 @@ def validate_acquisition_indices(
 	*,
 	recorded_count: int,
 	planned_count: int,
+	out_of_range_hint: str | None = None,
 ) -> np.ndarray:
-	"""Return a validated one-dimensional index for each recorded projection."""
+	"""Validate projection indices, optionally explaining a bounds failure."""
 
 	values = np.asarray(indices)
 	if values.ndim != 1:
@@ -32,9 +33,10 @@ def validate_acquisition_indices(
 	if len(values) > 1 and np.any(np.diff(values) <= 0):
 		raise ValueError("acquisition indices must be strictly increasing")
 	if len(values) and values[-1] >= planned_count:
-		raise ValueError(
-			f"acquisition index {values[-1]} is outside {planned_count} planned slots"
-		)
+		message = f"acquisition index {values[-1]} is outside {planned_count} planned slots"
+		if out_of_range_hint is not None:
+			message += f"; {out_of_range_hint}"
+		raise ValueError(message)
 	return values
 
 
@@ -75,8 +77,27 @@ def indices_from_angles(
 	if step == 0:
 		raise ValueError("rotation start and end angles must differ")
 	indices = np.rint((angles - start) / step).astype(np.int64)
+	tolerance = max(1e-6, abs(step) * 1e-4)
+	out_of_range_hint = None
+	if (
+		len(indices) and indices[-1] == planned_count
+		and np.isclose(angles[-1], np.deg2rad(rotation_end_deg), rtol=0, atol=tolerance)
+	):
+		out_of_range_hint = (
+			"the last imported angle matches "
+			f"acquisition.rotation_end_deg={rotation_end_deg}, which is endpoint-exclusive"
+		)
+		if planned_count > 1:
+			endpoint_exclusive = (
+				rotation_end_deg + (rotation_end_deg - rotation_start_deg) / (planned_count - 1)
+			)
+			out_of_range_hint += (
+				f"; for {planned_count} endpoint-inclusive acquisition slots, use "
+				f"acquisition.rotation_end_deg={endpoint_exclusive}"
+			)
 	indices = validate_acquisition_indices(
 		indices, recorded_count=recorded_count, planned_count=planned_count,
+		out_of_range_hint=out_of_range_hint,
 	)
 	expected = angles_from_indices(
 		indices,
@@ -84,7 +105,6 @@ def indices_from_angles(
 		rotation_start_deg=rotation_start_deg,
 		rotation_end_deg=rotation_end_deg,
 	)
-	tolerance = max(1e-6, abs(step) * 1e-4)
 	if not np.allclose(angles, expected, rtol=0, atol=tolerance):
 		raise ValueError("angles are inconsistent with acquisition indices and convention")
 	return indices

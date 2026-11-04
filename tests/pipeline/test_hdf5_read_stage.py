@@ -223,6 +223,35 @@ def test_hdf5_stage_imports_explicit_angles_and_derives_indices(tmp_path):
 	np.testing.assert_allclose(np.rad2deg(result.dataset.angles), [0, 36, 108, 144])
 
 
+@pytest.mark.parametrize("units", ["degrees", "radians"])
+def test_hdf5_endpoint_inclusive_angles_explain_rotation_end(tmp_path, units):
+	count, size = 1969, 1
+	angles_degrees = np.linspace(0, 180, count)
+	angles = angles_degrees if units == "degrees" else np.deg2rad(angles_degrees)
+	path = tmp_path / "endpoint-inclusive.h5"
+	_write(path, np.ones((count, size, size), dtype=np.uint16), calibration=False)
+	with h5py.File(path, "a") as handle:
+		handle.create_dataset("exchange/theta", data=angles)
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange")
+	state = _state(path, count, size, config)
+	state.scan.acquisition.angle_source = HDF5AngleSource(units=units)
+	stage = create_stage(config)
+
+	with pytest.raises(ValueError) as error:
+		resolve_streaming_plan([stage], state.scan)
+	message = str(error.value)
+	assert f"acquisition index {count} is outside {count} planned slots" in message
+	assert "last imported angle matches acquisition.rotation_end_deg=180" in message
+	assert "endpoint-exclusive" in message
+	assert "acquisition.rotation_end_deg=180.09146341463415" in message
+	assert state.scan.acquisition.rotation_end_deg == 180
+
+	state.scan.acquisition.rotation_end_deg = 180 + 180 / (count - 1)
+	dataset = resolve_streaming_plan([stage], state.scan)
+	np.testing.assert_array_equal(dataset.acquisition_indices, np.arange(count))
+	np.testing.assert_array_equal(dataset.angles, np.deg2rad(angles_degrees).astype(np.float32))
+
+
 def test_hdf5_stage_uses_bounded_fallback_for_chunked_compressed_source(tmp_path):
 	count, size = 5, 6
 	data = np.arange(count * size * size, dtype=np.uint16).reshape(count, size, size)

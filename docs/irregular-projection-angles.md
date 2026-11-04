@@ -21,6 +21,13 @@ can use `angle_source.kind: hdf5` to import an angle dataset.  `explicit`
 accepts embedded acquisition-index and/or degree arrays for small or generated
 metadata.
 
+If an imported final angle matches `acquisition.rotation_end_deg`, the bounds
+error explains that the configured endpoint is exclusive and suggests the
+endpoint-exclusive value. For example, 1969 uniformly spaced angles from 0° to 180°
+need `acquisition.rotation_end_deg: 180.09146341463415`
+(`180 + 180 / 1968`). The imported angles and acquisition convention are
+unchanged; the configuration must describe that convention.
+
 Hardware-timestamp inference anchors the first recorded projection to planned
 slot zero.  A leading dropped frame is therefore not observable from the
 recorded timestamp intervals and is deliberately treated as a shifted
