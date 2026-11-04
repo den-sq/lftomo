@@ -37,8 +37,9 @@ reconstruction and the run fails with broken worker connections.
 
 Paths behave as on the command line: `scan.yaml`'s projection path is resolved
 from the Scan file's directory; a normalize Stage's `calibration_manifest` and
-legacy gain/dark paths from the pipeline file's directory; `output_path` and
-any other relative Stage path from the working directory (see
+legacy gain/dark paths from the pipeline file's directory; `output_path` from
+the working directory. Other Stage path parameters are passed to the Stage
+unchanged, and each Stage determines how they are interpreted (see
 [Configuration](configuration.md#paths-inside-the-pipeline-file)).
 
 ## Return value

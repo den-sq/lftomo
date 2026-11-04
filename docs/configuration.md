@@ -185,11 +185,13 @@ the legacy `pre_gain`/`post_gain`/`pre_dark`/`post_dark` TIFFs. This is why a
 bundled template that names such files should be copied next to your data
 before being edited; see the [Quickstart](quickstart.md#2-pick-a-pipeline-template).
 
-Other path parameters are not rebased. A Stage uses them as given, so a
-relative one resolves from the working directory. For example,
-`write.hdf5_volume`'s `path: results/recon.h5` writes to `./results/recon.h5`
-wherever the pipeline file lives. Use absolute paths, or run from the directory
-the paths are relative to.
+The runner passes other path parameters to the selected Stage unchanged, and
+that Stage's contract determines how they are interpreted. For example,
+`write.hdf5_volume`'s `path: results/recon.h5` writes to `results/recon.h5` under
+the working directory, wherever the pipeline file lives, while
+`center.entropy_local`'s `diagnostic_subdirectory: qc/centers` is placed relative
+to `Recon.output_path` and must be a safe relative path; an absolute value is
+rejected when the Stage is built.
 
 ### Bounding a run
 
