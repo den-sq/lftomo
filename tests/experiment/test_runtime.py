@@ -335,3 +335,31 @@ def test_accepted_runtime_report_is_in_preflight_and_manifest(tmp_path):
 	assert summary.preflight.runtime == report
 	assert manifest["metadata"]["runtime_compatibility"] == report.model_dump(mode="json")
 	assert summary.attempts[0].identity.environment == report.environment
+
+
+def test_installed_code_identity_changes_with_the_package_version(tmp_path, monkeypatch):
+	from lftomo.experiment import cli
+
+	scan_path = tmp_path / "scan.yaml"
+	scan_path.write_text(f"""
+energy_keV: 20
+pixel_size_um: 1
+n_projections: 4
+degrees_per_fov: 180
+detector: {{pixel_size_um: 1, rows: 3, columns: 5}}
+acquisition: {{n_projections: 4, rotation_end_deg: 180}}
+projections: {{format: tiff_stack, path: projections}}
+metadata: {{dataset_content_hash: {"a" * 64}}}
+""", encoding="utf-8")
+	# An installed copy has no git checkout to read a commit from.
+	monkeypatch.delenv("LFTOMO_GIT_COMMIT", raising=False)
+	monkeypatch.setattr(cli, "_git", lambda _arguments, _root: None)
+
+	monkeypatch.setattr(cli, "_metadata_version", lambda _package: "1.0.0")
+	first = cli.build_experiment_inputs(scan_path).code
+	monkeypatch.setattr(cli, "_metadata_version", lambda _package: "1.1.0")
+	second = cli.build_experiment_inputs(scan_path).code
+
+	assert (first.version, second.version) == ("1.0.0", "1.1.0")
+	assert first.git_commit == second.git_commit
+	assert first != second

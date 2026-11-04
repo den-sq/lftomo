@@ -58,6 +58,7 @@ from .runner import (
 	json_value,
 )
 from .runtime import (
+	_metadata_version,
 	RuntimeCompatibilityReport,
 	RuntimeCompatibilityError,
 	collect_environment_identity,
@@ -144,7 +145,7 @@ def build_experiment_inputs(
 			calibration_hash=calibration_hash,
 		),
 		code=CodeIdentity(
-			version="0.1.0", git_commit=commit, dirty=bool(dirty),
+			version=_metadata_version("lftomo") or "unknown", git_commit=commit, dirty=bool(dirty),
 		),
 		environment=environment or collect_environment_identity(),
 		description={"dataset_path": resolved},
