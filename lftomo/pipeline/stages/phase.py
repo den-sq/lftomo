@@ -181,7 +181,7 @@ class PaganinFilterStage(Stage):
 		self.alpha = alpha
 		self.enabled = enabled
 		self.contract = StageContract(
-			fft_extent_sensitive=True,
+			extent_sensitive_axes=("Y", "X"),
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -242,7 +242,7 @@ class NegativeLogStage(Stage):
 		self.enabled = enabled
 		self.invert = invert
 		self.contract = StageContract(
-			fft_extent_sensitive=False,
+			extent_sensitive_axes=(),
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -285,7 +285,7 @@ class BetaScaleStage(Stage):
 	def __init__(self, enabled: bool = True):
 		self.enabled = enabled
 		self.contract = StageContract(
-			fft_extent_sensitive=False,
+			extent_sensitive_axes=(),
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -321,7 +321,7 @@ class PaganinStage(Stage):
 
 	name = "phase.paganin"
 	contract = StageContract(
-		fft_extent_sensitive=True,
+		extent_sensitive_axes=("Y", "X"),
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
@@ -346,7 +346,7 @@ class PaganinStage(Stage):
 		self.enabled = enabled
 		self.pad_y = pad_y
 		self.contract = StageContract(
-			fft_extent_sensitive=type(self).contract.fft_extent_sensitive,
+			extent_sensitive_axes=type(self).contract.extent_sensitive_axes,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -395,7 +395,7 @@ class PaganinPhaseAbsorptionStage(Stage):
 
 	name = "phase.paganin_phase_absorption"
 	contract = StageContract(
-		fft_extent_sensitive=True,
+		extent_sensitive_axes=("Y", "X"),
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
@@ -417,7 +417,7 @@ class PaganinPhaseAbsorptionStage(Stage):
 		self.alpha = alpha
 		self.epsilon = epsilon
 		self.contract = StageContract(
-			fft_extent_sensitive=type(self).contract.fft_extent_sensitive,
+			extent_sensitive_axes=type(self).contract.extent_sensitive_axes,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -477,7 +477,7 @@ class BronnikovAidedCorrectionFilterStage(Stage):
 		if processes < 1:
 			raise ValueError("BAC processes must be positive")
 		self.contract = StageContract(
-			fft_extent_sensitive=True,
+			extent_sensitive_axes=("Y", "X"),
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,
@@ -534,7 +534,7 @@ class BronnikovAidedCorrectionStage(Stage):
 
 	name = "phase.bac"
 	contract = StageContract(
-		fft_extent_sensitive=True,
+		extent_sensitive_axes=("Y", "X"),
 		mutates_input=True,
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
@@ -551,7 +551,7 @@ class BronnikovAidedCorrectionStage(Stage):
 		if processes < 1:
 			raise ValueError("BAC processes must be positive")
 		self.contract = StageContract(
-			fft_extent_sensitive=type(self).contract.fft_extent_sensitive,
+			extent_sensitive_axes=type(self).contract.extent_sensitive_axes,
 			produces=PRESERVE,
 			accepts=(ProjOrder, SinoOrder),
 			prefers=ProjOrder,

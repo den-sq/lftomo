@@ -51,8 +51,8 @@ def _fixture():
 @pytest.mark.parametrize("key", sorted(
 	key for key in STAGE_REGISTRY if key.startswith("phase.")
 ))
-def test_registered_phase_stages_explicitly_declare_fft_extent_sensitivity(key):
-	# Only constructor inputs live here, not a second classification of FFT
+def test_registered_phase_stages_explicitly_declare_extent_sensitive_axes(key):
+	# Only constructor inputs live here, not a second classification of sensitive
 	# algorithms. A newly registered phase Stage automatically joins this test.
 	required_params = {
 		BronnikovAidedCorrectionStage: {"alpha": 2.0},
@@ -63,9 +63,9 @@ def test_registered_phase_stages_explicitly_declare_fft_extent_sensitivity(key):
 		kind=kind, algorithm=algorithm,
 		params=required_params.get(STAGE_REGISTRY[key], {}),
 	))
-	assert isinstance(stage.contract.fft_extent_sensitive, bool), (
-		f"{key} must explicitly declare StageContract.fft_extent_sensitive "
-		"as True or False; omission would silently skip the windowed-parity warning"
+	assert stage.contract.extent_sensitive_axes is not None, (
+		f"{key} must explicitly declare StageContract.extent_sensitive_axes "
+		"as axis names or (); omission would silently skip the windowed-parity warning"
 	)
 
 

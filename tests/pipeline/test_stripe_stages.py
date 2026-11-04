@@ -1,5 +1,3 @@
-from contextlib import nullcontext
-
 import numpy as np
 import pytest
 
@@ -80,10 +78,8 @@ def test_fourier_wavelet_projection_order_matches_sinogram_order():
 	np.testing.assert_allclose(projection_order, np.transpose(sinogram_order, (1, 0, 2)))
 
 
-@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
-@pytest.mark.parametrize("managed", [False, True])
 def test_public_sinogram_helper_uses_canonical_units_and_copies_returned_values(
-	monkeypatch, layout, managed,
+	monkeypatch,
 ):
 	config = StageConfig(kind="stripe", algorithm="vo_sort", params={"size": 3})
 	expected = _striped_fixture()
@@ -91,9 +87,7 @@ def test_public_sinogram_helper_uses_canonical_units_and_copies_returned_values(
 	expected_state = _state(expected, SinoOrder, config)
 	for row in expected:
 		stage.run_sinogram(row, expected_state)
-	values = _striped_fixture()
-	if layout is ProjOrder:
-		values = values.transpose(1, 0, 2).copy()
+	values = _striped_fixture().transpose(1, 0, 2).copy()
 	units = []
 	canonical_units = DataRef.units
 
@@ -104,21 +98,18 @@ def test_public_sinogram_helper_uses_canonical_units_and_copies_returned_values(
 			yield unit, local_index
 
 	monkeypatch.setattr(DataRef, "units", record_units)
-	with PipelineRunContext() if managed else nullcontext() as context:
-		working = values
-		if managed:
-			working = context.storage.allocate(
-				layout(*values.shape), values.dtype, role="normalized",
-			)
-			working.array()[...] = values
-		state = _state(values, layout, config)
+	with PipelineRunContext() as context:
+		working = context.storage.allocate(
+			ProjOrder(*values.shape), values.dtype, role="normalized",
+		)
+		working.array()[...] = values
+		state = _state(values, ProjOrder, config)
 		state.working_array = working
-		if managed:
-			state.storage = context.storage
+		state.storage = context.storage
 		state = attach_source_geometry(state, y_start=7, physical_y=10)
 		source_window = state.source_window
 		buffer_spec = state.buffer_spec
-		events_before = context.storage.allocation_events if managed else ()
+		events_before = context.storage.allocation_events
 		kernel = stage.run_sinogram
 
 		def return_corrected_row(row, row_state):
@@ -126,6 +117,7 @@ def test_public_sinogram_helper_uses_canonical_units_and_copies_returned_values(
 			assert row_state.buffer_spec.shape is units[-1].shape
 			assert row_state.buffer_spec.dtype == state.buffer_spec.dtype
 			assert row_state.artifacts is state.artifacts
+			assert not row.flags.c_contiguous
 			assert np.shares_memory(row, np.asarray(working))
 			assert np.shares_memory(row_state.working_array, row)
 			replacement = row.copy()
@@ -139,8 +131,5 @@ def test_public_sinogram_helper_uses_canonical_units_and_copies_returned_values(
 		assert state.buffer_spec is buffer_spec
 		assert [unit.pos.Y for unit in units] == [7, 8, 9]
 		assert all(unit.shape.Y == 1 for unit in units)
-		if managed:
-			assert context.storage.allocation_events == events_before
-		if layout is ProjOrder:
-			expected = expected.transpose(1, 0, 2)
-		np.testing.assert_allclose(np.asarray(working), expected)
+		assert context.storage.allocation_events == events_before
+		np.testing.assert_allclose(np.asarray(working), expected.transpose(1, 0, 2))

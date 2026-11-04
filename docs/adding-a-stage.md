@@ -80,12 +80,17 @@ config, contract, backend, state inputs, and declared artifacts; leave it false
 unless that promise holds. Declare required metadata, artifacts, padding, and
 full-axis requirements when the algorithm needs them.
 
-For every new `phase.*` Stage, explicitly set `fft_extent_sensitive=True` if its
-FFT result depends on the detector-window extent, or `False` otherwise. The
-registry-wide phase declaration test rejects the default `None`. Streaming
-reads the instance contract to emit the existing full-height parity warning;
-there is no phase-name list to update. This flag describes FFT sensitivity,
-while `required_pad` and `requires_full_axes` describe input requirements.
+For any Stage whose numerical result depends on input extent, declare the
+affected axes in `extent_sensitive_axes`. For example, the phase filters use
+`extent_sensitive_axes=("Y", "X")` because their two-dimensional FFTs depend on
+both detector extents. Use `()` to explicitly declare no sensitivity. The
+default `None` means undeclared; the registry-wide phase declaration test
+rejects it for every `phase.*` Stage. Streaming reads the instance contract
+and warns when it partitions a declared axis, currently `Y`; there is no
+phase-name list to update. This property describes numerical sensitivity:
+`required_pad` declares needed source context, while `requires_full_axes`
+prohibits splitting an axis. Extent sensitivity allows splitting with the
+warning that fixed-window parity does not imply whole-volume equivalence.
 
 Keep one class-level contract when parameters do not change its facts, as
 above. Planning, validation, and execution read `stage.contract` on the
