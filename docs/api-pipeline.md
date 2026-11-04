@@ -91,16 +91,27 @@ back reconstruction output after normalization has retired it, proved by the
 planner's liveness schedule. Projection-order normalized input may back TomoPy
 output because the supported TomoPy boundary materializes that input before it
 writes `init_recon`; the installed runtime is exercised by the test suite and
-the hidden copy remains in the external-engine memory estimate. External
+the hidden copy is outside the shared-memory allocation schedule. External
 prefix/cache/trial pins prevent either reuse while they are live. Set
 `Recon.buffer_aliasing: false` to disable all aliases, or
 `Recon.tomopy_input_aliasing: false` to disable only the engine-dependent pair.
 
-The validated `PipelinePlan` exposes each Stage's input/output `BufferSpec`, an
-allocation/alias/retirement schedule, and separate peak estimates for shared
-memory, per-worker private scratch, and external-engine temporary storage.
+The validated `PipelinePlan` exposes each Stage's input/output `BufferSpec` and
+an allocation/alias/retirement schedule. Its `shared_memory_peak_bytes` sums
+physical allocations in that schedule; aliases add no storage, and retired
+segments remain allocated until run-context shutdown. This estimate excludes
+allocations absent from the schedule, worker-private scratch and external-engine
+temporaries.
 Flat/dark calibration arrays and detector-sized phase filters are also
 manager-issued artifacts declared by their producer contracts.
+
+Before starting a run's manager or reading projection pixels, the runner checks
+the largest padded window's planned shared-memory peak against available
+`/dev/shm` space on Linux. That same plan supplies the run's buffer reservations.
+Insufficient capacity raises an error naming both byte counts and suggesting
+smaller `--window-rows` or a larger `/dev/shm` (`--shm-size` in Docker). This is
+a capacity snapshot, not a reservation against concurrent allocations. Platforms
+without Linux's `/dev/shm` convention keep their existing allocation behavior.
 
 ## Run-scoped dispatch
 

@@ -5,7 +5,7 @@ from multiprocessing.managers import SharedMemoryManager, BaseManager
 from multiprocessing import util as multiprocessing_util
 import os
 import signal
-from sys import stdout
+from sys import platform, stdout
 import threading
 from time import sleep
 from typing import TextIO
@@ -28,6 +28,25 @@ MEM_INTERVAL_TIMER = 1.0
 
 class SharedNPManager(SharedMemoryManager, StorageBackend):
 	""" Manages shared memory numpy arrays. """
+
+	@staticmethod
+	def check_capacity(planned_peak_bytes: int) -> None:
+		"""Reject a known Linux tmpfs shortfall before lazily allocated pages SIGBUS."""
+
+		if platform != "linux":
+			return
+		try:
+			space = os.statvfs("/dev/shm")
+		except OSError as error:
+			raise OSError(f"cannot check shared memory capacity at /dev/shm: {error}") from error
+		available = space.f_bavail * space.f_frsize
+		if planned_peak_bytes > available:
+			raise MemoryError(
+				f"insufficient shared memory: planned peak {planned_peak_bytes} bytes "
+				f"({planned_peak_bytes / 1024**2:.1f} MiB), available /dev/shm space "
+				f"{available} bytes ({available / 1024**2:.1f} MiB); reduce "
+				"--window-rows or increase /dev/shm (Docker: --shm-size)"
+			)
 
 	@classmethod
 	def _run_server(cls, registry, address, authkey, serializer, writer,

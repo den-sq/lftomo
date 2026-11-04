@@ -50,8 +50,10 @@ from lftomo.pipeline import (
 )
 from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
+from lftomo.pipeline.planning import PipelinePlan
 from lftomo.storage import ManagedBuffer, buffer_view
 from lftomo.util.converter import CONVERTER
+from lftomo.util.mem import SharedNPManager
 from lftomo.util.shapes import Y
 from lftomo.util.window import TomoDataSet, TomoWindow
 
@@ -471,7 +473,7 @@ def _center_artifacts(state: PipelineState) -> dict[str, Any]:
 def _run_streaming_pipeline(
 	*, stages: list[Stage], concrete: Recon, run_scan: Scan,
 	initial_artifacts: dict[str, Any], backend: Backend, run_context,
-	dataset: TomoDataSet,
+	dataset: TomoDataSet, buffer_plan: PipelinePlan,
 	stage_observer: StageObserver | None,
 	execution_observer: ExecutionSpanObserver | None,
 ) -> dict[str, Any]:
@@ -483,21 +485,7 @@ def _run_streaming_pipeline(
 	output_files = []
 	reserve = getattr(run_context.storage, "reserve", None)
 	if reserve is not None:
-		largest = max(
-			dataset,
-			key=lambda item: item.with_pad(["Y"]).shape.Y,
-		)
-		reserve_writer = next((
-			index for index, stage in enumerate(stages)
-			if stage.name.startswith("write.")
-		), len(stages))
-		reserve_pipeline = _planned_pipeline(
-			stages[:reserve_writer], run_scan, backend,
-			initial_artifacts, None, concrete,
-			execution_observer=None,
-			dataset=dataset, source_window=largest,
-		)
-		for event in reserve_pipeline.plan.allocation_schedule:
+		for event in buffer_plan.allocation_schedule:
 			reserve(event.role, event.bytes)
 	for window in dataset:
 		window_stages = list(stages)
@@ -680,7 +668,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 		# Validate every selected complete structure before the first projection
 		# Stage runs. Candidate N cannot fail contract validation after candidate
 		# N-1 has already produced output.
-		validate_pipeline(
+		largest = max(dataset, key=lambda item: item.with_pad(["Y"]).shape.Y)
+		buffer_plan = validate_pipeline(
 			stages,
 			run_scan,
 			backend,
@@ -689,16 +678,17 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
 			dataset=dataset,
-			source_window=dataset.full_window(),
+			source_window=largest,
 		)
+		SharedNPManager.check_capacity(buffer_plan.shared_memory_peak_bytes)
 		prepared.append((
 			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
-			dataset,
+			dataset, buffer_plan,
 		))
 	results = []
 	for (
 		run, concrete, resolved_document, run_scan, initial_artifacts, stages,
-		dataset,
+		dataset, buffer_plan,
 	) in prepared:
 		resolved_metadata = resolved_document.setdefault("metadata", {})
 		resolved_metadata["streaming_dataset"] = CONVERTER.unstructure(dataset)
@@ -751,7 +741,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 				artifacts = _run_streaming_pipeline(
 					stages=stages, concrete=concrete, run_scan=run_scan,
 					initial_artifacts=initial_artifacts, backend=backend,
-					run_context=run_context, dataset=dataset,
+					run_context=run_context, dataset=dataset, buffer_plan=buffer_plan,
 					stage_observer=stage_observer,
 					execution_observer=execution_observer,
 				)
