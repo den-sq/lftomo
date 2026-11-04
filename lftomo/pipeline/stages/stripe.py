@@ -18,13 +18,6 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.runtime import tomopy_requirement
-from lftomo.prep.stripe import (
-	_bottleneck_line_half_width,
-	_remove_dead_array,
-	_remove_large_array,
-	_remove_sort_array,
-	_remove_stripe_fw_array,
-)
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
 
@@ -88,9 +81,13 @@ class VoSortStripeStage(SinogramStage):
 
 	@property
 	def vo_line_median_half_width(self) -> int:
+		from lftomo.prep.stripe import _bottleneck_line_half_width
+
 		return _bottleneck_line_half_width(self.params.size) if self.params.dim == 1 else 0
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		from lftomo.prep.stripe import _remove_sort_array
+
 		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		_remove_sort_array(
 			sinogram, size=self.params.size, dim=self.params.dim,
@@ -110,9 +107,13 @@ class VoDeadStripeStage(SinogramStage):
 
 	@property
 	def vo_line_median_half_width(self) -> int:
+		from lftomo.prep.stripe import _bottleneck_line_half_width
+
 		return _bottleneck_line_half_width(self.params.size) if self.params.norm else 0
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		from lftomo.prep.stripe import _remove_dead_array, _remove_large_array
+
 		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		_remove_dead_array(sinogram, snr=self.params.snr, size=self.params.size, work=work)
 		if self.params.norm:
@@ -135,9 +136,13 @@ class VoLargeStripeStage(SinogramStage):
 
 	@property
 	def vo_line_median_half_width(self) -> int:
+		from lftomo.prep.stripe import _bottleneck_line_half_width
+
 		return _bottleneck_line_half_width(self.params.size)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		from lftomo.prep.stripe import _remove_large_array
+
 		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		_remove_large_array(
 			sinogram, snr=self.params.snr, size=self.params.size,
@@ -165,11 +170,15 @@ class VoFamilyStripeStage(SinogramStage):
 
 	@property
 	def vo_line_median_half_width(self) -> int:
+		from lftomo.prep.stripe import _bottleneck_line_half_width
+
 		uses_large = "remove_large_vo" in self.params.order
 		uses_sort = "remove_sort_vo" in self.params.order and self.params.dim == 1
 		return _bottleneck_line_half_width(self.params.size) if uses_large or uses_sort else 0
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		from lftomo.prep.stripe import _remove_dead_array, _remove_large_array, _remove_sort_array
+
 		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		for operation in self.params.order:
 			if operation == "remove_dead_vo":
@@ -211,6 +220,8 @@ class FourierWaveletStripeStage(SinogramStage):
 			return values
 
 	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+		from lftomo.prep.stripe import _remove_stripe_fw_array
+
 		level = self.params.level or int(np.ceil(np.log2(max(sinogram.shape))))
 		_remove_stripe_fw_array(
 			sinogram, level=level, wname=self.params.wname,

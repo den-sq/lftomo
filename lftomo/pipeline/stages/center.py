@@ -9,8 +9,6 @@ from typing import Literal
 
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 import numpy as np
-from skimage.measure import shannon_entropy
-import tifffile as tf
 
 from lftomo.pipeline.core import (
 	PipelineState,
@@ -208,6 +206,7 @@ class EntropyLocalCenterStage(Stage):
 		diagnostic_root = self._diagnostic_root(state) if self.params.diagnostic_images else None
 
 		import tomopy
+		from skimage.measure import shannon_entropy
 
 		searches = []
 		all_candidates = []
@@ -248,6 +247,8 @@ class EntropyLocalCenterStage(Stage):
 						diagnostic_root, source_slice, search,
 						candidate_index, float(center),
 					)
+					import tifffile as tf
+
 					tf.imwrite(path, np.asarray(reconstruction[0], dtype=np.float32))
 					diagnostic_files.append(path)
 			entropies_array = np.asarray(entropies, dtype=np.float64)

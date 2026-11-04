@@ -6,10 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from natsort import natsorted
-import h5py
 import numpy as np
-import tifffile as tf
 from pydantic import Field, model_validator
 
 from lftomo.angles import (
@@ -29,7 +26,6 @@ from lftomo.config import (
 )
 from lftomo.pipeline.core import PipelineState, Stage, StageContract, StageParams
 from lftomo.pipeline.domains import DataDomain
-from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
 from lftomo.util.window import TomoWindow
 
@@ -185,6 +181,8 @@ def probe_source_metadata(scan, stage: Stage) -> SourceMetadata:
 
 	source = scan.projections
 	if isinstance(stage, HDF5DxchangeReadStage):
+		import h5py
+
 		if not isinstance(source, HDF5DxchangeProjections):
 			raise TypeError("read.hdf5_dxchange requires HDF5DxchangeProjections scan metadata")
 		with h5py.File(source.path, "r") as handle:
@@ -197,6 +195,8 @@ def probe_source_metadata(scan, stage: Stage) -> SourceMetadata:
 				scan, stage, shape=data.shape, dtype=data.dtype, hdf5_handle=handle,
 			)
 	if isinstance(stage, TIFFStackReadStage):
+		import tifffile as tf
+
 		if not isinstance(source, TIFFStackProjections):
 			raise TypeError("read.tiff_stack requires TIFFStackProjections scan metadata")
 		files = stage._source_files(source)
@@ -270,6 +270,8 @@ class HDF5DxchangeReadStage(Stage):
 		)
 
 	def run(self, state: PipelineState) -> PipelineState:
+		import h5py
+
 		if state.backend.name != "numpy":
 			raise TypeError("HDF5DxchangeReadStage currently requires the NumPy backend")
 		source = state.scan.projections
@@ -390,6 +392,8 @@ class TIFFStackReadStage(Stage):
 		return replace(cls.contract, produces=ProjOrder if params.order == "projection" else SinoOrder)
 
 	def _source_files(self, source: TIFFStackProjections) -> list[Path]:
+		from natsort import natsorted
+
 		path = Path(source.path)
 		pattern = self.params.pattern or source.pattern
 		files = natsorted(path.glob(pattern)) if path.is_dir() else [path]
@@ -398,6 +402,8 @@ class TIFFStackReadStage(Stage):
 		return files
 
 	def run(self, state: PipelineState) -> PipelineState:
+		from lftomo.util.io import distribute_tiff_read, distribute_tiff_sinogram_read
+
 		if state.backend.name != "numpy":
 			raise TypeError("TIFFStackReadStage currently requires the NumPy backend")
 		if not isinstance(state.scan.projections, TIFFStackProjections):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-import cv2
 import numpy as np
 from pydantic import Field
 
@@ -36,7 +35,7 @@ class BilateralFilterStage(ProjectionStage):
 		sigma_color: float = Field(default=1, gt=0)
 		sigma_space: float = Field(default=1, gt=0)
 		enabled: bool = True
-		border_type: int = cv2.BORDER_DEFAULT
+		border_type: int = 4  # OpenCV BORDER_DEFAULT; keep schema imports lightweight.
 
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
@@ -53,6 +52,8 @@ class BilateralFilterStage(ProjectionStage):
 			return None
 		if image.dtype != np.dtype(np.float32):
 			raise TypeError("filter.bilateral requires the canonical float32 work dtype")
+		import cv2
+
 		return cv2.bilateralFilter(
 			image,
 			self.params.diameter,

@@ -238,7 +238,7 @@ def test_entropy_local_selects_lowest_entropy_candidate(monkeypatch):
 	monkeypatch.setattr("tomopy.recon", recon)
 	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
 	monkeypatch.setattr(
-		"lftomo.pipeline.stages.center.shannon_entropy",
+		"skimage.measure.shannon_entropy",
 		lambda data: abs(float(np.mean(data)) - 4),
 	)
 	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
@@ -268,7 +268,7 @@ def test_entropy_local_expands_from_boundary_and_updates_current_center(monkeypa
 	monkeypatch.setattr("tomopy.recon", recon)
 	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
 	monkeypatch.setattr(
-		"lftomo.pipeline.stages.center.shannon_entropy",
+		"skimage.measure.shannon_entropy",
 		lambda data: abs(float(np.mean(data)) - 6),
 	)
 	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
@@ -295,7 +295,7 @@ def test_entropy_local_stops_at_expansion_cap(monkeypatch):
 	)
 	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
 	monkeypatch.setattr(
-		"lftomo.pipeline.stages.center.shannon_entropy",
+		"skimage.measure.shannon_entropy",
 		lambda data: -float(np.mean(data)),
 	)
 	result = Pipeline([create_stage(config)]).run(_state(working, [config]))
@@ -321,7 +321,7 @@ def test_entropy_local_stops_when_the_same_candidate_remains_at_a_boundary(monke
 	)
 	monkeypatch.setattr("tomopy.circ_mask", lambda data, **_kwargs: data)
 	monkeypatch.setattr(
-		"lftomo.pipeline.stages.center.shannon_entropy",
+		"skimage.measure.shannon_entropy",
 		lambda data: abs(float(np.mean(data)) - 5),
 	)
 	result = Pipeline([create_stage(config)]).run(_state(working, [config]))

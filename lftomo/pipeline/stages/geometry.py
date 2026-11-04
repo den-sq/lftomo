@@ -7,7 +7,6 @@ from typing import Literal
 
 from pydantic import Field, TypeAdapter, model_validator
 
-import cv2
 import numpy as np
 from scipy.ndimage import shift
 
@@ -45,17 +44,17 @@ def _array(state: PipelineState, name: str) -> np.ndarray:
 
 
 _INTERPOLATION = {
-	"nearest": cv2.INTER_NEAREST,
-	"linear": cv2.INTER_LINEAR,
-	"cubic": cv2.INTER_CUBIC,
-	"lanczos": cv2.INTER_LANCZOS4,
+	"nearest": "INTER_NEAREST",
+	"linear": "INTER_LINEAR",
+	"cubic": "INTER_CUBIC",
+	"lanczos": "INTER_LANCZOS4",
 }
 
 _BORDER_MODE = {
-	"constant": cv2.BORDER_CONSTANT,
-	"edge": cv2.BORDER_REPLICATE,
-	"reflect": cv2.BORDER_REFLECT_101,
-	"symmetric": cv2.BORDER_REFLECT,
+	"constant": "BORDER_CONSTANT",
+	"edge": "BORDER_REPLICATE",
+	"reflect": "BORDER_REFLECT_101",
+	"symmetric": "BORDER_REFLECT",
 }
 
 
@@ -69,6 +68,8 @@ def transform_affine_projection(
 	target: np.ndarray | None = None,
 ) -> np.ndarray:
 	"""Return one fused affine projection for serial or process dispatch."""
+
+	import cv2
 
 	if stage.params.movement_enabled and (stage.params.movement_y != 0 or stage.params.movement_x != 0):
 		fraction = (
@@ -85,7 +86,7 @@ def transform_affine_projection(
 		target = np.empty((row_count, width), dtype=image.dtype)
 	cv2.copyMakeBorder(
 		image, 0, 0, stage.params.pad_x, stage.params.pad_x,
-		_BORDER_MODE[stage.params.pad_mode], dst=target, value=0,
+		getattr(cv2, _BORDER_MODE[stage.params.pad_mode]), dst=target, value=0,
 	)
 	if stage.params.skew_degrees != 0:
 		width = target.shape[1]
@@ -97,7 +98,7 @@ def transform_affine_projection(
 		)
 		matrix = cv2.getRotationMatrix2D(center, stage.params.skew_degrees, 1.0)
 		try:
-			interpolation = _INTERPOLATION[stage.params.interpolation]
+			interpolation = getattr(cv2, _INTERPOLATION[stage.params.interpolation])
 		except KeyError as error:
 			raise ValueError(
 				f"unknown skew interpolation {stage.params.interpolation!r}"
@@ -146,6 +147,8 @@ class SkewCorrectStage(Stage):
 		layout = type(state.buffer_spec.shape)
 		if not self.params.enabled or self.params.degrees == 0:
 			return state
+		import cv2
+
 		height = data.shape[layout.axis_of("Y")]
 		width = data.shape[layout.axis_of("X")]
 		center = (
@@ -160,7 +163,7 @@ class SkewCorrectStage(Stage):
 				image,
 				matrix,
 				(width, height),
-				flags=_INTERPOLATION[self.params.interpolation],
+				flags=getattr(cv2, _INTERPOLATION[self.params.interpolation]),
 			)
 		return state
 

@@ -150,19 +150,17 @@ def test_plan_time_probe_rejects_detector_header_mismatch(tmp_path):
 
 
 def test_plan_time_probe_opens_the_source_once(tmp_path, monkeypatch):
-	import lftomo.pipeline.stages.read as read_module
-
 	path = tmp_path / "scan.h5"
 	_write(path, np.ones((2, 3, 3), dtype=np.uint16))
 	config = StageConfig(kind="read", algorithm="hdf5_dxchange")
-	original_file = read_module.h5py.File
+	original_file = h5py.File
 	opens = []
 
 	def counted_file(*args, **kwargs):
 		opens.append(args[0])
 		return original_file(*args, **kwargs)
 
-	monkeypatch.setattr(read_module.h5py, "File", counted_file)
+	monkeypatch.setattr(h5py, "File", counted_file)
 	dataset = resolve_streaming_plan(
 		[create_stage(config)], _state(path, 2, 3, config).scan,
 	)

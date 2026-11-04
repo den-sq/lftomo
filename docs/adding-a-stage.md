@@ -92,6 +92,10 @@ constructor validates the supplied parameters into `stage.params` and resolves
 there is no second copy on the Stage. Inspect the schema with
 `SinogramScaleStage.Params.model_json_schema()`.
 
+Configuration validation imports the Stage registry to read these models.
+Keep numerical engines and I/O dependencies inside the methods that use them,
+so loading parameters and inspecting schemas works in the lightweight environment.
+
 Keep one class-level contract when parameters do not change its facts, as
 above. For parameter-dependent facts, override the `contract_for` classmethod
 and return `dataclasses.replace(cls.contract, ...)` using the validated model.

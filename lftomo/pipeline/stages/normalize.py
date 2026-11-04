@@ -30,7 +30,6 @@ from lftomo.pipeline.core import (
 	commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.prep.flat import _weighted_normalize_projection
 from lftomo.storage import buffer_view
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
 
@@ -142,6 +141,8 @@ class WeightedNormalizeStage(Stage):
 
 
 	def run(self, state: PipelineState) -> PipelineState:
+		from lftomo.prep.flat import _weighted_normalize_projection
+
 		if state.backend.name != "numpy":
 			raise TypeError("WeightedNormalizeStage currently requires the NumPy backend")
 

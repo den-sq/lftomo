@@ -6,8 +6,6 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import numpy as np
-import tifffile as tf
-import h5py
 from pydantic import Field
 
 from lftomo.pipeline.core import (
@@ -19,7 +17,6 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer
-from lftomo.util.io import np_convert
 from lftomo.util.shapes import IntIter, ReconOrder, ReverseReconOrder, Y
 
 
@@ -41,6 +38,9 @@ _OUTPUT_DTYPES = {
 
 def _write_array_slice(array: np.ndarray, path: Path, dtype: np.dtype) -> None:
 	"""Write one independent slice; suitable for multiprocessing workers."""
+	import tifffile as tf
+	from lftomo.util.io import np_convert
+
 	values = array.astype(np.float32, copy=False) if dtype == np.dtype(np.float32) else np_convert(dtype, array)
 	tf.imwrite(path, values)
 
@@ -162,6 +162,8 @@ class HDF5VolumeWriteStage(Stage):
 		return path if path.suffix.lower() in (".h5", ".hdf5") else path / "reconstruction.h5"
 
 	def run(self, state: PipelineState) -> PipelineState:
+		import h5py
+
 		if state.backend.name != "numpy":
 			raise TypeError("HDF5VolumeWriteStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)

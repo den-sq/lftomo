@@ -49,7 +49,7 @@ def test_bilateral_stage_is_registered_and_filters_each_projection(monkeypatch):
 	assert STAGE_REGISTRY["filter.bilateral"] is BilateralFilterStage
 	assert len(calls) == 3
 	assert all(call[0] == np.float32 for call in calls)
-	assert all(call[1:4] == (5, 2, 3) and call[5] for call in calls)
+	assert all(call[1:5] == (5, 2, 3, cv2.BORDER_DEFAULT) and call[5] for call in calls)
 	assert result.working_array is working
 	assert result.working_array.dtype == np.float32
 	np.testing.assert_array_equal(working, 2)
