@@ -23,6 +23,7 @@ nav:
  - API reference:
    - Configuration models: api/config.md
    - Pipeline: api-pipeline.md
+   - Adding a Stage: adding-a-stage.md
 
 plugins:
   - mkdocs-jupyter

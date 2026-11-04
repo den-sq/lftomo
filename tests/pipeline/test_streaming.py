@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import h5py
@@ -16,11 +17,16 @@ from lftomo.pipeline import (
 	resolve_streaming_plan,
 )
 from lftomo.pipeline.stages import (
+	BetaScaleStage,
 	BilateralFilterStage,
+	BronnikovAidedCorrectionFilterStage,
+	BronnikovAidedCorrectionStage,
 	HelicalIndexRemapStage,
 	MovementCorrectStage,
 	NegativeLogStage,
 	PaganinFilterStage,
+	PaganinPhaseAbsorptionStage,
+	PaganinStage,
 	create_stage,
 )
 from lftomo.prep.phase import _phase_pad
@@ -105,6 +111,41 @@ def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent(caplog):
 	assert dataset.pad_after.Y == _phase_pad(8, 1e-4, 10, 20)
 	assert "phase.paganin_filter" in caplog.text
 	assert "whole-volume equivalence" in caplog.text
+
+
+@pytest.mark.parametrize("stage", [
+	PaganinFilterStage(),
+	PaganinStage(),
+	PaganinPhaseAbsorptionStage(),
+	BronnikovAidedCorrectionFilterStage(alpha=2.0),
+	BronnikovAidedCorrectionStage(alpha=2.0),
+	create_stage(StageConfig(kind="phase", algorithm="bronnikov_aided", params={"alpha": 2.0})),
+	PaganinStage(enabled=False),
+	BronnikovAidedCorrectionStage(alpha=2.0, enabled=False),
+])
+def test_fft_stage_warning_is_preserved_and_only_emitted_for_multiple_windows(stage, caplog):
+	resolve_streaming_plan([stage], _scan(), WindowConfig())
+	assert "FFT-extent-sensitive" not in caplog.text
+	resolve_streaming_plan([stage], _scan(), WindowConfig(rows=4))
+	assert "FFT-extent-sensitive" in caplog.text
+	assert stage.name in caplog.text
+
+
+def test_fft_warning_uses_instance_contract_and_deduplicates_new_stage_names(caplog):
+	stage = PaganinFilterStage()
+	stage.name = "phase.new_fft_filter"
+	resolve_streaming_plan(
+		[stage, stage, NegativeLogStage(), BetaScaleStage()], _scan(), WindowConfig(rows=4),
+	)
+	assert caplog.text.count("phase.new_fft_filter") == 1
+	assert "phase.negative_log" not in caplog.text
+	assert "phase.beta_scale" not in caplog.text
+
+	caplog.clear()
+	stage.name = "phase.paganin_filter"
+	stage.contract = replace(stage.contract, fft_extent_sensitive=False)
+	resolve_streaming_plan([stage], _scan(), WindowConfig(rows=4))
+	assert "FFT-extent-sensitive" not in caplog.text
 
 
 def test_full_axis_contract_rejects_silent_window_degradation():

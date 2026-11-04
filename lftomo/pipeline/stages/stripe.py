@@ -6,7 +6,6 @@ import numpy as np
 
 from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	BufferSpec,
 	Locality,
 	PipelineState,
 	RuntimeRequirement,
@@ -14,6 +13,7 @@ from lftomo.pipeline.core import (
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.pipeline.execution import run_sinogram_stage
 from lftomo.pipeline.runtime import tomopy_requirement
 from lftomo.prep.stripe import (
 	_bottleneck_line_half_width,
@@ -28,22 +28,6 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 VO_FLOAT_WORK_ARTIFACT = "_vo_float_work"
 VO_INDEX_WORK_ARTIFACT = "_vo_index_work"
 VO_MEDIAN_PAD_WORK_ARTIFACT = "_vo_median_pad_work"
-
-
-def _scope_vo_work_to_unit(
-	state: PipelineState, unit, local_index: tuple[slice, ...],
-) -> None:
-	"""Bind bounded-segment scratch handles to one iterator-produced row slice."""
-
-	from lftomo.pipeline.execution import _unit_handle
-
-	for key in (
-		VO_FLOAT_WORK_ARTIFACT, VO_INDEX_WORK_ARTIFACT, VO_MEDIAN_PAD_WORK_ARTIFACT,
-	):
-		if key in state.artifacts:
-			state.artifacts[key] = _unit_handle(
-				state.artifacts[key], unit, local_index,
-			)
 
 
 def _vo_work_planes(
@@ -93,29 +77,6 @@ def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> Stag
 	)
 
 
-def _run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
-	if state.backend.name != "numpy":
-		raise TypeError(f"{stage.name} currently requires the NumPy backend")
-	data = np.asarray(state.working_array)
-	layout = type(state.buffer_spec.shape)
-	if data.ndim != 3:
-		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
-	from lftomo.pipeline.execution import _buffer_units, _unit_index
-
-	for unit, local_index in _buffer_units(state, "Y"):
-		row_data = data[_unit_index(unit, local_index, state.buffer_spec.shape)]
-		row_state = state.with_array(
-			row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
-		)
-		row_state.artifacts = state.artifacts
-		row_state.source_window = unit
-		sinogram = row_data[layout.point_index(Y=0)]
-		result = stage.run_sinogram(sinogram, row_state)
-		if result is not None and result is not sinogram:
-			sinogram[...] = result
-	return state
-
-
 class VoSortStripeStage(Stage):
 	name = "stripe.vo_sort"
 	contract = _contract()
@@ -131,7 +92,7 @@ class VoSortStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		return _run_sinogram_stage(self, state)
+		return run_sinogram_stage(self, state)
 
 	@property
 	def vo_line_median_half_width(self) -> int:
@@ -160,7 +121,7 @@ class VoDeadStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		return _run_sinogram_stage(self, state)
+		return run_sinogram_stage(self, state)
 
 	@property
 	def vo_line_median_half_width(self) -> int:
@@ -193,7 +154,7 @@ class VoLargeStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		return _run_sinogram_stage(self, state)
+		return run_sinogram_stage(self, state)
 
 	@property
 	def vo_line_median_half_width(self) -> int:
@@ -235,7 +196,7 @@ class VoFamilyStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		return _run_sinogram_stage(self, state)
+		return run_sinogram_stage(self, state)
 
 	@property
 	def vo_line_median_half_width(self) -> int:
@@ -294,7 +255,7 @@ class FourierWaveletStripeStage(Stage):
 		return cls(**config.params)
 
 	def run(self, state: PipelineState) -> PipelineState:
-		return _run_sinogram_stage(self, state)
+		return run_sinogram_stage(self, state)
 
 	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
 		level = self.level or int(np.ceil(np.log2(max(sinogram.shape))))

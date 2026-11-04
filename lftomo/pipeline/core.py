@@ -141,6 +141,11 @@ class StageContract:
 	required_pad: PadRequirement = PadRequirement()
 	requires_full_axes: tuple[str, ...] = ()
 	runtime_requirements: tuple[RuntimeRequirement, ...] = ()
+	# Whether changing the detector-row FFT extent changes this algorithm's
+	# numerical result. None means undeclared, so registry tests can catch a
+	# phase Stage that forgot to choose True or False. This describes the
+	# algorithm, including when a configured instance is disabled.
+	fft_extent_sensitive: bool | None = None
 
 	def __post_init__(self):
 		undeclared = set(self.managed_artifacts) - set(self.produces_artifacts)

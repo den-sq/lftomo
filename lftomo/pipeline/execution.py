@@ -122,6 +122,68 @@ def _unit_handle(
 	return buffer[_unit_index(unit, local_index, buffer.shape)]
 
 
+def _sinogram_states(
+	state: PipelineState,
+) -> Iterator[tuple[np.ndarray, PipelineState]]:
+	"""Bind each serial row view to its canonical unit geometry."""
+
+	data = np.asarray(state.working_array)
+	for unit, local_index in _buffer_units(state, "Y"):
+		row_data = data[_unit_index(unit, local_index, state.buffer_spec.shape)]
+		row_state = state.with_array(
+			row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
+		)
+		row_state.artifacts = state.artifacts
+		row_state.source_window = unit
+		yield row_data[state.layout.point_index(Y=0)], row_state
+
+
+def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
+	"""Apply a Stage's ``run_sinogram`` kernel to each detector-row unit.
+
+	The kernel receives a writable, potentially strided ``(Theta, X)`` view
+	and a row-scoped state whose ``BufferSpec`` and ``source_window`` come
+	from the canonical unit iterator. It may mutate the view and return
+	``None``, or return replacement values to copy into that same view.
+	Artifacts remain shared with the input state. The original state object is
+	returned after its array has been updated.
+
+	This is the serial implementation for a Stage's ``run`` method. It accepts
+	NumPy arrays and managed buffers without allocating a new working buffer
+	or creating an executor; pipeline bounded dispatch owns parallel execution.
+	"""
+
+	if state.backend.name != "numpy":
+		raise TypeError(f"{stage.name} currently requires the NumPy backend")
+	if np.asarray(state.working_array).ndim != 3:
+		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
+	for sinogram, row_state in _sinogram_states(state):
+		result = stage.run_sinogram(sinogram, row_state)
+		if result is not None and result is not sinogram:
+			sinogram[...] = result
+	return state
+
+
+def _scope_vo_work_to_unit(
+	state: PipelineState, unit: DataRef, local_index: tuple[slice, ...],
+) -> None:
+	"""Bind bounded-segment scratch handles to one iterator-produced row slice."""
+
+	from lftomo.pipeline.stages.stripe import (
+		VO_FLOAT_WORK_ARTIFACT,
+		VO_INDEX_WORK_ARTIFACT,
+		VO_MEDIAN_PAD_WORK_ARTIFACT,
+	)
+
+	for key in (
+		VO_FLOAT_WORK_ARTIFACT, VO_INDEX_WORK_ARTIFACT, VO_MEDIAN_PAD_WORK_ARTIFACT,
+	):
+		if key in state.artifacts:
+			state.artifacts[key] = _unit_handle(
+				state.artifacts[key], unit, local_index,
+			)
+
+
 def run_projection_kernel(
 	handle: ManagedBuffer,
 	stage: Stage,
@@ -162,8 +224,6 @@ def run_sinogram_chain_kernel(
 	"""Process one unit-shaped row through a complete bounded Stage chain."""
 
 	state = _worker_state(handle, payload)
-	from lftomo.pipeline.stages.stripe import _scope_vo_work_to_unit
-
 	_scope_vo_work_to_unit(state, payload.source_window, local_index)
 	data = np.asarray(state.working_array)
 	layout = state.layout
@@ -706,14 +766,7 @@ def run_bounded_sinogram_segment(
 						member_samples[member_index].append(elapsed)
 		else:
 			# ndarray-only hermetic execution is deliberately serial.
-			for unit, local_index in _buffer_units(state, "Y"):
-				row_data = data[_unit_index(unit, local_index, state.buffer_spec.shape)]
-				row_state = state.with_array(
-					row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
-				)
-				row_state.artifacts = state.artifacts
-				row_state.source_window = unit
-				working = row_data[state.layout.point_index(Y=0)]
+			for working, row_state in _sinogram_states(state):
 				for member_index, stage in enumerate(stages):
 					if checkpoint is not None:
 						checkpoint()

@@ -105,11 +105,7 @@ def resolve_streaming_plan(
 				f"{stage.name} requires the full Y axis and cannot run with "
 				f"window_rows={window_rows}; select whole-volume mode",
 			)
-		if multiple and stage.name in {
-			"phase.paganin", "phase.paganin_filter",
-			"phase.paganin_phase_absorption", "phase.bac",
-			"phase.bac_correction", "phase.bronnikov_aided",
-		} and stage.name not in seen_sensitive:
+		if multiple and stage.contract.fft_extent_sensitive and stage.name not in seen_sensitive:
 			sensitive.append(stage.name)
 			seen_sensitive.add(stage.name)
 	extra = _canonical_pad(config.extra_pad)
