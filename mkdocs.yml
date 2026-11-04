@@ -2,6 +2,10 @@ site_name: "lftomo: Library for Large-format Tomography Computation"
 
 nav:
  - Home: index.md
+ - Getting started:
+   - Quickstart: quickstart.md
+   - Configuration: configuration.md
+   - Using lftomo from Python: library.md
  - Plans:
    - Survey: recon-survey.md
    - Unification plan: recon-unification-plan.md
