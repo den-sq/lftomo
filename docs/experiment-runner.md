@@ -86,8 +86,11 @@ not divide it by candidate concurrency. Consequently, up to `max_concurrency ×
 process_workers` Stage workers may be live when concurrent candidates all reach
 process-dispatched Stages. The dry-run/preflight record and `preflight.completed` event log
 the resolved per-candidate budgets and their upper bound so operators can size both values
-deliberately. External engines may additionally manage their own threads within that
-per-candidate budget.
+deliberately. Engine-dispatched Stages cap their internal core counts at that
+per-candidate worker count. BAC projection workers instead share the available
+CPUs through a per-worker Torch thread ceiling, as described in
+[run-scoped dispatch](api-pipeline.md#run-scoped-dispatch); each candidate applies
+that ceiling independently.
 
 `peak_memory_bytes` is a true per-trial measurement when the executor supplies it.
 Otherwise the runner records the isolated trial process `RUSAGE_SELF` high-water mark.

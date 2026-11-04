@@ -43,8 +43,14 @@ class _WorkerState:
 	domain: Any
 
 
-def _worker_initializer() -> None:
-	"""Give each persistent worker a killable process group."""
+_WORKER_CPU_THREAD_LIMIT: int | None = None
+
+
+def _worker_initializer(cpu_thread_limit: int) -> None:
+	"""Set the run-owned native-thread ceiling and killable process group."""
+
+	global _WORKER_CPU_THREAD_LIMIT
+	_WORKER_CPU_THREAD_LIMIT = cpu_thread_limit
 
 	if hasattr(os, "setsid"):
 		try:
@@ -52,6 +58,23 @@ def _worker_initializer() -> None:
 		except OSError:
 			pass
 	signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
+def _limit_worker_cpu_threads(stage: Stage) -> None:
+	"""Cap a declared native pool only inside a run-owned process worker."""
+
+	if (
+		_WORKER_CPU_THREAD_LIMIT is None
+		or stage.contract.resources.cpu_thread_pool != "torch"
+	):
+		return
+	try:
+		import torch
+	except ImportError:
+		# The Stage's numerical boundary owns its actionable dependency error.
+		return
+	if torch.get_num_threads() > _WORKER_CPU_THREAD_LIMIT:
+		torch.set_num_threads(_WORKER_CPU_THREAD_LIMIT)
 
 
 def _worker_state(
@@ -221,6 +244,7 @@ def run_projection_kernel(
 	if isinstance(air_mask, ManagedBuffer) and air_mask.array().ndim == 3:
 		state.artifacts[air_mask_key] = _unit_handle(air_mask, unit, local_index)
 	before = set(state.artifacts)
+	_limit_worker_cpu_threads(stage)
 	result = stage.run(state)
 	return {
 		key: value for key, value in result.artifacts.items()
@@ -244,6 +268,7 @@ def run_sinogram_chain_kernel(
 	working = data[layout.point_index(Y=0)]
 	timings = []
 	for stage in stages:
+		_limit_worker_cpu_threads(stage)
 		started = time.perf_counter() if collect_timings else None
 		result = stage.run_sinogram(working, state)
 		if started is not None:
@@ -393,6 +418,7 @@ def run_affine_fill_kernel(
 ) -> None:
 	"""Transform one projection into a manager-owned fused output."""
 
+	_limit_worker_cpu_threads(stage)
 	from lftomo.pipeline.stages.geometry import transform_affine_projection
 
 	source_values = source.array()
@@ -462,10 +488,15 @@ class PipelineExecutor:
 	def _ensure_pool(self) -> ProcessPoolExecutor:
 		with self._lock:
 			if self._pool is None:
+				available_cpus = (
+					getattr(os, "process_cpu_count", os.cpu_count)()
+					or os.cpu_count() or 1
+				)
 				self._pool = ProcessPoolExecutor(
 					max_workers=self.max_workers,
 					mp_context=multiprocessing.get_context(self.context_name),
 					initializer=_worker_initializer,
+					initargs=(max(1, available_cpus // self.max_workers),),
 				)
 			return self._pool
 

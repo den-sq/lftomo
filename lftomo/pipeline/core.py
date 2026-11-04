@@ -28,6 +28,9 @@ class ResourceHints:
 
 	preferred_cpus: int | None = None
 	requires_gpu: bool = False
+	# Native CPU pool used inside a process-dispatched Stage. The executor
+	# owns its thread ceiling; the Stage declares only which pool it uses.
+	cpu_thread_pool: Literal["torch"] | None = None
 
 
 @dataclass(frozen=True)

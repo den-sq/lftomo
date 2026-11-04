@@ -11,6 +11,7 @@ from lftomo.pipeline.core import (
 	PadRequirement,
 	PipelineState,
 	ProjectionStage,
+	ResourceHints,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
@@ -403,12 +404,22 @@ class BronnikovAidedCorrectionStage(BronnikovAidedCorrectionFilterStage):
 	contract = replace(
 		BronnikovAidedCorrectionFilterStage.contract,
 		produces_domain=DataDomain.ATTENUATION,
+		resources=ResourceHints(cpu_thread_pool="torch"),
 		runtime_requirements=(_BAC_RUNTIME_REQUIREMENT,),
 	)
 
 	class Params(BronnikovAidedCorrectionFilterStage.Params):
 		invert: bool = False
 		device: str | None = None
+
+	@classmethod
+	def contract_for(cls, params: Params) -> StageContract:
+		contract = super().contract_for(params)
+		if params.enabled:
+			return contract
+		return replace(
+			contract, resources=replace(contract.resources, cpu_thread_pool=None),
+		)
 
 	def _correct(self, image: np.ndarray) -> np.ndarray:
 		try:

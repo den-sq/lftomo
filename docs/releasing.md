@@ -43,8 +43,14 @@ the base constructor resolves the instance contract. `SinogramStage` and
 `ProjectionStage` own the respective per-unit loops. See
 [Adding a Stage](adding-a-stage.md) for the updated example and schema API.
 
-Removing the contract field changes prefix-cache fingerprints and causes safe
-cold misses. Existing cached results need no migration.
+Enabled BAC now declares `ResourceHints.cpu_thread_pool="torch"`. Its process
+workers cap Torch intra-op threads at the available CPU count divided by the
+pool size, with a minimum of one, preserving lower existing settings. This
+makes worker threading explicit instead of depending on numerical-library
+import order. Parent/serial execution keeps its existing Torch settings.
+
+The contract field changes cause safe prefix-cache cold misses. Existing
+cached results need no migration.
 
 ## Cutting a release
 

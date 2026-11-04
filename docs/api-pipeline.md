@@ -116,10 +116,23 @@ prospective outputs before the parent commits the handoff.
 
 I/O remains on I/O-oriented paths. TIFF output submits `(handle, index, path,
 dtype)` tasks, while single-file HDF5 and Neuroglancer writers retain their
-bounded chunk behavior. TomoPy, ASTRA, torch, and GPU Stages remain serial at
-the orchestration level and receive an internal-core budget capped by the run's
-worker count. Plain ndarray-only execution is deliberately serial so hermetic
-tests never depend on process scheduling.
+bounded chunk behavior. Engine-dispatched Stages, including TomoPy, ASTRA and
+Torch super-resolution, remain serial at the orchestration level and receive
+an internal-core budget capped by the run's worker count. Plain ndarray-only
+execution is deliberately serial so hermetic tests never depend on process
+scheduling.
+
+BAC runs in projection workers and declares
+`ResourceHints(cpu_thread_pool="torch")`. When creating the pool, the executor
+sets a per-worker native-thread ceiling of
+`max(1, available_cpus // process_workers)`. Before an enabled BAC kernel runs,
+the worker lowers Torch's intra-op thread count to that ceiling if necessary.
+It preserves lower settings, including explicit `OMP_NUM_THREADS` or
+`MKL_NUM_THREADS` limits, and keeps the cap for that worker's lifetime. Torch
+loads only when a Stage declares that pool; disabled BAC declares none.
+Parent/serial Torch settings and other native libraries are unaffected. This
+limits each pipeline independently; concurrent experiment candidates retain
+their separate worker budgets.
 
 `Recon.process_workers` selects the pool size; the production default is at
 most four workers. `Recon.worker_timeout_seconds` applies a per-task deadline.
