@@ -8,13 +8,14 @@ are visible.
 
 ## Choose the execution pattern
 
-`StageContract.locality` describes independent numerical work. Dispatch is a
-separate declaration in `lftomo/pipeline/dispatch.py`:
+`SinogramStage` and `ProjectionStage` provide the unit-iteration adapters.
+Use plain `Stage` for orchestration or a whole-array operation. Dispatch remains
+a separate declaration in `lftomo/pipeline/dispatch.py`:
 
 | Work | Stage pattern | Dispatch group | Existing example |
 | --- | --- | --- | --- |
-| Independent projections | `Locality.PROJECTION`; `run(state)` handles the supplied projections, including a one-projection view. | `_PROJECTION_PROCESS` | `BilateralFilterStage` |
-| Independent detector rows | `Locality.SINOGRAM`; implement `run_sinogram` and delegate `run` to the public helper below. Declare `bounded_views_from=(ProjOrder,)` when projection-order row views are supported. | `_BOUNDED_PROCESS` | `VoSortStripeStage` |
+| Independent projections | Extend `ProjectionStage` and implement `run_projection(image, state)` for a `(Y, X)` view; the base handles Theta units. | `_PROJECTION_PROCESS` | `BilateralFilterStage` |
+| Independent detector rows | Extend `SinogramStage` and implement `run_sinogram(sinogram, state)` for a `(Theta, X)` view; the base handles Y units and declares bounded views from `ProjOrder`. | `_BOUNDED_PROCESS` | `VoSortStripeStage` |
 | A new output allocation | Allocate through `allocate_output`, fill it, then publish through `commit_output`; derive geometry from `BufferSpec` and `TomoWindow`. | `_OUT_OF_PLACE_PROCESS` for an existing supported fill path | `LayoutConvertStage` |
 | An external engine owns parallelism | `run(state)` calls the engine with its assigned core budget; declare runtime dependencies and resource needs. | `_ENGINE` | `GridrecStage` |
 
@@ -29,47 +30,38 @@ and parallel work. See [Pipeline API](api-pipeline.md) for lifecycle details.
 Create `lftomo/pipeline/stages/example_sino_scale.py`:
 
 ```python
+from dataclasses import replace
+
 import numpy as np
+from pydantic import Field
 
-from lftomo.config import StageConfig
-from lftomo.pipeline import (
-    DataDomain, Locality, PRESERVE, PipelineState, Stage, StageContract,
-    run_sinogram_stage,
-)
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.pipeline import DataDomain, PipelineState, SinogramStage, StageParams
 
 
-class SinogramScaleStage(Stage):
-    name = "example.sino_scale"
-    contract = StageContract(
-        accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
-        accepts_domain=(DataDomain.ATTENUATION,), produces_domain=PRESERVE,
-        locality=Locality.SINOGRAM, bounded_views_from=(ProjOrder,),
-        mutates_input=True, cacheable_prefix=True, window_axes=("Y",),
-    )
+class SinogramScaleStage(SinogramStage):
+	name = "example.sino_scale"
+	contract = replace(
+		SinogramStage.contract,
+		accepts_domain=(DataDomain.ATTENUATION,), cacheable_prefix=True,
+	)
 
-    def __init__(self, gain: float = 1.0):
-        self.gain = gain
+	class Params(StageParams):
+		gain: float = Field(default=1.0, gt=0)
 
-    @classmethod
-    def from_config(cls, config: StageConfig):
-        return cls(**config.params)
-
-    def run(self, state: PipelineState) -> PipelineState:
-        return run_sinogram_stage(self, state)
-
-    def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
-        sinogram *= self.gain
+	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
+		sinogram *= self.params.gain
 ```
 
-`run_sinogram_stage` calls the kernel once per detector row, with a `(Theta, X)`
-NumPy view and a row-scoped state. Its `BufferSpec` and `source_window` come from
+`SinogramStage.run` delegates to the public `run_sinogram_stage` adapter, which
+calls the kernel once per detector row with a `(Theta, X)` NumPy view and a
+row-scoped state. Its `BufferSpec` and `source_window` come from
 the canonical unit iterator; use them for geometry and source coordinates.
 The view may be strided. Mutate it and return `None`, or return a replacement
 array which the helper copies into that row. The helper returns the original
 parent state and creates no executor. `Pipeline` invokes the same kernel for
 bounded chains through its existing run-scoped executor; ndarray tests run
-serially. Stage authors need no private execution imports.
+serially. `ProjectionStage` similarly delegates to `run_projection_stage` for
+Theta units. Each base supplies `run`; authors implement the numerical kernel.
 
 Declare layouts and numerical domains separately: `ProjOrder` and `SinoOrder`
 describe memory axes; `RAW`, `TRANSMISSION`, `ATTENUATION`, and `RECON` describe
@@ -92,15 +84,23 @@ phase-name list to update. This property describes numerical sensitivity:
 prohibits splitting an axis. Extent sensitivity allows splitting with the
 warning that fixed-window parity does not imply whole-volume equivalence.
 
+The nested `Params` model owns configured values. `StageParams` rejects unknown
+keys and is immutable; use `Field` bounds and `Literal` choices for scalar
+constraints, and model validators for relationships between fields. The base
+constructor validates the supplied parameters into `stage.params` and resolves
+`stage.contract` through `contract_for(cls, params)`. Kernels read `self.params`;
+there is no second copy on the Stage. Inspect the schema with
+`SinogramScaleStage.Params.model_json_schema()`.
+
 Keep one class-level contract when parameters do not change its facts, as
-above. Planning, validation, and execution read `stage.contract` on the
-instance. Optional-dependency preflight reads
-`StageClass.contract.runtime_requirements` before constructing a Stage, so those
-requirements must be invariant and declared on the class. For parameter-based
-fields, derive the instance contract with
-`dataclasses.replace(type(self).contract, ...)` to retain the class declarations.
-The class contract supplies defaults; the instance contract owns the configured
-Stage's behavior.
+above. For parameter-dependent facts, override the `contract_for` classmethod
+and return `dataclasses.replace(cls.contract, ...)` using the validated model.
+The default returns the class declaration. Planning, validation, and execution
+read the resolved instance contract. Optional-dependency preflight reads
+`StageClass.contract.runtime_requirements` before construction, so those
+requirements stay invariant on the class. The base owns parameter validation
+and contract resolution; a Stage needs no constructor or `from_config` wrapper
+for the ordinary case.
 
 ## Register it and configure it
 
@@ -115,8 +115,11 @@ completeness is checked at import time.
    `_BOUNDED_PROCESS`. Each registry key belongs to exactly one dispatch group.
 
 The YAML entry below can then follow an attenuation-producing Stage in an
-existing reconstruction pipeline. `params` is passed to `from_config`; it
-remains a free dictionary.
+existing reconstruction pipeline. YAML keeps `params` as its serialized mapping;
+`StageConfig` validates supplied keys and values against the registered `Params`
+model. Required values may remain unresolved in a template until materialization.
+`create_stage` requires the complete parameter model and supplies the occurrence
+and dispatch metadata.
 
 ```yaml
 - kind: example
@@ -137,10 +140,10 @@ import numpy as np
 import pytest
 
 from lftomo.config import (
-    Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections,
+	Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections,
 )
 from lftomo.pipeline import (
-    BufferSpec, DataDomain, ExecutionKind, Pipeline, PipelineState,
+	BufferSpec, DataDomain, ExecutionKind, Pipeline, PipelineState,
 )
 from lftomo.pipeline.stages import SinogramScaleStage, create_stage
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -148,37 +151,37 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 def test_sinogram_scale(layout):
-    config = StageConfig(kind="example", algorithm="sino_scale", params={"gain": 2})
-    scan = Scan(
-        energy_keV=20, pixel_size_um=1, n_projections=4, degrees_per_fov=180,
-        detector=Detector(pixel_size_um=1, rows=3, columns=5),
-        acquisition=Acquisition(n_projections=4, rotation_end_deg=180),
-        projections=TIFFStackProjections(format="tiff_stack", path="unused"),
-    )
-    shape = scan.projection_shape().to(layout)
-    working = np.arange(60, dtype=np.float32).reshape(shape.as_tuple())
-    expected = working * 2
-    state = PipelineState(
-        working_array=working, scan=scan, recon=Recon(pipeline=[config]),
-        buffer_spec=BufferSpec(shape, working.dtype), domain=DataDomain.ATTENUATION,
-    )
-    stage = create_stage(config)
-    pipeline = Pipeline(
-        [stage], initial_layout=layout, initial_domain=state.domain,
-    )
+	config = StageConfig(kind="example", algorithm="sino_scale", params={"gain": 2})
+	scan = Scan(
+		energy_keV=20, pixel_size_um=1, n_projections=4, degrees_per_fov=180,
+		detector=Detector(pixel_size_um=1, rows=3, columns=5),
+		acquisition=Acquisition(n_projections=4, rotation_end_deg=180),
+		projections=TIFFStackProjections(format="tiff_stack", path="unused"),
+	)
+	shape = scan.projection_shape().to(layout)
+	working = np.arange(60, dtype=np.float32).reshape(shape.as_tuple())
+	expected = working * 2
+	state = PipelineState(
+		working_array=working, scan=scan, recon=Recon(pipeline=[config]),
+		buffer_spec=BufferSpec(shape, working.dtype), domain=DataDomain.ATTENUATION,
+	)
+	stage = create_stage(config)
+	pipeline = Pipeline(
+		[stage], initial_layout=layout, initial_domain=state.domain,
+	)
 
-    result = pipeline.run(state)
+	result = pipeline.run(state)
 
-    assert isinstance(stage, SinogramScaleStage)
-    assert result.working_array is working
-    assert result.layout is layout
-    assert result.domain is DataDomain.ATTENUATION
-    np.testing.assert_array_equal(working, expected)
-    expected_kind = (
-        ExecutionKind.BOUNDED_SINOGRAM if layout is ProjOrder
-        else ExecutionKind.SEQUENTIAL
-    )
-    assert pipeline.plan.segments[0].kind is expected_kind
+	assert isinstance(stage, SinogramScaleStage)
+	assert result.working_array is working
+	assert result.layout is layout
+	assert result.domain is DataDomain.ATTENUATION
+	np.testing.assert_array_equal(working, expected)
+	expected_kind = (
+		ExecutionKind.BOUNDED_SINOGRAM if layout is ProjOrder
+		else ExecutionKind.SEQUENTIAL
+	)
+	assert pipeline.plan.segments[0].kind is expected_kind
 ```
 
 Run the example and registration checks:

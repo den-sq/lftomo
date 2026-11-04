@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import Literal
+
+from pydantic import Field, TypeAdapter, model_validator
+
 import cv2
 import numpy as np
 from scipy.ndimage import shift
 
-from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	BufferSpec, Locality, PadRequirement, PipelineState, Stage, StageContract,
+	BufferSpec, PadRequirement, PipelineState, Stage, StageContract, StageParams,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -24,7 +28,6 @@ def _contract(*, resamples_detector: bool = False, mutates_input: bool = True,
 		prefers=ProjOrder,
 		accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 		produces_domain=PRESERVE,
-		locality=Locality.PROJECTION,
 		resamples_detector=resamples_detector,
 		mutates_input=mutates_input,
 		window_axes=("Y", "Theta"),
@@ -67,37 +70,37 @@ def transform_affine_projection(
 ) -> np.ndarray:
 	"""Return one fused affine projection for serial or process dispatch."""
 
-	if stage.movement_enabled and (stage.movement_y != 0 or stage.movement_x != 0):
+	if stage.params.movement_enabled and (stage.params.movement_y != 0 or stage.params.movement_x != 0):
 		fraction = (
 			source_window.pos.Theta
 			+ local_projection * source_window.step.Theta
 		) / physical_shape.Theta
 		image = shift(
 			image,
-			(stage.movement_y * fraction, stage.movement_x * fraction),
+			(stage.params.movement_y * fraction, stage.params.movement_x * fraction),
 			order=3, mode="constant", cval=0.0,
 		)
 	if target is None:
 		width = stage.output_shape(ProjOrder(1, row_count, image.shape[1])).X
 		target = np.empty((row_count, width), dtype=image.dtype)
 	cv2.copyMakeBorder(
-		image, 0, 0, stage.pad_x, stage.pad_x,
-		_BORDER_MODE[stage.pad_mode], dst=target, value=0,
+		image, 0, 0, stage.params.pad_x, stage.params.pad_x,
+		_BORDER_MODE[stage.params.pad_mode], dst=target, value=0,
 	)
-	if stage.skew_degrees != 0:
+	if stage.params.skew_degrees != 0:
 		width = target.shape[1]
 		left_padding = (target.shape[1] - image.shape[1]) // 2
 		center = (
-			(image.shape[1] / 2 if stage.center_px is None else stage.center_px)
+			(image.shape[1] / 2 if stage.params.center_px is None else stage.params.center_px)
 			+ left_padding,
-			row_count / 2 if stage.center_y_px is None else stage.center_y_px,
+			row_count / 2 if stage.params.center_y_px is None else stage.params.center_y_px,
 		)
-		matrix = cv2.getRotationMatrix2D(center, stage.skew_degrees, 1.0)
+		matrix = cv2.getRotationMatrix2D(center, stage.params.skew_degrees, 1.0)
 		try:
-			interpolation = _INTERPOLATION[stage.interpolation_name]
+			interpolation = _INTERPOLATION[stage.params.interpolation]
 		except KeyError as error:
 			raise ValueError(
-				f"unknown skew interpolation {stage.interpolation_name!r}"
+				f"unknown skew interpolation {stage.params.interpolation!r}"
 			) from error
 		# OpenCV does not support an affine transform whose source and destination
 		# are the same array. Its result is the one unavoidable library temporary;
@@ -114,42 +117,42 @@ class SkewCorrectStage(Stage):
 	name = "skew_correct.cv2_affine"
 	contract = _contract()
 
-	def __init__(self, degrees: float = 0.0, center_px: float | None = None,
-				interpolation: str = "cubic", enabled: bool = True,
-				skew_degrees: float | None = None, center_y_px: float | None = None):
-		if skew_degrees is not None:
-			if degrees != 0:
-				raise ValueError("provide degrees or skew_degrees, not both")
-			degrees = skew_degrees
-		try:
-			self.interpolation = _INTERPOLATION[interpolation]
-		except KeyError as error:
-			raise ValueError(f"unknown skew interpolation {interpolation!r}") from error
-		self.degrees = degrees
-		self.center_px = center_px
-		self.center_y_px = center_y_px
-		self.enabled = enabled
-		active = enabled and degrees != 0
-		self.contract = _contract(
-			resamples_detector=active, mutates_input=active,
-		)
+	class Params(StageParams):
+		degrees: float = 0.0
+		center_px: float | None = None
+		interpolation: Literal["nearest", "linear", "cubic", "lanczos"] = "cubic"
+		enabled: bool = True
+		center_y_px: float | None = None
+
+		@model_validator(mode="before")
+		@classmethod
+		def normalize_degrees(cls, value):
+			if isinstance(value, dict) and "skew_degrees" in value:
+				value = dict(value)
+				alias = value.pop("skew_degrees")
+				if alias is not None:
+					if value.get("degrees", 0) != 0:
+						raise ValueError("provide degrees or skew_degrees, not both")
+					value["degrees"] = alias
+			return value
 
 	@classmethod
-	def from_config(cls, config: StageConfig) -> "SkewCorrectStage":
-		return cls(**config.params)
+	def contract_for(cls, params: Params) -> StageContract:
+		active = params.enabled and params.degrees != 0
+		return replace(cls.contract, resamples_detector=active, mutates_input=active)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data = _array(state, self.name)
 		layout = type(state.buffer_spec.shape)
-		if not self.enabled or self.degrees == 0:
+		if not self.params.enabled or self.params.degrees == 0:
 			return state
 		height = data.shape[layout.axis_of("Y")]
 		width = data.shape[layout.axis_of("X")]
 		center = (
-			width / 2 if self.center_px is None else self.center_px,
-			height / 2 if self.center_y_px is None else self.center_y_px,
+			width / 2 if self.params.center_px is None else self.params.center_px,
+			height / 2 if self.params.center_y_px is None else self.params.center_y_px,
 		)
-		matrix = cv2.getRotationMatrix2D(center, self.degrees, 1.0)
+		matrix = cv2.getRotationMatrix2D(center, self.params.degrees, 1.0)
 		count = data.shape[layout.axis_of("Theta")]
 		for projection in range(count):
 			image = data[layout.point_index(Theta=projection)]
@@ -157,7 +160,7 @@ class SkewCorrectStage(Stage):
 				image,
 				matrix,
 				(width, height),
-				flags=self.interpolation,
+				flags=_INTERPOLATION[self.params.interpolation],
 			)
 		return state
 
@@ -168,38 +171,44 @@ class MovementCorrectStage(Stage):
 	name = "movement_correct.linear_shift"
 	contract = _contract()
 
-	def __init__(self, y: float = 0.0, x: float = 0.0, enabled: bool = True,
-				order: int = 3, mode: str = "constant", cval: float = 0.0,
-				movement_y: float | None = None, movement_x: float | None = None):
-		if movement_y is not None:
-			y = movement_y
-		if movement_x is not None:
-			x = movement_x
-		if not 0 <= order <= 5:
-			raise ValueError("movement interpolation order must be between 0 and 5")
-		self.y = y
-		self.x = x
-		self.enabled = enabled
-		self.order = order
-		self.mode = mode
-		self.cval = cval
-		active = enabled and (y != 0 or x != 0)
-		self.contract = _contract(
-			resamples_detector=active, mutates_input=active,
-			required_pad=PadRequirement(fixed=Proj(
-				Y=int(np.ceil(abs(y))) if active else 0,
-				X=int(np.ceil(abs(x))) if active else 0,
-			)),
-		)
+	class Params(StageParams):
+		y: float = 0.0
+		x: float = 0.0
+		enabled: bool = True
+		order: int = Field(default=3, ge=0, le=5)
+		mode: Literal[
+			"reflect", "grid-mirror", "constant", "grid-constant", "nearest",
+			"mirror", "grid-wrap", "wrap",
+		] = "constant"
+		cval: float = 0.0
+
+		@model_validator(mode="before")
+		@classmethod
+		def normalize_movement(cls, value):
+			if isinstance(value, dict):
+				value = dict(value)
+				for alias, canonical in (("movement_y", "y"), ("movement_x", "x")):
+					if alias in value:
+						amount = value.pop(alias)
+						if amount is not None:
+							value[canonical] = amount
+			return value
 
 	@classmethod
-	def from_config(cls, config: StageConfig) -> "MovementCorrectStage":
-		return cls(**config.params)
+	def contract_for(cls, params: Params) -> StageContract:
+		active = params.enabled and (params.y != 0 or params.x != 0)
+		return replace(
+			cls.contract, resamples_detector=active, mutates_input=active,
+			required_pad=PadRequirement(fixed=Proj(
+				Y=int(np.ceil(abs(params.y))) if active else 0,
+				X=int(np.ceil(abs(params.x))) if active else 0,
+			)),
+		)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data = _array(state, self.name)
 		layout = type(state.buffer_spec.shape)
-		if not self.enabled or (self.y == 0 and self.x == 0):
+		if not self.params.enabled or (self.params.y == 0 and self.params.x == 0):
 			return state
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
@@ -211,10 +220,10 @@ class MovementCorrectStage(Stage):
 			image = data[layout.point_index(Theta=projection)]
 			image[:] = shift(
 				image,
-				(self.y * fraction, self.x * fraction),
-				order=self.order,
-				mode=self.mode,
-				cval=self.cval,
+				(self.params.y * fraction, self.params.x * fraction),
+				order=self.params.order,
+				mode=self.params.mode,
+				cval=self.params.cval,
 			)
 		return state
 
@@ -225,94 +234,79 @@ class AffineSkewMovementStage(Stage):
 	name = "geometry.affine_skew_movement"
 	contract = _contract()
 
-	def __init__(self, skew_degrees: float = 0.0, movement_enabled: bool = False,
-				movement_y: float = 0.0, movement_x: float = 0.0,
-				center_px: float | None = None, interpolation: str = "cubic",
-				transition_to: str | None = None, pad_x: int = 0,
-				pad_mode: str = "edge", center_y_px: float | None = None,
-				tilt_radians: float | None = None):
-		if tilt_radians is not None:
-			if skew_degrees != 0:
-				raise ValueError("provide skew_degrees or tilt_radians, not both")
-			# recon_minimal's rotate_xy corrects the recorded detector tilt.
-			skew_degrees = float(np.degrees(-tilt_radians))
-		if pad_x < 0:
-			raise ValueError("fused affine pad_x cannot be negative")
-		if pad_mode not in {"edge", "constant", "reflect", "symmetric"}:
-			raise ValueError("unsupported fused affine pad_mode")
-		try:
-			target = {None: None, "projection": ProjOrder, "sinogram": SinoOrder}[
-				transition_to
-			]
-		except KeyError as error:
-			raise ValueError("transition_to must be 'projection' or 'sinogram'")
-		self.skew_degrees = skew_degrees
-		self.movement_enabled = movement_enabled
-		self.movement_y = movement_y
-		self.movement_x = movement_x
-		self.center_px = center_px
-		self.center_y_px = center_y_px
-		self.interpolation_name = interpolation
-		self.transition_to = transition_to
-		self.target_layout = target
-		self.pad_x = pad_x
-		self.pad_mode = pad_mode
-		self.movement = MovementCorrectStage(
-			enabled=movement_enabled,
-			movement_y=movement_y,
-			movement_x=movement_x,
-		)
-		self.skew = SkewCorrectStage(
-			skew_degrees=skew_degrees,
-			center_px=center_px,
-			center_y_px=center_y_px,
-			interpolation=interpolation,
-		)
-		active_resample = (
-			skew_degrees != 0
-			or (movement_enabled and (movement_y != 0 or movement_x != 0))
-		)
-		if target is None:
-			self.contract = _contract(
-				resamples_detector=active_resample,
-				mutates_input=active_resample,
-				required_pad=PadRequirement(fixed=Proj(
-					Y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
-					X=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
-				)),
-			)
-		else:
-			source = SinoOrder if target is ProjOrder else ProjOrder
-			self.contract = StageContract(
-				accepts=(source,), prefers=source, produces=target,
-				accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
-				produces_domain=PRESERVE, locality=Locality.VOLUME,
-				fused_transition=True, resamples_detector=active_resample,
-				mutates_input=False,
-				required_pad=PadRequirement(fixed=Proj(
-					Y=int(np.ceil(abs(movement_y))) if movement_enabled else 0,
-					X=int(np.ceil(abs(movement_x))) if movement_enabled else 0,
-				)),
-			)
+	class Params(StageParams):
+		skew_degrees: float = 0.0
+		movement_enabled: bool = False
+		movement_y: float = 0.0
+		movement_x: float = 0.0
+		center_px: float | None = None
+		interpolation: Literal["nearest", "linear", "cubic", "lanczos"] = "cubic"
+		transition_to: Literal["projection", "sinogram"] | None = None
+		pad_x: int = Field(default=0, ge=0)
+		pad_mode: Literal["edge", "constant", "reflect", "symmetric"] = "edge"
+		center_y_px: float | None = None
+
+		@model_validator(mode="before")
+		@classmethod
+		def normalize_tilt(cls, value):
+			if isinstance(value, dict) and "tilt_radians" in value:
+				value = dict(value)
+				tilt = value.pop("tilt_radians")
+				if tilt is not None:
+					if value.get("skew_degrees", 0) != 0:
+						raise ValueError("provide skew_degrees or tilt_radians, not both")
+					# recon_minimal's rotate_xy corrects the recorded detector tilt.
+					value["skew_degrees"] = float(np.degrees(-TypeAdapter(float).validate_python(tilt)))
+			return value
 
 	@classmethod
-	def from_config(cls, config: StageConfig) -> "AffineSkewMovementStage":
-		return cls(**config.params)
+	def contract_for(cls, params: Params) -> StageContract:
+		active = params.skew_degrees != 0 or (
+			params.movement_enabled and (params.movement_y != 0 or params.movement_x != 0)
+		)
+		pad = PadRequirement(fixed=Proj(
+			Y=int(np.ceil(abs(params.movement_y))) if params.movement_enabled else 0,
+			X=int(np.ceil(abs(params.movement_x))) if params.movement_enabled else 0,
+		))
+		if params.transition_to is None:
+			return replace(
+				cls.contract, resamples_detector=active, mutates_input=active,
+				required_pad=pad,
+			)
+		target = ProjOrder if params.transition_to == "projection" else SinoOrder
+		source = SinoOrder if target is ProjOrder else ProjOrder
+		return replace(
+			cls.contract, accepts=(source,), prefers=source, produces=target,
+			fused_transition=True, resamples_detector=active, mutates_input=False,
+			window_axes=(), required_pad=pad,
+		)
+
+	@property
+	def target_layout(self):
+		return self.contract.produces if self.contract.fused_transition else None
 
 	def output_window(self, source: TomoWindow) -> TomoWindow:
 		"""Return the published output canvas for the fused affine transition."""
 
-		return source.with_output_padding(X(self.pad_x))
+		return source.with_output_padding(X(self.params.pad_x))
 
 	def output_shape(self, source_shape) -> ProjOrder | SinoOrder:
 		"""Return the one canonical target-layout affine allocation shape."""
 
-		expanded = source_shape + X(self.pad_x) + X(self.pad_x)
+		expanded = source_shape + X(self.params.pad_x) + X(self.params.pad_x)
 		return expanded.to(self.target_layout)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if self.target_layout is None:
-			return self.skew.run(self.movement.run(state))
+			movement = MovementCorrectStage(
+				enabled=self.params.movement_enabled,
+				y=self.params.movement_y, x=self.params.movement_x,
+			)
+			skew = SkewCorrectStage(
+				degrees=self.params.skew_degrees, center_px=self.params.center_px,
+				center_y_px=self.params.center_y_px, interpolation=self.params.interpolation,
+			)
+			return skew.run(movement.run(state))
 		if state.backend.name != "numpy":
 			raise TypeError("geometry.affine_skew_movement currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
@@ -346,6 +340,6 @@ class AffineSkewMovementStage(Stage):
 			result.source_window = self.output_window(state.source_window)
 		result.artifacts["fused_layout_transition"] = {
 			"from": input_layout.__name__, "to": self.target_layout.__name__,
-			"pad_x": self.pad_x, "skew_degrees": self.skew_degrees,
+			"pad_x": self.params.pad_x, "skew_degrees": self.params.skew_degrees,
 		}
 		return result

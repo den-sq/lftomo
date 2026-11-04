@@ -18,6 +18,7 @@ from lftomo.pipeline.stages import (
 	WeightedNormalizeStage,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.window import DataRef
 from tests.sample_data import attach_source_geometry
 
 
@@ -97,26 +98,35 @@ def test_state_layout_drives_paganin_without_constructor_order():
 	np.testing.assert_allclose(projection, sinogram.transpose(1, 0, 2), rtol=1e-6, atol=1e-6)
 
 
-def test_serial_phase_uses_local_slice_iteration_for_strided_source(monkeypatch):
-	import lftomo.pipeline.stages.phase as phase_module
-
+def test_serial_phase_uses_canonical_units_for_strided_source(monkeypatch):
 	working = np.full((4, 2, 3), 0.5, dtype=np.float32)
 	current = state(working, ProjOrder)
 	attach_source_geometry(
 		current, theta_start=1, theta_stride=2, physical_theta=8,
 	)
-	indices = []
-	original = phase_module.SliceIter.__call__
+	units = []
+	original_units = DataRef.units
 
-	def record(self, position):
-		index = original(self, position)
-		indices.append(index)
-		return index
+	def record(self, axis):
+		for unit, index in original_units(self, axis):
+			units.append(unit)
+			yield unit, index
 
-	monkeypatch.setattr(phase_module.SliceIter, "__call__", record)
-	NegativeLogStage().run(current)
+	stage = NegativeLogStage()
+	kernel = stage.run_projection
 
-	assert indices == [ProjOrder.point_index(Theta=index) for index in range(4)]
+	def inspect(image, unit_state):
+		assert unit_state.source_window is units[-1]
+		assert unit_state.buffer_spec.shape is units[-1].shape
+		assert unit_state.artifacts is current.artifacts
+		assert np.shares_memory(image, working)
+		return kernel(image, unit_state)
+
+	monkeypatch.setattr(DataRef, "units", record)
+	monkeypatch.setattr(stage, "run_projection", inspect)
+	assert stage.run(current) is current
+	assert [unit.pos.Theta for unit in units] == [1, 3, 5, 7]
+	np.testing.assert_allclose(working, -np.log(0.5))
 
 
 def test_pipeline_preserves_projection_layout_through_manual_center():

@@ -93,18 +93,21 @@ def _sample_case(
 	units: np.ndarray,
 	prefix: str,
 ) -> tuple[StageConfig, dict[str, Any]]:
-	resolved = stage.model_copy(deep=True)
-	resolved.algorithm = case.algorithm
-	resolved.params.update(case.params)
+	document = stage.model_dump(mode="python")
+	document.update({
+		"algorithm": case.algorithm,
+		"params": {**document["params"], **case.params},
+		"sweep": None,
+	})
 	values: dict[str, Any] = {
 		f"{prefix}.case": case.name,
 		f"{prefix}.algorithm": case.algorithm,
 	}
 	for offset, name in enumerate(sorted(case.domains)):
 		value = _sample_domain(case.domains[name], float(units[offset]))
-		resolved.params[name] = value
+		document["params"][name] = value
 		values[f"{prefix}.{name}"] = value
-	resolved.sweep = None
+	resolved = StageConfig.model_validate(document)
 	return resolved, values
 
 

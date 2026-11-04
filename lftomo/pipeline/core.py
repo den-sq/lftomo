@@ -4,17 +4,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
-from enum import Enum, auto
 import time
 from typing import TYPE_CHECKING, Any, Callable, Literal
 import uuid
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer, StorageBackend, buffer_view
-from lftomo.util.shapes import DataShape, ProjOrder, Y
+from lftomo.util.shapes import DataShape, ProjOrder, SinoOrder, Y
 
 if TYPE_CHECKING:
 	from lftomo.pipeline.execution import PipelineExecutor
@@ -44,15 +44,6 @@ class RuntimeRequirement:
 	module: str
 	probe_attributes: tuple[str, ...] = ()
 	corrective_action: str = ""
-
-
-class Locality(Enum):
-	"""Smallest independent unit on which a Stage operates."""
-
-	PROJECTION = auto()
-	SINOGRAM = auto()
-	VOLUME = auto()
-	METADATA = auto()
 
 
 def _canonical_pad(value: DataShape) -> ProjOrder:
@@ -131,7 +122,6 @@ class StageContract:
 	accepts: tuple[type[Any], ...] | None = None
 	prefers: type[Any] | None = None
 	produces: type[Any] | ContractEffect | None = None
-	locality: Locality | None = None
 	bounded_views_from: tuple[type[Any], ...] = ()
 	fused_transition: bool = False
 	accepts_domain: tuple[DataDomain, ...] | None = None
@@ -386,11 +376,32 @@ def commit_output(
 	return result
 
 
+class StageParams(BaseModel):
+	"""Validated parameters owned by a constructed Stage.
+
+	Config dictionaries are input boundaries; runtime consumers use this model.
+	Models stay immutable so a resolved contract cannot become stale.
+	"""
+
+	model_config = ConfigDict(extra="forbid", frozen=True)
+
+
 class Stage(ABC):
 	"""Base class for sequential reconstruction pipeline Stages."""
 
 	name: str = "stage"
 	contract: StageContract = StageContract()
+	Params = StageParams
+
+	def __init__(self, **params):
+		self.params = self.Params.model_validate(params)
+		self.contract = type(self).contract_for(self.params)
+
+	@classmethod
+	def contract_for(cls, params: StageParams) -> StageContract:
+		"""Resolve parameter-dependent facts from the class declaration."""
+
+		return cls.contract
 
 	@abstractmethod
 	def run(self, state: PipelineState) -> PipelineState:
@@ -400,6 +411,42 @@ class Stage(ABC):
 		"""Return the source-coordinate window published after this Stage."""
 
 		return source
+
+
+class SinogramStage(Stage):
+	"""Stage with one kernel per detector row and canonical bounded views."""
+
+	contract = StageContract(
+		accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
+		produces_domain=PRESERVE, bounded_views_from=(ProjOrder,),
+		mutates_input=True, window_axes=("Y",),
+	)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		from lftomo.pipeline.execution import run_sinogram_stage
+
+		return run_sinogram_stage(self, state)
+
+	@abstractmethod
+	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> Any:
+		"""Mutate a row view or return replacement values for that row."""
+
+
+class ProjectionStage(Stage):
+	"""Stage with one kernel per projection, using canonical unit geometry."""
+
+	contract = StageContract(
+		accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
+	)
+
+	def run(self, state: PipelineState) -> PipelineState:
+		from lftomo.pipeline.execution import run_projection_stage
+
+		return run_projection_stage(self, state)
+
+	@abstractmethod
+	def run_projection(self, image: np.ndarray, state: PipelineState) -> Any:
+		"""Mutate a projection view or return replacement values for it."""
 
 
 StageObserver = Callable[

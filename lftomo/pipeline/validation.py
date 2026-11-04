@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from lftomo.pipeline.core import Backend, Locality, NumpyBackend, Stage
+from lftomo.pipeline.core import Backend, NumpyBackend, Stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.planning import (
 	Materialization,
@@ -254,7 +254,7 @@ def validate_pipeline(
 
 		materializations: list[Materialization] = []
 		if stage.name == "layout.convert":
-			reason = str(getattr(stage, "reason", "")).strip()
+			reason = str(getattr(stage.params, "reason", "")).strip()
 			if not reason:
 				raise ShapeCompatibilityError(
 					stage=stage_name, field="reason",
@@ -320,7 +320,6 @@ def validate_pipeline(
 		contract = stage.contract
 		bounded = (
 			step.input_layout is ProjOrder
-			and contract.locality is Locality.SINOGRAM
 			and ProjOrder in contract.bounded_views_from
 			and step.output_layout is step.input_layout
 			and step.output_domain is step.input_domain
@@ -343,7 +342,6 @@ def validate_pipeline(
 			next_contract = next_stage.contract
 			if not (
 				next_step.input_layout is ProjOrder
-				and next_contract.locality is Locality.SINOGRAM
 				and ProjOrder in next_contract.bounded_views_from
 				and next_step.output_layout is next_step.input_layout
 				and next_step.output_domain is next_step.input_domain

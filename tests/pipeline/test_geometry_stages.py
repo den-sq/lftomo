@@ -175,7 +175,7 @@ def test_recon_minimal_tilt_radians_is_converted_to_corrective_degrees():
 	stage = AffineSkewMovementStage(
 		transition_to="projection", tilt_radians=-0.003134796238244514,
 	)
-	assert stage.skew_degrees == pytest.approx(0.17961059408489755)
+	assert stage.params.skew_degrees == pytest.approx(0.17961059408489755)
 
 
 def test_nontransition_affine_preserves_aaa523_style_projection_layout():

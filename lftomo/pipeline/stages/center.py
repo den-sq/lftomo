@@ -5,16 +5,18 @@ from __future__ import annotations
 from dataclasses import replace
 import logging
 from pathlib import Path
+from typing import Literal
+
+from pydantic import Field, TypeAdapter, field_validator, model_validator
 import numpy as np
 from skimage.measure import shannon_entropy
 import tifffile as tf
 
-from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality,
 	PipelineState,
 	RuntimeRequirement,
 	Stage,
+	StageParams,
 	StageContract,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -29,7 +31,7 @@ def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> Stag
 	return StageContract(
 		produces=PRESERVE,
 		accepts=(SinoOrder,), prefers=SinoOrder,
-		bounded_views_from=(ProjOrder,), locality=Locality.SINOGRAM,
+		bounded_views_from=(ProjOrder,),
 		accepts_domain=(DataDomain.ATTENUATION,),
 		produces_domain=PRESERVE,
 		window_axes=("Y",),
@@ -76,42 +78,40 @@ class ManualCenterStage(Stage):
 	"""Provide a fixed center, optionally varying linearly with detector row."""
 
 	name = "center.manual"
-	contract = _contract()
+	contract = StageContract(
+		window_axes=("Y",), produces=PRESERVE, accepts=(ProjOrder, SinoOrder),
+		accepts_domain=(DataDomain.ATTENUATION,), produces_domain=PRESERVE,
+		produces_artifacts=("center",),
+	)
 
-	def __init__(
-		self,
-		value_px: float,
-		tilt: float = 0.0,
-		tilt_radians: float | None = None,
-		reference_y: float = 0.0,
-		find_center: bool = False,
-		pc_fallback: bool = False,
-		vo_fallback: bool = False,
-		center_dump: bool = False,
-		center_samples_per_job: int | None = None,
-	):
-		if tilt_radians is not None and tilt != 0:
-			raise ValueError("center.manual accepts either tilt or tilt_radians, not both")
-		if find_center or pc_fallback or vo_fallback:
-			raise ValueError("automatic center finding must use a center.vo or center.pc Stage")
-		if center_samples_per_job is not None and center_samples_per_job < 1:
-			raise ValueError("center_samples_per_job must be positive")
-		self.contract = StageContract(
-			window_axes=("Y",),
-			produces=PRESERVE,
-			accepts=(ProjOrder, SinoOrder),
-			accepts_domain=(DataDomain.ATTENUATION,),
-			produces_domain=PRESERVE,
-			produces_artifacts=("center",),
-		)
-		self.value_px = value_px
-		self.slope = np.tan(tilt_radians) if tilt_radians is not None else tilt
-		self.reference_y = reference_y
-		self.center_dump = center_dump
+	class Params(StageParams):
+		value_px: float
+		tilt: float = 0.0
+		reference_y: float = 0.0
+		find_center: Literal[False] = False
+		pc_fallback: Literal[False] = False
+		vo_fallback: Literal[False] = False
+		center_dump: bool = False
+		center_samples_per_job: int | None = Field(default=None, ge=1)
 
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "ManualCenterStage":
-		return cls(**config.params)
+		@model_validator(mode="wrap")
+		@classmethod
+		def normalize_tilt(cls, value, handler):
+			radians_input = False
+			if isinstance(value, dict) and "tilt_radians" in value:
+				value = dict(value)
+				tilt = value.pop("tilt_radians")
+				if tilt is not None:
+					if value.get("tilt", 0) != 0:
+						raise ValueError("center.manual accepts either tilt or tilt_radians, not both")
+					value["tilt"] = np.tan(TypeAdapter(float).validate_python(tilt))
+					radians_input = True
+			params = handler(value)
+			if radians_input:
+				# Preserve the original NumPy scalar promotion in the row arithmetic.
+				# A Python float would round some float32 centers differently.
+				object.__setattr__(params, "tilt", np.float64(params.tilt))
+			return params
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
@@ -120,76 +120,54 @@ class ManualCenterStage(Stage):
 		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("center.manual expects a three-dimensional tomography array")
-		if self.slope == 0:
-			return _store_center(state, self.value_px)
+		if self.params.tilt == 0:
+			return _store_center(state, self.params.value_px)
 		if state.source_window is None:
 			raise RuntimeError("center.manual tilt requires PipelineState.source_window")
 		y_size = data.shape[layout.axis_of("Y")]
 		source_y = int(state.source_window.pos.Y)
 		rows = source_y + np.arange(y_size, dtype=np.float32)
-		return _store_center(state, self.value_px + (rows - self.reference_y) * self.slope)
+		return _store_center(state, self.params.value_px + (rows - self.params.reference_y) * self.params.tilt)
 
 
 class EntropyLocalCenterStage(Stage):
 	"""Select the lowest-entropy gridrec result from a local center sweep."""
 
 	name = "center.entropy_local"
-	contract = _contract(
-		runtime_requirements=(tomopy_requirement("circ_mask", "recon"),),
+	contract = replace(
+		_contract(runtime_requirements=(tomopy_requirement("circ_mask", "recon"),)),
+		produces_artifacts=("center", "center_entropy"),
 	)
 
-	def __init__(
-		self,
-		start: float | None = None,
-		range: float = 5.0,
-		step: float = 0.25,
-		slice_index: int | None = None,
-		filter_name: str = "butterworth",
-		filter_parameters: list[float] | tuple[float, ...] = (0.2, 2),
-		ncore: int | None = None,
-		circle_mask_ratio: float = 1.0,
-		max_expansions: int = 3,
-		diagnostic_images: bool = False,
-		diagnostic_subdirectory: str = "center-diagnostics",
-	):
-		if range < 0:
-			raise ValueError("center.entropy_local range cannot be negative")
-		if step <= 0:
-			raise ValueError("center.entropy_local step must be positive")
-		if ncore is not None and ncore < 1:
-			raise ValueError("center.entropy_local ncore must be positive")
-		if not 0 < circle_mask_ratio <= 1:
-			raise ValueError("center.entropy_local circle_mask_ratio must be in (0, 1]")
-		if max_expansions < 0:
-			raise ValueError("center.entropy_local max_expansions cannot be negative")
-		diagnostic_path = Path(diagnostic_subdirectory)
-		if (
-			diagnostic_path.is_absolute()
-			or not diagnostic_path.parts
-			or ".." in diagnostic_path.parts
-		):
-			raise ValueError(
-				"center.entropy_local diagnostic_subdirectory must be a safe relative path"
-			)
-		self.start = start
-		self.range = range
-		self.step = step
-		self.slice_index = slice_index
-		self.filter_name = filter_name
-		self.filter_parameters = filter_parameters
-		self.ncore = ncore
-		self.circle_mask_ratio = circle_mask_ratio
-		self.max_expansions = max_expansions
-		self.diagnostic_images = diagnostic_images
-		self.diagnostic_subdirectory = diagnostic_path
-		produces = ("center", "center_entropy")
-		if diagnostic_images:
-			produces += ("output_files",)
-		self.contract = replace(type(self).contract, produces_artifacts=produces)
+	class Params(StageParams):
+		start: float | None = None
+		range: float = Field(default=5.0, ge=0)
+		step: float = Field(default=0.25, gt=0)
+		slice_index: int | None = Field(default=None, ge=0)
+		filter_name: str = "butterworth"
+		filter_parameters: tuple[float, ...] = (0.2, 2)
+		ncore: int | None = Field(default=None, ge=1)
+		circle_mask_ratio: float = Field(default=1.0, gt=0, le=1)
+		max_expansions: int = Field(default=3, ge=0)
+		diagnostic_images: bool = False
+		diagnostic_subdirectory: Path = Path("center-diagnostics")
+
+		@field_validator("diagnostic_subdirectory")
+		@classmethod
+		def relative_diagnostic_path(cls, value):
+			if value.is_absolute() or not value.parts or ".." in value.parts:
+				raise ValueError(
+					"center.entropy_local diagnostic_subdirectory must be a safe relative path"
+				)
+			return value
 
 	@classmethod
-	def from_config(cls, config: StageConfig) -> "EntropyLocalCenterStage":
-		return cls(**config.params)
+	def contract_for(cls, params: Params) -> StageContract:
+		if params.diagnostic_images:
+			return replace(
+				cls.contract, produces_artifacts=cls.contract.produces_artifacts + ("output_files",),
+			)
+		return cls.contract
 
 	def _diagnostic_root(self, state: PipelineState) -> Path:
 		output = state.recon.output_path
@@ -199,9 +177,9 @@ class EntropyLocalCenterStage(Stage):
 			)
 		output = Path(output)
 		if output.suffix.lower() in {".h5", ".hdf5"}:
-			root = output.parent / f"{output.stem}-{self.diagnostic_subdirectory}"
+			root = output.parent / f"{output.stem}-{self.params.diagnostic_subdirectory}"
 		else:
-			root = output / self.diagnostic_subdirectory
+			root = output / self.params.diagnostic_subdirectory
 		root.mkdir(parents=True, exist_ok=True)
 		return root
 
@@ -217,17 +195,17 @@ class EntropyLocalCenterStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		data, layout = _sinograms(state)
 		row_count = data.shape[layout.axis_of("Y")]
-		index = row_count // 2 if self.slice_index is None else self.slice_index
+		index = row_count // 2 if self.params.slice_index is None else self.params.slice_index
 		if not 0 <= index < row_count:
 			raise ValueError("center.entropy_local slice_index is outside the sinogram window")
 		if state.source_window is None:
 			raise RuntimeError("center.entropy_local requires PipelineState.source_window")
-		current_start = data.shape[layout.axis_of("X")] / 2 if self.start is None else self.start
+		current_start = data.shape[layout.axis_of("X")] / 2 if self.params.start is None else self.params.start
 		angles = _angles(state, data.shape[layout.axis_of("Theta")])
 		window = state.source_window.with_pad()
 		source_slice = int(window.pos.Y + index * window.step.Y)
 		sinogram = data[layout.point_index(Y=index)]
-		diagnostic_root = self._diagnostic_root(state) if self.diagnostic_images else None
+		diagnostic_root = self._diagnostic_root(state) if self.params.diagnostic_images else None
 
 		import tomopy
 
@@ -239,11 +217,11 @@ class EntropyLocalCenterStage(Stage):
 		termination = "cap-reached"
 		converged = False
 		selected_center = float(current_start)
-		for search in range(self.max_expansions + 1):
+		for search in range(self.params.max_expansions + 1):
 			candidates = np.arange(
-				current_start - self.range,
-				current_start + self.range + self.step / 2,
-				self.step,
+				current_start - self.params.range,
+				current_start + self.params.range + self.params.step / 2,
+				self.params.step,
 				dtype=np.float32,
 			)
 			entropies = []
@@ -254,15 +232,15 @@ class EntropyLocalCenterStage(Stage):
 					center=float(center),
 					sinogram_order=True,
 					algorithm="gridrec",
-					filter_name=self.filter_name,
-					filter_par=self.filter_parameters,
-					ncore=self.ncore,
+					filter_name=self.params.filter_name,
+					filter_par=self.params.filter_parameters,
+					ncore=self.params.ncore,
 				)
 				reconstruction = tomopy.circ_mask(
 					reconstruction,
 					axis=0,
-					ratio=self.circle_mask_ratio,
-					ncore=self.ncore,
+					ratio=self.params.circle_mask_ratio,
+					ncore=self.params.ncore,
 				)
 				entropies.append(float(shannon_entropy(reconstruction)))
 				if diagnostic_root is not None:
@@ -293,15 +271,15 @@ class EntropyLocalCenterStage(Stage):
 				termination = "converged"
 				converged = True
 				break
-			if len(candidates) == 1 or self.range == 0 or (
+			if len(candidates) == 1 or self.params.range == 0 or (
 				previous_boundary is not None and boundary != previous_boundary
 			):
 				termination = "boundary-persisted"
 				break
-			if search == self.max_expansions:
+			if search == self.params.max_expansions:
 				termination = "cap-reached"
 				break
-			current_start += -2 * self.range if boundary == "left" else 2 * self.range
+			current_start += -2 * self.params.range if boundary == "left" else 2 * self.params.range
 			previous_boundary = boundary
 		state.artifacts["center_entropy"] = {
 			"candidates": np.concatenate(all_candidates),
@@ -312,7 +290,7 @@ class EntropyLocalCenterStage(Stage):
 			"termination": termination,
 			"converged": converged,
 			"expansions": len(searches) - 1,
-			"max_expansions": self.max_expansions,
+			"max_expansions": self.params.max_expansions,
 			"selected_center": selected_center,
 			"diagnostic_files": diagnostic_files,
 		}
@@ -334,80 +312,46 @@ class VoCenterStage(Stage):
 		),
 	)
 
-	def __init__(
-		self,
-		ind: int | None = None,
-		smin: float = -50,
-		smax: float = 50,
-		srad: float = 6,
-		step: float = 0.25,
-		ratio: float = 0.5,
-		drop: int = 20,
-		ncore: int | None = None,
-		tilt_fit: str | None = None,
-		tilt_samples: int = 5,
-		fit_degree: int = 1,
-		tilt_outlier_sigma: float = 3.5,
-		tilt_max_iterations: int = 5,
-		tilt_min_inliers: int | None = None,
-		tilt_residual_cutoff_px: float | None = None,
-		tilt_qc_policy: str = "reject",
-		tilt_quantization_px: float | None = None,
-		fallback: str | None = None,
-		fallback_params: dict | None = None,
-	):
-		if tilt_fit not in (None, "polynomial"):
-			raise ValueError("center.vo tilt_fit must be 'polynomial' or omitted")
-		if tilt_samples < 2:
-			raise ValueError("center.vo tilt_samples must be at least two")
-		if fit_degree < 1:
-			raise ValueError("center.vo fit_degree must be positive")
-		if tilt_outlier_sigma <= 0:
-			raise ValueError("center.vo tilt_outlier_sigma must be positive")
-		if tilt_max_iterations < 1:
-			raise ValueError("center.vo tilt_max_iterations must be positive")
-		if tilt_min_inliers is not None and tilt_min_inliers < fit_degree + 1:
-			raise ValueError(
-				"center.vo tilt_min_inliers must exceed the polynomial degree"
-			)
-		if tilt_residual_cutoff_px is not None and tilt_residual_cutoff_px < 0:
-			raise ValueError("center.vo tilt_residual_cutoff_px cannot be negative")
-		if tilt_qc_policy not in ("reject", "force"):
-			raise ValueError("center.vo tilt_qc_policy must be 'reject' or 'force'")
-		if tilt_quantization_px is not None and tilt_quantization_px <= 0:
-			raise ValueError("center.vo tilt_quantization_px must be positive")
-		if fallback not in (None, "entropy_local"):
-			raise ValueError("center.vo fallback must be entropy_local or omitted")
-		self.ind = ind
-		self.kwargs = {
-			"smin": smin,
-			"smax": smax,
-			"srad": srad,
-			"step": step,
-			"ratio": ratio,
-			"drop": drop,
-			"ncore": ncore,
-		}
-		self.tilt_fit = tilt_fit
-		self.tilt_samples = tilt_samples
-		self.fit_degree = fit_degree
-		self.tilt_outlier_sigma = tilt_outlier_sigma
-		self.tilt_max_iterations = tilt_max_iterations
-		self.tilt_min_inliers = tilt_min_inliers
-		self.tilt_residual_cutoff_px = tilt_residual_cutoff_px
-		self.tilt_qc_policy = tilt_qc_policy
-		self.tilt_quantization_px = tilt_quantization_px
-		self.fallback = fallback
-		self.fallback_params = fallback_params or {}
+	class Params(StageParams):
+		ind: int | None = Field(default=None, ge=0)
+		smin: float = -50
+		smax: float = 50
+		srad: float = 6
+		step: float = 0.25
+		ratio: float = 0.5
+		drop: int = 20
+		ncore: int | None = Field(default=None, ge=1)
+		tilt_fit: Literal["polynomial"] | None = None
+		tilt_samples: int = Field(default=5, ge=2)
+		fit_degree: int = Field(default=1, ge=1)
+		tilt_outlier_sigma: float = Field(default=3.5, gt=0)
+		tilt_max_iterations: int = Field(default=5, ge=1)
+		tilt_min_inliers: int | None = None
+		tilt_residual_cutoff_px: float | None = Field(default=None, ge=0)
+		tilt_qc_policy: Literal["reject", "force"] = "reject"
+		tilt_quantization_px: float | None = Field(default=None, gt=0)
+		fallback: Literal["entropy_local"] | None = None
+		fallback_params: EntropyLocalCenterStage.Params = Field(
+			default_factory=EntropyLocalCenterStage.Params,
+		)
 
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "VoCenterStage":
-		return cls(**config.params)
+		@field_validator("fallback_params", mode="before")
+		@classmethod
+		def default_fallback_params(cls, value):
+			return {} if value is None else value
+
+		@model_validator(mode="after")
+		def enough_inliers(self):
+			if self.tilt_min_inliers is not None and self.tilt_min_inliers < self.fit_degree + 1:
+				raise ValueError("center.vo tilt_min_inliers must exceed the polynomial degree")
+			return self
 
 	def _find(self, sinogram: np.ndarray) -> float:
 		import tomopy
 
-		center = float(tomopy.find_center_vo(sinogram, **self.kwargs))
+		center = float(tomopy.find_center_vo(sinogram, **self.params.model_dump(
+			include={"smin", "smax", "srad", "step", "ratio", "drop", "ncore"},
+		)))
 		if not np.isfinite(center):
 			raise ValueError("center.vo returned a non-finite center")
 		return center
@@ -417,9 +361,9 @@ class VoCenterStage(Stage):
 	) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, bool]:
 		"""Iteratively reject center residuals using a median/MAD scale."""
 
-		minimum = self.tilt_min_inliers
+		minimum = self.params.tilt_min_inliers
 		if minimum is None:
-			minimum = min(len(rows), max(self.fit_degree + 1, 3))
+			minimum = min(len(rows), max(self.params.fit_degree + 1, 3))
 		if len(rows) < minimum:
 			raise ValueError(
 				f"center.vo tilt fit requires at least {minimum} unique sampled rows"
@@ -427,14 +371,14 @@ class VoCenterStage(Stage):
 		mask = np.ones(len(rows), dtype=bool)
 		clipping_limited = False
 		iterations = 0
-		for iterations in range(1, self.tilt_max_iterations + 1):
-			coefficients = np.polyfit(rows[mask], centers[mask], self.fit_degree)
+		for iterations in range(1, self.params.tilt_max_iterations + 1):
+			coefficients = np.polyfit(rows[mask], centers[mask], self.params.fit_degree)
 			residuals = centers - np.polyval(coefficients, rows)
 			inlier_residuals = residuals[mask]
 			residual_center = float(np.median(inlier_residuals))
 			deviations = np.abs(residuals - residual_center)
 			mad = float(np.median(np.abs(inlier_residuals - residual_center)))
-			threshold = max(1e-6, self.tilt_outlier_sigma * 1.4826 * mad)
+			threshold = max(1e-6, self.params.tilt_outlier_sigma * 1.4826 * mad)
 			updated = mask & (deviations <= threshold)
 			if np.count_nonzero(updated) < minimum:
 				clipping_limited = True
@@ -442,15 +386,15 @@ class VoCenterStage(Stage):
 			if np.array_equal(updated, mask):
 				break
 			mask = updated
-		coefficients = np.polyfit(rows[mask], centers[mask], self.fit_degree)
+		coefficients = np.polyfit(rows[mask], centers[mask], self.params.fit_degree)
 		residuals = centers - np.polyval(coefficients, rows)
 		return coefficients, residuals, mask, iterations, clipping_limited
 
 	def _tilt_center(self, state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
 		row_count = data.shape[layout.axis_of("Y")]
-		count = min(self.tilt_samples, row_count)
+		count = min(self.params.tilt_samples, row_count)
 		local_rows = np.unique(np.linspace(0, row_count - 1, count).round().astype(int))
-		if len(local_rows) <= self.fit_degree:
+		if len(local_rows) <= self.params.fit_degree:
 			raise ValueError("center.vo needs more sampled rows than the polynomial degree")
 		if state.source_window is None:
 			raise RuntimeError("center.vo tilt fit requires PipelineState.source_window")
@@ -466,9 +410,9 @@ class VoCenterStage(Stage):
 		evaluation_rows = window.pos.Y + np.arange(row_count) * window.step.Y
 		unquantized = np.polyval(coefficients, evaluation_rows)
 		center = unquantized
-		if self.tilt_quantization_px is not None:
+		if self.params.tilt_quantization_px is not None:
 			center = (
-				np.round(center / self.tilt_quantization_px) * self.tilt_quantization_px
+				np.round(center / self.params.tilt_quantization_px) * self.params.tilt_quantization_px
 			)
 		inlier_residuals = residuals[inliers]
 		residual_rms = float(np.sqrt(np.mean(np.square(inlier_residuals))))
@@ -477,13 +421,13 @@ class VoCenterStage(Stage):
 		if clipping_limited:
 			qc_reasons.append("outlier clipping would leave too few inliers")
 		if (
-			self.tilt_residual_cutoff_px is not None
-			and residual_rms > self.tilt_residual_cutoff_px
+			self.params.tilt_residual_cutoff_px is not None
+			and residual_rms > self.params.tilt_residual_cutoff_px
 		):
 			qc_reasons.append("inlier residual RMS exceeds cutoff")
 		qc_passed = not qc_reasons
 		status = "accepted" if qc_passed else (
-			"forced" if self.tilt_qc_policy == "force" else "rejected"
+			"forced" if self.params.tilt_qc_policy == "force" else "rejected"
 		)
 		state.artifacts["center_fit"] = {
 			"sampled_local_rows": local_rows,
@@ -495,19 +439,19 @@ class VoCenterStage(Stage):
 			"outlier_source_rows": source_rows[~inliers],
 			"residual_rms_px": residual_rms,
 			"residual_max_abs_px": residual_max,
-			"residual_cutoff_px": self.tilt_residual_cutoff_px,
+			"residual_cutoff_px": self.params.tilt_residual_cutoff_px,
 			"row_span": int(source_rows.max() - source_rows.min()),
-			"fit_degree": self.fit_degree,
-			"outlier_sigma": self.tilt_outlier_sigma,
+			"fit_degree": self.params.fit_degree,
+			"outlier_sigma": self.params.tilt_outlier_sigma,
 			"fit_iterations": iterations,
-			"quantization_px": self.tilt_quantization_px,
+			"quantization_px": self.params.tilt_quantization_px,
 			"unquantized_center": unquantized,
 			"qc_passed": qc_passed,
-			"qc_policy": self.tilt_qc_policy,
+			"qc_policy": self.params.tilt_qc_policy,
 			"qc_status": status,
 			"qc_reasons": qc_reasons,
 		}
-		if not qc_passed and self.tilt_qc_policy == "reject":
+		if not qc_passed and self.params.tilt_qc_policy == "reject":
 			raise ValueError("center.vo tilt fit rejected: " + "; ".join(qc_reasons))
 		return np.asarray(center, dtype=np.float32)
 
@@ -517,22 +461,22 @@ class VoCenterStage(Stage):
 			raise RuntimeError("center.vo requires PipelineState.source_window")
 		row_count = data.shape[layout.axis_of("Y")]
 		try:
-			if self.tilt_fit == "polynomial":
+			if self.params.tilt_fit == "polynomial":
 				center = self._tilt_center(state, data, layout)
 			else:
-				index = row_count // 2 if self.ind is None else self.ind
+				index = row_count // 2 if self.params.ind is None else self.params.ind
 				if not 0 <= index < row_count:
 					raise ValueError("center.vo ind is outside the sinogram window")
 				center = self._find(data[layout.point_index(Y=index)])
 		except (ValueError, RuntimeError, ArithmeticError) as error:
-			if self.fallback != "entropy_local":
+			if self.params.fallback != "entropy_local":
 				raise
 			LOGGER.warning(
 				"center.vo failed with %s; using center.entropy_local fallback",
 				error,
 				exc_info=True,
 			)
-			return EntropyLocalCenterStage(**self.fallback_params).run(state)
+			return EntropyLocalCenterStage(**self.params.fallback_params.model_dump()).run(state)
 		return _store_center(state, center)
 
 
@@ -540,25 +484,15 @@ class PhaseCorrelationCenterStage(Stage):
 	"""Find center from the first and last projections by phase correlation."""
 
 	name = "center.pc"
-	contract = _contract(
-		runtime_requirements=(tomopy_requirement("find_center_pc"),),
+	contract = replace(
+		_contract(runtime_requirements=(tomopy_requirement("find_center_pc"),)),
+		accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, bounded_views_from=(),
+		window_axes=(),
 	)
 
-	def __init__(self, tol: float = 0.5, rotc_guess: float | None = None):
-		if tol <= 0:
-			raise ValueError("center.pc tol must be positive")
-		self.tol = tol
-		self.rotc_guess = rotc_guess
-		self.contract = StageContract(
-			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
-			accepts_domain=(DataDomain.ATTENUATION,), produces_domain=PRESERVE,
-			locality=Locality.PROJECTION, produces_artifacts=("center",),
-			runtime_requirements=type(self).contract.runtime_requirements,
-		)
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "PhaseCorrelationCenterStage":
-		return cls(**config.params)
+	class Params(StageParams):
+		tol: float = Field(default=0.5, gt=0)
+		rotc_guess: float | None = None
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data, layout = _sinograms(state)
@@ -571,8 +505,8 @@ class PhaseCorrelationCenterStage(Stage):
 		center = tomopy.find_center_pc(
 			data[layout.point_index(Theta=0)],
 			data[layout.point_index(Theta=projection_count - 1)],
-			tol=self.tol,
-			rotc_guess=self.rotc_guess,
+			tol=self.params.tol,
+			rotc_guess=self.params.rotc_guess,
 		)
 		if not np.isfinite(center):
 			raise ValueError("center.pc returned a non-finite center")

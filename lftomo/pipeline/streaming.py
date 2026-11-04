@@ -44,17 +44,18 @@ def _read_source_window(
 ) -> TomoWindow:
 	"""Resolve the source selection declared by a read Stage."""
 
+	params = getattr(stage, "params", None)
 	return TomoWindow.from_bounds(
 		physical_shape,
 		y=(
-			getattr(stage, "y_start", 0),
-			physical_shape.Y if getattr(stage, "y_stop", None) is None else stage.y_stop,
+			getattr(params, "y_start", 0),
+			physical_shape.Y if getattr(params, "y_stop", None) is None else params.y_stop,
 		),
 		theta=(
-			getattr(stage, "theta_start", 0),
+			getattr(params, "theta_start", 0),
 			physical_shape.Theta
-			if getattr(stage, "theta_stop", None) is None else stage.theta_stop,
-			getattr(stage, "theta_stride", 1),
+			if getattr(params, "theta_stop", None) is None else params.theta_stop,
+			getattr(params, "theta_stride", 1),
 		),
 		dtype=dtype,
 	)

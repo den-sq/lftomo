@@ -8,7 +8,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState
-from lftomo.pipeline.core import Locality, Stage, StageContract
+from lftomo.pipeline.core import Stage, StageContract
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.pipeline.execution import (
 	PipelineExecutor, WorkerTimeoutError, run_bounded_sinogram_segment,
@@ -82,7 +82,7 @@ def _raise_deterministic_error():
 
 class _AddSinogramStage(Stage):
 	name = "test.add_sinogram"
-	contract = StageContract(locality=Locality.SINOGRAM)
+	contract = StageContract()
 
 	def run(self, state):
 		return state
@@ -144,10 +144,12 @@ def test_ndarray_bounded_segment_checks_cancellation_before_each_kernel():
 
 def test_engine_internal_core_budget_is_scoped_to_the_call(monkeypatch):
 	stage = VoCenterStage(ncore=7)
+	original_params = stage.params
+	original_contract = stage.contract
 	seen = []
 
 	def capture(state):
-		seen.append(stage.kwargs["ncore"])
+		seen.append(stage.params.ncore)
 		return state
 
 	monkeypatch.setattr(stage, "run", capture)
@@ -158,7 +160,9 @@ def test_engine_internal_core_budget_is_scoped_to_the_call(monkeypatch):
 	)
 	PipelineExecutor(2).run_stage(state, stage)
 	assert seen == [2]
-	assert stage.kwargs["ncore"] == 7
+	assert stage.params is original_params
+	assert stage.contract is original_contract
+	assert stage.params.ncore == 7
 
 
 def test_process_normalization_receives_only_handles_and_matches_serial(monkeypatch):

@@ -43,8 +43,8 @@ def test_all_center_algorithms_are_registered():
 	assert STAGE_REGISTRY["center.entropy_local"] is EntropyLocalCenterStage
 	for stage_type in STAGE_REGISTRY.values():
 		if stage_type in (ManualCenterStage, VoCenterStage, PhaseCorrelationCenterStage, EntropyLocalCenterStage):
-			assert stage_type.contract.accepts == (SinoOrder,)
-			assert stage_type.contract.produces_artifacts == ("center",)
+			assert SinoOrder in stage_type.contract.accepts
+			assert "center" in stage_type.contract.produces_artifacts
 
 
 @pytest.mark.parametrize(

@@ -165,6 +165,10 @@ def test_phase_filter_is_a_manager_issued_producer_artifact():
 		)
 		result = PaganinFilterStage().run(state)
 		assert isinstance(result.artifacts["phase_filter"], ManagedBuffer)
+		assert sum(
+			event["action"] == "allocate" and event["role"] == "phase_filter"
+			for event in context.storage.allocation_events
+		) == 1
 
 
 def test_planner_emits_liveness_alias_and_managed_artifact_allocations():

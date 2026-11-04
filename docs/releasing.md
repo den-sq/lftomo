@@ -22,6 +22,30 @@ Decide the bump from the change surface since the previous tag:
 Pre-1.0 we still bump **MINOR for every public-contract addition** so downstream
 repositories have a concrete version to pin.
 
+## Stage parameter migration (#332)
+
+This change removes the public `Locality` enum and `StageContract.locality`.
+Bounded execution uses `bounded_views_from` and the `run_sinogram` kernel;
+dispatch remains owned by `STAGE_DISPATCH`. Apply the breaking-contract rule
+above when releasing this change.
+
+Built-in Stages now own validated, immutable `stage.params` models. Consumers
+must read `stage.params.sigma` instead of `stage.sigma`, for example. Construct
+Stages with keyword arguments; `LayoutConvertStage(target, reason)` retains
+its existing positional input adapter. Existing parameter aliases normalize
+into one model field, and unknown parameters now fail validation instead of
+being silently ignored. Configuration dictionaries remain the serialized
+input format and retain their supplied values for sweep and cache identity.
+
+Stage authors declare nested `Params(StageParams)` models and class-level
+contracts. Parameter-dependent contract facts use `contract_for(params)`;
+the base constructor resolves the instance contract. `SinogramStage` and
+`ProjectionStage` own the respective per-unit loops. See
+[Adding a Stage](adding-a-stage.md) for the updated example and schema API.
+
+Removing the contract field changes prefix-cache fingerprints and causes safe
+cold misses. Existing cached results need no migration.
+
 ## Cutting a release
 
 1. Land the change on `master` and confirm CI is green.

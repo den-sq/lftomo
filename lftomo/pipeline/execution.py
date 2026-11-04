@@ -122,20 +122,20 @@ def _unit_handle(
 	return buffer[_unit_index(unit, local_index, buffer.shape)]
 
 
-def _sinogram_states(
-	state: PipelineState,
+def _unit_states(
+	state: PipelineState, axis: str,
 ) -> Iterator[tuple[np.ndarray, PipelineState]]:
-	"""Bind each serial row view to its canonical unit geometry."""
+	"""Bind numerical views and states to the same canonical unit iterator."""
 
 	data = np.asarray(state.working_array)
-	for unit, local_index in _buffer_units(state, "Y"):
+	for unit, local_index in _buffer_units(state, axis):
 		row_data = data[_unit_index(unit, local_index, state.buffer_spec.shape)]
 		row_state = state.with_array(
 			row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
 		)
 		row_state.artifacts = state.artifacts
 		row_state.source_window = unit
-		yield row_data[state.layout.point_index(Y=0)], row_state
+		yield row_data[state.layout.point_index(**{axis: 0})], row_state
 
 
 def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
@@ -157,10 +157,24 @@ def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
 		raise TypeError(f"{stage.name} currently requires the NumPy backend")
 	if np.asarray(state.working_array).ndim != 3:
 		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
-	for sinogram, row_state in _sinogram_states(state):
+	for sinogram, row_state in _unit_states(state, "Y"):
 		result = stage.run_sinogram(sinogram, row_state)
 		if result is not None and result is not sinogram:
 			sinogram[...] = result
+	return state
+
+
+def run_projection_stage(stage: Stage, state: PipelineState) -> PipelineState:
+	"""Run a projection kernel on shared views with canonical unit geometry."""
+
+	if state.backend.name != "numpy":
+		raise TypeError(f"{stage.name} currently requires the NumPy backend")
+	if np.asarray(state.working_array).ndim != 3:
+		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
+	for image, projection_state in _unit_states(state, "Theta"):
+		result = stage.run_projection(image, projection_state)
+		if result is not None and result is not image:
+			image[...] = result
 	return state
 
 
@@ -202,7 +216,7 @@ def run_projection_kernel(
 		state.artifacts["projection_times"] = np.asarray(
 			projection_times[index:index + 1],
 		)
-	air_mask_key = getattr(stage, "air_mask_artifact", "air_mask")
+	air_mask_key = getattr(stage.params, "air_mask_artifact", "air_mask")
 	air_mask = state.artifacts.get(air_mask_key)
 	if isinstance(air_mask, ManagedBuffer) and air_mask.array().ndim == 3:
 		state.artifacts[air_mask_key] = _unit_handle(air_mask, unit, local_index)
@@ -540,7 +554,7 @@ class PipelineExecutor:
 			working_state = state.with_array(
 				output, buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(output.dtype)),
 			)
-			air_mask_key = getattr(stage, "air_mask_artifact", "air_mask")
+			air_mask_key = getattr(stage.params, "air_mask_artifact", "air_mask")
 			air_mask = working_state.artifacts.get(air_mask_key)
 			if (
 				isinstance(air_mask, np.ndarray)
@@ -595,11 +609,11 @@ class PipelineExecutor:
 		if stage.name == "layout.convert":
 			if state.layout not in (ProjOrder, SinoOrder):
 				raise TypeError("layout.convert requires ProjOrder or SinoOrder input")
-			if state.layout is stage.target:
+			if state.layout is stage.contract.produces:
 				raise ValueError("layout.convert target is already the current layout")
-			shape = state.buffer_spec.shape.to(stage.target)
+			shape = state.buffer_spec.shape.to(stage.contract.produces)
 			output, _target = allocate_output(
-				state, shape, data.dtype, role=f"layout:{stage.target.__name__}",
+				state, shape, data.dtype, role=f"layout:{stage.contract.produces.__name__}",
 			)
 			positions = Theta.drange(0, shape.Theta, 1).get_iter(IntIter)
 			self.submit_all(run_layout_fill_kernel, (
@@ -649,12 +663,12 @@ class PipelineExecutor:
 				result.source_window = stage.output_window(state.source_window)
 			result.artifacts["fused_layout_transition"] = {
 				"from": input_layout.__name__, "to": stage.target_layout.__name__,
-				"pad_x": stage.pad_x, "skew_degrees": stage.skew_degrees,
+				"pad_x": stage.params.pad_x, "skew_degrees": stage.params.skew_degrees,
 			}
 			return result
 
 		if isinstance(stage, HelicalIndexRemapStage):
-			if not stage.enabled:
+			if not stage.params.enabled:
 				return state
 			source_shape = state.buffer_spec.shape
 			if state.source_window is None:
@@ -665,15 +679,15 @@ class PipelineExecutor:
 			output, target = allocate_output(
 				state, shape, data.dtype, role="helical_remap",
 			)
-			if not stage.crop_valid:
-				target.fill(stage.fill_value)
+			if not stage.params.crop_valid:
+				target.fill(stage.params.fill_value)
 			positions = Theta.drange(0, source_shape.Theta, 1).get_iter(IntIter)
 			self.submit_all(run_helical_fill_kernel, (
 				(
 					state.working_array[type(source_shape).point_index(Theta=index)],
 					output[type(shape).point_index(Theta=index)],
 					int(shifts[index]),
-					start, stop, stage.crop_valid,
+					start, stop, stage.params.crop_valid,
 				)
 				for index in positions
 			))
@@ -696,21 +710,18 @@ class PipelineExecutor:
 		if spec.kind is not DispatchKind.ENGINE:
 			return self.run_projection_stage(state, stage)
 		budget = stage.contract.resources.preferred_cpus or self.max_workers
-		old_ncore = getattr(stage, "ncore", None)
-		old_kwargs_ncore = None
-		kwargs = getattr(stage, "kwargs", None)
-		if hasattr(stage, "ncore"):
-			stage.ncore = min(self.max_workers, old_ncore or budget)
-		elif isinstance(kwargs, dict) and "ncore" in kwargs:
-			old_kwargs_ncore = kwargs["ncore"]
-			kwargs["ncore"] = min(self.max_workers, old_kwargs_ncore or budget)
+		original_params = stage.params
+		original_contract = stage.contract
+		if "ncore" in type(original_params).model_fields:
+			stage.params = original_params.model_copy(update={
+				"ncore": min(self.max_workers, original_params.ncore or budget),
+			})
+			stage.contract = type(stage).contract_for(stage.params)
 		try:
 			return stage.run(state)
 		finally:
-			if hasattr(stage, "ncore"):
-				stage.ncore = old_ncore
-			elif isinstance(kwargs, dict) and "ncore" in kwargs:
-				kwargs["ncore"] = old_kwargs_ncore
+			stage.params = original_params
+			stage.contract = original_contract
 
 
 def run_bounded_sinogram_segment(
@@ -766,7 +777,7 @@ def run_bounded_sinogram_segment(
 						member_samples[member_index].append(elapsed)
 		else:
 			# ndarray-only hermetic execution is deliberately serial.
-			for working, row_state in _sinogram_states(state):
+			for working, row_state in _unit_states(state, "Y"):
 				for member_index, stage in enumerate(stages):
 					if checkpoint is not None:
 						checkpoint()

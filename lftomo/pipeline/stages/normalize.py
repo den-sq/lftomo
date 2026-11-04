@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict
+from typing import Literal
+
+from pydantic import Field, field_validator, model_validator
 
 import numpy as np
 from scipy.ndimage import gaussian_filter
@@ -16,12 +20,11 @@ from lftomo.calibration import (
 	fit_projection_beam,
 	optimal_transport_interp,
 )
-from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	BufferSpec,
-	Locality,
 	PipelineState,
 	Stage,
+	StageParams,
 	StageContract,
 	allocate_output,
 	commit_output,
@@ -113,7 +116,6 @@ class WeightedNormalizeStage(Stage):
 		produces=PRESERVE,
 		accepts_domain=(DataDomain.RAW,),
 		produces_domain=DataDomain.TRANSMISSION,
-		locality=Locality.PROJECTION,
 		accepts=(ProjOrder, SinoOrder),
 		prefers=ProjOrder,
 		mutates_input=False,
@@ -124,10 +126,20 @@ class WeightedNormalizeStage(Stage):
 		managed_artifacts=("flat_fields",),
 	)
 
-	def __init__(self, pre_sub: bool = False, pre_subtracted: bool | None = None,
-				timing_source: str | None = None):
-		self.pre_sub = pre_sub if pre_subtracted is None else pre_subtracted
-		self.timing_source = timing_source
+	class Params(StageParams):
+		pre_sub: bool = False
+		timing_source: str | None = None
+
+		@model_validator(mode="before")
+		@classmethod
+		def normalize_pre_subtracted(cls, value):
+			if isinstance(value, dict) and "pre_subtracted" in value:
+				value = dict(value)
+				alias = value.pop("pre_subtracted")
+				if alias is not None:
+					value["pre_sub"] = alias
+			return value
+
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
@@ -155,7 +167,7 @@ class WeightedNormalizeStage(Stage):
 				flats,
 				projection,
 				projection_count,
-				self.pre_sub,
+				self.params.pre_sub,
 				projection_index=(
 					state.source_window.pos.Theta
 					+ projection * state.source_window.step.Theta
@@ -224,33 +236,34 @@ class BeamTrackingNormalizeStage(Stage):
 	contract = StageContract(
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
-		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
+		mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
 		produces_artifacts=("beam_tracking_qc",),
 	)
 
-	def __init__(
-		self, *, transport_sigma: float = 12, schedule: dict | None = None,
-		fit_schedule: bool = False, schedule_sample_count: int = 8,
-		component_names: dict[str, str] | None = None,
-		pre_subtracted: bool = False,
-	):
-		if schedule_sample_count < 2:
-			raise ValueError("schedule_sample_count must be at least two")
-		self.transport_sigma = transport_sigma
-		self.schedule = BeamSchedule(**schedule) if schedule is not None else BeamSchedule()
-		self.fit_schedule = fit_schedule
-		self.schedule_sample_count = schedule_sample_count
-		self.component_names = {
-			"pre_gain": "pre_gain", "post_gain": "post_gain",
-			"pre_dark": "pre_dark", "post_dark": "post_dark",
-			**(component_names or {}),
-		}
-		self.pre_subtracted = pre_subtracted
+	class Params(StageParams):
+		transport_sigma: float = Field(default=12, gt=0)
+		schedule: BeamSchedule = Field(default_factory=BeamSchedule)
+		fit_schedule: bool = False
+		schedule_sample_count: int = Field(default=8, ge=2)
+		component_names: dict[str, str] = Field(default_factory=dict, validate_default=True)
+		pre_subtracted: bool = False
 
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "BeamTrackingNormalizeStage":
-		return cls(**config.params)
+		@field_validator("schedule", mode="before")
+		@classmethod
+		def default_schedule(cls, value):
+			return BeamSchedule() if value is None else value
+
+		@field_validator("component_names", mode="before")
+		@classmethod
+		def merge_component_names(cls, value):
+			if value is not None and not isinstance(value, Mapping):
+				return value
+			return {
+				"pre_gain": "pre_gain", "post_gain": "post_gain",
+				"pre_dark": "pre_dark", "post_dark": "post_dark",
+				**(value or {}),
+			}
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
@@ -261,20 +274,20 @@ class BeamTrackingNormalizeStage(Stage):
 			raise ValueError("normalize.beam_tracking expects a three-dimensional array")
 		y_size = data.shape[layout.axis_of("Y")]
 		pre_gain, post_gain, pre_dark, post_dark = _tracking_fields(
-			state, y_size, self.component_names,
+			state, y_size, self.params.component_names,
 		)
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
 		projection_count = state.dataset.physical_shape.Theta
 		batch_count = state.buffer_spec.shape.Theta
-		schedule = self.schedule
+		schedule = self.params.schedule
 		fit = None
 		prepared = getattr(self, "_dispatch_schedule_fit", None)
 		if prepared is not None:
 			fit = prepared
 			schedule = fit.schedule
-		elif self.fit_schedule:
-			indices = np.unique(np.linspace(0, batch_count - 1, self.schedule_sample_count).astype(int))
+		elif self.params.fit_schedule:
+			indices = np.unique(np.linspace(0, batch_count - 1, self.params.schedule_sample_count).astype(int))
 			fractions = (
 				state.source_window.pos.Theta
 				+ indices * state.source_window.step.Theta
@@ -285,7 +298,7 @@ class BeamTrackingNormalizeStage(Stage):
 			)
 			schedule = fit.schedule
 		gain_at = optimal_transport_interp(
-			pre_gain, post_gain, transport_sigma=self.transport_sigma, schedule=schedule,
+			pre_gain, post_gain, transport_sigma=self.params.transport_sigma, schedule=schedule,
 		)
 		for local_index in range(batch_count):
 			global_index = (
@@ -301,7 +314,7 @@ class BeamTrackingNormalizeStage(Stage):
 			dark = (1 - dark_time) * pre_dark + dark_time * post_dark
 			image = data[layout.point_index(Theta=local_index)]
 			image[:] = _normalize_with_maps(
-				image, gain, dark, self.pre_subtracted, floor_nonpositive=True,
+				image, gain, dark, self.params.pre_subtracted, floor_nonpositive=True,
 			)
 		state.artifacts["beam_tracking_qc"] = {
 			"diagnostics": diagnose_beam_change(pre_gain, post_gain),
@@ -321,21 +334,16 @@ class BeamKeyframesNormalizeStage(Stage):
 	contract = StageContract(
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
-		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
+		mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
 		produces_artifacts=("beam_keyframe_qc",),
 	)
 
-	def __init__(self, *, component: str = "beam_keyframes", dark_component: str | None = None,
-			transport_sigma: float = 12, maximum_gap: float | None = None):
-		self.component = component
-		self.dark_component = dark_component
-		self.transport_sigma = transport_sigma
-		self.maximum_gap = maximum_gap
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "BeamKeyframesNormalizeStage":
-		return cls(**config.params)
+	class Params(StageParams):
+		component: str = "beam_keyframes"
+		dark_component: str | None = None
+		transport_sigma: float = 12
+		maximum_gap: float | None = None
 
 	def run(self, state: PipelineState) -> PipelineState:
 		output, data = _normalization_output(state)
@@ -352,7 +360,7 @@ class BeamKeyframesNormalizeStage(Stage):
 		if not isinstance(ref, CalibrationBundleRef):
 			raise ValueError("normalize.beam_keyframes requires a selected calibration bundle")
 		bundle = CalibrationBundle.open(ref.manifest_path)
-		component = bundle.component(self.component)
+		component = bundle.component(self.params.component)
 		if component.time_axis is None:
 			raise ValueError("beam keyframes require an explicit time axis")
 		if component.time_axis.kind == "timestamp_seconds":
@@ -367,31 +375,31 @@ class BeamKeyframesNormalizeStage(Stage):
 				state.source_window.pos.Theta
 				+ np.arange(state.buffer_spec.shape.Theta) * state.source_window.step.Theta
 			).astype(float)
-		dark = 0.0 if self.dark_component is None else bundle.read_component(
-			self.dark_component, y_start=start, y_stop=stop,
+		dark = 0.0 if self.params.dark_component is None else bundle.read_component(
+			self.params.dark_component, y_start=start, y_stop=stop,
 		)
 		maximum_seen_gap = 0.0
 		for local_index, time in enumerate(times):
 			bracket = bundle.read_time_bracket(
-				self.component, float(time), y_start=start, y_stop=stop,
+				self.params.component, float(time), y_start=start, y_stop=stop,
 			)
 			gap = bracket.after_time - bracket.before_time
 			maximum_seen_gap = max(maximum_seen_gap, gap)
-			if self.maximum_gap is not None and gap > self.maximum_gap:
+			if self.params.maximum_gap is not None and gap > self.params.maximum_gap:
 				raise ValueError(
-					f"projection time {time} lies in keyframe gap {gap}, exceeding {self.maximum_gap}"
+					f"projection time {time} lies in keyframe gap {gap}, exceeding {self.params.maximum_gap}"
 				)
 			average = 0.5 * (np.log(np.clip(bracket.before, 1e-6, None))
 				+ np.log(np.clip(bracket.after, 1e-6, None)))
 			transport = gaussian_filter(
 				np.log(np.clip(bracket.after, 1e-6, None))
-				- np.log(np.clip(bracket.before, 1e-6, None)), self.transport_sigma,
+				- np.log(np.clip(bracket.before, 1e-6, None)), self.params.transport_sigma,
 			)
 			gain = np.exp(average + (bracket.weight - 0.5) * transport)
 			image = data[layout.point_index(Theta=local_index)]
 			image[:] = _normalize_with_maps(image, gain, dark, False, floor_nonpositive=True)
 		state.artifacts["beam_keyframe_qc"] = {
-			"component": self.component, "maximum_gap_seen": maximum_seen_gap,
+			"component": self.params.component, "maximum_gap_seen": maximum_seen_gap,
 			"observability": "events wholly inside a keyframe gap cannot be recovered",
 		}
 		return _finish_normalization(state, output)
@@ -404,61 +412,32 @@ class BeamBasisFitNormalizeStage(Stage):
 	contract = StageContract(
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
-		locality=Locality.PROJECTION, mutates_input=False, window_axes=("Y", "Theta"),
+		mutates_input=False, window_axes=("Y", "Theta"),
 		cacheable_prefix=True,
 		consumes_artifacts=("calibration_bundle",), produces_artifacts=("beam_basis_qc",),
 	)
 
-	def __init__(
-		self, *, component: str = "beam_basis", detector_component: str | None = None,
-		air_mask_artifact: str = "air_mask", air_threshold: float = 0.95,
-		minimum_air_pixels: int = 100, minimum_air_fraction: float = 0.005,
-		trim_sigma: float = 4.0, erode: int = 1, iterations: int = 4,
-		exposure_quantile: float = 0.2, edge_quantile: float = 0.85,
-		maximum_fit_residual: float = 0.08, maximum_out_of_basis: float = 0.75,
-		maximum_basis_condition: float = 1e6,
-		maximum_contamination_fraction: float = 0.5,
-		maximum_coefficient_extrapolation: float = 1.0,
-		fail_on_qc: bool = True,
-	):
-		if (
-			not 0 < air_threshold <= 1 or not 0 < minimum_air_fraction <= 1
-			or not 0 <= exposure_quantile <= 1 or not 0 <= edge_quantile <= 1
-		):
-			raise ValueError(
-				"air_threshold and minimum_air_fraction must lie in (0, 1], and mask "
-				"quantiles must lie in [0, 1]"
-			)
-		if any(value <= 0 for value in (
-			minimum_air_pixels, trim_sigma,
-			maximum_fit_residual, maximum_out_of_basis, maximum_basis_condition,
-			maximum_contamination_fraction, maximum_coefficient_extrapolation,
-		)) or erode < 0 or iterations < 1:
-			raise ValueError("beam-basis fit counts and QC thresholds must be positive")
-		self.component = component
-		self.detector_component = detector_component
-		self.air_mask_artifact = air_mask_artifact
-		self.air_threshold = air_threshold
-		self.minimum_air_pixels = minimum_air_pixels
-		self.minimum_air_fraction = minimum_air_fraction
-		self.trim_sigma = trim_sigma
-		self.erode = erode
-		self.iterations = iterations
-		self.exposure_quantile = exposure_quantile
-		self.edge_quantile = edge_quantile
-		self.maximum_fit_residual = maximum_fit_residual
-		self.maximum_out_of_basis = maximum_out_of_basis
-		self.maximum_basis_condition = maximum_basis_condition
-		self.maximum_contamination_fraction = maximum_contamination_fraction
-		self.maximum_coefficient_extrapolation = maximum_coefficient_extrapolation
-		self.fail_on_qc = fail_on_qc
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "BeamBasisFitNormalizeStage":
-		return cls(**config.params)
+	class Params(StageParams):
+		component: str = "beam_basis"
+		detector_component: str | None = None
+		air_mask_artifact: str = "air_mask"
+		air_threshold: float = Field(default=0.95, gt=0, le=1)
+		minimum_air_pixels: int = Field(default=100, gt=0)
+		minimum_air_fraction: float = Field(default=0.005, gt=0, le=1)
+		trim_sigma: float = Field(default=4.0, gt=0)
+		erode: int = Field(default=1, ge=0)
+		iterations: int = Field(default=4, ge=1)
+		exposure_quantile: float = Field(default=0.2, ge=0, le=1)
+		edge_quantile: float = Field(default=0.85, ge=0, le=1)
+		maximum_fit_residual: float = Field(default=0.08, gt=0)
+		maximum_out_of_basis: float = Field(default=0.75, gt=0)
+		maximum_basis_condition: float = Field(default=1e6, gt=0)
+		maximum_contamination_fraction: float = Field(default=0.5, gt=0)
+		maximum_coefficient_extrapolation: float = Field(default=1.0, gt=0)
+		fail_on_qc: bool = True
 
 	def _mask(self, state: PipelineState, layout: type, index: int, shape: tuple[int, int]):
-		value = state.artifacts.get(self.air_mask_artifact)
+		value = state.artifacts.get(self.params.air_mask_artifact)
 		if value is None:
 			return None
 		value = np.asarray(buffer_view(value), dtype=bool)
@@ -467,9 +446,9 @@ class BeamBasisFitNormalizeStage(Stage):
 		elif value.ndim == 3:
 			mask = value[layout.point_index(Theta=index)]
 		else:
-			raise ValueError(f"{self.air_mask_artifact} must be a 2-D or 3-D mask")
+			raise ValueError(f"{self.params.air_mask_artifact} must be a 2-D or 3-D mask")
 		if mask.shape != shape:
-			raise ValueError(f"{self.air_mask_artifact} does not match the active detector window")
+			raise ValueError(f"{self.params.air_mask_artifact} does not match the active detector window")
 		return mask
 
 	def run(self, state: PipelineState) -> PipelineState:
@@ -483,7 +462,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		if not isinstance(ref, CalibrationBundleRef):
 			raise ValueError("normalize.beam_basis_fit requires a selected calibration bundle")
 		bundle = CalibrationBundle.open(ref.manifest_path)
-		descriptor = bundle.component(self.component)
+		descriptor = bundle.component(self.params.component)
 		if descriptor.kind != "beam_basis" or descriptor.coordinate_frame != "beam":
 			raise ValueError("beam-basis component must have kind='beam_basis' in beam coordinates")
 		y_size = data.shape[layout.axis_of("Y")]
@@ -494,14 +473,14 @@ class BeamBasisFitNormalizeStage(Stage):
 		stop = start + source_window.shape.Y
 		if stop - start != y_size:
 			raise ValueError("calibration rows do not match the canonical source window")
-		basis = bundle.read_component(self.component, y_start=start, y_stop=stop)
+		basis = bundle.read_component(self.params.component, y_start=start, y_stop=stop)
 		if basis.shape[2] != data.shape[2]:
 			raise ValueError("beam-basis X extent is incompatible with the active detector window")
-		detector = None if self.detector_component is None else bundle.read_component(
-			self.detector_component, y_start=start, y_stop=stop,
+		detector = None if self.params.detector_component is None else bundle.read_component(
+			self.params.detector_component, y_start=start, y_stop=stop,
 		)
-		if self.detector_component is not None:
-			detector_descriptor = bundle.component(self.detector_component)
+		if self.params.detector_component is not None:
+			detector_descriptor = bundle.component(self.params.detector_component)
 			if (detector_descriptor.kind != "detector_static"
 					or detector_descriptor.coordinate_frame != "detector"):
 				raise ValueError(
@@ -516,12 +495,12 @@ class BeamBasisFitNormalizeStage(Stage):
 			fit = fit_projection_beam(
 				image, basis, detector=detector,
 				air_mask=self._mask(state, layout, index, image.shape),
-				air_threshold=self.air_threshold,
-				minimum_air_pixels=self.minimum_air_pixels,
-				minimum_air_fraction=self.minimum_air_fraction,
-				trim_sigma=self.trim_sigma, erode=self.erode, n_iter=self.iterations,
-				exposure_quantile=self.exposure_quantile,
-				edge_quantile=self.edge_quantile,
+				air_threshold=self.params.air_threshold,
+				minimum_air_pixels=self.params.minimum_air_pixels,
+				minimum_air_fraction=self.params.minimum_air_fraction,
+				trim_sigma=self.params.trim_sigma, erode=self.params.erode, n_iter=self.params.iterations,
+				exposure_quantile=self.params.exposure_quantile,
+				edge_quantile=self.params.edge_quantile,
 			)
 			coefficient_extrapolation = 0.0
 			if training_min.shape == fit.coefficients.shape == training_max.shape:
@@ -531,16 +510,16 @@ class BeamBasisFitNormalizeStage(Stage):
 			contamination = max(fit.qc.rejected_fraction, fit.qc.edge_overlap_fraction)
 			projection_violations = []
 			for failed, label in (
-				(fit.qc.fit_residual > self.maximum_fit_residual, "fit_residual"),
-				(fit.qc.out_of_basis > self.maximum_out_of_basis, "out_of_basis"),
-				(fit.qc.basis_condition > self.maximum_basis_condition, "basis_condition"),
-				(contamination > self.maximum_contamination_fraction, "mask_contamination"),
-				(coefficient_extrapolation > self.maximum_coefficient_extrapolation,
+				(fit.qc.fit_residual > self.params.maximum_fit_residual, "fit_residual"),
+				(fit.qc.out_of_basis > self.params.maximum_out_of_basis, "out_of_basis"),
+				(fit.qc.basis_condition > self.params.maximum_basis_condition, "basis_condition"),
+				(contamination > self.params.maximum_contamination_fraction, "mask_contamination"),
+				(coefficient_extrapolation > self.params.maximum_coefficient_extrapolation,
 					"coefficient_extrapolation"),
 			):
 				if failed:
 					projection_violations.append(label)
-			if projection_violations and self.fail_on_qc:
+			if projection_violations and self.params.fail_on_qc:
 				raise ValueError(
 					f"beam-basis fit failed QC for projection {index}: "
 					+ ", ".join(projection_violations)
@@ -550,12 +529,12 @@ class BeamBasisFitNormalizeStage(Stage):
 			violations.append(projection_violations)
 			qcs.append({
 				**asdict(fit.qc), "coefficient_extrapolation": coefficient_extrapolation,
-				"mask_source": "auto" if self.air_mask_artifact not in state.artifacts else "supplied",
+				"mask_source": "auto" if self.params.air_mask_artifact not in state.artifacts else "supplied",
 				"violations": projection_violations,
 			})
 		coefficient_array = np.asarray(coefficients)
 		state.artifacts["beam_basis_qc"] = {
-			"component": self.component,
+			"component": self.params.component,
 			"training_coverage": descriptor.compatibility.training_coverage,
 			"training_relative_residual": metadata.get("training_relative_residual"),
 			"projections": qcs,
@@ -585,7 +564,6 @@ class ThetaSwitchNormalizeStage(Stage):
 		prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,),
 		produces_domain=DataDomain.TRANSMISSION,
-		locality=Locality.PROJECTION,
 		mutates_input=False,
 		cacheable_prefix=True,
 		window_axes=("Y", "Theta"),
@@ -594,25 +572,15 @@ class ThetaSwitchNormalizeStage(Stage):
 		managed_artifacts=("flat_fields",),
 	)
 
-	def __init__(self, gain_averaging: bool = False, pre_subtracted: bool = False,
-				pre_gain: str | None = None, post_gain: str | None = None,
-				pre_dark: str | None = None, post_dark: str | None = None,
-				floor_nonpositive: bool = False,
-				floor_value: float = 1.0):
-		self.floor_nonpositive = floor_nonpositive
-		self.floor_value = floor_value
-		self.gain_averaging = gain_averaging
-		self.pre_subtracted = pre_subtracted
-		self.calibration_paths = {
-			"pre_gain": pre_gain,
-			"post_gain": post_gain,
-			"pre_dark": pre_dark,
-			"post_dark": post_dark,
-		}
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "ThetaSwitchNormalizeStage":
-		return cls(**config.params)
+	class Params(StageParams):
+		gain_averaging: bool = False
+		pre_subtracted: bool = False
+		pre_gain: str | None = None
+		post_gain: str | None = None
+		pre_dark: str | None = None
+		post_dark: str | None = None
+		floor_nonpositive: bool = False
+		floor_value: float = 1.0
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
@@ -631,7 +599,7 @@ class ThetaSwitchNormalizeStage(Stage):
 				state.source_window.pos.Theta
 				+ local_projection * state.source_window.step.Theta
 			)
-			if self.gain_averaging:
+			if self.params.gain_averaging:
 				weight = projection / total_count
 				gain = pre_gain * (1 - weight) + post_gain * weight
 				dark = pre_dark * (1 - weight) + post_dark * weight
@@ -641,8 +609,8 @@ class ThetaSwitchNormalizeStage(Stage):
 				gain, dark = pre_gain, pre_dark
 			image = data[layout.point_index(Theta=local_projection)]
 			image[:] = _normalize_with_maps(
-				image, gain, dark, self.pre_subtracted,
-				self.floor_nonpositive, self.floor_value,
+				image, gain, dark, self.params.pre_subtracted,
+				self.params.floor_nonpositive, self.params.floor_value,
 			)
 		return _finish_normalization(state, output)
 
@@ -652,52 +620,32 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 
 	name = "normalize.taper_blended"
 
-	def __init__(self, pre_subtracted: bool = False,
-				pre_gain: str | None = None, post_gain: str | None = None,
-			pre_dark: str | None = None, post_dark: str | None = None,
-			pre_weight: str = "linear", post_weight: str = "linear",
-				gain_averaging: bool = True, gain_movement_enabled: bool = False,
-				floor_nonpositive: bool = False,
-				floor_value: float = 1.0):
-		if pre_weight != "linear" or post_weight != "linear":
-			raise ValueError("taper-blended normalization currently supports linear weights")
-		if not gain_averaging:
-			raise ValueError("taper-blended normalization requires gain_averaging")
-		if gain_movement_enabled:
-			raise ValueError("gain movement correction must be a separate geometry Stage")
-		super().__init__(
-			gain_averaging=True,
-			pre_subtracted=pre_subtracted,
-			pre_gain=pre_gain,
-			post_gain=post_gain,
-			pre_dark=pre_dark,
-			post_dark=post_dark,
-			floor_nonpositive=floor_nonpositive,
-			floor_value=floor_value,
-		)
+	class Params(ThetaSwitchNormalizeStage.Params):
+		pre_weight: Literal["linear"] = "linear"
+		post_weight: Literal["linear"] = "linear"
+		gain_averaging: Literal[True] = True
+		gain_movement_enabled: Literal[False] = False
 
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "TaperBlendedNormalizeStage":
-		return cls(**config.params)
+
 
 
 def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 	"""Perform normalization work that requires the complete projection window."""
 
-	if not isinstance(stage, BeamTrackingNormalizeStage) or not stage.fit_schedule:
+	if not isinstance(stage, BeamTrackingNormalizeStage) or not stage.params.fit_schedule:
 		return
 	data = np.asarray(state.working_array)
 	layout = type(state.buffer_spec.shape)
 	y_size = data.shape[layout.axis_of("Y")]
 	pre_gain, post_gain, _pre_dark, _post_dark = _tracking_fields(
-		state, y_size, stage.component_names,
+		state, y_size, stage.params.component_names,
 	)
 	if state.source_window is None or state.dataset is None:
 		raise RuntimeError(f"{stage.name} requires canonical source geometry")
 	projection_count = state.dataset.physical_shape.Theta
 	batch_count = state.buffer_spec.shape.Theta
 	indices = np.unique(
-		np.linspace(0, batch_count - 1, stage.schedule_sample_count).astype(int),
+		np.linspace(0, batch_count - 1, stage.params.schedule_sample_count).astype(int),
 	)
 	fractions = (
 		state.source_window.pos.Theta

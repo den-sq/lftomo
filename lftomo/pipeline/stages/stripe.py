@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-import numpy as np
+from dataclasses import replace
+from typing import Literal
 
-from lftomo.config import StageConfig
+import numpy as np
+from pydantic import Field, model_validator
+
 from lftomo.pipeline.core import (
-	Locality,
 	PipelineState,
 	RuntimeRequirement,
+	SinogramStage,
 	Stage,
 	StageContract,
+	StageParams,
 )
-from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.execution import run_sinogram_stage
+from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.runtime import tomopy_requirement
 from lftomo.prep.stripe import (
 	_bottleneck_line_half_width,
@@ -65,203 +68,153 @@ def _vo_work_planes(
 
 
 def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> StageContract:
-	return StageContract(
-		accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
+	return replace(
+		SinogramStage.contract,
 		accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
-		produces_domain=PRESERVE, locality=Locality.SINOGRAM,
-		bounded_views_from=(ProjOrder,),
-		mutates_input=True,
 		cacheable_prefix=True,
-		window_axes=("Y",),
 		runtime_requirements=runtime_requirements,
 	)
 
 
-class VoSortStripeStage(Stage):
+class VoSortStripeStage(SinogramStage):
 	name = "stripe.vo_sort"
 	contract = _contract()
 	uses_vo_work = True
 
-	def __init__(self, size: int = 21, dim: int = 1, ncore: int | None = None):
-		self.size = size
-		self.dim = dim
-		self.ncore = ncore
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "VoSortStripeStage":
-		return cls(**config.params)
-
-	def run(self, state: PipelineState) -> PipelineState:
-		return run_sinogram_stage(self, state)
+	class Params(StageParams):
+		size: int = 21
+		dim: int = 1
+		ncore: int | None = None
 
 	@property
 	def vo_line_median_half_width(self) -> int:
-		return _bottleneck_line_half_width(self.size) if self.dim == 1 else 0
+		return _bottleneck_line_half_width(self.params.size) if self.params.dim == 1 else 0
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		_remove_sort_array(
-			sinogram, size=self.size, dim=self.dim,
+			sinogram, size=self.params.size, dim=self.params.dim,
 			work=work, index_work=index_work, median_pad_work=median_pad_work,
 		)
 
 
-class VoDeadStripeStage(Stage):
+class VoDeadStripeStage(SinogramStage):
 	name = "stripe.vo_dead"
 	contract = _contract()
 	uses_vo_work = True
 
-	def __init__(self, snr: int = 3, size: int = 51, norm: bool = True):
-		self.snr = snr
-		self.size = size
-		self.norm = norm
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "VoDeadStripeStage":
-		return cls(**config.params)
-
-	def run(self, state: PipelineState) -> PipelineState:
-		return run_sinogram_stage(self, state)
+	class Params(StageParams):
+		snr: float = 3
+		size: int = 51
+		norm: bool = True
 
 	@property
 	def vo_line_median_half_width(self) -> int:
-		return _bottleneck_line_half_width(self.size) if self.norm else 0
+		return _bottleneck_line_half_width(self.params.size) if self.params.norm else 0
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
-		_remove_dead_array(sinogram, snr=self.snr, size=self.size, work=work)
-		if self.norm:
+		_remove_dead_array(sinogram, snr=self.params.snr, size=self.params.size, work=work)
+		if self.params.norm:
 			_remove_large_array(
-				sinogram, snr=self.snr, size=self.size, norm=True,
+				sinogram, snr=self.params.snr, size=self.params.size, norm=True,
 				work=work, index_work=index_work, median_pad_work=median_pad_work,
 			)
 
 
-class VoLargeStripeStage(Stage):
+class VoLargeStripeStage(SinogramStage):
 	name = "stripe.vo_large"
 	contract = _contract()
 	uses_vo_work = True
 
-	def __init__(self, snr: int = 3, size: int = 51,
-				drop_ratio: float = 0.1, norm: bool = True):
-		self.snr = snr
-		self.size = size
-		self.drop_ratio = drop_ratio
-		self.norm = norm
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "VoLargeStripeStage":
-		return cls(**config.params)
-
-	def run(self, state: PipelineState) -> PipelineState:
-		return run_sinogram_stage(self, state)
+	class Params(StageParams):
+		snr: float = 3
+		size: int = 51
+		drop_ratio: float = 0.1
+		norm: bool = True
 
 	@property
 	def vo_line_median_half_width(self) -> int:
-		return _bottleneck_line_half_width(self.size)
+		return _bottleneck_line_half_width(self.params.size)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
 		_remove_large_array(
-			sinogram, snr=self.snr, size=self.size,
-			drop_ratio=self.drop_ratio, norm=self.norm,
+			sinogram, snr=self.params.snr, size=self.params.size,
+			drop_ratio=self.params.drop_ratio, norm=self.params.norm,
 			work=work, index_work=index_work, median_pad_work=median_pad_work,
 		)
 
 
-class VoFamilyStripeStage(Stage):
+class VoFamilyStripeStage(SinogramStage):
 	"""Execute an explicitly ordered sequence of Vo stripe-removal methods."""
 
 	name = "stripe.vo_family"
 	contract = _contract()
 	uses_vo_work = True
 
-	def __init__(self, order: list[str] | tuple[str, ...] = (
-				"remove_dead_vo", "remove_large_vo", "remove_sort_vo"),
-				size: int = 31, snr: float = 3.0, dim: int = 1,
-				drop_ratio: float = 0.1, norm: bool = True):
-		known = {"remove_dead_vo", "remove_large_vo", "remove_sort_vo"}
-		unknown = set(order) - known
-		if unknown:
-			raise ValueError(f"unknown Vo-family operation(s): {sorted(unknown)}")
-		self.order = tuple(order)
-		self.size = size
-		self.snr = snr
-		self.dim = dim
-		self.drop_ratio = drop_ratio
-		self.norm = norm
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "VoFamilyStripeStage":
-		return cls(**config.params)
-
-	def run(self, state: PipelineState) -> PipelineState:
-		return run_sinogram_stage(self, state)
+	class Params(StageParams):
+		order: tuple[Literal["remove_dead_vo", "remove_large_vo", "remove_sort_vo"], ...] = (
+			"remove_dead_vo", "remove_large_vo", "remove_sort_vo",
+		)
+		size: int = 31
+		snr: float = 3.0
+		dim: int = 1
+		drop_ratio: float = 0.1
+		norm: bool = True
 
 	@property
 	def vo_line_median_half_width(self) -> int:
-		uses_large = "remove_large_vo" in self.order
-		uses_sort = "remove_sort_vo" in self.order and self.dim == 1
-		return _bottleneck_line_half_width(self.size) if uses_large or uses_sort else 0
+		uses_large = "remove_large_vo" in self.params.order
+		uses_sort = "remove_sort_vo" in self.params.order and self.params.dim == 1
+		return _bottleneck_line_half_width(self.params.size) if uses_large or uses_sort else 0
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		work, index_work, median_pad_work = _vo_work_planes(state, sinogram)
-		for operation in self.order:
+		for operation in self.params.order:
 			if operation == "remove_dead_vo":
 				_remove_dead_array(
-					sinogram, snr=self.snr, size=self.size, work=work,
+					sinogram, snr=self.params.snr, size=self.params.size, work=work,
 				)
 			elif operation == "remove_large_vo":
 				_remove_large_array(
-					sinogram, snr=self.snr, size=self.size,
-					drop_ratio=self.drop_ratio, norm=self.norm,
+					sinogram, snr=self.params.snr, size=self.params.size,
+					drop_ratio=self.params.drop_ratio, norm=self.params.norm,
 					work=work, index_work=index_work, median_pad_work=median_pad_work,
 				)
 			else:
 				_remove_sort_array(
-					sinogram, size=self.size, dim=self.dim,
+					sinogram, size=self.params.size, dim=self.params.dim,
 					work=work, index_work=index_work, median_pad_work=median_pad_work,
 				)
 
 
-class FourierWaveletStripeStage(Stage):
+class FourierWaveletStripeStage(SinogramStage):
 	name = "stripe.fw"
 	contract = _contract()
 
-	def __init__(self, level: int | None = None, wname: str = "db5",
-				sigma: float = 2.0, zero_pad: bool = False,
-				wavelet: str | None = None, ncore: int | None = None):
-		if level is not None and level < 1:
-			raise ValueError("Fourier-wavelet level must be positive")
-		if sigma <= 0:
-			raise ValueError("Fourier-wavelet sigma must be positive")
-		self.contract = StageContract(
-			mutates_input=True,
-			cacheable_prefix=True,
-			accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
-			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
-			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
-			bounded_views_from=(ProjOrder,),
-			window_axes=("Y",),
-		)
-		self.level = level
-		self.wname = wavelet or wname
-		self.sigma = sigma
-		self.zero_pad = zero_pad
-		self.ncore = ncore
+	class Params(StageParams):
+		level: int | None = Field(default=None, ge=1)
+		wname: str = "db5"
+		sigma: float = Field(default=2.0, gt=0)
+		zero_pad: bool = False
+		ncore: int | None = None
 
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "FourierWaveletStripeStage":
-		return cls(**config.params)
-
-	def run(self, state: PipelineState) -> PipelineState:
-		return run_sinogram_stage(self, state)
+		@model_validator(mode="before")
+		@classmethod
+		def resolve_wavelet_alias(cls, values):
+			if isinstance(values, dict) and "wavelet" in values:
+				values = dict(values)
+				wavelet = values.pop("wavelet")
+				if wavelet:
+					values["wname"] = wavelet
+			return values
 
 	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
-		level = self.level or int(np.ceil(np.log2(max(sinogram.shape))))
+		level = self.params.level or int(np.ceil(np.log2(max(sinogram.shape))))
 		_remove_stripe_fw_array(
-			sinogram, level=level, wname=self.wname,
-			sigma=self.sigma, zero_pad=self.zero_pad,
+			sinogram, level=level, wname=self.params.wname,
+			sigma=self.params.sigma, zero_pad=self.params.zero_pad,
 		)
 
 
@@ -269,35 +222,18 @@ class AllOfTheStripeStage(Stage):
 	"""Run TomoPy's combined Vo dead, large, and sorting algorithms."""
 
 	name = "stripe.all_of_the_stripe"
-	contract = _contract(
-		runtime_requirements=(tomopy_requirement("remove_all_stripe"),),
+	contract = replace(
+		_contract(runtime_requirements=(tomopy_requirement("remove_all_stripe"),)),
+		accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, bounded_views_from=(),
 	)
 
-	def __init__(self, snr: float = 3, la_size: int = 61, sm_size: int = 21,
-				dim: int = 1, ncore: int | None = None, nchunk: int | None = None):
-		if snr <= 0:
-			raise ValueError("all-of-the-stripe snr must be positive")
-		if la_size < 1 or sm_size < 1:
-			raise ValueError("all-of-the-stripe filter sizes must be positive")
-		if dim not in (1, 2):
-			raise ValueError("all-of-the-stripe dim must be 1 or 2")
-		self.snr = snr
-		self.la_size = la_size
-		self.sm_size = sm_size
-		self.dim = dim
-		self.ncore = ncore
-		self.nchunk = nchunk
-		self.contract = StageContract(
-			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
-			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
-			produces_domain=PRESERVE, locality=Locality.SINOGRAM,
-			mutates_input=True, cacheable_prefix=True, window_axes=("Y",),
-			runtime_requirements=type(self).contract.runtime_requirements,
-		)
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "AllOfTheStripeStage":
-		return cls(**config.params)
+	class Params(StageParams):
+		snr: float = Field(default=3, gt=0)
+		la_size: int = Field(default=61, ge=1)
+		sm_size: int = Field(default=21, ge=1)
+		dim: Literal[1, 2] = 1
+		ncore: int | None = None
+		nchunk: int | None = None
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
@@ -316,12 +252,12 @@ class AllOfTheStripeStage(Stage):
 		# library-boundary handoff; no pipeline-side transpose is materialized.
 		corrected = tomopy.remove_all_stripe(
 			tomopy_input,
-			snr=self.snr,
-			la_size=self.la_size,
-			sm_size=self.sm_size,
-			dim=self.dim,
-			ncore=self.ncore,
-			nchunk=self.nchunk,
+			snr=self.params.snr,
+			la_size=self.params.la_size,
+			sm_size=self.params.sm_size,
+			dim=self.params.dim,
+			ncore=self.params.ncore,
+			nchunk=self.params.nchunk,
 		)
 		data[:] = shape.to(ProjOrder).transposed_view(corrected, layout)
 		return state

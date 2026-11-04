@@ -48,7 +48,7 @@ def test_aaa523_keeps_nonzero_warp_in_projection_order_before_stripe():
 	skew_index = next(index for index, stage in enumerate(stages) if stage.name == "skew_correct.cv2_affine")
 	recon_step = next(step for step in plan.steps if step.stage_name == "recon.gridrec")
 
-	assert stages[skew_index].degrees == 0.149
+	assert stages[skew_index].params.degrees == 0.149
 	assert stages[skew_index].contract.fused_transition is False
 	assert stages[skew_index].contract.resamples_detector is True
 	assert plan.steps[skew_index].input_layout is ProjOrder

@@ -208,9 +208,9 @@ def test_beam_basis_is_the_sole_normalization_in_a_complete_pipeline():
 
 def test_beam_basis_mask_quantiles_are_configurable_and_validated():
 	stage = BeamBasisFitNormalizeStage(exposure_quantile=0.1, edge_quantile=0.9)
-	assert stage.exposure_quantile == 0.1
-	assert stage.edge_quantile == 0.9
-	with pytest.raises(ValueError, match="quantiles"):
+	assert stage.params.exposure_quantile == 0.1
+	assert stage.params.edge_quantile == 0.9
+	with pytest.raises(ValueError, match="edge_quantile"):
 		BeamBasisFitNormalizeStage(edge_quantile=1.1)
 
 

@@ -6,9 +6,18 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
 
 from lftomo.util.shapes import Proj, ProjOrder
+
+
+# Normalization configuration keys consumed by the runner before Stage construction.
+CALIBRATION_RESOLUTION_FIELDS = {
+	"calibration_manifest",
+	"calibration_components",
+	"compatibility_policy",
+	"compatibility_override_reason",
+}
 
 
 class ConfigModel(BaseModel):
@@ -315,6 +324,40 @@ class StageConfig(ConfigModel):
 	algorithm: str | None = Field(default=None, description="Optional algorithm choice within the stage kind.")
 	params: dict[str, Any] = Field(default_factory=dict, description="Stage-specific parameters.")
 	sweep: SweepConfig | None = Field(default=None, description="Optional sweep applied at this stage.")
+
+	@model_validator(mode="after")
+	def _validate_declared_params(self):
+		if not self.params:
+			return self
+		# Resolve through the construction registry, without constructing a Stage
+		# or importing its optional numerical engine. The serialized dictionary
+		# stays unchanged for sweep expansion and prefix-cache identity.
+		from lftomo.pipeline.stages import STAGE_REGISTRY
+
+		key = f"{self.kind}.{self.algorithm}" if self.algorithm else self.kind
+		stage_type = STAGE_REGISTRY.get(key)
+		if stage_type is None:
+			return self
+		params = self.params
+		if self.kind == "normalize":
+			params = {
+				key: value for key, value in params.items()
+				if key not in CALIBRATION_RESOLUTION_FIELDS
+			}
+		try:
+			stage_type.Params.model_validate(params)
+		except ValidationError as error:
+			# A StageConfig can be an unresolved template. Required inputs are
+			# checked when create_stage materializes it; supplied inputs are
+			# always checked here, including when another input is absent.
+			failures = [item for item in error.errors() if item["type"] != "missing"]
+			if failures:
+				fields = "; ".join(
+					f"{'.'.join(map(str, item['loc'])) or 'params'}: {item['msg']}"
+					for item in failures
+				)
+				raise ValueError(f"Stage {self.id or key!r} ({key}) parameters: {fields}") from error
+		return self
 
 
 class PipelineVariant(ConfigModel):

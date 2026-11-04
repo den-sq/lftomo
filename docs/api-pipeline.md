@@ -24,6 +24,32 @@ storage allocator. The initial compute backends are
 `NumpyBackend` and `DaskStubBackend`. The Dask stub proves the ABC can carry a
 Dask-shaped array without introducing a scheduler dependency.
 
+## Stage authoring and parameters
+
+`Stage` owns construction: its nested `Params(StageParams)` model validates
+configuration into immutable `stage.params`, then `contract_for(cls, params)`
+resolves the instance contract. `StageParams` rejects extra keys. Scalar bounds
+and choices declared with Pydantic fields appear in
+`StageClass.Params.model_json_schema()`. `StageConfig` checks supplied values
+against that model while allowing required inputs to remain unresolved in
+pipeline templates; Stage construction requires all inputs. Serialized config
+mappings remain at the input boundary. Runtime code reads the typed model.
+
+Use a class-level `StageContract` for invariant facts. The default `contract_for`
+returns it; parameter-dependent implementations return
+`dataclasses.replace(cls.contract, ...)`. Runtime dependency preflight reads
+class-level `runtime_requirements`; planning and execution read the resolved
+instance contract. Parameters are not mirrored as individual Stage attributes.
+
+`SinogramStage` supplies the Y-unit loop for `run_sinogram(sinogram, state)`;
+`ProjectionStage` supplies the Theta-unit loop for
+`run_projection(image, state)`. Both adapters derive unit geometry from the
+canonical window model and accept in-place mutation or returned replacement
+values. Plain `Stage` remains available for orchestration, managed output
+handoffs, and external engines. There is no separate locality enum: bounded
+planning uses the row-kernel capability and contract, while `STAGE_DISPATCH`
+selects the executor.
+
 ## Managed working storage
 
 Production runs enter `PipelineRunContext`, which owns one `SharedNPManager`

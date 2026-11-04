@@ -144,7 +144,7 @@ def _read_spec(
 		window = _read_source_window(stage, physical_shape, dtype=dtype)
 	else:
 		window = source_window.with_pad(["Y"])
-	layout = ProjOrder if getattr(stage, "order", "projection") == "projection" else SinoOrder
+	layout = stage.contract.output_layout(ProjOrder)
 	shape = window.frange.length.to(layout)
 	return BufferSpec(shape, dtype)
 
@@ -176,8 +176,8 @@ def stage_output_spec(
 		shape = shape.to(layout)
 	elif stage.name == "geometry.affine_skew_movement" and getattr(stage, "target_layout", None) is not None:
 		shape = stage.output_shape(shape)
-	elif stage.name == "helical_correct.index_remap" and getattr(stage, "enabled", True):
-		pitch = stage.pitch_px_per_projection
+	elif stage.name == "helical_correct.index_remap" and getattr(stage.params, "enabled", True):
+		pitch = stage.params.pitch_px_per_projection
 		if pitch is None and scan.helical.pitch_um_per_projection is not None:
 			pitch = scan.helical.pitch_um_per_projection / scan.pixel_size_um
 		if pitch is not None:
@@ -223,7 +223,7 @@ def _transition_role(stage: Stage) -> tuple[str | None, str | None]:
 		return "layout_converted", "current"
 	if stage.name == "geometry.affine_skew_movement" and getattr(stage, "target_layout", None) is not None:
 		return "fused_geometry", "current"
-	if stage.name == "helical_correct.index_remap" and getattr(stage, "enabled", True):
+	if stage.name == "helical_correct.index_remap" and getattr(stage.params, "enabled", True):
 		return "helical_remap", "current"
 	if stage.name.startswith("recon."):
 		return "reconstruction", "current"
