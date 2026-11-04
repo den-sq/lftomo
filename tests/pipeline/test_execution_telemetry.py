@@ -9,7 +9,6 @@ from lftomo.pipeline import (
 	DataDomain,
 	ExecutionKind,
 	ExecutionSpanPhase,
-	Locality,
 	NumpyBackend,
 	PRESERVE,
 	Pipeline,
@@ -85,7 +84,6 @@ class _AddSinogramStage(Stage):
 			produces=PRESERVE,
 			accepts_domain=(DataDomain.ATTENUATION,),
 			produces_domain=PRESERVE,
-			locality=Locality.SINOGRAM,
 			bounded_views_from=(ProjOrder,),
 			mutates_input=True,
 		)

@@ -6,7 +6,10 @@ from types import ModuleType
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import BufferSpec, DataDomain, PRESERVE, Pipeline, PipelineState
-from lftomo.pipeline.stages import BronnikovAidedCorrectionStage, STAGE_REGISTRY, create_stage
+from lftomo.pipeline.stages import (
+	BronnikovAidedCorrectionFilterStage, BronnikovAidedCorrectionStage,
+	STAGE_REGISTRY, create_stage,
+)
 from lftomo.util.shapes import ProjOrder, SinoOrder
 from tests.sample_data import attach_source_geometry
 
@@ -65,6 +68,8 @@ def test_bac_aliases_are_registered_and_process_each_projection(monkeypatch, hot
 
 	assert STAGE_REGISTRY["phase.bac"] is BronnikovAidedCorrectionStage
 	assert STAGE_REGISTRY["phase.bronnikov_aided"] is BronnikovAidedCorrectionStage
+	assert stage.contract.resources.cpu_thread_pool == "torch"
+	assert BronnikovAidedCorrectionFilterStage(alpha=2).contract.resources.cpu_thread_pool is None
 	assert len(calls) == working.shape[1]
 	assert all(call[:3] == ((3, 5), 2, 1.25) for call in calls)
 	assert result.working_array is working
@@ -72,6 +77,14 @@ def test_bac_aliases_are_registered_and_process_each_projection(monkeypatch, hot
 
 
 def test_disabled_bac_is_noop(monkeypatch, hotopy_holo):
+	original_import = builtins.__import__
+
+	def without_torch(name, *args, **kwargs):
+		if name == "torch" or name.startswith("torch."):
+			raise AssertionError("disabled BAC must not import Torch")
+		return original_import(name, *args, **kwargs)
+
+	monkeypatch.setattr(builtins, "__import__", without_torch)
 	config = StageConfig(
 		kind="phase",
 		algorithm="bac",
@@ -95,6 +108,7 @@ def test_disabled_bac_is_noop(monkeypatch, hotopy_holo):
 	)
 	assert stage.contract.produces_domain is PRESERVE
 	assert stage.contract.mutates_input is False
+	assert stage.contract.resources.cpu_thread_pool is None
 
 
 def test_bac_projection_order_processes_contiguous_projection_images(monkeypatch, hotopy_holo):

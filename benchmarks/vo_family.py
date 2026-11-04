@@ -122,7 +122,7 @@ class _ScipyVoSortStage(VoSortStripeStage):
 	def run_sinogram(self, sinogram, state):
 		work, index_work, _pad_work = _vo_work_planes(state, sinogram)
 		_remove_sort_array(
-			sinogram, size=self.size, dim=self.dim, work=work,
+			sinogram, size=self.params.size, dim=self.params.dim, work=work,
 			index_work=index_work, use_bottleneck=False,
 		)
 
@@ -137,8 +137,8 @@ class _ScipyVoLargeStage(VoLargeStripeStage):
 	def run_sinogram(self, sinogram, state):
 		work, index_work, _pad_work = _vo_work_planes(state, sinogram)
 		_remove_large_array(
-			sinogram, snr=self.snr, size=self.size, drop_ratio=self.drop_ratio,
-			norm=self.norm, work=work, index_work=index_work,
+			sinogram, snr=self.params.snr, size=self.params.size, drop_ratio=self.params.drop_ratio,
+			norm=self.params.norm, work=work, index_work=index_work,
 			use_bottleneck=False,
 		)
 

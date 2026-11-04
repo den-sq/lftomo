@@ -50,11 +50,10 @@ def test_planning_and_execution_call_the_same_output_geometry(monkeypatch):
 
 
 def test_stale_projection_start_config_fails_loudly():
-	config = StageConfig(
-		kind="helical_correct", algorithm="index_remap", params={"projection_start": 2},
-	)
-	with np.testing.assert_raises(TypeError):
-		create_stage(config)
+	with np.testing.assert_raises_regex(ValueError, "projection_start"):
+		StageConfig(
+			kind="helical_correct", algorithm="index_remap", params={"projection_start": 2},
+		)
 
 
 def test_helical_remap_crops_to_rows_valid_for_every_projection():

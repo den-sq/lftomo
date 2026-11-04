@@ -185,11 +185,13 @@ def expand_sweep(sweep: SweepConfig) -> list[dict[str, Any]]:
 def _case_variants(stage: StageConfig, case: StageCase, prefix: str) -> list[_StageVariant]:
 	variants = []
 	for overrides in _domain_grid(case.domains):
-		concrete = stage.model_copy(deep=True)
-		concrete.algorithm = case.algorithm
-		concrete.params.update(case.params)
-		concrete.params.update(overrides)
-		concrete.sweep = None
+		document = stage.model_dump(mode="python")
+		document.update({
+			"algorithm": case.algorithm,
+			"params": {**document["params"], **case.params, **overrides},
+			"sweep": None,
+		})
+		concrete = StageConfig.model_validate(document)
 		values: dict[str, Any] = {
 			f"{prefix}.case": case.name,
 			f"{prefix}.algorithm": case.algorithm,

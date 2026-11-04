@@ -81,7 +81,7 @@ def test_phase_contrast_alias_accepts_pinned_path_parameters():
 
 	assert isinstance(stage, TaperBlendedNormalizeStage)
 	assert STAGE_REGISTRY["normalize.phase_contrast"] is TaperBlendedNormalizeStage
-	assert stage.calibration_paths["pre_gain"] == "gains/gain.tif"
+	assert stage.params.pre_gain == "gains/gain.tif"
 
 
 def test_frozen_r254_theta_switch_parameters_construct():
@@ -101,7 +101,7 @@ def test_frozen_r254_theta_switch_parameters_construct():
 	stage = create_stage(config)
 
 	assert isinstance(stage, ThetaSwitchNormalizeStage)
-	assert stage.calibration_paths == {
+	assert stage.params.model_dump(include={"pre_gain", "post_gain", "pre_dark", "post_dark"}) == {
 		"pre_gain": "gains/gain.tif",
 		"post_gain": "gains/gain_post.tif",
 		"pre_dark": "gains/dark.tif",
@@ -126,4 +126,4 @@ def test_frozen_phase_contrast_taper_parameters_construct():
 	stage = create_stage(config)
 
 	assert isinstance(stage, TaperBlendedNormalizeStage)
-	assert stage.gain_averaging is True
+	assert stage.params.gain_averaging is True

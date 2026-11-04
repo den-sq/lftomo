@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-import numpy as np
+from dataclasses import replace
 
-from lftomo.config import StageConfig
+import numpy as np
+from pydantic import model_validator
+
 from lftomo.pipeline.core import (
-	BufferSpec, Locality, PipelineState, Stage, StageContract,
+	BufferSpec, PipelineState, Stage, StageContract, StageParams,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -24,38 +26,44 @@ class HelicalIndexRemapStage(Stage):
 	"""
 
 	name = "helical_correct.index_remap"
+	contract = StageContract(
+		window_axes=("Y", "Theta"),
+		produces=PRESERVE,
+		accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
+		accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+		produces_domain=PRESERVE,
+		requires_row_identity=True,
+		requires_full_axes=("Y",),
+	)
 
-	def __init__(self, pitch_px_per_projection: float | None = None,
-				enabled: bool = True, going_up: bool = False,
-				crop_valid: bool = True,
-				fill_value: float = 0.0, vertical_velocity_px: float | None = None):
-		if pitch_px_per_projection is not None and vertical_velocity_px is not None:
-			raise ValueError("provide pitch_px_per_projection or vertical_velocity_px, not both")
-		if vertical_velocity_px is not None:
-			pitch_px_per_projection = vertical_velocity_px
-		self.contract = StageContract(
-			window_axes=("Y", "Theta"),
-			produces=PRESERVE,
-			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
-			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
-			produces_domain=PRESERVE,
-			locality=Locality.PROJECTION,
-			requires_row_identity=enabled,
-			requires_full_axes=("Y",) if enabled else (),
-		)
-		self.pitch_px_per_projection = pitch_px_per_projection
-		self.enabled = enabled
-		self.going_up = going_up
-		self.crop_valid = crop_valid
-		self.fill_value = fill_value
+	class Params(StageParams):
+		pitch_px_per_projection: float | None = None
+		enabled: bool = True
+		going_up: bool = False
+		crop_valid: bool = True
+		fill_value: float = 0.0
+
+		@model_validator(mode="before")
+		@classmethod
+		def normalize_pitch_alias(cls, values):
+			values = dict(values)
+			velocity = values.pop("vertical_velocity_px", None)
+			if values.get("pitch_px_per_projection") is not None and velocity is not None:
+				raise ValueError("provide pitch_px_per_projection or vertical_velocity_px, not both")
+			if velocity is not None:
+				values["pitch_px_per_projection"] = velocity
+			return values
 
 	@classmethod
-	def from_config(cls, config: StageConfig) -> "HelicalIndexRemapStage":
-		return cls(**config.params)
+	def contract_for(cls, params: Params) -> StageContract:
+		return replace(
+			cls.contract, requires_row_identity=params.enabled,
+			requires_full_axes=("Y",) if params.enabled else (),
+		)
 
 	def _pitch(self, state: PipelineState) -> float:
-		if self.pitch_px_per_projection is not None:
-			return self.pitch_px_per_projection
+		if self.params.pitch_px_per_projection is not None:
+			return self.params.pitch_px_per_projection
 		pitch_um = state.scan.helical.pitch_um_per_projection
 		if pitch_um is None:
 			raise ValueError(
@@ -69,7 +77,7 @@ class HelicalIndexRemapStage(Stage):
 	) -> tuple[ProjOrder | SinoOrder, np.ndarray, int, int]:
 		"""Return the canonical output shape, shifts, and valid source-row bounds."""
 
-		direction = -1 if self.going_up else 1
+		direction = -1 if self.params.going_up else 1
 		start = int(source_window.pos.Theta)
 		covered = int(source_window.shape.Theta)
 		step = int(source_window.step.Theta)
@@ -77,7 +85,7 @@ class HelicalIndexRemapStage(Stage):
 		if len(indices) != source_shape.Theta:
 			raise ValueError("helical source window does not match the current Theta extent")
 		shifts = np.rint(direction * pitch * indices).astype(int)
-		if not self.crop_valid:
+		if not self.params.crop_valid:
 			return source_shape, shifts, 0, source_shape.Y
 		start = max(0, -int(shifts.min()))
 		stop = min(source_shape.Y, source_shape.Y - int(shifts.max()))
@@ -93,7 +101,7 @@ class HelicalIndexRemapStage(Stage):
 		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("helical_correct.index_remap expects a (Y, Theta, X) sinogram array")
-		if not self.enabled:
+		if not self.params.enabled:
 			return state
 		source_shape = state.buffer_spec.shape
 		count = source_shape.Theta
@@ -104,7 +112,7 @@ class HelicalIndexRemapStage(Stage):
 			source_shape, self._pitch(state), state.source_window,
 		)
 
-		if self.crop_valid:
+		if self.params.crop_valid:
 			output_rows = np.arange(start, stop)
 			output, remapped = allocate_output(
 				state, shape, data.dtype, role="helical_remap",
@@ -117,7 +125,7 @@ class HelicalIndexRemapStage(Stage):
 			output, remapped = allocate_output(
 				state, source_shape, data.dtype, role="helical_remap",
 			)
-			remapped.fill(self.fill_value)
+			remapped.fill(self.params.fill_value)
 			rows = np.arange(y_size)
 			for projection, shift_px in enumerate(shifts):
 				source = rows + shift_px

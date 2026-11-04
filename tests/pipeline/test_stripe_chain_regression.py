@@ -132,7 +132,7 @@ def test_reversing_non_commuting_fw_vo_chain_changes_the_result():
 
 
 def test_vo_family_preserves_its_authored_order_and_matches_contiguous(monkeypatch):
-	import lftomo.pipeline.stages.stripe as stripe_module
+	import lftomo.prep.stripe as stripe_module
 
 	projection = _fixture()
 	sinogram = projection.transpose(1, 0, 2).copy()

@@ -12,7 +12,7 @@ from typing import Any
 import click
 import numpy as np
 
-from lftomo.config import Recon
+from lftomo.config import CALIBRATION_RESOLUTION_FIELDS, Recon
 from lftomo.pipeline import NumpyBackend, Pipeline, validate_pipeline
 from lftomo.pipeline.stages import create_stage, dispatch_for_stage
 from lftomo.review import CandidateReport, ExperimentCandidateResolver
@@ -205,10 +205,7 @@ class PipelineTrialExecutor:
 		scan, _ = load_scan(self.scan_path)
 		resolved = recon.model_copy(deep=True)
 		for stage in resolved.pipeline:
-			for name in (
-				"calibration_manifest", "calibration_components",
-				"compatibility_policy", "compatibility_override_reason",
-			):
+			for name in CALIBRATION_RESOLUTION_FIELDS:
 				stage.params.pop(name, None)
 		stages = [create_stage(config) for config in resolved.pipeline]
 		validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
@@ -249,10 +246,7 @@ class PipelineTrialExecutor:
 		for window in identity.fidelity.windows:
 			recon = self._window_recon(identity, window, Path("validation") / window.id)
 			for stage in recon.pipeline:
-				for name in (
-					"calibration_manifest", "calibration_components",
-					"compatibility_policy", "compatibility_override_reason",
-				):
+				for name in CALIBRATION_RESOLUTION_FIELDS:
 					stage.params.pop(name, None)
 			stages = [create_stage(config) for config in recon.pipeline]
 			validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
@@ -347,10 +341,7 @@ class PipelineTrialExecutor:
 					trial.identity, window, Path("prefix-plan") / window.id,
 				)
 				for config in recon.pipeline:
-					for name in (
-						"calibration_manifest", "calibration_components",
-						"compatibility_policy", "compatibility_override_reason",
-					):
+					for name in CALIBRATION_RESOLUTION_FIELDS:
 						config.params.pop(name, None)
 				stages = tuple(create_stage(config) for config in recon.pipeline)
 				candidates.append(PrefixPlanningCandidate(

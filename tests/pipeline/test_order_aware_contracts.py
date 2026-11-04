@@ -7,7 +7,6 @@ from lftomo.pipeline import (
 	CompletePipelineError,
 	DataDomain,
 	DomainCompatibilityError,
-	Locality,
 	MaterializationKind,
 	PRESERVE,
 	Pipeline,

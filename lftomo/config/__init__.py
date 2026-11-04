@@ -3,6 +3,7 @@
 from .models import (
 	Acquisition,
 	AngleSource,
+	CALIBRATION_RESOLUTION_FIELDS,
 	CandidateLimits,
 	CategoricalDomain,
 	ConfigModel,
@@ -31,6 +32,7 @@ from .models import (
 __all__ = [
 	"Acquisition",
 	"AngleSource",
+	"CALIBRATION_RESOLUTION_FIELDS",
 	"CandidateLimits",
 	"CategoricalDomain",
 	"ConfigModel",

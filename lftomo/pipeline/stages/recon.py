@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import os
+from typing import Literal
 
 import numpy as np
+from pydantic import Field, PositiveInt, TypeAdapter, ValidationError, model_validator
 
-from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	BufferSpec,
-	Locality,
 	PipelineState,
 	ResourceHints,
 	Stage,
 	StageContract,
+	StageParams,
 	allocate_output,
 	commit_output,
 )
@@ -23,69 +25,60 @@ from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder, X
 from lftomo.util.window import TomoWindow
 
 
+class _ReconstructionParams(StageParams):
+	center: float | list[float] | None = None
+	circle_mask: bool = True
+	circle_mask_ratio: float = Field(default=1.0, gt=0, le=1)
+	circle_mask_value: float = 0.0
+	filter_name: str = "shepp"
+	filter_parameters: list[float] | tuple[float, ...] | None = None
+	edge_buffer_left: int = Field(default=0, ge=0)
+	edge_buffer_right: int = Field(default=0, ge=0)
+	output_width: int | None = Field(default=None, ge=1)
+
+
 class GridrecStage(Stage):
 	"""Reconstruct projection or sinogram-order data with TomoPy gridrec."""
 
 	name = "recon.gridrec"
 	contract = StageContract(
+		accepts=(ProjOrder, SinoOrder),
+		prefers=SinoOrder,
+		produces=ReconOrder,
+		accepts_domain=(DataDomain.ATTENUATION,),
+		produces_domain=DataDomain.RECON,
+		window_axes=("Y",),
+		consumes_artifacts=("center",),
 		runtime_requirements=(tomopy_requirement("circ_mask", "recon"),),
 	)
 
-	def __init__(
-		self,
-		center: float | list[float] | None = None,
-		ncore: int | None = None,
-		ncore_from_machine: bool = False,
-		circle_mask: bool = True,
-		circle_mask_ratio: float = 1.0,
-		circle_mask_value: float = 0.0,
-		filter_name: str = "shepp",
-		filter_parameters: list[float] | tuple[float, ...] | None = None,
-		iterations: int | None = None,
-		edge_buffer_left: int = 0,
-		edge_buffer_right: int = 0,
-		edge_buffer_input: bool = False,
-		output_width: int | None = None,
-		angle_endpoint: bool = False,
-	):
-		if ncore is not None and ncore < 1:
-			raise ValueError("gridrec ncore must be positive")
-		if not 0 < circle_mask_ratio <= 1:
-			raise ValueError("gridrec circle_mask_ratio must be in (0, 1]")
-		if iterations not in (None, 1):
-			raise ValueError("gridrec is non-iterative; iterations may only be 1")
-		if edge_buffer_left < 0 or edge_buffer_right < 0:
-			raise ValueError("gridrec edge buffers cannot be negative")
-		if output_width is not None and output_width < 1:
-			raise ValueError("gridrec output_width must be positive")
-		self.center = center
-		self.ncore = (os.cpu_count() or 1) if ncore_from_machine else ncore
-		self.circle_mask = circle_mask
-		self.circle_mask_ratio = circle_mask_ratio
-		self.circle_mask_value = circle_mask_value
-		self.filter_name = filter_name
-		self.filter_parameters = filter_parameters
-		self.edge_buffer_left = edge_buffer_left
-		self.edge_buffer_right = edge_buffer_right
-		self.edge_buffer_input = edge_buffer_input
-		self.output_width = output_width
-		self.angle_endpoint = angle_endpoint
-		self.contract = StageContract(
-			accepts=(ProjOrder, SinoOrder),
-			prefers=SinoOrder,
-			produces=ReconOrder,
-			accepts_domain=(DataDomain.ATTENUATION,),
-			produces_domain=DataDomain.RECON,
-			locality=Locality.SINOGRAM,
-			window_axes=("Y",),
-			consumes_artifacts=() if center is not None else ("center",),
-			resources=ResourceHints(preferred_cpus=self.ncore),
-			runtime_requirements=type(self).contract.runtime_requirements,
-		)
+	class Params(_ReconstructionParams):
+		ncore: PositiveInt | None = None
+		iterations: Literal[1] | None = None
+		edge_buffer_input: bool = False
+		angle_endpoint: bool = False
+
+		@model_validator(mode="before")
+		@classmethod
+		def resolve_machine_cores(cls, values):
+			values = dict(values)
+			if values.pop("ncore_from_machine", False):
+				# Validate the supplied value before applying the existing override.
+				if values.get("ncore") is not None:
+					try:
+						TypeAdapter(PositiveInt).validate_python(values["ncore"])
+					except ValidationError as error:
+						raise ValueError(f"ncore: {error.errors()[0]['msg']}") from error
+				values["ncore"] = os.cpu_count() or 1
+			return values
 
 	@classmethod
-	def from_config(cls, config: StageConfig) -> "GridrecStage":
-		return cls(**config.params)
+	def contract_for(cls, params: Params) -> StageContract:
+		return replace(
+			cls.contract,
+			consumes_artifacts=() if params.center is not None else ("center",),
+			resources=replace(cls.contract.resources, preferred_cpus=params.ncore),
+		)
 
 	def _angles(self, state: PipelineState, theta_count: int) -> np.ndarray:
 		angles = None
@@ -97,7 +90,7 @@ class GridrecStage(Stage):
 				np.deg2rad(acquisition.rotation_start_deg),
 				np.deg2rad(acquisition.rotation_end_deg),
 				theta_count,
-				endpoint=self.angle_endpoint,
+				endpoint=getattr(self.params, "angle_endpoint", False),
 				dtype=np.float32,
 			)
 		angles = np.asarray(angles, dtype=np.float32)
@@ -108,13 +101,13 @@ class GridrecStage(Stage):
 	def _center(
 		self, state: PipelineState, slice_count: int, input_y: slice,
 	) -> float | np.ndarray:
-		center = self.center if self.center is not None else state.artifacts.get("center")
+		center = self.params.center if self.params.center is not None else state.artifacts.get("center")
 		if center is None:
 			raise ValueError("recon.gridrec requires a center parameter or center artifact")
 		values = np.asarray(center, dtype=np.float32)
 		if values.ndim == 0:
 			return float(values)
-		if self.center is None and values.ndim == 1 \
+		if self.params.center is None and values.ndim == 1 \
 				and len(values) == state.buffer_spec.shape.Y:
 			values = values[input_y]
 		if values.ndim != 1 or len(values) != slice_count:
@@ -141,21 +134,22 @@ class GridrecStage(Stage):
 		else:
 			width = source_window.recon_shape().X
 			input_offset = source_window.internal.axis_slice("X").start
-		edge_stop = width - self.edge_buffer_right
-		if self.edge_buffer_left >= edge_stop:
+		edge_buffer_input = getattr(self.params, "edge_buffer_input", False)
+		edge_stop = width - self.params.edge_buffer_right
+		if self.params.edge_buffer_left >= edge_stop:
 			raise ValueError("gridrec edge buffers remove the entire reconstruction width")
 		input_start, input_stop = (
-			(self.edge_buffer_left, edge_stop) if self.edge_buffer_input else (0, width)
+			(self.params.edge_buffer_left, edge_stop) if edge_buffer_input else (0, width)
 		)
 		output_start, output_stop = (
 			(0, input_stop - input_start)
-			if self.edge_buffer_input else (self.edge_buffer_left, edge_stop)
+			if edge_buffer_input else (self.params.edge_buffer_left, edge_stop)
 		)
-		if self.output_width is not None:
-			if self.output_width > output_stop - output_start:
+		if self.params.output_width is not None:
+			if self.params.output_width > output_stop - output_start:
 				raise ValueError("gridrec output_width exceeds the reconstructed width")
-			output_start += (output_stop - output_start - self.output_width) // 2
-			output_stop = output_start + self.output_width
+			output_start += (output_stop - output_start - self.params.output_width) // 2
+			output_stop = output_start + self.params.output_width
 
 		if source_window is None:
 			allocation = ReconOrder.of(
@@ -199,12 +193,12 @@ class GridrecStage(Stage):
 		self, state: PipelineState, output, target: np.ndarray, tomopy,
 		shape: ReconOrder, output_x: slice, *, ncore: int | None,
 	) -> PipelineState:
-		if self.circle_mask:
+		if self.params.circle_mask:
 			tomopy.circ_mask(
 				target,
 				axis=0,
-				ratio=self.circle_mask_ratio,
-				val=self.circle_mask_value,
+				ratio=self.params.circle_mask_ratio,
+				val=self.params.circle_mask_value,
 				ncore=ncore,
 			)
 		cropped = output[ReconOrder.point_index(X=output_x)]
@@ -230,9 +224,9 @@ class GridrecStage(Stage):
 
 		import tomopy
 
-		kwargs = {"filter_name": self.filter_name}
-		if self.filter_parameters is not None:
-			kwargs["filter_par"] = self.filter_parameters
+		kwargs = {"filter_name": self.params.filter_name}
+		if self.params.filter_parameters is not None:
+			kwargs["filter_par"] = self.params.filter_parameters
 		output, target = self._allocate_reconstruction(state, allocation_shape)
 		tomopy.recon(
 			data,
@@ -240,12 +234,12 @@ class GridrecStage(Stage):
 			center=center,
 			sinogram_order=sinogram_order,
 			algorithm="gridrec",
-			ncore=self.ncore,
+			ncore=self.params.ncore,
 			init_recon=target,
 			**kwargs,
 		)
 		return self._finish_reconstruction(
-			state, output, target, tomopy, output_shape, output_x, ncore=self.ncore,
+			state, output, target, tomopy, output_shape, output_x, ncore=self.params.ncore,
 		)
 
 
@@ -254,59 +248,33 @@ class AstraCudaStage(GridrecStage):
 
 	method = ""
 	iterative = False
-	contract = StageContract(runtime_requirements=(
-		tomopy_requirement("astra", "circ_mask", "recon"),
-		ASTRA_RUNTIME_REQUIREMENT,
-	))
+	contract = replace(
+		GridrecStage.contract,
+		resources=ResourceHints(preferred_cpus=1, requires_gpu=True),
+		runtime_requirements=(
+			tomopy_requirement("astra", "circ_mask", "recon"),
+			ASTRA_RUNTIME_REQUIREMENT,
+		),
+	)
 
-	def __init__(
-		self,
-		center: float | list[float] | None = None,
-		iterations: int = 1,
-		proj_type: str = "cuda",
-		extra_options: dict | None = None,
-		circle_mask: bool = True,
-		circle_mask_ratio: float = 1.0,
-		circle_mask_value: float = 0.0,
-		filter_name: str = "butterworth",
-		filter_parameters: list[float] | tuple[float, ...] | None = (0.2, 2),
-		edge_buffer_left: int = 0,
-		edge_buffer_right: int = 0,
-		output_width: int | None = None,
-	):
-		if iterations < 1:
-			raise ValueError("ASTRA iterations must be positive")
-		super().__init__(
-			center=center,
-			ncore=1,
-			circle_mask=circle_mask,
-			circle_mask_ratio=circle_mask_ratio,
-			circle_mask_value=circle_mask_value,
-			filter_name=filter_name,
-			filter_parameters=filter_parameters,
-			edge_buffer_left=edge_buffer_left,
-			edge_buffer_right=edge_buffer_right,
-			output_width=output_width,
-		)
-		self.iterations = iterations
-		self.proj_type = proj_type
-		self.extra_options = extra_options or {}
-		self.contract = StageContract(
-			accepts=(ProjOrder, SinoOrder),
-			prefers=SinoOrder,
-			produces=ReconOrder,
-			accepts_domain=(DataDomain.ATTENUATION,),
-			produces_domain=DataDomain.RECON,
-			locality=Locality.SINOGRAM,
-			window_axes=("Y",),
-			consumes_artifacts=self.contract.consumes_artifacts,
-			resources=ResourceHints(preferred_cpus=1, requires_gpu=True),
-			runtime_requirements=self.contract.runtime_requirements,
-		)
+	class Params(_ReconstructionParams):
+		iterations: int = Field(default=1, ge=1)
+		proj_type: str = "cuda"
+		extra_options: dict = Field(default_factory=dict)
+		filter_name: str = "butterworth"
+		filter_parameters: list[float] | tuple[float, ...] | None = (0.2, 2)
+
+		@model_validator(mode="before")
+		@classmethod
+		def normalize_options(cls, values):
+			values = dict(values)
+			if values.get("extra_options") is None:
+				values["extra_options"] = {}
+			return values
 
 	@classmethod
-	def from_config(cls, config: StageConfig) -> "AstraCudaStage":
-		return cls(**config.params)
+	def contract_for(cls, params: Params) -> StageContract:
+		return replace(cls.contract, consumes_artifacts=() if params.center is not None else ("center",))
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if not state.backend.supports_gpu:
@@ -326,15 +294,15 @@ class AstraCudaStage(GridrecStage):
 		import tomopy
 
 		options = {
-			"proj_type": self.proj_type,
+			"proj_type": self.params.proj_type,
 			"method": self.method,
-			"extra_options": dict(self.extra_options),
+			"extra_options": dict(self.params.extra_options),
 		}
 		if self.iterative:
-			options["num_iter"] = self.iterations
-		kwargs = {"filter_name": self.filter_name}
-		if self.filter_parameters is not None:
-			kwargs["filter_par"] = self.filter_parameters
+			options["num_iter"] = self.params.iterations
+		kwargs = {"filter_name": self.params.filter_name}
+		if self.params.filter_parameters is not None:
+			kwargs["filter_par"] = self.params.filter_parameters
 		output, target = self._allocate_reconstruction(state, allocation_shape)
 		tomopy.recon(
 			data,

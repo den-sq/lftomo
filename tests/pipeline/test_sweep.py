@@ -179,6 +179,39 @@ def test_algorithm_cases_keep_conditional_parameters_disjoint():
 	assert all(run.recon.pipeline[0].sweep is None for run in runs)
 
 
+@pytest.mark.parametrize("sampled", [False, True], ids=["enumerated", "sampled"])
+def test_algorithm_case_validates_after_applying_parameter_overrides(sampled):
+	recon = Recon.model_validate({
+		"pipeline": [{
+			"kind": "recon",
+			"algorithm": "sirt_cuda",
+			"params": {"iterations": 10, "center": "4"},
+			"sweep": {
+				"kind": "cases",
+				"cases": [{
+					"name": "gridrec",
+					"algorithm": "gridrec",
+					"params": {"iterations": 1},
+				}],
+			},
+		}],
+	})
+	original = recon.model_dump(mode="json")
+	if sampled:
+		import numpy as np
+		from lftomo.experiment.selection import _resolve_unit_candidate
+
+		resolved, _ = _resolve_unit_candidate(recon, np.array([0.5]))
+	else:
+		resolved = expand_recon_sweeps(recon)[0].recon
+	expected = Recon(pipeline=[StageConfig(
+		kind="recon", algorithm="gridrec", params={"iterations": 1, "center": "4"},
+	)])
+	assert resolved.pipeline[0].model_dump() == expected.pipeline[0].model_dump()
+	assert candidate_key(resolved) == candidate_key(expected)
+	assert recon.model_dump(mode="json") == original
+
+
 def test_typed_domains_share_one_finite_and_continuous_vocabulary():
 	finite = SweepConfig.model_validate({
 		"kind": "domain",

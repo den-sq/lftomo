@@ -15,14 +15,15 @@ import sys
 from types import SimpleNamespace
 
 import numpy as np
+from pydantic import Field
 
-from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
 	BufferSpec,
 	PipelineState,
 	RuntimeRequirement,
 	Stage,
 	StageContract,
+	StageParams,
 	allocate_output,
 	commit_output,
 )
@@ -128,37 +129,27 @@ class DRHTStage(Stage):
 	name = "super_resolve.drht"
 	contract = _contract(runtime_requirements=(_TORCH_RUNTIME_REQUIREMENT,))
 
-	def __init__(self, repo_path: str | Path | None = None,
-				checkpoint_path: str | Path | None = None, device: str = "cuda",
-				arch: str = "DRHT", embed_dim: int = 32, patch_size: int = 128,
-				patch_overlap: float = 0.25, dd_in: int = 1,
-				allow_bicubic_fallback: bool = False):
-		if patch_size < 1 or not 0 <= patch_overlap < 1:
-			raise ValueError("invalid DRHT patch size or overlap")
-		self.repo_path = None if repo_path is None else Path(repo_path)
-		self.checkpoint_path = None if checkpoint_path is None else Path(checkpoint_path)
-		self.device = device
-		self.arch = arch
-		self.embed_dim = embed_dim
-		self.patch_size = patch_size
-		self.patch_overlap = patch_overlap
-		self.dd_in = dd_in
-		self.allow_bicubic_fallback = allow_bicubic_fallback
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "DRHTStage":
-		return cls(**config.params)
+	class Params(StageParams):
+		repo_path: Path | None = None
+		checkpoint_path: Path | None = None
+		device: str = "cuda"
+		arch: str = "DRHT"
+		embed_dim: int = 32
+		patch_size: int = Field(default=128, ge=1)
+		patch_overlap: float = Field(default=0.25, ge=0, lt=1)
+		dd_in: int = 1
+		allow_bicubic_fallback: bool = False
 
 	def _issues(self) -> list[str]:
 		issues = []
-		if self.repo_path is None or not self.repo_path.exists():
+		if self.params.repo_path is None or not self.params.repo_path.exists():
 			issues.append("DRHT repo path is not set or does not exist")
-		if self.checkpoint_path is None or not self.checkpoint_path.exists():
+		if self.params.checkpoint_path is None or not self.params.checkpoint_path.exists():
 			issues.append("DRHT checkpoint path is not set or does not exist")
 		return issues
 
 	def _load_model(self, torch, device):
-		repo = str(self.repo_path.resolve())
+		repo = str(self.params.repo_path.resolve())
 		old_path = list(sys.path)
 		try:
 			if repo not in sys.path:
@@ -166,13 +157,13 @@ class DRHTStage(Stage):
 			importlib.invalidate_caches()
 			util = importlib.import_module("util")
 			options = SimpleNamespace(
-				arch=self.arch,
-				embed_dim=self.embed_dim,
-				train_ps=self.patch_size,
-				dd_in=self.dd_in,
+				arch=self.params.arch,
+				embed_dim=self.params.embed_dim,
+				train_ps=self.params.patch_size,
+				dd_in=self.params.dd_in,
 			)
 			model = util.get_arch(options)
-			checkpoint = torch.load(str(self.checkpoint_path), map_location=device)
+			checkpoint = torch.load(str(self.params.checkpoint_path), map_location=device)
 			state_dict = checkpoint.get("state_dict", checkpoint)
 			try:
 				model.load_state_dict(state_dict)
@@ -190,9 +181,9 @@ class DRHTStage(Stage):
 		scratch: dict[str, np.ndarray],
 	) -> tuple[np.ndarray, dict]:
 		normalized, offset, scale = normalize01(image)
-		stride = max(1, round(self.patch_size * (1 - self.patch_overlap)))
-		y_grid = ChunkGrid(self.patch_size, stride, normalized.shape[0], "reanchor")
-		x_grid = ChunkGrid(self.patch_size, stride, normalized.shape[1], "reanchor")
+		stride = max(1, round(self.params.patch_size * (1 - self.params.patch_overlap)))
+		y_grid = ChunkGrid(self.params.patch_size, stride, normalized.shape[0], "reanchor")
+		x_grid = ChunkGrid(self.params.patch_size, stride, normalized.shape[1], "reanchor")
 		for values in scratch.values():
 			values.fill(0)
 		output, count = scratch["output"], scratch["count"]
@@ -204,7 +195,7 @@ class DRHTStage(Stage):
 					chunk = normalized[y_window, x_window]
 					patch = np.pad(
 						chunk,
-						((0, self.patch_size - chunk.shape[0]), (0, self.patch_size - chunk.shape[1])),
+						((0, self.params.patch_size - chunk.shape[0]), (0, self.params.patch_size - chunk.shape[1])),
 						mode="edge",
 					).astype(np.float32)
 					tensor = torch.from_numpy(patch[None, None]).to(
@@ -235,13 +226,13 @@ class DRHTStage(Stage):
 		seed = interpolate_missing_angles(volume, mask, theta)
 		issues = self._issues()
 		if issues:
-			if not self.allow_bicubic_fallback:
+			if not self.params.allow_bicubic_fallback:
 				raise RuntimeError("; ".join(issues))
 			return _store_result(state, seed, {"method": "drht", "fallback": "interpolation", "issues": issues})
 
 		import torch
 
-		device = torch.device("cuda" if self.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
+		device = torch.device("cuda" if self.params.device.startswith("cuda") and torch.cuda.is_available() else "cpu")
 		model = self._load_model(torch, device)
 		restored = np.empty_like(seed)
 		attention_volumes = {name: np.empty_like(seed) for name in ("l1", "kl_row", "kl_col")}
@@ -284,28 +275,20 @@ class LDMStage(Stage):
 	name = "super_resolve.ldm"
 	contract = _contract()
 
-	def __init__(self, repo_path: str | Path | None = None,
-				config_path: str | Path | None = None,
-				checkpoint_path: str | Path | None = None,
-				module: str = "inference", callable_name: str = "restore_sinograms",
-				device: str = "cuda", allow_interpolation_fallback: bool = False):
-		self.repo_path = None if repo_path is None else Path(repo_path)
-		self.config_path = None if config_path is None else Path(config_path)
-		self.checkpoint_path = None if checkpoint_path is None else Path(checkpoint_path)
-		self.module = module
-		self.callable_name = callable_name
-		self.device = device
-		self.allow_interpolation_fallback = allow_interpolation_fallback
-
-	@classmethod
-	def from_config(cls, config: StageConfig) -> "LDMStage":
-		return cls(**config.params)
+	class Params(StageParams):
+		repo_path: Path | None = None
+		config_path: Path | None = None
+		checkpoint_path: Path | None = None
+		module: str = "inference"
+		callable_name: str = "restore_sinograms"
+		device: str = "cuda"
+		allow_interpolation_fallback: bool = False
 
 	def _issues(self) -> list[str]:
 		paths = {
-			"LDM repo": self.repo_path,
-			"LDM config": self.config_path,
-			"LDM checkpoint": self.checkpoint_path,
+			"LDM repo": self.params.repo_path,
+			"LDM config": self.params.config_path,
+			"LDM checkpoint": self.params.checkpoint_path,
 		}
 		return [f"{name} path is not set or does not exist" for name, path in paths.items() if path is None or not path.exists()]
 
@@ -313,26 +296,26 @@ class LDMStage(Stage):
 		volume, mask, theta = _dense_inputs(state)
 		issues = self._issues()
 		if issues:
-			if not self.allow_interpolation_fallback:
+			if not self.params.allow_interpolation_fallback:
 				raise RuntimeError("; ".join(issues))
 			seed = interpolate_missing_angles(volume, mask, theta)
 			return _store_result(state, seed, {"method": "ldm", "fallback": "interpolation", "issues": issues})
 		old_path = list(sys.path)
 		try:
-			sys.path.insert(0, str(self.repo_path.resolve()))
-			module = importlib.import_module(self.module)
-			restore = getattr(module, self.callable_name)
+			sys.path.insert(0, str(self.params.repo_path.resolve()))
+			module = importlib.import_module(self.params.module)
+			restore = getattr(module, self.params.callable_name)
 			restored = restore(
 				volume=volume,
 				availability_mask=mask,
 				theta_degrees=theta,
-				config_path=self.config_path,
-				checkpoint_path=self.checkpoint_path,
-				device=self.device,
+				config_path=self.params.config_path,
+				checkpoint_path=self.params.checkpoint_path,
+				device=self.params.device,
 			)
 		finally:
 			sys.path[:] = old_path
-		return _store_result(state, restored, {"method": "ldm", "device": self.device})
+		return _store_result(state, restored, {"method": "ldm", "device": self.params.device})
 
 
 def normalize01(image: np.ndarray) -> tuple[np.ndarray, float, float]:

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import h5py
 import numpy as np
 from scipy.ndimage import binary_erosion, gaussian_gradient_magnitude
 
@@ -24,6 +23,8 @@ class HDF5RandomFrameSource:
 		self, path: str | Path, dataset: str = "exchange/data_white", *,
 		frame_start: int = 0, frame_stop: int | None = None,
 	):
+		import h5py
+
 		self.path = Path(path).expanduser().resolve()
 		self.dataset = dataset
 		with h5py.File(self.path, "r") as handle:
@@ -44,6 +45,8 @@ class HDF5RandomFrameSource:
 
 	def read(self, index: int, *, y_start: int = 0, y_stop: int | None = None,
 			x_start: int = 0, x_stop: int | None = None) -> np.ndarray:
+		import h5py
+
 		if not 0 <= index < self.frame_count:
 			raise IndexError(index)
 		with h5py.File(self.path, "r") as handle:

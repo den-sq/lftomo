@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-from functools import partial
+from dataclasses import replace
 
-import cv2
 import numpy as np
+from pydantic import Field
 
-from lftomo.config import StageConfig
 from lftomo.pipeline.core import (
-	Locality, PadRequirement, PipelineState, Stage,
-	StageContract,
+	PadRequirement, PipelineState, ProjectionStage, StageContract, StageParams,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.util.shapes import Proj, ProjOrder, SinoOrder, SliceIter, Theta
+from lftomo.util.shapes import Proj
 
 
-class BilateralFilterStage(Stage):
+class BilateralFilterStage(ProjectionStage):
 	"""Apply OpenCV edge-preserving bilateral filtering per projection.
 
 	OpenCV's bilateral implementation consumes the canonical float32 work buffer
@@ -24,52 +22,42 @@ class BilateralFilterStage(Stage):
 	"""
 
 	name = "filter.bilateral"
+	contract = replace(
+		ProjectionStage.contract,
+		mutates_input=True,
+		accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
+		produces_domain=PRESERVE,
+		window_axes=("Y", "Theta"),
+	)
 
-	def __init__(self, diameter: int = 3, sigma_color: float = 1,
-				sigma_space: float = 1, enabled: bool = True,
-				border_type: int = cv2.BORDER_DEFAULT):
-		if diameter < 1:
-			raise ValueError("bilateral diameter must be positive")
-		if sigma_color <= 0 or sigma_space <= 0:
-			raise ValueError("bilateral sigma values must be positive")
-		self.contract = StageContract(
-			mutates_input=enabled,
-			accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,
-			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
-			produces_domain=PRESERVE, locality=Locality.PROJECTION,
-			window_axes=("Y", "Theta"),
-			required_pad=PadRequirement(
-				fixed=Proj(Y=diameter // 2, X=diameter // 2),
-			),
-		)
-		self.diameter = diameter
-		self.sigma_color = sigma_color
-		self.sigma_space = sigma_space
-		self.enabled = enabled
-		self.border_type = border_type
+	class Params(StageParams):
+		diameter: int = Field(default=3, ge=1)
+		sigma_color: float = Field(default=1, gt=0)
+		sigma_space: float = Field(default=1, gt=0)
+		enabled: bool = True
+		border_type: int = 4  # OpenCV BORDER_DEFAULT; keep schema imports lightweight.
 
 	@classmethod
-	def from_config(cls, config: StageConfig) -> "BilateralFilterStage":
-		return cls(**config.params)
+	def contract_for(cls, params: Params) -> StageContract:
+		return replace(
+			cls.contract,
+			mutates_input=params.enabled,
+			required_pad=PadRequirement(
+				fixed=Proj(Y=params.diameter // 2, X=params.diameter // 2),
+			),
+		)
 
-	def run(self, state: PipelineState) -> PipelineState:
-		if state.backend.name != "numpy":
-			raise TypeError("BilateralFilterStage currently requires the NumPy backend")
-		data = np.asarray(state.working_array)
-		shape = state.buffer_spec.shape
-		if data.ndim != 3:
-			raise ValueError("filter.bilateral expects a (Y, Theta, X) sinogram array")
-		if not self.enabled:
-			return state
-		if data.dtype != np.dtype(np.float32):
+	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:
+		if not self.params.enabled:
+			return None
+		if image.dtype != np.dtype(np.float32):
 			raise TypeError("filter.bilateral requires the canonical float32 work dtype")
-		for index in Theta.drange(0, shape.Theta, 1).get_iter(partial(SliceIter, shape=shape)):
-			image = data[index]
-			image[:] = cv2.bilateralFilter(
-				image,
-				self.diameter,
-				self.sigma_color,
-				self.sigma_space,
-				borderType=self.border_type,
-			)
-		return state
+		import cv2
+
+		return cv2.bilateralFilter(
+			image,
+			self.params.diameter,
+			self.params.sigma_color,
+			self.params.sigma_space,
+			borderType=self.params.border_type,
+		)

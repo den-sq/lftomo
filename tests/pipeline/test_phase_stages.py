@@ -6,7 +6,6 @@ from lftomo.pipeline import (
 	BufferSpec,
 	DataDomain,
 	DomainCompatibilityError,
-	Locality,
 	PRESERVE,
 	Pipeline,
 	PipelineState,
@@ -123,7 +122,6 @@ def test_coupled_phase_absorption_is_distinct_registered_algorithm():
 def test_enabled_phase_algorithms_declare_terminal_projection_contracts(stage):
 	assert stage.contract.accepts_domain == (DataDomain.TRANSMISSION,)
 	assert stage.contract.produces_domain is DataDomain.ATTENUATION
-	assert stage.contract.locality is Locality.PROJECTION
 	assert stage.contract.accepts == (ProjOrder, SinoOrder)
 	assert stage.contract.prefers is ProjOrder
 	assert stage.contract.mutates_input is True

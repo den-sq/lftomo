@@ -8,7 +8,6 @@ from lftomo.pipeline import (
 	BufferSpec,
 	DataDomain,
 	ExecutionKind,
-	Locality,
 	PRESERVE,
 	Pipeline,
 	PipelineState,
@@ -45,7 +44,7 @@ class AddSinogramStage(Stage):
 		self.contract = StageContract(
 			accepts=(SinoOrder,), prefers=SinoOrder, produces=PRESERVE,
 			accepts_domain=(DataDomain.ATTENUATION,), produces_domain=PRESERVE,
-			locality=Locality.SINOGRAM, bounded_views_from=(ProjOrder,),
+			bounded_views_from=(ProjOrder,),
 			mutates_input=True,
 		)
 
@@ -69,7 +68,6 @@ class BarrierStage(Stage):
 	contract = StageContract(
 		accepts=(ProjOrder,), produces=PRESERVE,
 		accepts_domain=(DataDomain.ATTENUATION,), produces_domain=PRESERVE,
-		locality=Locality.PROJECTION,
 	)
 
 	def run(self, state):

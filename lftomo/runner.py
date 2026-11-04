@@ -26,6 +26,7 @@ from lftomo.calibration import (
 	validate_bundle,
 )
 from lftomo.config import (
+	CALIBRATION_RESOLUTION_FIELDS,
 	HDF5DxchangeProjections,
 	HardwareTimestampAngleSource,
 	Recon,
@@ -155,12 +156,6 @@ def _read_tiff_map(path: Path, y_start: int, y_stop: int | None) -> np.ndarray:
 
 
 _LEGACY_COMPONENTS = ("pre_gain", "post_gain", "pre_dark", "post_dark")
-_RESOLUTION_PARAMS = {
-	"calibration_manifest",
-	"calibration_components",
-	"compatibility_policy",
-	"compatibility_override_reason",
-}
 
 
 def _normalization_stage(recon: Recon):
@@ -227,7 +222,7 @@ def _manifest_selection(recon: Recon, pipeline_root: Path) -> tuple[Path | None,
 			continue
 		if stage.params.get("calibration_manifest") is not None:
 			selections.append(_resolve_path(stage.params["calibration_manifest"], pipeline_root))
-		for name in _RESOLUTION_PARAMS - {"calibration_manifest"}:
+		for name in CALIBRATION_RESOLUTION_FIELDS - {"calibration_manifest"}:
 			if name in stage.params:
 				options[name] = stage.params[name]
 	if selections and any(path != selections[0] for path in selections[1:]):
@@ -237,7 +232,7 @@ def _manifest_selection(recon: Recon, pipeline_root: Path) -> tuple[Path | None,
 
 def _strip_resolution_params(recon: Recon) -> None:
 	for stage in recon.pipeline:
-		for name in _RESOLUTION_PARAMS:
+		for name in CALIBRATION_RESOLUTION_FIELDS:
 			stage.params.pop(name, None)
 
 

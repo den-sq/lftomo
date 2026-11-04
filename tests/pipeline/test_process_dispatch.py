@@ -8,7 +8,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState
-from lftomo.pipeline.core import Locality, Stage, StageContract
+from lftomo.pipeline.core import Stage, StageContract
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.pipeline.execution import (
 	PipelineExecutor, WorkerTimeoutError, run_bounded_sinogram_segment,
@@ -76,13 +76,29 @@ def _worker_pid():
 	return os.getpid()
 
 
+def _worker_torch_threads():
+	import torch
+
+	return os.getpid(), torch.get_num_threads()
+
+
 def _raise_deterministic_error():
 	raise ValueError("deterministic kernel failure")
 
 
+class _ObservedBACStage(BronnikovAidedCorrectionStage):
+	def run_projection(self, image, state):
+		import torch
+
+		state.artifacts[f"bac_worker_{state.source_window.pos.Theta}"] = (
+			os.getpid(), torch.get_num_threads(),
+		)
+		return super().run_projection(image, state)
+
+
 class _AddSinogramStage(Stage):
 	name = "test.add_sinogram"
-	contract = StageContract(locality=Locality.SINOGRAM)
+	contract = StageContract()
 
 	def run(self, state):
 		return state
@@ -144,10 +160,12 @@ def test_ndarray_bounded_segment_checks_cancellation_before_each_kernel():
 
 def test_engine_internal_core_budget_is_scoped_to_the_call(monkeypatch):
 	stage = VoCenterStage(ncore=7)
+	original_params = stage.params
+	original_contract = stage.contract
 	seen = []
 
 	def capture(state):
-		seen.append(stage.kwargs["ncore"])
+		seen.append(stage.params.ncore)
 		return state
 
 	monkeypatch.setattr(stage, "run", capture)
@@ -158,7 +176,9 @@ def test_engine_internal_core_budget_is_scoped_to_the_call(monkeypatch):
 	)
 	PipelineExecutor(2).run_stage(state, stage)
 	assert seen == [2]
-	assert stage.kwargs["ncore"] == 7
+	assert stage.params is original_params
+	assert stage.contract is original_contract
+	assert stage.params.ncore == 7
 
 
 def test_process_normalization_receives_only_handles_and_matches_serial(monkeypatch):
@@ -230,6 +250,55 @@ def test_process_phase_chain_matches_intentionally_coupled_stage():
 		state = context.executor.run_stage(state, PaganinFilterStage(alpha=0.06))
 		state = context.executor.run_stage(state, NegativeLogStage())
 		np.testing.assert_allclose(np.asarray(state.working_array), expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("worker_threads", [4, 1])
+def test_real_bac_process_threads_follow_worker_budget_without_raising_user_limit(
+	monkeypatch, worker_threads,
+):
+	torch = pytest.importorskip("torch")
+	pytest.importorskip("hotopy.holo")
+	parent_threads = torch.get_num_threads()
+	monkeypatch.setenv("OMP_NUM_THREADS", str(worker_threads))
+	monkeypatch.setenv("MKL_NUM_THREADS", str(worker_threads))
+	monkeypatch.setattr(os, "process_cpu_count", lambda: 4, raising=False)
+	values = np.full((4, 8, 8), 0.8, dtype=np.float32)
+	values[:, 2:6, 2:6] = 0.4
+	scan = _scan(theta=4, rows=8, columns=8)
+	expected = values.copy()
+	BronnikovAidedCorrectionStage(alpha=2, gamma=1.25, device="cpu").run(
+		attach_source_geometry(PipelineState(
+			expected, scan, _recon(),
+			buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
+			domain=DataDomain.TRANSMISSION,
+		)),
+	)
+	assert torch.get_num_threads() == parent_threads
+
+	with PipelineRunContext(max_workers=2) as context:
+		before = context.executor.submit_all(_worker_torch_threads, [(), ()])
+		assert all(threads == worker_threads for _pid, threads in before)
+		pool = context.executor._pool
+		worker_pids = set(pool._processes)
+		working = context.storage.allocate(ProjOrder(4, 8, 8), np.float32, role="normalized")
+		for _repeat in range(2):
+			working.array()[...] = values
+			state = attach_source_geometry(PipelineState(
+				working, scan, _recon(), storage=context.storage, executor=context.executor,
+				domain=DataDomain.TRANSMISSION,
+			))
+			result = context.executor.run_stage(
+				state, _ObservedBACStage(alpha=2, gamma=1.25, device="cpu"),
+			)
+			observations = [result.artifacts[f"bac_worker_{index}"] for index in range(4)]
+			assert all(pid in worker_pids and pid != os.getpid() for pid, _threads in observations)
+			assert all(threads == min(worker_threads, 2) for _pid, threads in observations)
+			assert context.executor._pool is pool
+			assert set(pool._processes) == worker_pids
+			np.testing.assert_allclose(
+				np.asarray(result.working_array), expected, rtol=2e-6, atol=2e-7,
+			)
+	assert torch.get_num_threads() == parent_threads
 
 
 def test_process_bac_filter_then_negative_log_matches_coupled_stage(

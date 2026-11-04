@@ -30,6 +30,7 @@ jobs:
         shell: bash
         run: |
           test_paths=(
+            tests/config/test_stage_params.py
             tests/pipeline/test_sweep.py
             tests/pipeline/test_validation.py
             tests/experiment/test_models.py

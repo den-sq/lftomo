@@ -7,9 +7,7 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-import h5py
 import numpy as np
-import tifffile as tf
 
 from .models import (
 	ArrayPayload,
@@ -101,6 +99,8 @@ def _payload_metadata(path: Path, payload: ArrayPayload) -> tuple[tuple[int, ...
 		array = np.load(path, mmap_mode="r", allow_pickle=False)
 		return tuple(array.shape), np.dtype(array.dtype).name
 	if payload.format == "hdf5":
+		import h5py
+
 		with h5py.File(path, "r") as handle:
 			if payload.dataset not in handle:
 				raise CalibrationBundleError(
@@ -108,6 +108,8 @@ def _payload_metadata(path: Path, payload: ArrayPayload) -> tuple[tuple[int, ...
 				)
 			dataset = handle[payload.dataset]
 			return tuple(dataset.shape), np.dtype(dataset.dtype).name
+	import tifffile as tf
+
 	with tf.TiffFile(path) as tif:
 		series = tif.series[0]
 		return tuple(series.shape), np.dtype(series.dtype).name
@@ -264,8 +266,12 @@ class CalibrationBundle:
 			array = np.load(path, mmap_mode="r", allow_pickle=False)
 			return np.asarray(array[selection])
 		if payload.format == "hdf5":
+			import h5py
+
 			with h5py.File(path, "r") as handle:
 				return np.asarray(handle[payload.dataset][selection])
+		import tifffile as tf
+
 		try:
 			array = tf.memmap(path)
 		except (ValueError, OSError) as error:

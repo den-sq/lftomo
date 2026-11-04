@@ -24,6 +24,32 @@ storage allocator. The initial compute backends are
 `NumpyBackend` and `DaskStubBackend`. The Dask stub proves the ABC can carry a
 Dask-shaped array without introducing a scheduler dependency.
 
+## Stage authoring and parameters
+
+`Stage` owns construction: its nested `Params(StageParams)` model validates
+configuration into immutable `stage.params`, then `contract_for(cls, params)`
+resolves the instance contract. `StageParams` rejects extra keys. Scalar bounds
+and choices declared with Pydantic fields appear in
+`StageClass.Params.model_json_schema()`. `StageConfig` checks supplied values
+against that model while allowing required inputs to remain unresolved in
+pipeline templates; Stage construction requires all inputs. Serialized config
+mappings remain at the input boundary. Runtime code reads the typed model.
+
+Use a class-level `StageContract` for invariant facts. The default `contract_for`
+returns it; parameter-dependent implementations return
+`dataclasses.replace(cls.contract, ...)`. Runtime dependency preflight reads
+class-level `runtime_requirements`; planning and execution read the resolved
+instance contract. Parameters are not mirrored as individual Stage attributes.
+
+`SinogramStage` supplies the Y-unit loop for `run_sinogram(sinogram, state)`;
+`ProjectionStage` supplies the Theta-unit loop for
+`run_projection(image, state)`. Both adapters derive unit geometry from the
+canonical window model and accept in-place mutation or returned replacement
+values. Plain `Stage` remains available for orchestration, managed output
+handoffs, and external engines. There is no separate locality enum: bounded
+planning uses the row-kernel capability and contract, while `STAGE_DISPATCH`
+selects the executor.
+
 ## Managed working storage
 
 Production runs enter `PipelineRunContext`, which owns one `SharedNPManager`
@@ -90,10 +116,23 @@ prospective outputs before the parent commits the handoff.
 
 I/O remains on I/O-oriented paths. TIFF output submits `(handle, index, path,
 dtype)` tasks, while single-file HDF5 and Neuroglancer writers retain their
-bounded chunk behavior. TomoPy, ASTRA, torch, and GPU Stages remain serial at
-the orchestration level and receive an internal-core budget capped by the run's
-worker count. Plain ndarray-only execution is deliberately serial so hermetic
-tests never depend on process scheduling.
+bounded chunk behavior. Engine-dispatched Stages, including TomoPy, ASTRA and
+Torch super-resolution, remain serial at the orchestration level and receive
+an internal-core budget capped by the run's worker count. Plain ndarray-only
+execution is deliberately serial so hermetic tests never depend on process
+scheduling.
+
+BAC runs in projection workers and declares
+`ResourceHints(cpu_thread_pool="torch")`. When creating the pool, the executor
+sets a per-worker native-thread ceiling of
+`max(1, available_cpus // process_workers)`. Before an enabled BAC kernel runs,
+the worker lowers Torch's intra-op thread count to that ceiling if necessary.
+It preserves lower settings, including explicit `OMP_NUM_THREADS` or
+`MKL_NUM_THREADS` limits, and keeps the cap for that worker's lifetime. Torch
+loads only when a Stage declares that pool; disabled BAC declares none.
+Parent/serial Torch settings and other native libraries are unaffected. This
+limits each pipeline independently; concurrent experiment candidates retain
+their separate worker budgets.
 
 `Recon.process_workers` selects the pool size; the production default is at
 most four workers. `Recon.worker_timeout_seconds` applies a per-task deadline.

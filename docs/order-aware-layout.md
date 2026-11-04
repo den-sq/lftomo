@@ -47,19 +47,12 @@ class ContractEffect(Enum):
 
 PRESERVE = ContractEffect.PRESERVE
 
-class Locality(Enum):
-    PROJECTION = auto()
-    SINOGRAM = auto()
-    VOLUME = auto()
-    METADATA = auto()
-
 @dataclass(frozen=True)
 class StageContract:
     # ... existing fields unchanged ...
     accepts: tuple[type, ...] | None = None   # consumable layouts; None -> unconstrained
     prefers: type | None = None               # planner tiebreak; None -> accepts[0]
     produces: type | ContractEffect | None = None  # shape class | PRESERVE | None(unknown)
-    locality: Locality | None = None
     bounded_views_from: tuple[type, ...] = ()      # full-volume layouts supporting bounded locality views
     fused_transition: bool = False            # rewrite already touches every voxel; layout change rides free
     resamples_detector: bool = False           # irreversible detector-space interpolation
@@ -198,7 +191,12 @@ Contracts are parameter-dependent. A disabled Stage that returns without
 changing data declares `produces_domain=PRESERVE`, does not claim a fused layout
 transition, and does not satisfy an exactly-once boundary. The same applies to
 zero-effect configuration branches generally; validation describes what the
-concrete Stage instance will execute, not what its class could execute.
+concrete Stage instance will execute, not what its class could execute. Each
+Stage owns a nested immutable `Params(StageParams)` model; the base validates
+configuration once and calls `contract_for(cls, params)` to derive those facts
+from the class contract. Kernels consume `stage.params`, and planners consume
+the resulting instance contract. Parameter schemas are exposed through
+`StageClass.Params.model_json_schema()`.
 
 Same-domain operations intentionally have no implied adjacency rule. A Stage
 that accepts transmission and preserves transmission can follow another such
@@ -279,7 +277,7 @@ ordering instead of treating all recon-minimal provenance as zero skew.
 
 ## 6. Bounded-view semantics, segment execution, and the AC-7 benchmark
 
-`locality=SINOGRAM, bounded_views_from=(ProjOrder,)` declares a capability; it
+`SinogramStage` with `bounded_views_from=(ProjOrder,)` declares a capability; it
 does not select an execution strategy and does not claim that a sinogram-local
 kernel can consume the full ProjOrder array directly. Per detector row `y`, the
 bounded-view executor may gather `data[:, y, :]` into contiguous `(Theta, X)`
@@ -288,7 +286,8 @@ scratch → run the whole sinogram-local **segment**
 per Stage) → scatter back. Rows are independent → bounded-concurrency
 parallelism. TomoPy's `remove_all_stripe` works this way internally.
 
-`StageContract` declares locality and bounded-view capability. `PipelinePlan`
+`SinogramStage` supplies the row kernel adapter; `StageContract` declares
+bounded-view capability. `PipelinePlan`
 groups adjacent compatible Stages into execution segments and selects bounded
 views versus a materialized conversion. `Pipeline.run` (or a dedicated segment
 executor) executes that plan. Merely adding a mapping to each Stage contract is
@@ -402,7 +401,7 @@ to adopt `state.layout`, capability contracts, and domain declarations.
 | `geometry.skew` / `movement` | projection-local | order branches present | accepts (Proj, Sino), prefers **Proj**, PRESERVE; skew sets `resamples_detector` when enabled/nonzero | A |
 | **`geometry.affine_skew_movement`** | optional boundary rewrite | Sino-only compatibility wrapper | accepts either; when transition configured, **produces the other, `fused_transition=True`** | C |
 | `helical.index_remap` | per-projection row shifts | order branch present | accepts (Proj, Sino), prefers Proj, PRESERVE; `requires_row_identity=True` | A |
-| `stripe.vo_dead/large/sort/family` | **sinogram-local** (`data[y]`) | Sino-only | accepts Sino, prefers Sino, PRESERVE; `locality=SINOGRAM`, bounded views from Proj | B |
+| `stripe.vo_dead/large/sort/family` | **sinogram-local** (`data[y]`) | Sino-only | accepts Sino, prefers Sino, PRESERVE; `SinogramStage`, bounded views from Proj | B |
 | `stripe.fw` | sinogram-local | order branch directly iterates Proj strided views | same bounded-view segment contract as other sinogram-local kernels | B |
 | `stripe.all_of_the_stripe` | batched TomoPy | Sino-only | accepts (Proj, Sino); derive TomoPy flag from `state.layout` | A |
 | `center.manual` | no data access | order branch present | accepts (Proj, Sino), PRESERVE | A |
@@ -444,8 +443,9 @@ injection and prove ordinary YAML execution selects the same layout.
 
 ## 9. Resolved design decisions
 
-1. Contracts declare locality and `bounded_views_from`; the planner chooses and
-   the segment executor implements gather/scatter. Scratch strategy is not a
+1. `SinogramStage` and `ProjectionStage` own unit iteration; contracts declare
+   `bounded_views_from`. The planner chooses and the segment executor implements
+   gather/scatter. Scratch strategy is not a
    per-Stage mutable mapping.
 2. A YAML-authored `layout.convert` refuses to run without a non-empty `reason:`.
    Planner-generated conversions carry a generated rationale in `PipelinePlan`.

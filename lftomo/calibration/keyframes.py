@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-from natsort import natsorted
 import numpy as np
-import tifffile as tf
 
 from .build import CalibrationBuildSession
 from .models import CalibrationComponent, CompatibilityMetadata, TimeAxis, ValidationResult
@@ -18,6 +16,9 @@ class TIFFRandomFrameSource:
 	"""Random-access single-frame TIFF series without loading the full series."""
 
 	def __init__(self, path: str | Path, pattern: str = "*.tif*"):
+		from natsort import natsorted
+		import tifffile as tf
+
 		path = Path(path).expanduser().resolve()
 		self.path = path
 		self.pattern = pattern
@@ -39,6 +40,8 @@ class TIFFRandomFrameSource:
 
 	def read(self, index: int, *, y_start: int = 0, y_stop: int | None = None,
 			x_start: int = 0, x_stop: int | None = None) -> np.ndarray:
+		import tifffile as tf
+
 		if not 0 <= index < self.frame_count:
 			raise IndexError(index)
 		if self._stack:
