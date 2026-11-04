@@ -36,8 +36,10 @@ imports the main script. Without the guard, every worker starts its own
 reconstruction and the run fails with broken worker connections.
 
 Paths behave as on the command line: `scan.yaml`'s projection path is resolved
-from the Scan file's directory, Stage parameter paths from the pipeline file's
-directory, and `output_path` from the working directory.
+from the Scan file's directory; a normalize Stage's `calibration_manifest` and
+legacy gain/dark paths from the pipeline file's directory; `output_path` and
+any other relative Stage path from the working directory (see
+[Configuration](configuration.md#paths-inside-the-pipeline-file)).
 
 ## Return value
 
@@ -51,7 +53,7 @@ gives one per candidate. Each `RunResult` has:
 | `candidate_key` | Stable key identifying the concrete candidate; multi-candidate output goes to `candidate-<key>` beneath `output_path` |
 | `parameters` | The swept parameter values chosen for this run (empty for a plain pipeline) |
 | `output_path` | Directory the slices were written to |
-| `resolved_recon` | The complete resolved `Recon` as a dict, with every default filled in; `Recon.model_validate()` accepts it, and its `to_yaml()` output reruns the same configuration |
+| `resolved_recon` | The resolved `Recon` as a dict, with every `Recon` field filled in. `Recon.model_validate()` accepts it and its `to_yaml()` output reruns the same pipeline. Window settings are not part of it: pass the same `window_config` again to reproduce the run (its `metadata.streaming_dataset` records the plan that was used) |
 | `artifacts` | Run artifacts, including `output_files`, `center` (the centers used), `calibration_resolution` (which flat/dark source was used), `recon_run` (path of the run record), `window_results`, and shared-memory accounting (`measured_shared_memory_bytes`, `allocation_events`) |
 
 `lftomo-run --json-output` prints the same fields as JSON.

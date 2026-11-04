@@ -171,15 +171,25 @@ An optional `id` names a Stage occurrence. IDs are needed for
 - When a `Recon` expands to several candidate runs, each is written to its own
   `candidate-<key>` subdirectory beneath `output_path`.
 - When an output path is set, every run writes `recon_run.yaml` next to its
-  slices, containing the fully resolved `Recon` (`resolved_recon`) and the
-  streaming window plan.
+  slices, containing the resolved `Recon` (`resolved_recon`) and the
+  streaming window plan that was used (`streaming_dataset`). Rerunning
+  `resolved_recon` does not restore that plan; the window settings
+  (`--window-rows`, `--extra-pad-y`, or `window_config=`) have to be passed
+  again, as they come from the run, not the `Recon`.
 
 ### Paths inside the pipeline file
 
-Relative paths in Stage parameters (calibration manifests, the legacy
-`pre_gain`/`post_gain`/`pre_dark`/`post_dark` TIFFs) resolve from the directory
-of the pipeline file. This is why a bundled template should be copied next to
-your data before being edited; see the [Quickstart](quickstart.md#2-pick-a-pipeline-template).
+The runner resolves two kinds of relative Stage parameter path from the
+directory of the pipeline file: a normalize Stage's `calibration_manifest`, and
+the legacy `pre_gain`/`post_gain`/`pre_dark`/`post_dark` TIFFs. This is why a
+bundled template that names such files should be copied next to your data
+before being edited; see the [Quickstart](quickstart.md#2-pick-a-pipeline-template).
+
+Other path parameters are not rebased. A Stage uses them as given, so a
+relative one resolves from the working directory. For example,
+`write.hdf5_volume`'s `path: results/recon.h5` writes to `./results/recon.h5`
+wherever the pipeline file lives. Use absolute paths, or run from the directory
+the paths are relative to.
 
 ### Bounding a run
 

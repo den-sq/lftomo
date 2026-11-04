@@ -36,8 +36,8 @@ center, the projection count and the output directory, are the originating
 dataset's. Treat them as a starting point, not as defaults for your scan.
 
 A template can be passed by name (`b10-recon` or `b10-recon-canonical`), but
-for your own data, copy it next to your files and edit the copy. Relative paths
-inside a pipeline file (for example the gain/dark TIFFs in
+for your own data, copy it next to your files and edit the copy. The
+calibration paths a pipeline file names (for example the gain/dark TIFFs in
 `phase-contrast-canonical`) resolve from the directory of that pipeline file, so
 a template used by name would look for them inside the installed package.
 
@@ -129,10 +129,14 @@ run 0 [f6623d9703a3767a]: /path/to/recon
 ```
 
 `recon/` then contains one float32 TIFF per reconstructed row (`01080.tif`, …)
-and `recon_run.yaml`. Its `resolved_recon` section is the complete `Recon` that
-produced the slices, with every default filled in. Saved on its own as a YAML
-file, it repeats the run; the file as a whole is a run record, not a pipeline
-file.
+and `recon_run.yaml`, a run record (not a pipeline file). Its `resolved_recon`
+section is the `Recon` that produced the slices, with every `Recon` field filled
+in, and `streaming_dataset` records the window plan that was used. Saved on its
+own as a YAML file, `resolved_recon` reruns the same pipeline, but the window
+plan is not restored from it: pass the same `--window-rows` / `--extra-pad-y`
+again. A different window plan changes the memory needed, and can change the
+result of FFT-based phase Stages (BAC, Paganin), whose filter extent follows the
+window.
 
 Useful options: `--json-output` prints machine-readable run summaries;
 `--window-rows N` streams the volume through windows of N detector rows to bound
