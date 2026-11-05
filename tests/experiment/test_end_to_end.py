@@ -18,6 +18,7 @@ from lftomo.experiment import (
 	EnvironmentIdentity,
 	ExperimentConfig,
 	FidelityExperimentRunner,
+	FidelityIdentity,
 	Tier2Bounds,
 	audit_tier2_results,
 	build_tier2_plan,
@@ -33,6 +34,8 @@ from lftomo.pipeline import BufferSpec, NumpyBackend, Pipeline, PipelineState
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.stages import create_stage
 from lftomo.util.shapes import ProjOrder
+
+from lftomo.util.window import TomoWindow
 
 
 HASHES = [f"{index:064x}" for index in range(1, 10)]
@@ -115,6 +118,7 @@ def scan():
 
 def inputs():
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(scan().projection_shape(), dtype=np.float32),
 		dataset=DatasetIdentity(dataset_id="synthetic", content_hash=HASHES[0]),
 		configuration=ConfigurationIdentity(scan_config_hash=HASHES[1]),
 		code=CodeIdentity(version="test", git_commit="abcdef123456", dirty=False),
@@ -156,12 +160,12 @@ class HermeticWorkflowExecutor:
 	def __call__(self, identity, output_root):
 		result = run_fragment(identity.resolved_recon, self.source)
 		window_metrics = {}
-		for window in identity.fidelity.windows:
-			actual = result[:, window.y_start:window.y_stop]
-			expected = self.reference[:, window.y_start:window.y_stop]
+		for window_id, window in identity.fidelity.windows.items():
+			actual = result[:, window.axis_slice("Y")]
+			expected = self.reference[:, window.axis_slice("Y")]
 			dynamic_range = float(np.ptp(expected)) or 1.0
 			nrmse = float(np.sqrt(np.mean((actual - expected) ** 2)) / dynamic_range)
-			window_metrics[window.id] = {"nrmse": [nrmse]}
+			window_metrics[window_id] = {"nrmse": [nrmse]}
 		artifacts = {}
 		outputs = ()
 		if identity.fidelity.id == "screen":
@@ -184,8 +188,19 @@ class HermeticWorkflowExecutor:
 		)
 
 
-def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_path):
+def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_path, monkeypatch):
 	config = experiment_config()
+	experiment_inputs = inputs()
+	built = []
+	original = FidelityIdentity.from_reference
+
+	def record(cls, reference, windows, source):
+		assert source is experiment_inputs.source
+		result = original(reference, windows, source)
+		built.append(result)
+		return result
+
+	monkeypatch.setattr(FidelityIdentity, "from_reference", classmethod(record))
 	rng = np.random.default_rng(20260804)
 	source = np.clip(
 		0.82 + rng.normal(0, 0.025, size=(8, 4, 8))
@@ -199,8 +214,14 @@ def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_
 	reference = run_fragment(target_recon, source)
 
 	executor = HermeticWorkflowExecutor(source, reference)
-	summary = FidelityExperimentRunner(config, inputs(), tmp_path, executor).run()
+	summary = FidelityExperimentRunner(config, experiment_inputs, tmp_path, executor).run()
 	assert [len(level.attempts) for level in summary.levels] == [3, 1]
+	# Ranking round-trips attempts through their serialized documents.
+	for level in summary.levels:
+		for attempt in level.attempts:
+			assert attempt.identity.fidelity.model_dump(mode="json") in [
+				fidelity.model_dump(mode="json") for fidelity in built
+			]
 	winner = summary.levels[-1].attempts[0]
 	assert winner.identity.resolved_recon.pipeline[2].params["alpha"] == 0.05
 	assert winner.result.metrics["nrmse"] == 0
@@ -224,9 +245,10 @@ def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_
 		blinding_key="hermetic-private-key",
 		max_bytes=100000,
 	)
+	built.clear()
 	plan = build_tier2_plan(
 		config,
-		inputs(),
+		experiment_inputs,
 		environment_lock_hash=HASHES[2],
 		projection_manifest_hash=HASHES[3],
 		preview=preview_contract,
@@ -239,19 +261,25 @@ def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_
 			max_memory_gb=2,
 		),
 	)
+	for fidelity, level in zip(plan.fidelities, summary.levels, strict=True):
+		assert any(fidelity is result for result in built)
+		assert fidelity.held_out_window_ids == ("blind",)
+		assert fidelity.model_dump(mode="json") == level.attempts[0].identity.fidelity.model_dump(mode="json")
 	plan_path = tmp_path / "tier2-plan.json"
 	write_tier2_plan(plan_path, plan)
-	assert Tier2ExperimentPlan.model_validate_json(plan_path.read_text()) == plan
+	assert Tier2ExperimentPlan.model_validate_json(plan_path.read_text()).model_dump(mode="json") == plan.model_dump(mode="json")
 	assert plan.timeout_seconds_by_fidelity == {"final": None, "screen": None}
 	tampered = plan.model_copy(update={"blinding_key_id": "different-key"})
 	with pytest.raises(ValueError, match="content-addressed payload"):
 		write_tier2_plan(tmp_path / "tampered-plan.json", tampered)
 	assert audit_tier2_results(plan, summary, previews).passed
 
-	resumed = FidelityExperimentRunner(config, inputs(), tmp_path, executor).run()
+	resumed = FidelityExperimentRunner(config, experiment_inputs, tmp_path, executor).run()
 	assert resumed.promotions == summary.promotions
 	for resumed_level, original_level in zip(resumed.levels, summary.levels):
-		assert resumed_level.attempts == original_level.attempts
+		assert [attempt.model_dump(mode="json") for attempt in resumed_level.attempts] == [
+			attempt.model_dump(mode="json") for attempt in original_level.attempts
+		]
 		assert resumed_level.leaderboard == original_level.leaderboard
 		assert resumed_level.preflight.model_dump(
 			mode="json", exclude={"path_resources"},

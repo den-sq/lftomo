@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
+import numpy as np
 from pydantic import ValidationError
 import pytest
 
@@ -14,6 +15,7 @@ from lftomo.experiment import (
 	ExperimentManifest,
 	FailureRecord,
 	FidelityIdentity,
+	FidelityReference,
 	FinalResult,
 	MetricProtocolIdentity,
 	OutputRecord,
@@ -21,11 +23,14 @@ from lftomo.experiment import (
 	TrialAttemptRecord,
 	TrialDescription,
 	TrialIdentity,
-	WindowIdentity,
+	WindowReference,
 	canonical_json,
 	compare_trial_identities,
 	select_candidates,
 )
+from lftomo.util.converter import CONVERTER
+from lftomo.util.shapes import ProjOrder
+from lftomo.util.window import TomoWindow
 
 
 HASHES = [f"{index:064x}" for index in range(1, 16)]
@@ -113,7 +118,7 @@ def test_sampled_structural_variants_are_atomically_materialized(sampler_name):
 	assert structural.model_dump(mode="json") == original
 
 
-def trial_identity(*, recon=None):
+def trial_identity(*, recon=None, fidelity=None):
 	recon = recon or resolved_recon()
 	return TrialIdentity(
 		candidate=CandidateKey.from_recon(recon),
@@ -134,13 +139,16 @@ def trial_identity(*, recon=None):
 		sampler=SamplerIdentity(
 			name="sobol", seed=17, coordinate={"alpha": 0.25},
 		),
-		fidelity=FidelityIdentity(
+		fidelity=fidelity or FidelityIdentity(
 			id="screen",
-			windows=(
-				WindowIdentity(id="top", y_start=0, y_stop=8),
-				WindowIdentity(id="bottom", y_start=24, y_stop=32),
-			),
-			projection_stride=2,
+			windows={
+				"top": TomoWindow.from_bounds(
+					ProjOrder(2, 32, 1), y=(0, 8), theta=(0, 2, 2), dtype=np.uint16,
+				),
+				"bottom": TomoWindow.from_bounds(
+					ProjOrder(2, 32, 1), y=(24, 32), theta=(0, 2, 2), dtype=np.uint16,
+				),
+			},
 		),
 		metric_protocols=(
 			MetricProtocolIdentity(
@@ -214,7 +222,7 @@ def test_candidate_key_and_trial_id_have_distinct_stable_identity_domains():
 		metric_protocols=list(reversed(identity.model_dump(mode="json")["metric_protocols"])),
 		fidelity={
 			**identity.fidelity.model_dump(mode="json"),
-			"windows": list(reversed(identity.fidelity.model_dump(mode="json")["windows"])),
+			"windows": dict(reversed(list(identity.fidelity.model_dump(mode="json")["windows"].items()))),
 		},
 	)
 	assert permuted.trial_id == identity.trial_id
@@ -231,6 +239,12 @@ def test_candidate_key_and_trial_id_have_distinct_stable_identity_domains():
 	assert compare_trial_identities(identity, resampled).compatible
 	assert "sampler" not in identity.identity_payload()
 
+	# Changing a window's role changes the evaluation identity.
+	held_out = trial_identity(fidelity=FidelityIdentity(
+		id="screen", windows=identity.fidelity.windows, held_out_window_ids=("bottom",),
+	))
+	assert held_out.trial_id != identity.trial_id
+
 	changed = trial_identity(recon=resolved_recon(alpha=0.02))
 	assert changed.candidate != identity.candidate
 	assert changed.trial_id != identity.trial_id
@@ -243,7 +257,9 @@ def test_candidate_key_and_trial_id_have_distinct_stable_identity_domains():
 		("configuration", {"scan_config_hash": HASHES[6], "calibration_hash": HASHES[2]}, "configuration.scan_config_hash"),
 		("code", {"version": "0.1.0", "git_commit": "123456789abc", "dirty": False}, "code.git_commit"),
 		("environment", {"python": "3.12", "platform": "linux-x86_64", "backend": "numpy"}, "environment"),
-		("fidelity", {"id": "full", "windows": [{"id": "top", "y_start": 0, "y_stop": 8}]}, "fidelity"),
+		("fidelity", {"id": "full", "windows": {
+			"top": TomoWindow.from_bounds(ProjOrder(2, 32, 1), y=(0, 8), dtype=np.uint16),
+		}}, "fidelity"),
 	],
 )
 def test_trial_identity_sensitivity_and_field_specific_compatibility(
@@ -265,6 +281,65 @@ def test_descriptive_metadata_does_not_participate_in_compatibility():
 
 	assert a != b
 	assert compare_trial_identities(identity, identity).compatible
+
+
+def test_realized_halo_and_sampling_are_the_fidelity_identity_authority():
+	reference = FidelityReference(
+		id="screen", windows=["edge"], projection_stride=2, projection_limit=2,
+	)
+	window = WindowReference(
+		id="edge", y_start=1, y_stop=3, theta_start=1, theta_stop=8, halo=4,
+	)
+	clipped = FidelityIdentity.from_reference(
+		reference, [window], TomoWindow.from_bounds(ProjOrder(8, 5, 4), dtype=np.uint16),
+	)
+	unclipped = FidelityIdentity.from_reference(
+		reference, [window], TomoWindow.from_bounds(ProjOrder(8, 9, 4), dtype=np.uint16),
+	)
+	selected = clipped.windows["edge"]
+	assert selected.pad_before.Y == 1
+	assert selected.pad_after.Y == 2
+	assert unclipped.windows["edge"].pad_after.Y == 4
+	assert selected.axis_slice("Theta") == slice(1, 5, 2)
+	assert selected.frange.length.Theta == 2
+	assert trial_identity(fidelity=clipped).trial_id != trial_identity(fidelity=unclipped).trial_id
+
+	# Both requests exhaust the same available source context. The larger
+	# requested halo must not survive as a second identity-bearing geometry.
+	larger_request = window.model_copy(update={"halo": 8})
+	equivalent = FidelityIdentity.from_reference(
+		reference, [larger_request],
+		TomoWindow.from_bounds(ProjOrder(8, 5, 4), dtype=np.uint16),
+	)
+	assert trial_identity(fidelity=equivalent).trial_id == trial_identity(fidelity=clipped).trial_id
+
+	# Once the requested context is available, extra source rows do not
+	# change the evaluated geometry or its identity.
+	more_context = FidelityIdentity.from_reference(
+		reference, [window], TomoWindow.from_bounds(ProjOrder(8, 13, 4), dtype=np.uint16),
+	)
+	assert trial_identity(fidelity=more_context).trial_id == trial_identity(fidelity=unclipped).trial_id
+
+
+def test_window_reference_reverse_rejects_unrepresentable_asymmetric_geometry():
+	physical_shape = ProjOrder(8, 10, 4)
+	window = TomoWindow.from_bounds(physical_shape, y=(2, 4), halo=(1, 3))
+	with pytest.raises(ValueError, match="cannot be represented"):
+		WindowReference.from_window(window, physical_shape, id="asymmetric")
+
+
+@pytest.mark.parametrize("invalid", [
+	{"windows": {"broken": {"type": "TomoWindow"}}},
+	{"windows": {"broken": {"type": "unknown"}}},
+	{"held_out_window_ids": ["unknown"]},
+])
+def test_corrupt_fidelity_documents_use_existing_value_error_handling(invalid):
+	# Persisted-record readers handle ValueError for corrupt geometry and roles;
+	# cattrs ExceptionGroups must not escape that established handling path.
+	document = trial_identity().fidelity.model_dump(mode="json")
+	document.update(invalid)
+	with pytest.raises(ValueError):
+		FidelityIdentity.model_validate(document)
 
 
 def test_trial_identity_requires_a_matching_fully_resolved_candidate():
@@ -347,6 +422,38 @@ def test_attempt_lifecycle_forbids_partial_output_from_appearing_successful():
 
 def test_manifest_and_yaml_json_serialization_are_deterministic_and_versioned():
 	config = ExperimentConfig.model_validate(experiment_document())
+	config.windows[0].halo = 3
+	serialized = config.to_yaml()
+	restored = ExperimentConfig.from_yaml(serialized)
+	assert restored == config
+	assert restored.to_yaml() == serialized
+
+	physical_shape = ProjOrder(8, 5, 4)
+	window = TomoWindow.from_bounds(
+		physical_shape, y=(1, 3), theta=(1, 7, 2), halo=4,
+		dtype=np.uint16, work_dtype=np.float64,
+	)
+	reference = WindowReference.from_window(
+		window, physical_shape, id="edge", role="held_out",
+	)
+	assert reference.halo == 2  # Smallest request that reproduces the clipped pads.
+	assert reference.role == "held_out"
+	restored_window = reference.to_window(
+		physical_shape, projection_stride=window.step.Theta,
+		dtype=window.dtype, work_dtype=window.work_dtype,
+	)
+	assert CONVERTER.unstructure(restored_window) == CONVERTER.unstructure(window)
+	identity = trial_identity(fidelity=FidelityIdentity(
+		id="screen", windows={"edge": window}, held_out_window_ids=("edge",),
+	))
+	assert identity.fidelity.windows["edge"] is window
+	assert identity.model_dump(mode="json")["fidelity"]["windows"] == {
+		"edge": CONVERTER.unstructure(window),
+	}
+	restored_identity = TrialIdentity.model_validate_json(identity.model_dump_json())
+	assert restored_identity.model_dump(mode="json") == identity.model_dump(mode="json")
+	assert restored_identity.trial_id == identity.trial_id
+
 	manifest = ExperimentManifest(
 		experiment_id=config.experiment_id,
 		config=config,

@@ -26,6 +26,9 @@ from lftomo.experiment.store import (
 )
 from tests.experiment.process_helpers import AlphaExecutor, TimeoutOneExecutor
 
+from lftomo.util.shapes import ProjOrder
+from lftomo.util.window import TomoWindow
+
 
 HASHES = [f"{index:064x}" for index in range(1, 10)]
 
@@ -56,7 +59,9 @@ def config(values=(0.01, 0.02), *, timeout=None):
 
 
 def inputs(content_hash=HASHES[0]):
+	# The persistence executor has one sample per configured detector row.
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(ProjOrder(1, 4, 1), dtype="uint16"),
 		dataset=DatasetIdentity(dataset_id="fixture", content_hash=content_hash),
 		configuration=ConfigurationIdentity(scan_config_hash=HASHES[1]),
 		code=CodeIdentity(version="test", git_commit="abcdef123456"),
@@ -295,7 +300,7 @@ def test_store_rejects_unknown_schema_and_identity_is_directly_reconstructable(t
 	trial = base.prepare()[1][0]
 	path = store.register_trial(trial.identity) / "identity.json"
 	reconstructed = type(trial.identity).model_validate_json(path.read_text())
-	assert reconstructed == trial.identity
+	assert reconstructed.model_dump(mode="json") == trial.identity.model_dump(mode="json")
 
 	metadata = json.loads((tmp_path / "store.json").read_text())
 	metadata["schema_version"] = 999

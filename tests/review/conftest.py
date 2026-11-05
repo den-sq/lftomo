@@ -17,6 +17,9 @@ from lftomo.experiment.runner import ExperimentInputs
 
 from .helpers import ReviewFixtureExecutor
 
+from lftomo.util.shapes import ProjOrder
+from lftomo.util.window import TomoWindow
+
 
 HASHES = [f"{index:064x}" for index in range(1, 8)]
 BLINDING_KEY = "review-fixture-private-key"
@@ -60,7 +63,9 @@ def review_experiment() -> ExperimentConfig:
 
 
 def review_inputs() -> ExperimentInputs:
+	# The review executor only needs the three configured detector rows.
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(ProjOrder(1, 3, 1), dtype="uint16"),
 		dataset=DatasetIdentity(dataset_id="review-fixture", content_hash=HASHES[0]),
 		configuration=ConfigurationIdentity(scan_config_hash=HASHES[1]),
 		code=CodeIdentity(version="test", git_commit="abcdef123456", dirty=False),

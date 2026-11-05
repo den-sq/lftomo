@@ -78,27 +78,6 @@ def _sha256(value: bytes) -> str:
 	return hashlib.sha256(value).hexdigest()
 
 
-def _fidelity_window(scan, identity, window) -> TomoWindow:
-	"""Resolve one experiment window through the canonical bounds constructor."""
-
-	theta_start = 0 if window.theta_start is None else window.theta_start
-	theta_stop = scan.n_projections if window.theta_stop is None else window.theta_stop
-	if identity.fidelity.projection_limit is not None:
-		theta_stop = min(
-			theta_stop,
-			theta_start
-			+ identity.fidelity.projection_limit * identity.fidelity.projection_stride,
-		)
-	return TomoWindow.from_bounds(
-		scan.projection_shape(),
-		y=(window.y_start, window.y_stop),
-		theta=(theta_start, theta_stop, identity.fidelity.projection_stride),
-		halo=window.halo,
-		dtype=np.dtype(scan.metadata.get("raw_dtype", np.uint16)),
-		work_dtype=np.float32,
-	)
-
-
 def load_experiment_config(path: str | Path) -> ExperimentConfig:
 	"""Load and validate one versioned experiment YAML document."""
 
@@ -135,6 +114,11 @@ def build_experiment_inputs(
 	dirty = _git(["status", "--porcelain"], repository)
 	calibration_hash = scan.metadata.get("calibration_hash")
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(
+			scan.projection_shape(),
+			dtype=np.dtype(scan.metadata.get("raw_dtype", np.uint16)),
+			work_dtype=np.float32,
+		),
 		dataset=DatasetIdentity(
 			dataset_id=str(scan.metadata.get("dataset_id") or resolved.stem),
 			content_hash=content_hash,
@@ -211,25 +195,23 @@ class PipelineTrialExecutor:
 		stages = [create_stage(config) for config in resolved.pipeline]
 		validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
 
-	def _window_recon(self, identity, window, output_root: Path) -> Recon:
-		scan, _ = load_scan(self.scan_path)
+	def _window_recon(self, identity, window_id: str, window: TomoWindow, output_root: Path) -> Recon:
 		recon = identity.resolved_recon.model_copy(deep=True)
 		read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
 		if read is None:
 			raise ValueError("fidelity window execution requires a read stage")
-		selected = _fidelity_window(scan, identity, window)
-		source = selected.with_pad(["Y"])
+		source = window.with_pad(["Y"])
 		read.params["y_start"] = source.pos.Y
 		read.params["y_stop"] = source.pos.Y + source.shape.Y
-		read.params["theta_start"] = selected.pos.Theta
-		read.params["theta_stop"] = selected.pos.Theta + selected.shape.Theta
-		read.params["theta_stride"] = selected.step.Theta
+		read.params["theta_start"] = window.pos.Theta
+		read.params["theta_stop"] = window.pos.Theta + window.shape.Theta
+		read.params["theta_stride"] = window.step.Theta
 		for stage in recon.pipeline:
 			if stage.kind == "evaluate":
 				stage.params["windows"] = [{
-					"id": window.id,
-					"slice_start": selected.pad_before.Y,
-					"slice_stop": selected.pad_before.Y + selected.shape.Y,
+					"id": window_id,
+					"slice_start": window.pad_before.Y,
+					"slice_stop": window.pad_before.Y + window.shape.Y,
 				}]
 		is_full_finalist = (
 			self.config.output.write_full_finalists
@@ -244,8 +226,8 @@ class PipelineTrialExecutor:
 
 	def validate_identity(self, identity) -> None:
 		scan, _ = load_scan(self.scan_path)
-		for window in identity.fidelity.windows:
-			recon = self._window_recon(identity, window, Path("validation") / window.id)
+		for window_id, window in identity.fidelity.windows.items():
+			recon = self._window_recon(identity, window_id, window, Path("validation") / window_id)
 			for stage in recon.pipeline:
 				for name in CALIBRATION_RESOLUTION_FIELDS:
 					stage.params.pop(name, None)
@@ -253,18 +235,18 @@ class PipelineTrialExecutor:
 			validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
 
 	@staticmethod
-	def _prefix_candidate_id(identity, window) -> str:
-		return f"{identity.trial_id.value}:{window.id}"
+	def _prefix_candidate_id(identity, window_id: str) -> str:
+		return f"{identity.trial_id.value}:{window_id}"
 
 	@staticmethod
-	def _prefix_share_identity(identity, window) -> dict[str, Any]:
+	def _prefix_share_identity(identity, window_id: str) -> dict[str, Any]:
 		return {
 			"dataset": identity.dataset,
 			"configuration": identity.configuration,
 			"code": identity.code,
 			"environment": identity.environment,
 			"fidelity": identity.fidelity,
-			"window": window,
+			"window_id": window_id,
 		}
 
 	@staticmethod
@@ -327,32 +309,29 @@ class PipelineTrialExecutor:
 			) from error
 
 	@staticmethod
-	def _estimated_snapshot_bytes(scan, identity, window) -> int | None:
-		selected = _fidelity_window(scan, identity, window).with_pad(["Y"])
-		return selected.frange.length.nbytes(np.float32)
+	def _estimated_snapshot_bytes(window: TomoWindow) -> int:
+		selected = window.with_pad(["Y"])
+		return selected.frange.length.nbytes(selected.work_dtype)
 
 	def plan_prefix_cache(self, trials) -> PrefixCachePlan:
 		"""Plan trial/window prefixes without opening projection payloads."""
 
-		scan, _ = load_scan(self.scan_path)
 		candidates = []
 		for trial in trials:
-			for window in trial.identity.fidelity.windows:
+			for window_id, window in trial.identity.fidelity.windows.items():
 				recon = self._window_recon(
-					trial.identity, window, Path("prefix-plan") / window.id,
+					trial.identity, window_id, window, Path("prefix-plan") / window_id,
 				)
 				for config in recon.pipeline:
 					for name in CALIBRATION_RESOLUTION_FIELDS:
 						config.params.pop(name, None)
 				stages = tuple(create_stage(config) for config in recon.pipeline)
 				candidates.append(PrefixPlanningCandidate(
-					candidate_id=self._prefix_candidate_id(trial.identity, window),
+					candidate_id=self._prefix_candidate_id(trial.identity, window_id),
 					configs=tuple(recon.pipeline),
 					stages=stages,
-					share_identity=self._prefix_share_identity(trial.identity, window),
-					estimated_snapshot_bytes=self._estimated_snapshot_bytes(
-						scan, trial.identity, window,
-					),
+					share_identity=self._prefix_share_identity(trial.identity, window_id),
+					estimated_snapshot_bytes=self._estimated_snapshot_bytes(window),
 				))
 		plan = plan_common_prefixes(candidates, self.prefix_cache_policy)
 		self._prefix_decisions = {item.candidate_id: item for item in plan.decisions}
@@ -377,24 +356,24 @@ class PipelineTrialExecutor:
 		outputs = []
 		preview_images = {}
 		preview_contract = None
-		for window_index, window in enumerate(identity.fidelity.windows):
+		for window_index, (window_id, window) in enumerate(identity.fidelity.windows.items()):
 			context = current_execution_context()
 			if context is not None:
 				context.window_started(
-					window.id, position=window_index + 1,
+					window_id, position=window_index + 1,
 					total=len(identity.fidelity.windows),
 				)
-			window_root = output_root / "windows" / window.id
-			recon = self._window_recon(identity, window, window_root)
+			window_root = output_root / "windows" / window_id
+			recon = self._window_recon(identity, window_id, window, window_root)
 			window_root.mkdir(parents=True, exist_ok=True)
 			pipeline_path = window_root / "resolved-recon.yaml"
 			pipeline_path.write_text(recon.to_yaml(), encoding="utf-8")
 			decision = None
 			if self._prefix_decisions:
 				decision = self._prefix_decisions.get(
-					self._prefix_candidate_id(identity, window)
+					self._prefix_candidate_id(identity, window_id)
 				)
-			def execute_state(state, stages, configs, *, _decision=decision, _window=window):
+			def execute_state(state, stages, configs, *, _decision=decision):
 				observer = self._execution_observer(configs)
 				if _decision is not None and _decision.action == "cache":
 					result, event = self.prefix_executor.execute(
@@ -440,7 +419,7 @@ class PipelineTrialExecutor:
 					continue
 				metric = metric_ids.get(observation.get("metric"), observation.get("metric"))
 				if isinstance(metric, str):
-					window_metrics.setdefault(window.id, {}).setdefault(metric, []).append(
+					window_metrics.setdefault(window_id, {}).setdefault(metric, []).append(
 						observation.get("value") if observation.get("valid") else None
 					)
 			if not observations:
@@ -448,10 +427,10 @@ class PipelineTrialExecutor:
 					aggregate = aggregates.get(reference.metric, aggregates.get(reference.id))
 					if isinstance(aggregate, dict):
 						aggregate = aggregate.get("value")
-					window_metrics.setdefault(window.id, {})[reference.id] = [aggregate]
+					window_metrics.setdefault(window_id, {})[reference.id] = [aggregate]
 			if isinstance(raw_previews, dict):
 				preview_images.update({
-					f"{window.id}-{label}": np.asarray(image)
+					f"{window_id}-{label}": np.asarray(image)
 					for label, image in raw_previews.items()
 				})
 			contract_document = artifact.get("preview") if isinstance(artifact, dict) else None
@@ -460,7 +439,7 @@ class PipelineTrialExecutor:
 				if preview_contract is not None and preview_contract != contract:
 					raise ValueError("evaluation windows use inconsistent preview contracts")
 				preview_contract = contract
-			artifacts[window.id] = json_value(window_artifacts)
+			artifacts[window_id] = json_value(window_artifacts)
 			for path in result.artifacts.get("output_files", ()):
 				path = Path(path)
 				if path.is_file():
@@ -473,7 +452,7 @@ class PipelineTrialExecutor:
 						bytes=path.stat().st_size,
 					))
 			if context is not None:
-				context.window_completed(window.id)
+				context.window_completed(window_id)
 		is_screening = identity.fidelity.id != self.config.output.final_fidelity_id
 		if self.config.output.screening == "metrics_and_previews" and is_screening:
 			if preview_contract is None or not preview_images:

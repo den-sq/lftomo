@@ -41,7 +41,7 @@ from lftomo.pipeline import BufferSpec, Pipeline, PipelineRunContext, PipelineSt
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 from lftomo.util.shapes import ProjOrder, X, Y
-from lftomo.util.window import CTFov, TomoDataSet
+from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
 class SourceStage(Stage):
@@ -999,6 +999,7 @@ def test_full_runner_metrics_outputs_leaderboard_and_identity_are_equivalent(tmp
 		"aggregation": {"metric_ids": ["mean"]},
 	})
 	experiment_inputs = ExperimentInputs(
+		source=TomoWindow.from_bounds(ProjOrder(*source.shape), dtype=source.dtype),
 		dataset=DatasetIdentity(dataset_id="fixture", content_hash="1" * 64),
 		configuration=ConfigurationIdentity(scan_config_hash="2" * 64),
 		code=CodeIdentity(version="test", git_commit="abcdef123456"),
@@ -1033,7 +1034,7 @@ def test_full_runner_metrics_outputs_leaderboard_and_identity_are_equivalent(tmp
 		assert cached_entry.pareto == independent_entry.pareto
 		assert cached_entry.parameters == independent_entry.parameters
 	for cached_attempt, independent_attempt in zip(cached.attempts, independent.attempts):
-		assert cached_attempt.identity == independent_attempt.identity
+		assert cached_attempt.identity.model_dump(mode="json") == independent_attempt.identity.model_dump(mode="json")
 		assert cached_attempt.result.metrics == independent_attempt.result.metrics
 		assert cached_attempt.result.pareto == independent_attempt.result.pareto
 		assert cached_attempt.result.resolved_recon == independent_attempt.result.resolved_recon

@@ -49,7 +49,7 @@ is scientifically and numerically reusable:
 - resolved scan configuration and calibration hashes;
 - package version, commit, dirty state, runtime/backend, dependencies, and
   relevant hardware facts;
-- exact fidelity windows, halos, and projection stride;
+- exact realized fidelity windows, before/after pads, and projection sampling;
 - metric protocol names, versions, and configuration hashes.
 
 The complete sweep-free `Recon` remains embedded for direct rerun. Labels,
@@ -60,6 +60,30 @@ across samplers. Compatibility compares normalized
 identity-bearing fields and reports paths such as
 `dataset.content_hash` or `metric_protocols[...].protocol_version`, not only
 a bare hash mismatch.
+
+`WindowReference` remains the YAML boundary. Its `to_window` method resolves
+bounds, fidelity sampling, and requested halo through `TomoWindow.from_bounds`.
+`FidelityIdentity.windows` maps the existing window IDs directly to those
+`TomoWindow` objects. There is no additional window class. Its
+`held_out_window_ids` records the held-out subset from configuration; the other
+IDs are tuning windows. The shared geometry converter supplies the documents
+used for persistence and hashing. Execution and cache sizing consume the same
+windows, including clipped edge pads. Requests that resolve to the same geometry
+have the same window identity; different realized pads cannot share one.
+
+Programmatic `ExperimentInputs` require `source`, a full-source `TomoWindow`
+carrying physical shape, raw dtype, and work dtype. The CLI derives it from the
+scan. Both trial execution and Tier-2 planning resolve fidelities through
+`FidelityIdentity.from_reference`. Stride and projection limits remain in the
+configuration; the resulting window's step and extent own realized sampling.
+
+This changes internal trial and plan documents and their hashes. Old records
+containing only requested bounds/halo cannot establish realized geometry and
+are not accepted as compatible records. Experiment YAML and its version remain
+unchanged. `WindowReference.from_window` requires the physical shape and emits
+the smallest scalar halo that reproduces the window; geometry that cannot fit
+the YAML schema is rejected. The original requested halo cannot be recovered
+after clipping.
 
 ## Manifest lifecycle
 

@@ -29,6 +29,8 @@ from lftomo.experiment.runner import (
 	TrialExecution,
 )
 
+from lftomo.util.window import TomoWindow
+
 
 HASHES = [f"{index:064x}" for index in range(1, 8)]
 
@@ -55,6 +57,7 @@ def config(values=(0.01, 0.02), *, concurrency=2):
 
 def inputs():
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(scan().projection_shape(), dtype="uint16"),
 		dataset=DatasetIdentity(dataset_id="fixture", content_hash=HASHES[0]),
 		configuration=ConfigurationIdentity(scan_config_hash=HASHES[1]),
 		code=CodeIdentity(version="test", git_commit="abcdef123456"),
@@ -472,7 +475,7 @@ def test_replay_bundle_rebuilds_controller_without_original_config_files(tmp_pat
 	replayed = ExperimentLifecycle.from_replay(api.root, executor_factory=factory)
 
 	assert replayed.runner.config == api.runner.config
-	assert replayed.runner.inputs == api.runner.inputs
+	assert replayed.runner.inputs.model_dump(mode="json") == api.runner.inputs.model_dump(mode="json")
 	assert replayed.root == api.root
 	assert (api.root / "invocation" / "normalized-experiment.yaml").is_file()
 	assert (api.root / "invocation" / "normalized-scan.yaml").is_file()
