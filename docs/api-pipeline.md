@@ -72,12 +72,18 @@ process-local mapping.
 All production Stage allocations go through the manager. A handle sent to a
 worker is a non-owning attachment and cannot unlink the segment. Normal and
 exceptional context exit unlink all tracked segments. The manager also runs
-outside an isolated trial's process group and watches its owner, allowing it to
-unlink tracked segments when a timed-out trial is terminated with `SIGKILL`.
+outside an isolated trial's process group and watches its creating process
+through `multiprocessing.parent_process().join()`. This follows the owner even
+when the manager's OS parent is a forkserver. If the owner dies, including from
+`SIGBUS` or `SIGKILL`, the manager unlinks its segments and exits. Pool workers
+use the same owner watch to exit without waiting for tasks or shutdown messages
+from the dead owner. Closing these helpers also releases inherited output pipes.
 Because a process-tree reaper may target the detached manager directly, its
 `SIGTERM` handler synchronously unlinks every tracked segment before exiting;
 the owner-death watch and explicit termination therefore share the same cleanup
-operation.
+operation. After a fatal owner exit, Python's resource tracker may report and
+remove abandoned pool semaphores whose owner-side finalizers could not run.
+Normal context shutdown still closes the executor before the manager.
 
 Out-of-place Stages use a two-phase handoff: allocate a prospective managed
 output, fill it while the input remains live, publish it as the next
