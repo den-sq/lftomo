@@ -314,14 +314,14 @@ def test_level_specific_memory_and_output_guards_apply_during_preflight(tmp_path
 
 def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monkeypatch):
 	config = experiment(values=(0.01,))
-	executor = PipelineTrialExecutor(config, "scan.yaml")
 	scan = SimpleNamespace(
 		detector=SimpleNamespace(rows=20),
 		n_projections=100,
 		metadata={},
 		projection_shape=lambda: ProjOrder(100, 20, 8),
 	)
-	monkeypatch.setattr("lftomo.experiment.cli.load_scan", lambda _path: (scan, _path))
+	monkeypatch.setattr("lftomo.runner.load_scan", lambda _path: (scan, Path(_path)))
+	executor = PipelineTrialExecutor(config, "scan.yaml")
 	recon = Recon.model_validate({
 		"pipeline": [
 			{"id": "read", "kind": "read", "algorithm": "tiff_stack"},
@@ -367,7 +367,6 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 
 
 def test_pipeline_span_observer_reports_resolved_variant_positions(tmp_path):
-	executor = PipelineTrialExecutor(experiment(values=(0.01,)), "scan.yaml")
 	configs = (
 		SimpleNamespace(id="stripe", kind="stripe", algorithm="vo_sort"),
 		SimpleNamespace(id="reconstruct", kind="recon", algorithm="gridrec"),
@@ -399,7 +398,7 @@ def test_pipeline_span_observer_reports_resolved_variant_positions(tmp_path):
 		"run", "run:0", 0, 1, ExecutionKind.BOUNDED_SINOGRAM, 0, 2, members,
 	)
 	with bind_execution_context(context):
-		observe = executor._execution_observer(configs)
+		observe = PipelineTrialExecutor._execution_observer(configs)
 		observe(ExecutionSpanEvent(ExecutionSpanPhase.STARTED, span))
 		observe(ExecutionSpanEvent(
 			ExecutionSpanPhase.COMPLETED, span, coordinator_wall_seconds=0.25,
@@ -420,12 +419,12 @@ def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp
 	document = experiment(values=(0.01,)).model_dump(mode="json")
 	document["output"]["screening"] = "metrics_and_previews"
 	config = ExperimentConfig.model_validate(document)
-	executor = PipelineTrialExecutor(config, "scan.yaml")
 	scan = SimpleNamespace(
 		detector=SimpleNamespace(rows=20), n_projections=100, metadata={},
 		projection_shape=lambda: ProjOrder(100, 20, 8),
 	)
-	monkeypatch.setattr("lftomo.experiment.cli.load_scan", lambda _path: (scan, _path))
+	monkeypatch.setattr("lftomo.runner.load_scan", lambda _path: (scan, Path(_path)))
+	executor = PipelineTrialExecutor(config, "scan.yaml")
 	monkeypatch.setenv("LFTOMO_PREVIEW_BLINDING_KEY", "test-private-key")
 	recon = Recon.model_validate({
 		"pipeline": [

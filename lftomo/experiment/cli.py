@@ -16,7 +16,7 @@ from lftomo.config import CALIBRATION_RESOLUTION_FIELDS, Recon
 from lftomo.pipeline import NumpyBackend, Pipeline, validate_pipeline
 from lftomo.pipeline.stages import create_stage, dispatch_for_stage
 from lftomo.review import CandidateReport, ExperimentCandidateResolver
-from lftomo.runner import load_scan, run_reconstruction
+from lftomo.runner import ResolvedScan, resolve_scan, run_reconstruction
 from lftomo.util.window import TomoWindow
 
 from .models import (
@@ -95,13 +95,14 @@ def _git(arguments: list[str], root: Path) -> str | None:
 
 
 def build_experiment_inputs(
-	scan_path: str | Path,
+	scan_path: str | Path | ResolvedScan,
 	*,
 	environment: EnvironmentIdentity | None = None,
 ) -> ExperimentInputs:
 	"""Derive invocation identity without opening projection payloads."""
 
-	scan, resolved = load_scan(scan_path)
+	resolved = resolve_scan(scan_path)
+	scan = resolved.scan
 	content_hash = scan.metadata.get("dataset_content_hash")
 	if not isinstance(content_hash, str) or len(content_hash) != 64:
 		raise ValueError(
@@ -120,7 +121,7 @@ def build_experiment_inputs(
 			work_dtype=np.float32,
 		),
 		dataset=DatasetIdentity(
-			dataset_id=str(scan.metadata.get("dataset_id") or resolved.stem),
+			dataset_id=str(scan.metadata.get("dataset_id") or resolved.path.stem),
 			content_hash=content_hash,
 			acquisition_id=scan.metadata.get("acquisition_id"),
 		),
@@ -132,7 +133,7 @@ def build_experiment_inputs(
 			version=_metadata_version("lftomo") or "unknown", git_commit=commit, dirty=bool(dirty),
 		),
 		environment=environment or collect_environment_identity(),
-		description={"dataset_path": resolved},
+		description={"dataset_path": resolved.path},
 	)
 
 
@@ -142,14 +143,20 @@ class PipelineTrialExecutor:
 	def __init__(
 		self,
 		config: ExperimentConfig,
-		scan_path: str | Path,
+		scan_path: str | Path | ResolvedScan,
 		prefix_cache_policy: PrefixCachePolicy | None = None,
 	):
 		self.config = config
-		self.scan_path = Path(scan_path).resolve()
+		self.resolved_scan = resolve_scan(scan_path)
 		self.prefix_cache_policy = prefix_cache_policy or PrefixCachePolicy()
 		self.prefix_executor = PrefixCachingPipelineExecutor(self.prefix_cache_policy)
 		self._prefix_decisions: dict[str, PrefixCacheDecision] = {}
+
+	@property
+	def scan_path(self) -> Path:
+		"""Expose source provenance without keeping a second scan input."""
+
+		return self.resolved_scan.path
 
 	def __getstate__(self) -> dict[str, Any]:
 		"""Exclude process-local cache locks from the spawned trial payload."""
@@ -167,10 +174,9 @@ class PipelineTrialExecutor:
 	def replay_document(self) -> dict[str, Any]:
 		"""Return the normalized non-secret adapter inputs needed for replay."""
 
-		scan, _ = load_scan(self.scan_path)
 		return {
 			"kind": "pipeline",
-			"scan": scan.model_dump(mode="json"),
+			"scan": self.resolved_scan.scan.model_dump(mode="json"),
 			"prefix_cache_policy": self.prefix_cache_policy.model_dump(mode="json"),
 		}
 
@@ -187,13 +193,12 @@ class PipelineTrialExecutor:
 		return cls(config, scan_path, policy)
 
 	def validate(self, recon: Recon) -> None:
-		scan, _ = load_scan(self.scan_path)
 		resolved = recon.model_copy(deep=True)
 		for stage in resolved.pipeline:
 			for name in CALIBRATION_RESOLUTION_FIELDS:
 				stage.params.pop(name, None)
 		stages = [create_stage(config) for config in resolved.pipeline]
-		validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
+		validate_pipeline(stages, self.resolved_scan.scan, NumpyBackend(), mode="complete")
 
 	def _window_recon(self, identity, window_id: str, window: TomoWindow, output_root: Path) -> Recon:
 		recon = identity.resolved_recon.model_copy(deep=True)
@@ -225,14 +230,13 @@ class PipelineTrialExecutor:
 		return recon
 
 	def validate_identity(self, identity) -> None:
-		scan, _ = load_scan(self.scan_path)
 		for window_id, window in identity.fidelity.windows.items():
 			recon = self._window_recon(identity, window_id, window, Path("validation") / window_id)
 			for stage in recon.pipeline:
 				for name in CALIBRATION_RESOLUTION_FIELDS:
 					stage.params.pop(name, None)
 			stages = [create_stage(config) for config in recon.pipeline]
-			validate_pipeline(stages, scan, NumpyBackend(), mode="complete")
+			validate_pipeline(stages, self.resolved_scan.scan, NumpyBackend(), mode="complete")
 
 	@staticmethod
 	def _prefix_candidate_id(identity, window_id: str) -> str:
@@ -404,10 +408,10 @@ class PipelineTrialExecutor:
 					checkpoint=None if context is None else context.checkpoint,
 				).run(state)
 			if context is None and (decision is None or decision.action != "cache"):
-				result = run_reconstruction(pipeline_path, self.scan_path)[0]
+				result = run_reconstruction(pipeline_path, self.resolved_scan)[0]
 			else:
 				result = run_reconstruction(
-					pipeline_path, self.scan_path, state_executor=execute_state,
+					pipeline_path, self.resolved_scan, state_executor=execute_state,
 				)[0]
 			window_artifacts = dict(result.artifacts)
 			raw_previews = window_artifacts.pop("preview_images", {})
@@ -540,10 +544,11 @@ def _runner(
 			config_directory=experiment_path.resolve().parent,
 		),
 	)
-	executor = PipelineTrialExecutor(config, scan_path, cache_policy)
+	resolved_scan = resolve_scan(scan_path)
+	executor = PipelineTrialExecutor(config, resolved_scan, cache_policy)
 	return IndependentExperimentRunner(
 		config,
-		build_experiment_inputs(scan_path, environment=runtime_report.environment),
+		build_experiment_inputs(resolved_scan, environment=runtime_report.environment),
 		root,
 		executor,
 		validator=executor.validate,

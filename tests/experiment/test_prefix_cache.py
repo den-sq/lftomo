@@ -1045,11 +1045,28 @@ def test_full_runner_metrics_outputs_leaderboard_and_identity_are_equivalent(tmp
 		np.testing.assert_allclose(np.load(cached_output.path), np.load(independent_output.path))
 
 
-def test_cli_dry_run_exposes_real_prefix_plan_without_creating_scratch(tmp_path):
+def test_cli_dry_run_exposes_real_prefix_plan_without_creating_scratch(tmp_path, monkeypatch):
 	from click.testing import CliRunner
 	import yaml
 
-	from lftomo.experiment.cli import main
+	from lftomo.experiment import cli
+	import lftomo.runner as reconstruction_runner
+
+	loaded_scans, validated_scans = [], []
+	load = reconstruction_runner.load_scan
+	validate = cli.validate_pipeline
+
+	def record_load(path):
+		loaded = load(path)
+		loaded_scans.append(loaded[0])
+		return loaded
+
+	def record_validation(stages, scan, *args, **kwargs):
+		validated_scans.append(scan)
+		return validate(stages, scan, *args, **kwargs)
+
+	monkeypatch.setattr(reconstruction_runner, "load_scan", record_load)
+	monkeypatch.setattr(cli, "validate_pipeline", record_validation)
 
 	scan_document = scan().model_dump(mode="json")
 	scan_document["metadata"] = {
@@ -1104,7 +1121,7 @@ def test_cli_dry_run_exposes_real_prefix_plan_without_creating_scratch(tmp_path)
 	experiment_path = tmp_path / "experiment.yaml"
 	experiment_path.write_text(yaml.safe_dump(experiment), encoding="utf-8")
 	scratch = tmp_path / "cache"
-	result = CliRunner().invoke(main, [
+	result = CliRunner().invoke(cli.main, [
 		"dry-run", str(experiment_path), str(scan_path),
 		"--root", str(tmp_path / "results"),
 		"--prefix-cache",
@@ -1113,6 +1130,8 @@ def test_cli_dry_run_exposes_real_prefix_plan_without_creating_scratch(tmp_path)
 		"--prefix-cache-max-memory-bytes", "10000000",
 	])
 	assert result.exit_code == 0, result.output
+	assert len(loaded_scans) == 1
+	assert validated_scans and all(scan is loaded_scans[0] for scan in validated_scans)
 	payload = json.loads(result.output)
 	plan = payload["prefix_cache"]
 	assert plan["enabled"] is True

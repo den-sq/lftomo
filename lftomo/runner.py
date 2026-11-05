@@ -146,6 +146,22 @@ def load_scan(path: str | Path) -> tuple[Scan, Path]:
 	return scan, path
 
 
+@dataclass(frozen=True)
+class ResolvedScan:
+	"""One parsed Scan and its source path for relative calibration provenance."""
+
+	scan: Scan
+	path: Path
+
+
+def resolve_scan(value: str | Path | ResolvedScan) -> ResolvedScan:
+	"""Convert a file input once, retaining an already resolved Scan by identity."""
+
+	if isinstance(value, ResolvedScan):
+		return value
+	return ResolvedScan(*load_scan(value))
+
+
 def _read_tiff_map(path: Path, y_start: int, y_stop: int | None) -> np.ndarray:
 	try:
 		values = tf.memmap(path)
@@ -593,7 +609,7 @@ def _run_streaming_pipeline(
 	return aggregated
 
 
-def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
+def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | ResolvedScan,
 			output_path: str | Path | None = None, backend: Backend | None = None, *,
 			calibration_bundle: CalibrationBundleRef | None = None,
 			verify_calibration_hashes: bool = True,
@@ -601,9 +617,10 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			stage_observer: StageObserver | None = None,
 			execution_observer: ExecutionSpanObserver | None = None,
 			window_config: WindowConfig | None = None) -> list[RunResult]:
-	"""Load, expand, and execute every concrete run described by YAML files."""
+	"""Expand and execute YAML reconstruction runs with a file or resolved Scan."""
 	recon, resolved_pipeline_path = load_recon(pipeline_path)
-	scan, resolved_scan_path = load_scan(scan_path)
+	resolved_scan = resolve_scan(scan_path)
+	scan = resolved_scan.scan
 	if output_path is not None:
 		recon.output_path = Path(output_path).resolve()
 	elif recon.output_path is not None and not recon.output_path.is_absolute():
@@ -653,7 +670,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path,
 			concrete,
 			source_window=dataset.full_window(),
 			pipeline_root=resolved_pipeline_path.parent,
-			scan_root=resolved_scan_path.parent,
+			scan_root=resolved_scan.path.parent,
 			seeded_bundle=calibration_bundle,
 			verify_hashes=verify_calibration_hashes,
 		)
