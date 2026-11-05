@@ -40,6 +40,9 @@ from tests.experiment.process_helpers import (
 	TimeoutOneExecutor,
 )
 
+from lftomo.util.shapes import ProjOrder
+from lftomo.util.window import TomoWindow
+
 
 HASHES = [f"{index:064x}" for index in range(1, 8)]
 
@@ -82,7 +85,9 @@ def experiment_config(
 
 
 def inputs():
+	# The fake executor needs only the four configured detector rows.
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(ProjOrder(1, 4, 1), dtype="uint16"),
 		dataset=DatasetIdentity(dataset_id="fixture", content_hash=HASHES[0]),
 		configuration=ConfigurationIdentity(scan_config_hash=HASHES[1]),
 		code=CodeIdentity(version="test", git_commit="abcdef123456"),

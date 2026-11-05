@@ -30,6 +30,7 @@ from lftomo.experiment import (
 from lftomo.experiment.cli import PipelineTrialExecutor
 from lftomo.experiment.runner import ExperimentInputs
 from lftomo.experiment.events import current_execution_context
+from lftomo.util.window import TomoWindow
 
 
 class HistoricalCollisionExecutor:
@@ -197,6 +198,7 @@ def _lifecycle(
 	runner = IndependentExperimentRunner(
 		config,
 		ExperimentInputs(
+			source=TomoWindow.from_bounds(scan_model.projection_shape(), dtype=data.dtype),
 			dataset=DatasetIdentity(
 				dataset_id="prefix-lifecycle-fixture", content_hash="c" * 64,
 			),

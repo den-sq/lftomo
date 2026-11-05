@@ -48,7 +48,7 @@ from .models import (
 	TrialAttemptRecord,
 	TrialDescription,
 	TrialIdentity,
-	WindowIdentity,
+	CanonicalWindow,
 	canonical_json,
 )
 from .selection import SelectedCandidate, select_candidates
@@ -146,6 +146,7 @@ def atomic_write_model(path: Path, value: Any) -> None:
 class ExperimentInputs(ConfigModel):
 	"""Identity-bearing inputs shared by selected candidates in one invocation."""
 
+	source: CanonicalWindow
 	dataset: DatasetIdentity
 	configuration: ConfigurationIdentity
 	code: CodeIdentity
@@ -482,24 +483,7 @@ class IndependentExperimentRunner:
 			reference = next(item for item in self.config.fidelities if item.id == self.fidelity_id)
 		except StopIteration as error:
 			raise ValueError(f"unknown fidelity {self.fidelity_id!r}") from error
-		windows = {item.id: item for item in self.config.windows}
-		return FidelityIdentity(
-			id=reference.id,
-			windows=tuple(WindowIdentity(
-				id=windows[name].id,
-				role=windows[name].role,
-				y_start=windows[name].y_start,
-				y_stop=windows[name].y_stop,
-				theta_start=windows[name].theta_start,
-				theta_stop=windows[name].theta_stop,
-				halo=windows[name].halo,
-			) for name in reference.windows),
-			projection_stride=reference.projection_stride,
-			projection_limit=reference.projection_limit,
-			resource_fraction=reference.resource_fraction,
-			memory_gb=reference.memory_gb,
-			max_output_bytes=reference.max_output_bytes,
-		)
+		return FidelityIdentity.from_reference(reference, self.config.windows, self.inputs.source)
 
 	def _timeout_seconds(self) -> float | None:
 		return next(

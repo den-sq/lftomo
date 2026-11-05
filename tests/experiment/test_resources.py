@@ -19,6 +19,9 @@ from lftomo.experiment.runner import (
 from lftomo.experiment.store import PersistedExperimentRunner
 from tests.experiment.process_helpers import AlphaExecutor
 
+from lftomo.util.shapes import ProjOrder
+from lftomo.util.window import TomoWindow
+
 
 HASHES = [f"{index:064x}" for index in range(1, 5)]
 
@@ -43,7 +46,9 @@ def config():
 
 
 def inputs():
+	# Path preflight uses a fake executor and a single-row window.
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(ProjOrder(1, 1, 1), dtype="uint16"),
 		dataset={"dataset_id": "fixture", "content_hash": HASHES[0]},
 		configuration={"scan_config_hash": HASHES[1]},
 		code={"version": "test", "git_commit": "abcdef123456"},
@@ -217,7 +222,9 @@ def test_manifest_records_accepted_report_and_compatible_scratch_relocation(tmp_
 	manifest = json.loads((result / "manifest.json").read_text(encoding="utf-8"))
 
 	assert len(list(call_root.glob("*.json"))) == 1
-	assert second.attempts == first.attempts
+	assert [attempt.model_dump(mode="json") for attempt in second.attempts] == [
+		attempt.model_dump(mode="json") for attempt in first.attempts
+	]
 	assert second.preflight.path_resources.root("scratch").resolved_path == (
 		tmp_path / "scratch-b"
 	).resolve()

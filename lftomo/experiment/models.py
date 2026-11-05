@@ -8,16 +8,41 @@ import json
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, JsonValue, model_validator
+from cattrs.errors import BaseValidationError
+import numpy as np
+from pydantic import Field, JsonValue, PlainSerializer, PlainValidator, model_validator
 
 from lftomo.config import ConfigModel, Recon
 from lftomo.pipeline import candidate_key as resolved_candidate_key
 from lftomo.pipeline import has_continuous_domains
+from lftomo.util.converter import CONVERTER
+from lftomo.util.shapes import DataShape
+from lftomo.util.window import DataRef, TomoWindow
 
 
 SchemaVersion = Literal[1]
 HashValue = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 StableName = Annotated[str, Field(pattern=r"^[A-Za-z][A-Za-z0-9_.-]*$")]
+
+
+def _window_from_document(value: Any) -> TomoWindow:
+	if isinstance(value, TomoWindow):
+		return value
+	try:
+		window = CONVERTER.structure(value, DataRef)
+	except (BaseValidationError, KeyError, TypeError) as error:
+		raise ValueError("invalid canonical window document") from error
+	if not isinstance(window, TomoWindow):
+		raise ValueError("expected a canonical TomoWindow document")
+	return window
+
+
+# Serialization hooks only: runtime values remain existing TomoWindow objects.
+CanonicalWindow = Annotated[
+	TomoWindow,
+	PlainValidator(_window_from_document, json_schema_input_type=dict[str, Any]),
+	PlainSerializer(CONVERTER.unstructure, return_type=dict[str, Any]),
+]
 
 
 def canonical_json(value: Any) -> str:
@@ -92,6 +117,48 @@ class WindowReference(ConfigModel):
 	theta_start: int | None = Field(default=None, ge=0)
 	theta_stop: int | None = Field(default=None, gt=0)
 	halo: int = Field(default=0, ge=0)
+
+	def to_window(
+		self, physical_shape: DataShape, *, projection_stride: int = 1,
+		projection_limit: int | None = None, dtype=None, work_dtype=np.float32,
+	) -> TomoWindow:
+		"""Resolve configuration bounds and sampling into canonical geometry."""
+
+		theta_start = 0 if self.theta_start is None else self.theta_start
+		theta_stop = physical_shape.Theta if self.theta_stop is None else self.theta_stop
+		if projection_limit is not None:
+			theta_stop = min(theta_stop, theta_start + projection_limit * projection_stride)
+		return TomoWindow.from_bounds(
+			physical_shape, y=(self.y_start, self.y_stop),
+			theta=(theta_start, theta_stop, projection_stride), halo=self.halo,
+			dtype=dtype, work_dtype=work_dtype,
+		)
+
+	@classmethod
+	def from_window(
+		cls, window: TomoWindow, physical_shape: DataShape, *,
+		id: str, role: Literal["tuning", "held_out"] = "tuning",
+	) -> "WindowReference":
+		"""Export representable bounds with the smallest equivalent scalar halo.
+
+		Sampling belongs to FidelityReference. Requested halo lost to physical
+		clipping cannot be recovered; the returned request reproduces realized pads.
+		"""
+
+		reference = cls(
+			id=id, role=role, y_start=window.pos.Y,
+			y_stop=window.pos.Y + window.shape.Y,
+			theta_start=window.pos.Theta,
+			theta_stop=window.pos.Theta + window.shape.Theta,
+			halo=max(window.pad_before.Y, window.pad_after.Y),
+		)
+		realized = reference.to_window(
+			physical_shape, projection_stride=window.step.Theta,
+			dtype=window.dtype, work_dtype=window.work_dtype,
+		)
+		if CONVERTER.unstructure(realized) != CONVERTER.unstructure(window):
+			raise ValueError("window cannot be represented by WindowReference bounds and scalar halo")
+		return reference
 
 	@model_validator(mode="after")
 	def _stops_follow_starts(self):
@@ -298,40 +365,47 @@ class SamplerIdentity(ConfigModel):
 	explicit_case: str | None = None
 
 
-class WindowIdentity(ConfigModel):
-	"""Exact global coordinates and halo for one evaluated window."""
-
-	id: StableName
-	role: Literal["tuning", "held_out"] = "tuning"
-	y_start: int = Field(ge=0)
-	y_stop: int = Field(gt=0)
-	theta_start: int | None = Field(default=None, ge=0)
-	theta_stop: int | None = Field(default=None, gt=0)
-	halo: int = Field(default=0, ge=0)
-
-	@model_validator(mode="after")
-	def _stops_follow_starts(self):
-		if self.y_stop <= self.y_start:
-			raise ValueError("window y_stop must be greater than y_start")
-		if (
-			self.theta_start is not None
-			and self.theta_stop is not None
-			and self.theta_stop <= self.theta_start
-		):
-			raise ValueError("window theta_stop must be greater than theta_start")
-		return self
-
-
 class FidelityIdentity(ConfigModel):
 	"""Exact comparison-bearing fidelity/window set used for this trial."""
 
 	id: StableName
-	windows: tuple[WindowIdentity, ...] = Field(min_length=1)
-	projection_stride: int = Field(default=1, gt=0)
-	projection_limit: int | None = Field(default=None, gt=0)
+	windows: dict[StableName, CanonicalWindow] = Field(min_length=1)
+	held_out_window_ids: tuple[StableName, ...] = ()
 	resource_fraction: float = Field(default=1.0, gt=0, le=1)
 	memory_gb: float | None = Field(default=None, gt=0)
 	max_output_bytes: int | None = Field(default=None, gt=0)
+
+	@model_validator(mode="after")
+	def _held_out_windows_exist(self):
+		if set(self.held_out_window_ids) - self.windows.keys():
+			raise ValueError("held-out IDs must refer to fidelity windows")
+		object.__setattr__(self, "held_out_window_ids", tuple(sorted(set(self.held_out_window_ids))))
+		return self
+
+	@classmethod
+	def from_reference(
+		cls, reference: FidelityReference, windows: list[WindowReference],
+		source: TomoWindow,
+	) -> "FidelityIdentity":
+		"""Realize a fidelity once at the configuration-to-identity boundary."""
+
+		by_id = {window.id: window for window in windows}
+		return cls(
+			id=reference.id,
+			windows={
+				name: by_id[name].to_window(
+					source.shape, projection_stride=reference.projection_stride,
+					projection_limit=reference.projection_limit,
+					dtype=source.dtype, work_dtype=source.work_dtype,
+				) for name in reference.windows
+			},
+			held_out_window_ids=tuple(
+				name for name in reference.windows if by_id[name].role == "held_out"
+			),
+			resource_fraction=reference.resource_fraction,
+			memory_gb=reference.memory_gb,
+			max_output_bytes=reference.max_output_bytes,
+		)
 
 
 class MetricProtocolIdentity(ConfigModel):
@@ -386,9 +460,6 @@ class TrialIdentity(ConfigModel):
 		payload["metric_protocols"] = sorted(
 			payload["metric_protocols"],
 			key=lambda item: (item["metric_id"], item["protocol_version"], item["config_hash"]),
-		)
-		payload["fidelity"]["windows"] = sorted(
-			payload["fidelity"]["windows"], key=lambda item: item["id"],
 		)
 		return payload
 

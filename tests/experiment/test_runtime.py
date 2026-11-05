@@ -25,6 +25,9 @@ from lftomo.experiment.store import PersistedExperimentRunner
 from lftomo.pipeline import RuntimeRequirement, Stage, StageContract
 from lftomo.pipeline.stages import STAGE_REGISTRY
 
+from lftomo.util.shapes import ProjOrder
+from lftomo.util.window import TomoWindow
+
 
 HASHES = [f"{index:064x}" for index in range(1, 5)]
 
@@ -259,7 +262,9 @@ def test_case_sweeps_preflight_every_selectable_optional_algorithm():
 
 
 def inputs(environment):
+	# Runtime preflight uses a fake executor and a single-row window.
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(ProjOrder(1, 1, 1), dtype="uint16"),
 		dataset=DatasetIdentity(dataset_id="fixture", content_hash=HASHES[0]),
 		configuration=ConfigurationIdentity(scan_config_hash=HASHES[1]),
 		code=CodeIdentity(version="test", git_commit="abcdef123456"),

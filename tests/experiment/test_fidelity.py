@@ -27,6 +27,7 @@ from lftomo.experiment import (
 	export_blinded_previews,
 	read_progress_events,
 	successive_halving,
+	WindowReference,
 )
 from lftomo.experiment.cli import PipelineTrialExecutor
 from lftomo.experiment.events import ExecutionContext, bind_execution_context
@@ -37,6 +38,8 @@ from lftomo.experiment.runner import (
 )
 from lftomo.util.shapes import ProjOrder
 from tests.experiment.process_helpers import AlphaExecutor, WindowedAlphaExecutor
+
+from lftomo.util.window import TomoWindow
 
 
 HASHES = [f"{index:064x}" for index in range(1, 20)]
@@ -87,7 +90,9 @@ def experiment(values=(0.01, 0.02, 0.03, 0.04), *, ties="stable_cut"):
 
 
 def inputs():
+	# Cover the configured 32 strided screening samples and all three windows.
 	return ExperimentInputs(
+		source=TomoWindow.from_bounds(ProjOrder(128, 12, 1), dtype="uint16"),
 		dataset=DatasetIdentity(dataset_id="fixture", content_hash=HASHES[0]),
 		configuration=ConfigurationIdentity(scan_config_hash=HASHES[1]),
 		code=CodeIdentity(version="test", git_commit="abcdef123456"),
@@ -324,17 +329,23 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 			{"id": "write", "kind": "write", "algorithm": "tiff_slices"},
 		],
 	})
-	window = SimpleNamespace(
+	window = WindowReference(
 		id="tune-a", y_start=2, y_stop=4, halo=1,
 		theta_start=5, theta_stop=90,
+	).to_window(
+		scan.projection_shape(), projection_stride=4, projection_limit=10,
+		work_dtype=np.float64,
 	)
+	def unexpected_rebuild(*_args, **_kwargs):
+		raise AssertionError("execution must consume the evaluated canonical window")
+	monkeypatch.setattr(TomoWindow, "from_bounds", unexpected_rebuild)
 	base = dict(
 		resolved_recon=recon,
 		fidelity=SimpleNamespace(
-			id="screen", projection_limit=10, projection_stride=4,
+			id="screen",
 		),
 	)
-	screen = executor._window_recon(SimpleNamespace(**base), window, SimpleNamespace(
+	screen = executor._window_recon(SimpleNamespace(**base), "tune-a", window, SimpleNamespace(
 		__truediv__=lambda self, value: self,
 	))
 	read = screen.pipeline[0]
@@ -345,12 +356,13 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 	assert screen.pipeline[1].params["windows"] == [{
 		"id": "tune-a", "slice_start": 1, "slice_stop": 3,
 	}]
+	assert executor._estimated_snapshot_bytes(window) == 10 * 4 * 8 * np.dtype(np.float64).itemsize
 	assert all(stage.kind != "write" for stage in screen.pipeline)
 
 	base["fidelity"] = SimpleNamespace(
-		id="final", projection_limit=None, projection_stride=1,
+		id="final",
 	)
-	final = executor._window_recon(SimpleNamespace(**base), window, Path("final-window"))
+	final = executor._window_recon(SimpleNamespace(**base), "tune-a", window, Path("final-window"))
 	assert any(stage.kind == "write" for stage in final.pipeline)
 
 
@@ -425,11 +437,10 @@ def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp
 		candidate=SimpleNamespace(value="a" * 64),
 		resolved_recon=recon,
 		fidelity=SimpleNamespace(
-			id="screen", projection_limit=10, projection_stride=2,
-			windows=(SimpleNamespace(
-				id="tune-a", y_start=2, y_stop=4, halo=0,
-				theta_start=None, theta_stop=None,
-			),),
+			id="screen",
+			windows={"tune-a": WindowReference(
+				id="tune-a", y_start=2, y_stop=4,
+			).to_window(scan.projection_shape(), projection_stride=2, projection_limit=10)},
 		),
 	)
 	artifact = {

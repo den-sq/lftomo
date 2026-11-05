@@ -21,7 +21,6 @@ from .models import (
 	ExperimentConfig,
 	FidelityIdentity,
 	MetricProtocolIdentity,
-	WindowIdentity,
 	canonical_json,
 )
 from .runner import ExperimentInputs, atomic_write_model, json_value
@@ -118,42 +117,25 @@ def build_tier2_plan(
 		raise ValueError(
 			f"Tier-2 candidate count {candidate_count} exceeds bound {bounds.max_candidates}"
 		)
-	windows = {item.id: item for item in config.windows}
 	screen = config.fidelities[0]
 	if screen.projection_limit is None:
 		raise ValueError("Tier-2 screening fidelity requires projection_limit")
 	if screen.projection_limit > bounds.max_screen_projections:
 		raise ValueError("Tier-2 screening projection limit exceeds protocol bounds")
-	for name in screen.windows:
-		window = windows[name]
-		if window.y_stop - window.y_start > bounds.max_screen_window_rows:
+	identities = tuple(
+		FidelityIdentity.from_reference(fidelity, config.windows, inputs.source)
+		for fidelity in config.fidelities
+	)
+	for name, window in identities[0].windows.items():
+		if window.shape.Y > bounds.max_screen_window_rows:
 			raise ValueError(f"Tier-2 screening window {name!r} exceeds row bound")
-	tuning = tuple(sorted(name for name in screen.windows if windows[name].role == "tuning"))
-	held_out = tuple(sorted(name for name in screen.windows if windows[name].role == "held_out"))
+	held_out = identities[0].held_out_window_ids
+	tuning = tuple(sorted(identities[0].windows.keys() - set(held_out)))
 	if len(tuning) < 2:
 		raise ValueError("Tier-2 screening requires at least two tuning windows")
 	if not held_out:
 		raise ValueError("Tier-2 screening requires at least one held-out window")
 
-	identities = []
-	for fidelity in config.fidelities:
-		identities.append(FidelityIdentity(
-			id=fidelity.id,
-			windows=tuple(WindowIdentity(
-				id=windows[name].id,
-				role=windows[name].role,
-				y_start=windows[name].y_start,
-				y_stop=windows[name].y_stop,
-				theta_start=windows[name].theta_start,
-				theta_stop=windows[name].theta_stop,
-				halo=windows[name].halo,
-			) for name in fidelity.windows),
-			projection_stride=fidelity.projection_stride,
-			projection_limit=fidelity.projection_limit,
-			resource_fraction=fidelity.resource_fraction,
-			memory_gb=fidelity.memory_gb,
-			max_output_bytes=fidelity.max_output_bytes,
-		))
 	protocols = tuple(MetricProtocolIdentity(
 		metric_id=metric.id,
 		protocol_version=metric.protocol_version,

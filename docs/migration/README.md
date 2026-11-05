@@ -142,6 +142,6 @@ object to `util.shapes.Y`; `WindowConfig(rows=, extra_pad=)`;
 lfreview-matched error substrings (`"private preview mapping"`, `"review
 session differs"`). `experiment.WindowReference`'s *serialized field names*
 are external contract (lfreview builds config dicts with `windows:` entries);
-`WindowIdentity` is pure-internal and free to delete. Keep the literal class
+the former duplicated window identity was internal and has been removed. Keep the literal class
 names `SharedNPArray`/`TomoDataSet` (hatmehyt's B10 importer greps driver
 source text for them).
