@@ -59,3 +59,20 @@ def test_explicit_angles_must_match_the_declared_slot_convention():
 			rotation_start_deg=0,
 			rotation_end_deg=180,
 		)
+
+
+@pytest.mark.parametrize("angles,message", [
+	([0, 0, 180], "acquisition indices must be strictly increasing"),
+	([-45, 90, 180], "acquisition indices cannot be negative"),
+	([0, 90, 179.98], "acquisition index 1969 is outside 1969 planned slots"),
+])
+def test_endpoint_hint_preserves_other_angle_validation_errors(angles, message):
+	with pytest.raises(ValueError) as error:
+		indices_from_angles(
+			np.deg2rad(angles),
+			recorded_count=len(angles),
+			planned_count=1969,
+			rotation_start_deg=0,
+			rotation_end_deg=180,
+		)
+	assert str(error.value) == message

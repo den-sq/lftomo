@@ -101,6 +101,15 @@ class PipelinePlan:
 	def full_volume_materializations(self) -> tuple[Materialization, ...]:
 		return tuple(item for step in self.steps for item in step.materializations)
 
+	@property
+	def shared_memory_peak_bytes(self) -> int:
+		"""Physical bytes in the schedule, retained until run-context shutdown."""
+
+		return sum(
+			event.bytes for event in self.allocation_schedule
+			if event.action is BufferAction.ALLOCATE
+		)
+
 
 def _nbytes(spec: BufferSpec | None) -> int:
 	if spec is None:

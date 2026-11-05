@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import h5py
 import numpy as np
@@ -185,6 +186,25 @@ def test_all_bundled_canonical_templates_instantiate():
 
 
 def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(tmp_path, monkeypatch):
+	import lftomo.runner as runner_module
+
+	plans, checked_peaks, reservations = [], [], []
+	validate = runner_module.validate_pipeline
+	check_capacity = runner_module.SharedNPManager.check_capacity
+	reserve = runner_module.SharedNPManager.reserve
+	def record_plan(*args, **kwargs):
+		plan = validate(*args, **kwargs)
+		plans.append(plan)
+		return plan
+	def record_capacity(peak):
+		checked_peaks.append(peak)
+		check_capacity(peak)
+	def record_reservation(manager, role, size):
+		reservations.append((role, size))
+		reserve(manager, role, size)
+	monkeypatch.setattr(runner_module, "validate_pipeline", record_plan)
+	monkeypatch.setattr(runner_module.SharedNPManager, "check_capacity", staticmethod(record_capacity))
+	monkeypatch.setattr(runner_module.SharedNPManager, "reserve", record_reservation)
 	data_path = tmp_path / "scan.h5"
 	with h5py.File(data_path, "w") as handle:
 		handle.create_dataset("exchange/data", data=np.arange(24, dtype=np.float32).reshape(3, 2, 4))
@@ -217,6 +237,86 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(tmp_path, 
 	assert results[0].artifacts["calibration_resolution"]["source"] == "embedded_hdf5"
 	assert "white_fields" not in results[0].artifacts
 	assert "dark_fields" not in results[0].artifacts
+	assert checked_peaks == [plans[0].shared_memory_peak_bytes]
+	assert reservations == [(event.role, event.bytes) for event in plans[0].allocation_schedule]
+
+
+@pytest.mark.parametrize("window_rows", [None, 1])
+def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
+	tmp_path, monkeypatch, window_rows,
+):
+	import lftomo.runner as runner_module
+	import lftomo.util.mem as mem_module
+	from lftomo.pipeline import WindowConfig
+
+	# Reproduce the reported source dimensions without materializing its 22 GB
+	# projection payload. Preflight needs the real HDF5 header, not pixel values.
+	data_path = tmp_path / "b10.h5"
+	with h5py.File(data_path, "w") as handle:
+		handle.create_dataset("exchange/data", shape=(1969, 2160, 2560), dtype=np.uint16)
+		handle.create_dataset("exchange/data_white", shape=(2, 2160, 2560), dtype=np.uint16, fillvalue=100)
+		handle.create_dataset("exchange/data_dark", shape=(2, 2160, 2560), dtype=np.uint16)
+	document = scan_document(str(data_path))
+	document["n_projections"] = document["acquisition"]["n_projections"] = 1969
+	document["detector"].update(rows=2160, columns=2560)
+	scan_path = tmp_path / "scan.yaml"
+	write_yaml(scan_path, document)
+	recon, _ = load_recon("b10-recon-canonical")
+	recon.pipeline[0].params.update(y_start=1076, y_stop=1086)
+	pipeline_path = tmp_path / "pipeline.yaml"
+	write_yaml(pipeline_path, recon.model_dump(mode="json"))
+
+	available = 64 * 1024**2
+	monkeypatch.setattr(mem_module, "platform", "linux")
+	def space(path):
+		assert path == "/dev/shm"
+		return SimpleNamespace(f_bavail=available // 4096, f_frsize=4096)
+	monkeypatch.setattr(mem_module.os, "statvfs", space)
+	plans = []
+	validate = runner_module.validate_pipeline
+	def record_plan(*args, **kwargs):
+		plan = validate(*args, **kwargs)
+		plans.append(plan)
+		return plan
+	monkeypatch.setattr(runner_module, "validate_pipeline", record_plan)
+
+	read = h5py.Dataset.__getitem__
+	def no_projection_read(dataset, *args, **kwargs):
+		assert dataset.name != "/exchange/data", "projection data read before capacity check"
+		return read(dataset, *args, **kwargs)
+	monkeypatch.setattr(h5py.Dataset, "__getitem__", no_projection_read)
+	class ReachedManager(Exception):
+		pass
+	def stop_before_manager(_context):
+		raise ReachedManager
+	monkeypatch.setattr(runner_module.PipelineRunContext, "__enter__", stop_before_manager)
+
+	if window_rows is None:
+		with pytest.raises(MemoryError) as error:
+			run_reconstruction(pipeline_path, scan_path)
+		assert len(plans) == 1
+		peak = plans[0].shared_memory_peak_bytes
+		assert peak > available
+		message = str(error.value)
+		assert f"planned peak {peak} bytes" in message
+		assert f"available /dev/shm space {available} bytes" in message
+		assert "shared memory" in message
+		assert "--window-rows" in message and "--shm-size" in message
+	else:
+		with pytest.raises(ReachedManager):
+			run_reconstruction(pipeline_path, scan_path, window_config=WindowConfig(rows=window_rows))
+		assert len(plans) == 1
+		assert 0 < plans[0].shared_memory_peak_bytes < available
+
+
+def test_shared_memory_preflight_does_not_assume_linux_mount_on_other_platforms(monkeypatch):
+	import lftomo.util.mem as mem_module
+
+	monkeypatch.setattr(mem_module, "platform", "darwin")
+	def unexpected_probe(_path):
+		raise AssertionError("/dev/shm is Linux-specific")
+	monkeypatch.setattr(mem_module.os, "statvfs", unexpected_probe)
+	mem_module.SharedNPManager.check_capacity(1)
 
 
 def test_external_bundle_overrides_hdf5_and_reads_only_y_window(tmp_path):

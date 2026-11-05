@@ -195,6 +195,7 @@ def test_planner_emits_liveness_alias_and_managed_artifact_allocations():
 		if event.action is BufferAction.ALLOCATE
 	)
 	assert allocated > 0
+	assert plan.shared_memory_peak_bytes == allocated
 
 	unaliased = validate_pipeline(stages, scan, mode="complete", enable_aliasing=False)
 	unaliased_recon = next(
@@ -206,6 +207,7 @@ def test_planner_emits_liveness_alias_and_managed_artifact_allocations():
 		if event.action is BufferAction.ALLOCATE
 	)
 	assert unaliased_allocated > allocated
+	assert unaliased.shared_memory_peak_bytes == unaliased_allocated
 
 	pinned = validate_pipeline(
 		stages, scan, mode="complete", external_pins=("raw_staging",),
