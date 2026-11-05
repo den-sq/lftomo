@@ -1,13 +1,17 @@
 import ast
 import inspect
+import json
 import multiprocessing
 import os
 from pathlib import Path
 import pickle
 import signal
+import subprocess
+import sys
 import time
 
 import numpy as np
+import psutil
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
@@ -259,6 +263,106 @@ def test_killed_process_group_does_not_leak_manager_segments(stop_signal):
 	while _segment_exists(name) and time.monotonic() < deadline:
 		time.sleep(0.1)
 	assert not _segment_exists(name)
+
+
+@pytest.mark.parametrize("start_method", ["default", "spawn"])
+def test_fatal_owner_exit_releases_manager_workers_and_pipes(tmp_path, start_method):
+	if sys.platform != "linux":
+		pytest.skip("fatal-owner cleanup inspection uses Linux shared-memory paths")
+	owner = subprocess.Popen(
+		[sys.executable, "-m", "tests.pipeline.process_helpers", start_method, str(tmp_path)],
+		cwd=Path(__file__).parents[2],
+		stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+		start_new_session=True,
+	)
+	owner_process = psutil.Process(owner.pid)
+	descendants = {}
+	resources = {}
+	resource_path = tmp_path / "resources.json"
+
+	def running(process):
+		try:
+			return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+		except psutil.NoSuchProcess:
+			return False
+
+	try:
+		deadline = time.monotonic() + 30
+		while "worker_pids" not in resources and time.monotonic() < deadline:
+			for process in owner_process.children(recursive=True):
+				descendants[process.pid] = process
+			if resource_path.exists():
+				resources = json.loads(resource_path.read_text(encoding="utf-8"))
+			assert owner.poll() is None, "standalone run owner exited before workers were ready"
+			time.sleep(0.01)
+		assert "worker_pids" in resources, "standalone run workers did not become ready"
+		manager = psutil.Process(resources["manager_pid"])
+		workers = [psutil.Process(pid) for pid in resources["worker_pids"]]
+		for process in owner_process.children(recursive=True):
+			descendants[process.pid] = process
+		assert len(set(resources["worker_pids"])) == 2
+		assert all(running(process) for process in [manager, *workers])
+		expected_method = (
+			multiprocessing.get_all_start_methods()[0] if start_method == "default" else "spawn"
+		)
+		assert resources["manager_start_method"] == expected_method
+		if expected_method == "forkserver":
+			assert manager.ppid() != owner.pid
+		assert _segment_exists(resources["segment"])
+
+		# Kill only the owning process: each detached child must notice its death.
+		killed_at = time.monotonic()
+		owner.send_signal(signal.SIGBUS)
+		deadline = time.monotonic() + 10
+		while (
+			any(running(process) for process in [manager, *workers])
+			or _segment_exists(resources["segment"])
+		) and time.monotonic() < deadline:
+			time.sleep(0.01)
+		assert not any(running(process) for process in [manager, *workers])
+		assert not _segment_exists(resources["segment"])
+		_stdout, stderr = owner.communicate(timeout=max(0.1, deadline - time.monotonic()))
+		print(f"{start_method}: owner-exit cleanup and pipe EOF in {time.monotonic() - killed_at:.3f}s")
+		assert owner.returncode == -signal.SIGBUS
+		if stderr:
+			print(stderr, end="")
+		assert all(
+			not (Path("/dev/shm") / f"sem.{name.lstrip('/')}").exists()
+			for name in resources["semaphores"]
+		)
+	finally:
+		if owner.poll() is None:
+			try:
+				for process in owner_process.children(recursive=True):
+					descendants[process.pid] = process
+			except psutil.NoSuchProcess:
+				pass
+			owner.kill()
+		for process in descendants.values():
+			if running(process):
+				try:
+					process.kill()
+				except psutil.NoSuchProcess:
+					pass
+		owner.wait(timeout=5)
+		deadline = time.monotonic() + 5
+		while any(running(process) for process in descendants.values()) and time.monotonic() < deadline:
+			time.sleep(0.01)
+		owner.stdout.close()
+		owner.stderr.close()
+		if resource_path.exists():
+			resources = json.loads(resource_path.read_text(encoding="utf-8"))
+		if resources.get("segment"):
+			(Path("/dev/shm") / resources["segment"].lstrip("/")).unlink(missing_ok=True)
+		for name in resources.get("semaphores", ()):
+			(Path("/dev/shm") / f"sem.{name.lstrip('/')}").unlink(missing_ok=True)
+		remaining = [process.pid for process in descendants.values() if running(process)]
+		if remaining:
+			message = f"test-owned processes survived cleanup: {remaining}"
+			if sys.exc_info()[1] is not None:
+				sys.exc_info()[1].add_note(message)
+			else:
+				pytest.fail(message)
 
 
 def _owned_python_paths(repository: Path) -> list[Path]:

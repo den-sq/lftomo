@@ -23,6 +23,7 @@ from lftomo.storage import (
 
 from .shapes import DataShape
 from .log import log, LOG
+from .process import watch_parent_exit
 
 MEM_INTERVAL_TIMER = 1.0
 
@@ -64,7 +65,6 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		"""
 
 		signal.signal(signal.SIGINT, signal.SIG_IGN)
-		owner_pid = os.getppid()
 		if hasattr(os, "setsid"):
 			try:
 				os.setsid()
@@ -99,14 +99,12 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		signal.signal(signal.SIGTERM, cleanup_after_sigterm)
 
 		def cleanup_after_owner_exit():
-			while os.getppid() == owner_pid:
-				sleep(0.1)
 			try:
 				unlink_once()
 			finally:
 				os._exit(0)
 
-		threading.Thread(target=cleanup_after_owner_exit, daemon=True).start()
+		watch_parent_exit(cleanup_after_owner_exit)
 		writer.send(server.address)
 		writer.close()
 		multiprocessing_util.info("manager serving at %r", server.address)

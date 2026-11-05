@@ -23,6 +23,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.storage import ManagedBuffer
+from lftomo.util.process import watch_parent_exit
 from lftomo.util.shapes import IntIter, ProjOrder, ReconOrder, SinoOrder, Theta
 from lftomo.util.window import DataRef, TomoWindow
 
@@ -47,7 +48,7 @@ _WORKER_CPU_THREAD_LIMIT: int | None = None
 
 
 def _worker_initializer(cpu_thread_limit: int) -> None:
-	"""Set the run-owned native-thread ceiling and killable process group."""
+	"""Set the run-owned thread ceiling, process group and owner-death watch."""
 
 	global _WORKER_CPU_THREAD_LIMIT
 	_WORKER_CPU_THREAD_LIMIT = cpu_thread_limit
@@ -58,6 +59,9 @@ def _worker_initializer(cpu_thread_limit: int) -> None:
 		except OSError:
 			pass
 	signal.signal(signal.SIGINT, signal.SIG_IGN)
+	# The owner cannot submit the executor's normal shutdown sentinels after
+	# a fatal signal. Exit even if this worker is idle or executing a task.
+	watch_parent_exit(lambda: os._exit(0))
 
 
 def _limit_worker_cpu_threads(stage: Stage) -> None:
