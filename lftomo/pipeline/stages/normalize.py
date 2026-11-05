@@ -105,7 +105,7 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 class WeightedNormalizeStage(Stage):
 	"""Blend pre/post flat fields into a float32 managed output.
 
-	The working array is in ``(Y, Theta, X)`` order. The four flat fields are
+	The working array is in ``ProjOrder`` or ``SinoOrder``. The four flat fields are
 	provided through ``Scan.metadata["flat_fields"]`` in pre-gain, post-gain,
 	pre-dark, post-dark order.
 	"""
@@ -150,29 +150,24 @@ class WeightedNormalizeStage(Stage):
 		flats = _managed_flat_fields(state)
 		layout = type(state.buffer_spec.shape)
 		if working.ndim != 3:
-			raise ValueError("weighted-normalize expects a (Y, Theta, X) working array")
+			raise ValueError("weighted-normalize expects a three-dimensional working array")
 		y_size = working.shape[layout.axis_of("Y")]
 		if flats.shape != (4, y_size, working.shape[layout.axis_of("X")]):
 			raise ValueError(
 				"flat_fields must have shape (4, Y, X) matching the working array"
 			)
 
-		sinogram_view = working if layout is SinoOrder else np.transpose(working, (1, 0, 2))
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
-		projection_count = state.dataset.physical_shape.Theta
-		for projection in range(state.buffer_spec.shape.Theta):
+		for local_index, global_index in enumerate(state.source_window.int_iter("Theta")):
+			image = working[layout.point_index(Theta=local_index)]
 			_weighted_normalize_projection(
-				sinogram_view,
-				sinogram_view,
+				image,
+				image,
 				flats,
-				projection,
-				projection_count,
+				global_index,
+				state.dataset.physical_shape.Theta,
 				self.params.pre_sub,
-				projection_index=(
-					state.source_window.pos.Theta
-					+ projection * state.source_window.step.Theta
-				),
 			)
 		return _finish_normalization(state, output)
 
