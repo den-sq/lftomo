@@ -166,11 +166,19 @@ for the return value and the optional controls.
 
 ## Troubleshooting
 
-- **`Bus error` or a worker dies with no traceback.** The runner keeps its working
-  arrays in POSIX shared memory (`/dev/shm`). Containers often limit it (Docker's
-  default is 64 MB), which is too small for even a single 2560-pixel reconstructed
-  slice plus its input. Raise the limit (for Docker, `--shm-size`) or reduce the
-  working set with fewer rows per window (`--window-rows`, or `y_start`/`y_stop`).
+- **`insufficient shared memory: planned peak ...`** The runner keeps its working
+  arrays in POSIX shared memory (`/dev/shm`) and checks their planned peak against
+  the free space before reading projections. Containers often limit it. Docker's
+  default of 64 MB holds about one row of a large scan: one 2560-pixel reconstructed
+  slice with its 1969 projections planned 54 MiB. Raise the limit (for Docker,
+  `--shm-size`) or reduce the working set with fewer rows per window
+  (`--window-rows`, or `y_start`/`y_stop`).
+- **`Bus error`, `BrokenProcessPool`, or a worker dies with no traceback.** Usually
+  the same shortage, in memory the check doesn't count. Vo stripe Stages
+  (`stripe.vo_*`, used by `r254-canonical` and `recon-minimal-canonical`) allocate
+  scratch of about twice the normalized working array on top of the planned peak,
+  and other processes can use `/dev/shm` after the check. Raise the limit; fewer
+  rows per window also helps until each window is down to one row.
 - **`unknown pipeline ...`**: the first argument is neither an existing file nor a
   bundled template name; the error lists the available templates.
 - **`normalization requires an explicit calibration bundle, legacy four-map fields,
