@@ -220,9 +220,26 @@ def _lifecycle(
 def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failures(
 	tmp_path, monkeypatch,
 ):
-	api, _executor = _lifecycle(tmp_path, monkeypatch)
+	import lftomo.runner as reconstruction_runner
+
+	loaded_paths = []
+	load = reconstruction_runner.load_scan
+
+	def record_load(path):
+		loaded = load(path)
+		loaded_paths.append(loaded[1])
+		return loaded
+
+	monkeypatch.setattr(reconstruction_runner, "load_scan", record_load)
+	api, executor = _lifecycle(tmp_path, monkeypatch)
+	scan_path = tmp_path / "scan.yaml"
+	assert loaded_paths == [scan_path]
+	scan_document = executor.replay_document()["scan"]
+	scan_path.unlink()
 	summary = api.run()
 	assert all(attempt.status == "succeeded" for attempt in summary.attempts)
+	assert loaded_paths == [scan_path]
+	assert executor.replay_document()["scan"] == scan_document
 	all_events = read_progress_events(api.root / "progress.jsonl")
 	cache_events = [
 		event for event in all_events
@@ -258,6 +275,10 @@ def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failure
 	retry_root = tmp_path / "retry-case"
 	retry_root.mkdir()
 	broken, working_executor = _lifecycle(retry_root, monkeypatch)
+	retry_scan_path = retry_root / "scan.yaml"
+	assert loaded_paths == [scan_path, retry_scan_path]
+	replay_document = working_executor.replay_document()
+	retry_scan_path.unlink()
 
 	broken.runner.executor = HistoricalCollisionExecutor(working_executor)
 	failed = broken.run()
@@ -267,9 +288,15 @@ def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failure
 		for attempt in failed.attempts
 	)
 
-	resumed, _executor = _lifecycle(retry_root, monkeypatch)
+	resumed = ExperimentLifecycle.from_replay(broken.root)
+	normalized_path = broken.root / "invocation" / "normalized-scan.yaml"
+	assert loaded_paths == [scan_path, retry_scan_path, normalized_path]
+	assert resumed.runner.executor.replay_document() == replay_document
+	normalized_path.unlink()
 	retried = resumed.resume(ResumePolicy(retry_failed=True))
 	assert all(attempt.status == "succeeded" for attempt in retried.attempts)
+	assert loaded_paths == [scan_path, retry_scan_path, normalized_path]
+	assert resumed.runner.executor.replay_document() == replay_document
 	assert all(
 		[attempt.status for attempt in history.attempts] == ["failed", "succeeded"]
 		for history in resumed.inspect().trials

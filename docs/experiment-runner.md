@@ -54,6 +54,12 @@ metric protocol without opening projection payloads. Dry-run also resolves, dedu
 identifies, and validates every complete candidate while reporting output roots and
 resource estimates.
 
+Each invocation parses the scan YAML once. Identity, validation, prefix planning,
+replay output, and spawned candidate execution use that same resolved `Scan` snapshot.
+Its source path remains available for relative calibration references. Library callers
+can share a `lftomo.runner.ResolvedScan` across the experiment adapter and
+`run_reconstruction`; ordinary path inputs still load through `load_scan`.
+
 ```console
 lftomo-experiment validate experiment.yaml
 lftomo-experiment dry-run experiment.yaml scan.yaml --root results

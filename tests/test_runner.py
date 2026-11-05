@@ -29,6 +29,7 @@ from lftomo.runner import (
 	load_scan,
 	main,
 	resolve_calibration,
+	resolve_scan,
 	run_reconstruction,
 )
 from lftomo.util.window import TomoWindow
@@ -185,16 +186,23 @@ def test_all_bundled_canonical_templates_instantiate():
 		assert stages, path.name
 
 
-def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(tmp_path, monkeypatch):
+def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
+	tmp_path, monkeypatch,
+):
 	import lftomo.runner as runner_module
 
-	plans, checked_peaks, reservations = [], [], []
+	plans, checked_peaks, reservations, loaded_scans, planned_scans = [], [], [], [], []
 	validate = runner_module.validate_pipeline
 	check_capacity = runner_module.SharedNPManager.check_capacity
 	reserve = runner_module.SharedNPManager.reserve
+	def record_scan(path):
+		loaded = load_scan(path)
+		loaded_scans.append(loaded[0])
+		return loaded
 	def record_plan(*args, **kwargs):
 		plan = validate(*args, **kwargs)
 		plans.append(plan)
+		planned_scans.append(args[1])
 		return plan
 	def record_capacity(peak):
 		checked_peaks.append(peak)
@@ -203,6 +211,7 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(tmp_path, 
 		reservations.append((role, size))
 		reserve(manager, role, size)
 	monkeypatch.setattr(runner_module, "validate_pipeline", record_plan)
+	monkeypatch.setattr(runner_module, "load_scan", record_scan)
 	monkeypatch.setattr(runner_module.SharedNPManager, "check_capacity", staticmethod(record_capacity))
 	monkeypatch.setattr(runner_module.SharedNPManager, "reserve", record_reservation)
 	data_path = tmp_path / "scan.h5"
@@ -228,8 +237,15 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(tmp_path, 
 	monkeypatch.setattr(tomopy, "recon", lambda data, *args, **kwargs:
 		np.repeat(np.asarray(data).mean(axis=1)[:, None, :], data.shape[2], axis=1))
 	output = tmp_path / "output"
-	results = run_reconstruction(pipeline_path, scan_path, output)
+	scan_input = resolve_scan(scan_path)
+	assert resolve_scan(scan_input) is scan_input
+	scan_path.unlink()
+	results = run_reconstruction(pipeline_path, scan_input, output)
 
+	assert len(loaded_scans) == 1
+	assert planned_scans[0].detector is loaded_scans[0].detector
+	assert planned_scans[0].metadata is not loaded_scans[0].metadata
+	assert "flat_fields" not in loaded_scans[0].metadata
 	assert len(results) == 1
 	assert results[0].output_path == output
 	assert [path.name for path in results[0].artifacts["output_files"]] == ["slice_000.tif", "slice_001.tif"]
