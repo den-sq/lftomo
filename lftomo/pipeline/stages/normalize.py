@@ -31,7 +31,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import buffer_view
-from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Theta
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
 
 
 def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
@@ -105,7 +105,7 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 class WeightedNormalizeStage(Stage):
 	"""Blend pre/post flat fields into a float32 managed output.
 
-	The working array is in ``(Y, Theta, X)`` order. The four flat fields are
+	The working array is in ``ProjOrder`` or ``SinoOrder``. The four flat fields are
 	provided through ``Scan.metadata["flat_fields"]`` in pre-gain, post-gain,
 	pre-dark, post-dark order.
 	"""
@@ -150,28 +150,23 @@ class WeightedNormalizeStage(Stage):
 		flats = _managed_flat_fields(state)
 		layout = type(state.buffer_spec.shape)
 		if working.ndim != 3:
-			raise ValueError("weighted-normalize expects a (Y, Theta, X) working array")
+			raise ValueError("weighted-normalize expects a three-dimensional working array")
 		y_size = working.shape[layout.axis_of("Y")]
 		if flats.shape != (4, y_size, working.shape[layout.axis_of("X")]):
 			raise ValueError(
 				"flat_fields must have shape (4, Y, X) matching the working array"
 			)
 
-		sinogram_view = working if layout is SinoOrder else np.transpose(working, (1, 0, 2))
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
-		source_window = state.source_window.with_pad(["Y"])
-		for local_index, global_index in enumerate(source_window.int_iter("Theta")):
-			projection = source_window.rescope(
-				pos=source_window.pos.merge(Theta(global_index), retain=False), shape=Theta(1),
-			)
-			image = sinogram_view[SinoOrder.point_index(Theta=local_index)]
+		for local_index, global_index in enumerate(state.source_window.int_iter("Theta")):
+			image = working[layout.point_index(Theta=local_index)]
 			_weighted_normalize_projection(
 				image,
 				image,
 				flats,
-				projection,
-				state.dataset.physical_shape,
+				global_index,
+				state.dataset.physical_shape.Theta,
 				self.params.pre_sub,
 			)
 		return _finish_normalization(state, output)

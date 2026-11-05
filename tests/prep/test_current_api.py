@@ -7,7 +7,7 @@ from lftomo.prep.flat import weighted_normalize
 from lftomo.prep.phase import _phase_pad, _phase_retrieval, filter_create
 from lftomo.prep import flat, stripe
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import DataRange, GenericOrder, ImgSlice, SinoOrder, Y
+from lftomo.util.shapes import DataRange, GenericOrder, ImgSlice, ProjOrder, SinoOrder, Y
 from lftomo.util.window import DataRef, TomoWindow
 
 
@@ -19,13 +19,24 @@ def _window(shape):
 	return TomoWindow(shape, Y(0), Y(0), Y(1), np.float32, np.float32)
 
 
-@pytest.mark.parametrize("pre_sub", [False, True])
-def test_weighted_normalize_uses_current_memory_and_window_api(monkeypatch, pre_sub):
+@pytest.mark.parametrize("order,y_start,y_size,before,after,y_step,pre_sub", [
+	pytest.param(SinoOrder, 0, 8, 0, 0, 1, False, id="sino-full"),
+	pytest.param(ProjOrder, 0, 8, 0, 0, 1, True, id="proj-full-presub"),
+	pytest.param(SinoOrder, 2, 4, 0, 0, 2, True, id="sino-subset-strided-presub"),
+	pytest.param(ProjOrder, 2, 4, 0, 0, 2, False, id="proj-subset-strided"),
+	pytest.param(SinoOrder, 3, 2, 1, 2, 1, False, id="sino-subset-halo"),
+	pytest.param(ProjOrder, 3, 2, 1, 2, 1, True, id="proj-subset-halo-presub"),
+])
+def test_weighted_normalize_uses_current_memory_and_window_api(
+	monkeypatch, order, y_start, y_size, before, after, y_step, pre_sub,
+):
 	window = TomoWindow(
-		SinoOrder(Y=2, Theta=3, X=4), SinoOrder(1, 0, 0), SinoOrder(3, 10, 0),
-		SinoOrder(1, 1, 1), np.float32, np.float32, pad_after=SinoOrder(2, 0, 0),
+		order(Y=y_size, Theta=3, X=4), order(Y=before, Theta=0, X=0),
+		order(Y=y_start, Theta=10, X=0), order(Y=y_step, Theta=1, X=1),
+		np.float32, np.float32, pad_after=order(Y=after, Theta=0, X=0),
 	)
-	output = _shared(window.internal.with_pad().shape)
+	# The classic API always receives Y-first arrays, independently of window order.
+	output = _shared(window.internal.with_pad().shape.to(SinoOrder))
 	source = _shared(output.shape)
 	flats = _shared(GenericOrder(4, 8, 4))
 	calls = []
@@ -38,14 +49,14 @@ def test_weighted_normalize_uses_current_memory_and_window_api(monkeypatch, pre_
 		views.append(view)
 		return view
 
-	def record(target, original, fields, projection, acquisition_shape, pre_sub):
-		assert isinstance(projection, DataRef)
-		assert acquisition_shape is window.shape
+	def record(target, original, fields, projection, projection_count, pre_sub):
+		assert isinstance(projection, int)
+		assert isinstance(projection_count, int)
 		assert np.shares_memory(target, views[0].array())
 		assert np.shares_memory(original, views[1].array())
 		assert np.shares_memory(fields, flats.array())
-		calls.append(projection)
-		return kernel(target, original, fields, projection, acquisition_shape, pre_sub)
+		calls.append((projection, projection_count))
+		return kernel(target, original, fields, projection, projection_count, pre_sub)
 
 	monkeypatch.setattr(flat, "_weighted_normalize_projection", record)
 	monkeypatch.setattr(SharedNPArray, "__getitem__", record_view)
@@ -59,16 +70,15 @@ def test_weighted_normalize_uses_current_memory_and_window_api(monkeypatch, pre_
 		])
 		expected = output.array().copy()
 		dark = 2
-		gain = 22 + rows[3:5] - (0 if pre_sub else dark)
-		expected[1:3, 1, :] = (source.array()[1:3, 1, :] - dark) / gain
+		gain = 22 + rows[y_start:y_start + y_size:y_step] - (0 if pre_sub else dark)
+		local_rows = slice(before, before + y_size, y_step)
+		expected[local_rows, 1, :] = (source.array()[local_rows, 1, :] - dark) / gain
 
 		weighted_normalize(output, flats, source, window, projection=1, pre_sub=pre_sub)
 
 		np.testing.assert_allclose(output.array(), expected)
 		assert [view.name for view in views] == [output.name, source.name]
-		assert len(calls) == 1
-		assert calls[0].pos == SinoOrder(Y=1, Theta=1, X=0)
-		assert calls[0].shape == SinoOrder(Y=2, Theta=1, X=4)
+		assert calls == [(1, 3)]
 	finally:
 		for view in views:
 			view.shutdown()

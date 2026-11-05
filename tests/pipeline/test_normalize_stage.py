@@ -121,26 +121,32 @@ def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window(monkeypa
 		dataset=dataset, source_window=window,
 	)
 	projections = []
+	iterated = []
 	kernel = flat._weighted_normalize_projection
+	int_iter = TomoWindow.int_iter
 
-	def record(target, source, fields, projection, acquisition_shape, pre_sub):
-		assert acquisition_shape is dataset.physical_shape
+	def record_iter(ref, axis=None):
+		iterated.append((ref, axis))
+		return int_iter(ref, axis)
+
+	def record(target, source, fields, projection, projection_count, pre_sub):
+		assert projection_count == dataset.physical_shape.Theta
 		assert target is source
 		assert np.shares_memory(fields, flats)
 		projections.append((projection, target))
-		return kernel(target, source, fields, projection, acquisition_shape, pre_sub)
+		return kernel(target, source, fields, projection, projection_count, pre_sub)
 
+	monkeypatch.setattr(TomoWindow, "int_iter", record_iter)
 	monkeypatch.setattr(flat, "_weighted_normalize_projection", record)
 	result = WeightedNormalizeStage().run(state)
 
 	assert result.working_array.dtype == np.float32
 	np.testing.assert_array_equal(working, 10)
-	assert [projection.pos.Theta for projection, _ in projections] == [1, 4, 7]
+	assert iterated == [(window, "Theta")]
+	assert [projection for projection, _ in projections] == [1, 4, 7]
 	for index, (projection, target) in enumerate(projections):
-		assert projection.shape.Theta == 1
-		assert projection.shape.Y == 5 and projection.pos.Y == 2
 		assert np.shares_memory(target, result.working_array)
-		expected_gain = 20 + 10 * np.arange(2, 7)[:, None] + 2 * projection.pos.Theta
+		expected_gain = 20 + 10 * np.arange(2, 7)[:, None] + 2 * projection
 		expected = np.broadcast_to(10 / expected_gain, (5, 2))
 		np.testing.assert_allclose(result.working_array[layout.point_index(Theta=index)], expected)
 	assert result.artifacts["flat_fields"].shape == (4, 5, 2)

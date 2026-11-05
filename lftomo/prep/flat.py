@@ -6,7 +6,7 @@ import numpy as np
 import tifffile as tf
 
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import DataRange, DataShape, ImgSlice, Theta
+from lftomo.util.shapes import DataRange, ImgSlice, SinoOrder
 from lftomo.util.window import DataRef, TomoWindow
 from lftomo.util.log import log
 
@@ -41,10 +41,10 @@ class FLAT(Enum):
 
 
 def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats: np.ndarray,
-									projection: DataRef, acquisition_shape: DataShape,
+									projection: int, projection_count: int,
 									pre_sub: bool = False) -> None:
-	"""Normalize a projection view using its canonical acquisition coordinates."""
-	weights = [acquisition_shape.Theta - projection.pos.Theta, projection.pos.Theta]
+	"""Normalize a projection view using the supplied weighting position and count."""
+	weights = [projection_count - projection, projection]
 	dark_map = np.average(
 		flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1], axis=0, weights=weights
 	)
@@ -73,22 +73,19 @@ def weighted_normalize(sino_mem: SharedNPArray, flats_mem: SharedNPArray, sino_r
 		:param sino_mem: Shared memory metadata for sinogram.
 		:param flats_mem: Shared memory metadata for flats (gains, darks).
 		:param sino_read: Shared memory metadata for input data.
-		:param window: Sinogram Data Window.
-		:param projection: Projection # to normalize.
+		:param window: Detector window in either ProjOrder or SinoOrder; buffers remain Y-first.
+		:param projection: Local projection # to normalize.
 		:param pre_sub: Whether darks have already been subtracted from flats.
 	"""
 
-	internal = window.internal
-	projection_ref = internal.rescope(
-		pos=internal.pos.merge(Theta(projection), retain=False), shape=Theta(1),
-	)
-	with sino_mem[projection_ref.index] as sino, sino_read[projection_ref.index] as sino_sm, flats_mem as flats:
+	index = SinoOrder.point_index(Y=window.internal.axis_slice("Y"), Theta=projection)
+	with sino_mem[index] as sino, sino_read[index] as sino_sm, flats_mem as flats:
 		_weighted_normalize_projection(
-			np.squeeze(sino, axis=projection_ref.shape.axis_of("Theta")),
-			np.squeeze(sino_sm, axis=projection_ref.shape.axis_of("Theta")),
+			sino,
+			sino_sm,
 			flats[:, window.axis_slice("Y"), :],
-			projection_ref,
-			window.shape,
+			projection,
+			window.shape.Theta,
 			pre_sub,
 		)
 
