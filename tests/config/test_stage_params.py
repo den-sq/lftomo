@@ -21,15 +21,24 @@ pipeline:
 """)
 
 
-def test_runtime_params_are_canonical_and_aliases_do_not_rewrite_serialized_config():
-	config = StageConfig(kind="stripe", algorithm="fw", params={"wavelet": "db2"})
-	stage = create_stage(config)
-	assert stage.params.wname == "db2"
-	assert config.params == {"wavelet": "db2"}
-	assert not hasattr(stage, "wname")
-	assert not hasattr(stage.params, "wavelet")
+@pytest.mark.parametrize("kind,algorithm,parameters,alias,field,expected", [
+	("stripe", "fw", {"wavelet": "db2"}, "wavelet", "wname", "db2"),
+	("normalize", "weighted", {"pre_subtracted": True, "timing_source": "acquisition"},
+		"pre_subtracted", "pre_sub", True),
+])
+def test_runtime_params_are_canonical_and_aliases_do_not_rewrite_serialized_config(
+	kind, algorithm, parameters, alias, field, expected,
+):
+	config = StageConfig(kind=kind, algorithm=algorithm, params=parameters)
+	restored = StageConfig.model_validate_json(config.model_dump_json())
+	assert restored.model_dump() == config.model_dump()
+	stage = create_stage(restored)
+	assert getattr(stage.params, field) == expected
+	assert restored.params == parameters
+	assert not hasattr(stage, field)
+	assert not hasattr(stage.params, alias)
 	with pytest.raises(ValidationError, match="frozen"):
-		stage.params.wname = "db3"
+		setattr(stage.params, field, expected)
 
 
 def test_registered_parameter_schemas_expose_fields_and_forbid_unknown_keys():

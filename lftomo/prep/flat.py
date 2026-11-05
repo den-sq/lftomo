@@ -6,13 +6,12 @@ import numpy as np
 import tifffile as tf
 
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import ImgSlice
-from lftomo.util.window import TomoWindow
+from lftomo.util.shapes import DataRange, DataShape, ImgSlice, Theta
+from lftomo.util.window import DataRef, TomoWindow
 from lftomo.util.log import log
 
 
 FlatPair = namedtuple("FlatPair", ['Index', 'Offset'])
-Distance = namedtuple("Distance", ['Y', 'X'])
 
 
 class FLAT(Enum):
@@ -41,17 +40,11 @@ class FLAT(Enum):
 		return self._value_.Offset
 
 
-def _axis_slice(window: TomoWindow, axis: str) -> slice:
-	"""Return the current-API index for one named window axis."""
-	return window.axis_slice(axis)
-
-
 def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats: np.ndarray,
-									projection: int, projection_count: int, pre_sub: bool = False,
-									projection_index: int | None = None) -> None:
-	"""Normalize one projection in array views shared by the function and Stage APIs."""
-	global_projection = projection if projection_index is None else projection_index
-	weights = [projection_count - global_projection, global_projection]
+									projection: DataRef, acquisition_shape: DataShape,
+									pre_sub: bool = False) -> None:
+	"""Normalize a projection view using its canonical acquisition coordinates."""
+	weights = [acquisition_shape.Theta - projection.pos.Theta, projection.pos.Theta]
 	dark_map = np.average(
 		flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1], axis=0, weights=weights
 	)
@@ -60,7 +53,7 @@ def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats
 	)
 	if not pre_sub:
 		gain_map = np.subtract(gain_map, dark_map)
-	temp = np.subtract(source[:, projection, :].astype(target.dtype), dark_map)
+	temp = np.subtract(source.astype(target.dtype), dark_map)
 
 	gain_zero = gain_map == 0
 	if gain_zero.any():
@@ -69,7 +62,7 @@ def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats
 			raise ValueError("weighted normalization gain map contains only zeros")
 		gain_map[gain_zero] = np.min(nonzero)
 
-	target[:, projection, :] = np.divide(temp, gain_map)
+	target[...] = np.divide(temp, gain_map)
 
 
 # Normalziation cacluation using weighted pre/post.
@@ -85,15 +78,17 @@ def weighted_normalize(sino_mem: SharedNPArray, flats_mem: SharedNPArray, sino_r
 		:param pre_sub: Whether darks have already been subtracted from flats.
 	"""
 
-	internal_y = _axis_slice(window.internal, "Y")
-	window_y = _axis_slice(window, "Y")
-	with sino_mem[internal_y] as sino, sino_read[internal_y] as sino_sm, flats_mem as flats:
+	internal = window.internal
+	projection_ref = internal.rescope(
+		pos=internal.pos.merge(Theta(projection), retain=False), shape=Theta(1),
+	)
+	with sino_mem[projection_ref.index] as sino, sino_read[projection_ref.index] as sino_sm, flats_mem as flats:
 		_weighted_normalize_projection(
-			sino,
-			sino_sm,
-			flats[:, window_y, :],
-			projection,
-			window.shape.Theta,
+			np.squeeze(sino, axis=projection_ref.shape.axis_of("Theta")),
+			np.squeeze(sino_sm, axis=projection_ref.shape.axis_of("Theta")),
+			flats[:, window.axis_slice("Y"), :],
+			projection_ref,
+			window.shape,
 			pre_sub,
 		)
 
@@ -118,58 +113,60 @@ def calculate_shift(flats: np.ndarray, scope: ImgSlice = ImgSlice(Y=20, X=20),
 	# generate division
 	flats[FLAT.PREGAIN.index][flats[FLAT.PREGAIN.index] == 0] = 0.000000001
 	flats_map = np.divide(flats[FLAT.POSTGAIN.index], flats[FLAT.PREGAIN.index])
-	flats_scope = np.s_[scope.Y: -scope.Y: interval, scope.X: -scope.X]
+	interior = DataRef(
+		ImgSlice(*flats_map.shape), ImgSlice(0, 0), ImgSlice(0, 0),
+		ImgSlice(Y=interval, X=1), flats_map.dtype,
+	).rescope(pad=scope)
 
 	log.write("Flat Shift", "Map and Scope Created.")
 
-	# Array for map ranges.
-	pos_range = [Distance(Y=y, X=x) for y in range(-scope.Y, scope.Y)
-									for x in range(-scope.X, scope.X)]
+	# Candidate beam displacements in detector coordinates.
+	positions = DataRange(-interior.pad_before, interior.pad_after, ImgSlice(1, 1))
 
 	# Completely blown out areas - No change at all
 	defect_mask = flats_map != 1.0
 
 	# Results (Average and Standard Deviation) arrays.
-	dist_avg = np.empty((scope.Y * 2, scope.X * 2))
-	dist_stddev = np.empty((scope.Y * 2, scope.X * 2))
+	dist_avg = np.empty(positions.length.as_tuple())
+	dist_stddev = np.empty(positions.length.as_tuple())
 
-	log.write("Flat Shift", f"Map and Scope Created {flats_map[flats_scope].shape}"
-							f"{defect_mask[flats_scope].shape}, {np.count_nonzero(defect_mask)}")
+	log.write("Flat Shift", f"Map and Scope Created {flats_map[interior.index].shape}"
+							f"{defect_mask[interior.index].shape}, {np.count_nonzero(defect_mask)}")
 
 	# Mask Test
-	test_scope = np.s_[0: flats_map.shape[0] - 2 * scope.Y: interval, 0: flats_map.shape[1] - 2 * scope.X]
-	test = np.logical_and(defect_mask[flats_scope], defect_mask[test_scope])
+	test_scope = interior.rescope(pos=ImgSlice(0, 0))
+	test = np.logical_and(defect_mask[interior.index], defect_mask[test_scope.index])
 	log.write("Flat Shift", f"{np.count_nonzero(test)}")
 
 	out_base = Path("..", "data", "output", "flat_gen")
 	out_base.mkdir(parents=True, exist_ok=True)
 
-	def calc_linemap(pos: Distance):
+	def calc_linemap(pos: ImgSlice):
 		""" Calculates accuracy of inverted linemaps """
-		pos_scope = np.s_[pos.Y + scope.Y, pos.X + scope.X]
-		local_scope = np.s_[pos.Y + scope.Y: flats_map.shape[0] + pos.Y - scope.Y:interval,
-								pos.X + scope.X: flats_map.shape[1] + pos.X - scope.X]
-		local_mask = np.logical_and(defect_mask[local_scope], defect_mask[pos_scope])
+		pos_scope = (pos - positions.start).as_tuple()
+		local_scope = interior.rescope(pos=interior.pos + pos)
+		local_mask = np.logical_and(defect_mask[local_scope.index], defect_mask[pos_scope])
 
-		temp = np.add(flats_map[flats_scope][local_mask], flats_map[local_scope][local_mask])
+		temp = np.add(flats_map[interior.index][local_mask], flats_map[local_scope.index][local_mask])
 		tf.imwrite(out_base.joinpath(f"sum_{pos.Y}_{pos.X}.tif"),
-					np.add(flats_map[flats_scope], flats_map[local_scope]))
+					np.add(flats_map[interior.index], flats_map[local_scope.index]))
 
 		dist_avg[pos_scope] = np.average(temp)
 		dist_stddev[pos_scope] = np.std(temp)
 
-	list(map(calc_linemap, pos_range))
+	for position in positions:
+		calc_linemap(position)
 
 	log.write("Flat Shift", "Linemap Calculated")
 
-	results = np.argsort(dist_stddev, axis=None).reshape(scope.Y * 2, scope.X * 2)
+	results = np.argsort(dist_stddev, axis=None).reshape(positions.length.as_tuple())
 
 	log.write("Flat Finding", f"{results.shape}")
 
 	with open("test_other.txt", "w") as change_data:
-		for y in range(0, scope.Y * 2):
-			for x in range(0, scope.X * 2):
-				change_data.write(f"{y - scope.Y}:{x - scope.X}:{dist_stddev[y,x]}:{results[y,x]}\n")
+		for position in positions:
+			index = (position - positions.start).as_tuple()
+			change_data.write(f"{position.Y}:{position.X}:{dist_stddev[index]}:{results[index]}\n")
 
 
 def shifting_flat(data_mem, flat_mem):

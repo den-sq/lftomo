@@ -1,6 +1,7 @@
 from uuid import uuid4
 
 import numpy as np
+import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
@@ -13,6 +14,7 @@ from lftomo.pipeline import (
 	StageContract,
 )
 from lftomo.pipeline.stages.normalize import TaperBlendedNormalizeStage, WeightedNormalizeStage
+from lftomo.prep import flat
 from lftomo.prep.flat import weighted_normalize
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
@@ -30,14 +32,14 @@ class PassThroughStage(Stage):
 		return state
 
 
-def _scan(flat_fields, *, rows=2, columns=2):
+def _scan(flat_fields, *, rows=2, columns=2, projections=3):
 	return Scan(
 		energy_keV=20,
 		pixel_size_um=1.0,
-		n_projections=3,
+		n_projections=projections,
 		degrees_per_fov=180,
 		detector=Detector(pixel_size_um=1.0, rows=rows, columns=columns),
-		acquisition=Acquisition(n_projections=3, rotation_end_deg=180),
+		acquisition=Acquisition(n_projections=projections, rotation_end_deg=180),
 		projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		metadata={"flat_fields": flat_fields},
 	)
@@ -97,52 +99,52 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 	np.testing.assert_allclose(result.working_array, expected, rtol=1e-6)
 
 
-def test_weighted_normalize_promotes_integer_projections_to_float32():
-	working = np.full((2, 3, 2), 10, dtype=np.uint16)
-	flats = np.stack([
-		np.full((2, 2), 20), np.full((2, 2), 20),
-		np.zeros((2, 2)), np.zeros((2, 2)),
-	]).astype(np.float32)
-	state = attach_source_geometry(PipelineState(
-		working_array=working,
-		scan=_scan(flats),
-		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
-		buffer_spec=BufferSpec(SinoOrder(*working.shape), working.dtype),
-	))
+@pytest.mark.parametrize("layout,flat_origin", [(ProjOrder, "selected"), (SinoOrder, "physical")])
+def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window(monkeypatch, layout, flat_origin):
+	physical = ProjOrder(Theta=8, Y=8, X=2)
+	detector_rows = np.arange(physical.Y, dtype=np.float32)
+	if flat_origin == "selected":
+		detector_rows = detector_rows[1:7]
+	gain = np.broadcast_to(20 + 10 * detector_rows[:, None], (len(detector_rows), 2))
+	flats = np.stack([gain, gain + 16, np.zeros_like(gain), np.zeros_like(gain)])
+	dataset = TomoDataSet.from_range(
+		CTFov(8, 180, 1), physical, Y.drange(1, 7, 2), dtype=np.uint16,
+		angles=np.linspace(0, np.pi, 8, endpoint=False),
+	)
+	window = TomoWindow.from_bounds(
+		physical, y=(3, 5), theta=(1, 8, 3), halo=(Y(1), Y(2)), dtype=np.uint16,
+	)
+	working = np.full(layout(Y=5, Theta=3, X=2).as_tuple(), 10, dtype=np.uint16)
+	state = PipelineState(
+		working, _scan(flats, rows=8, projections=8), Recon(pipeline=[StageConfig(kind="normalize")]),
+		buffer_spec=BufferSpec(layout(*working.shape), working.dtype),
+		dataset=dataset, source_window=window,
+	)
+	projections = []
+	kernel = flat._weighted_normalize_projection
 
+	def record(target, source, fields, projection, acquisition_shape, pre_sub):
+		assert acquisition_shape is dataset.physical_shape
+		assert target is source
+		assert np.shares_memory(fields, flats)
+		projections.append((projection, target))
+		return kernel(target, source, fields, projection, acquisition_shape, pre_sub)
+
+	monkeypatch.setattr(flat, "_weighted_normalize_projection", record)
 	result = WeightedNormalizeStage().run(state)
 
 	assert result.working_array.dtype == np.float32
-	np.testing.assert_allclose(result.working_array, 0.5)
-
-
-def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window():
-	physical = ProjOrder(Theta=3, Y=6, X=2)
-	flats = np.stack([
-		np.repeat(np.array([[20], [40], [80], [160]], np.float32), 2, axis=1),
-		np.repeat(np.array([[20], [40], [80], [160]], np.float32), 2, axis=1),
-		np.zeros((4, 2), np.float32), np.zeros((4, 2), np.float32),
-	])
-	dataset = TomoDataSet.from_range(
-		CTFov(3, 180, 1), physical, Y.drange(1, 5, 2), dtype=np.uint16,
-		angles=np.linspace(0, np.pi, 3, endpoint=False), pad=Y(1),
-	)
-	window = TomoWindow.from_bounds(
-		physical, y=(1, 3), halo=(Y(0), Y(1)), dtype=np.uint16,
-	)
-	working = np.full((3, 3, 2), 10, dtype=np.uint16)
-	state = PipelineState(
-		working, _scan(flats, rows=6),
-		Recon(pipeline=[StageConfig(kind="normalize")]),
-		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
-		dataset=dataset, source_window=window,
-	)
-
-	result = WeightedNormalizeStage().run(state)
-
-	np.testing.assert_allclose(result.working_array[:, :, 0], [[0.5, 0.25, 0.125]] * 3)
-	assert result.artifacts["flat_fields"].shape == (4, 3, 2)
-	assert state.scan.metadata["flat_fields"].shape == (4, 4, 2)
+	np.testing.assert_array_equal(working, 10)
+	assert [projection.pos.Theta for projection, _ in projections] == [1, 4, 7]
+	for index, (projection, target) in enumerate(projections):
+		assert projection.shape.Theta == 1
+		assert projection.shape.Y == 5 and projection.pos.Y == 2
+		assert np.shares_memory(target, result.working_array)
+		expected_gain = 20 + 10 * np.arange(2, 7)[:, None] + 2 * projection.pos.Theta
+		expected = np.broadcast_to(10 / expected_gain, (5, 2))
+		np.testing.assert_allclose(result.working_array[layout.point_index(Theta=index)], expected)
+	assert result.artifacts["flat_fields"].shape == (4, 5, 2)
+	assert state.scan.metadata["flat_fields"].shape == (4, len(detector_rows), 2)
 
 
 def test_float32_normalization_replaces_raw_handle_after_successful_handoff():

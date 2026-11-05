@@ -31,7 +31,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import buffer_view
-from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Theta
 
 
 def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
@@ -160,19 +160,19 @@ class WeightedNormalizeStage(Stage):
 		sinogram_view = working if layout is SinoOrder else np.transpose(working, (1, 0, 2))
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
-		projection_count = state.dataset.physical_shape.Theta
-		for projection in range(state.buffer_spec.shape.Theta):
+		source_window = state.source_window.with_pad(["Y"])
+		for local_index, global_index in enumerate(source_window.int_iter("Theta")):
+			projection = source_window.rescope(
+				pos=source_window.pos.merge(Theta(global_index), retain=False), shape=Theta(1),
+			)
+			image = sinogram_view[SinoOrder.point_index(Theta=local_index)]
 			_weighted_normalize_projection(
-				sinogram_view,
-				sinogram_view,
+				image,
+				image,
 				flats,
 				projection,
-				projection_count,
+				state.dataset.physical_shape,
 				self.params.pre_sub,
-				projection_index=(
-					state.source_window.pos.Theta
-					+ projection * state.source_window.step.Theta
-				),
 			)
 		return _finish_normalization(state, output)
 
