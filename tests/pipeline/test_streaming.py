@@ -29,7 +29,7 @@ from lftomo.pipeline.stages import (
 	PaganinStage,
 	create_stage,
 )
-from lftomo.prep.phase import _phase_pad
+from lftomo.prep.phase import _phase_pad, _wavelength
 from lftomo.runner import run_reconstruction
 from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import ProjOrder, Y
@@ -111,6 +111,26 @@ def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent(caplog):
 	assert dataset.pad_after.Y == _phase_pad(8, 1e-4, 10, 20)
 	assert "phase.paganin_filter" in caplog.text
 	assert "whole-volume equivalence" in caplog.text
+
+
+@pytest.mark.parametrize("rows", [154, 155, 256, 471, 472, 2160])
+def test_phase_pad_covers_the_fresnel_width_for_every_window_height(rows):
+	pixel_um, ssd_cm, energy = 0.637, 8.1795, 20
+	scan = Scan(
+		energy_keV=energy, pixel_size_um=pixel_um, ssd_cm=ssd_cm,
+		n_projections=4, degrees_per_fov=180,
+		detector=Detector(pixel_size_um=pixel_um, rows=2160, columns=8),
+		acquisition=Acquisition(n_projections=4, rotation_end_deg=180),
+		projections=TIFFStackProjections(format="tiff_stack", path="projections"),
+	)
+	fresnel = np.ceil(np.pi * _wavelength(energy) * ssd_cm / (pixel_um * 1e-4) ** 2)
+
+	dataset = resolve_streaming_plan(
+		[PaganinFilterStage(), NegativeLogStage()], scan, WindowConfig(rows=rows),
+	)
+
+	assert dataset.pad_before.Y >= fresnel // 2
+	assert dataset.pad_after.Y == dataset.pad_before.Y
 
 
 @pytest.mark.parametrize("stage", [
