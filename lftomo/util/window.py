@@ -179,26 +179,6 @@ class DataRef(object):
 	def slice_iter(self) -> Iterator:
 		return self.frange.get_iter(conv=partial(SliceIter, shape=self.shape))
 
-	def units(self, axis: str) -> Iterator[tuple[Self, tuple[slice, ...]]]:
-		"""Yield globally positioned units with their source-buffer-local slices."""
-
-		axis_index = self.shape.axis_of(axis)
-		position = self.pos.as_dict()
-		step = self.step.as_dict().get(axis, 1)
-		start = position.get(axis, 0)
-		for memory_position in range(getattr(self.shape, axis)):
-			unit_position = replace(
-				self.shape.make_with(0),
-				**{**position, axis: start + memory_position * step},
-			)
-			unit = self.rescope(
-				pos=unit_position,
-				shape=replace(self.shape, **{axis: 1}),
-			)
-			index = [slice(None)] * len(self.shape.names)
-			index[axis_index] = slice(memory_position, memory_position + 1)
-			yield unit, tuple(index)
-
 
 @dataclass(frozen=True, eq=False)
 class TomoWindow(DataRef):
@@ -281,6 +261,19 @@ class TomoWindow(DataRef):
 	@property
 	def internal(self):
 		return self.rescope(pos=self.pad_before.extract(self.pos), dtype=self.work_dtype)
+
+	def source_index(self, axis: str, buffer_index: int, *, include_padding: bool = True) -> int:
+		"""Map a packed buffer ordinal to its source coordinate on ``axis``.
+
+		The buffer includes the realized halo by default. ``internal`` retains
+		source-coordinate stride; its positions are not packed buffer ordinals.
+		"""
+
+		self.shape.axis_of(axis)
+		start = int(getattr(self.pos, axis, 0))
+		if include_padding:
+			start -= int(getattr(self.pad_before, axis, 0))
+		return start + int(buffer_index) * int(getattr(self.step, axis, 1))
 
 	def recon_shape(self) -> ReconOrder:
 		"""Return the square physical reconstruction shape for the core window.

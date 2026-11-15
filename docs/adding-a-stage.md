@@ -54,8 +54,10 @@ class SinogramScaleStage(SinogramStage):
 
 `SinogramStage.run` delegates to the public `run_sinogram_stage` adapter, which
 calls the kernel once per detector row with a `(Theta, X)` NumPy view and a
-row-scoped state. Its `BufferSpec` and `source_window` come from
-the canonical unit iterator; use them for geometry and source coordinates.
+a state retaining the full working buffer and held `source_window`.
+`state.work_range` assigns packed-buffer ordinals; `state.work_indices("Y")`
+iterates them and `state.source_window.source_index("Y", index)` derives their
+source positions, including source stride and realized padding.
 The view may be strided. Mutate it and return `None`, or return a replacement
 array which the helper copies into that row. The helper returns the original
 parent state and creates no executor. `Pipeline` invokes the same kernel for
@@ -72,8 +74,9 @@ dispatch; optional canvases retain their per-unit numerical fallback instead.
 Express numerical
 padding through `TomoWindow` before deriving the allocation shape. The generic
 executor allocates once for the segment through the run's `StorageBackend`,
-passes only the current unit's reopenable handle to kernels, and retires it
-after all units complete, including on failure. Plain ndarray execution keeps
+passes full reopenable handles and assignments to workers, derives the current
+kernel's scratch views from its assignment, and retires the storage after all
+assignments complete, including on failure. Plain ndarray execution keeps
 the existing serial numerical fallback. Retired work can be reused by its named
 role on a later segment or window; requested initialization runs again on reuse.
 

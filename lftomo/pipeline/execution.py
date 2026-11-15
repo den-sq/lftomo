@@ -27,8 +27,8 @@ from lftomo.pipeline.core import (
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.storage import ManagedBuffer, buffer_view
 from lftomo.util.process import watch_parent_exit
-from lftomo.util.shapes import IntIter, ProjOrder, ReconOrder, SinoOrder, Theta
-from lftomo.util.window import DataRef, TomoWindow
+from lftomo.util.shapes import DataRange, IntIter, ProjOrder, ReconOrder, SinoOrder, Theta
+from lftomo.util.window import TomoWindow
 
 
 class WorkerTimeoutError(TimeoutError):
@@ -42,7 +42,7 @@ class _WorkerState:
 	artifacts: dict[str, Any]
 	backend: Any
 	dataset: Any
-	source_window: Any
+	source_window: TomoWindow | None
 	buffer_spec: BufferSpec
 	domain: Any
 
@@ -85,9 +85,8 @@ def _limit_worker_cpu_threads(stage: Stage) -> None:
 
 
 def _worker_state(
-	buffer: ManagedBuffer, payload: _WorkerState,
+	buffer: ManagedBuffer, payload: _WorkerState, work_range: DataRange,
 ) -> PipelineState:
-	buffer_spec = BufferSpec(payload.source_window.shape, payload.source_window.dtype)
 	return PipelineState(
 		working_array=buffer,
 		scan=payload.scan,
@@ -97,102 +96,60 @@ def _worker_state(
 		storage=None,
 		dataset=payload.dataset,
 		source_window=payload.source_window,
-		buffer_spec=buffer_spec,
+		buffer_spec=payload.buffer_spec,
 		domain=payload.domain,
+		work_range=work_range,
 	)
 
 
-def _buffer_ref(state: PipelineState, shape=None) -> DataRef:
-	"""Bind current buffer extents to the source window's global coordinates."""
+def _work_ranges(state: PipelineState, axis: str) -> Iterator[DataRange]:
+	"""Assign one packed-buffer sample per task without deriving geometry."""
 
-	shape = state.buffer_spec.shape if shape is None else shape
-	position = shape.make_with(0)
-	step = shape.make_with(1)
-	if state.source_window is not None:
-		source = (
-			state.source_window if state.layout is ReconOrder
-			else state.source_window.with_pad()
-		)
-		source_position = source.pos.as_dict()
-		source_step = state.source_window.step.as_dict()
-		position = type(shape)(**{
-			name: source_position.get(name, value)
-			for name, value in position.as_dict().items()
-		})
-		step = type(shape)(**{
-			name: source_step.get(name, value)
-			for name, value in step.as_dict().items()
-		})
-	if isinstance(state.source_window, TomoWindow):
-		return TomoWindow(
-			shape, shape.make_with(0), position, step, state.buffer_spec.dtype,
-			state.source_window.internal.dtype,
-		)
-	return DataRef(shape, shape.make_with(0), position, step, state.buffer_spec.dtype)
+	assigned = state.assigned_range(axis)
+	axis_type = type(assigned.step)
+	for index in assigned.get_iter(IntIter):
+		yield axis_type.drange(index, index + 1, 1)
 
 
-def _buffer_units(
-	state: PipelineState, axis: str, shape=None,
-) -> Iterator[tuple[DataRef, tuple[slice, ...]]]:
-	return _buffer_ref(state, shape).units(axis)
-
-
-def _unit_index(
-	unit: DataRef, local_index: tuple[slice, ...], shape,
-) -> tuple[slice, ...]:
-	by_name = dict(zip(unit.shape.names, local_index, strict=True))
-	return type(shape).point_index(**{
-		name: by_name[name] for name in shape.names if name in by_name
-	})
-
-
-def _unit_handle(
-	buffer: ManagedBuffer, unit: DataRef, local_index: tuple[slice, ...],
-) -> ManagedBuffer:
-	return buffer[_unit_index(unit, local_index, buffer.shape)]
-
-
-def _unit_states(
+def _work_states(
 	state: PipelineState, axis: str, *, work_keys: tuple[str, ...] = (),
 ) -> Iterator[tuple[np.ndarray, PipelineState]]:
-	"""Bind numerical views and states to the same canonical unit iterator."""
+	"""Derive numerical views while retaining the held window and full buffer."""
 
 	data = np.asarray(state.working_array)
-	for unit, local_index in _buffer_units(state, axis):
-		row_data = data[_unit_index(unit, local_index, state.buffer_spec.shape)]
-		row_state = state.with_array(
-			row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
-		)
+	for work_range in _work_ranges(state, axis):
+		row_state = copy(state)
+		row_state.work_range = work_range
 		scoped_envelope = axis == "Theta" and "phase_envelope" in state.artifacts
 		scoped_keys = (*work_keys, *(("phase_envelope",) if scoped_envelope else ()))
 		row_state.artifacts = dict(state.artifacts) if scoped_keys else state.artifacts
-		row_state.source_window = unit
-		_scope_bounded_work_to_unit(row_state, unit, local_index, work_keys)
+		_scope_bounded_work(row_state, work_keys)
 		if scoped_envelope:
-			_scope_phase_envelope(row_state, unit, local_index)
-		yield row_data[state.layout.point_index(**{axis: 0})], row_state
+			_scope_phase_envelope(row_state)
+		index = next(work_range.get_iter(IntIter))
+		yield data[state.layout.point_index(**{axis: index})], row_state
 		if scoped_keys:
 			state.artifacts.update({
 				key: value for key, value in row_state.artifacts.items() if key not in scoped_keys
 			})
 
 
-def _scope_phase_envelope(state: PipelineState, unit: DataRef, local_index: tuple[slice, ...]) -> None:
-	"""Give a projection only its view of the prepared canonical envelope."""
+def _scope_phase_envelope(state: PipelineState) -> None:
+	"""Derive the assigned projection's view of the prepared envelope."""
 
 	envelope = state.artifacts.get("phase_envelope")
 	if isinstance(envelope, ManagedBuffer):
-		state.artifacts["phase_envelope"] = _unit_handle(envelope, unit, local_index)
+		state.artifacts["phase_envelope"] = envelope[state.work_index(envelope.shape)]
 	elif isinstance(envelope, np.ndarray):
-		state.artifacts["phase_envelope"] = envelope[local_index]
+		state.artifacts["phase_envelope"] = envelope[state.work_index()]
 
 
 def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
 	"""Apply a Stage's ``run_sinogram`` kernel to each detector-row unit.
 
 	The kernel receives a writable, potentially strided ``(Theta, X)`` view
-	and a row-scoped state whose ``BufferSpec`` and ``source_window`` come
-	from the canonical unit iterator. It may mutate the view and return
+	and a state holding the full buffer, source window, and assigned row range.
+	It may mutate the view and return
 	``None``, or return replacement values to copy into that same view.
 	Artifacts remain shared with the input state. The original state object is
 	returned after its array has been updated.
@@ -206,7 +163,7 @@ def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
 		raise TypeError(f"{stage.name} currently requires the NumPy backend")
 	if np.asarray(state.working_array).ndim != 3:
 		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
-	for sinogram, row_state in _unit_states(state, "Y"):
+	for sinogram, row_state in _work_states(state, "Y"):
 		result = stage.run_sinogram(sinogram, row_state)
 		if result is not None and result is not sinogram:
 			sinogram[...] = result
@@ -214,47 +171,55 @@ def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
 
 
 def run_projection_stage(stage: Stage, state: PipelineState) -> PipelineState:
-	"""Run a projection kernel on shared views with canonical unit geometry."""
+	"""Run a projection kernel on views derived from the assigned range."""
 
 	if state.backend.name != "numpy":
 		raise TypeError(f"{stage.name} currently requires the NumPy backend")
 	if np.asarray(state.working_array).ndim != 3:
 		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
-	for image, projection_state in _unit_states(state, "Theta"):
+	for image, projection_state in _work_states(state, "Theta"):
 		result = stage.run_projection(image, projection_state)
 		if result is not None and result is not image:
 			image[...] = result
 	return state
 
 
-def run_material_retrieval_kernel(source, baseline, layout, stage, scan, denominator):
-	"""Retrieve one projection into a coordinator-owned baseline plane."""
-	index = layout.point_index(Theta=0)
-	stage.retrieve(buffer_view(source)[index], buffer_view(baseline)[index], scan, buffer_view(denominator))
+def run_material_retrieval_kernel(source, baseline, payload, stage, work_range, denominator):
+	"""Retrieve assigned projections into a coordinator-owned baseline plane."""
+	for projection in work_range.get_iter(IntIter):
+		index = payload.buffer_spec.layout.point_index(Theta=projection)
+		stage.retrieve(
+			buffer_view(source)[index], buffer_view(baseline)[index],
+			payload.scan, buffer_view(denominator),
+		)
 
 
-def run_material_classification_kernel(current, psi, synthesis, previous, layout,
-		stage, scan, angles_deg, iteration):
-	"""Classify one source row and synthesize its material line integrals."""
-	index = layout.point_index(Y=0)
-	return stage.classify_row(
-		buffer_view(current)[index], buffer_view(psi)[index], buffer_view(synthesis)[index],
-		None if previous is None else buffer_view(previous)[ReconOrder.point_index(Y=0)],
-		angles_deg, scan, iteration,
-	)
+def run_material_classification_kernel(current, psi, synthesis, previous, payload,
+		stage, work_range, angles_deg, iteration):
+	"""Classify assigned rows and synthesize their material line integrals."""
+	changes = 0
+	for row in work_range.get_iter(IntIter):
+		index = payload.buffer_spec.layout.point_index(Y=row)
+		changes += stage.classify_row(
+			buffer_view(current)[index], buffer_view(psi)[index], buffer_view(synthesis)[index],
+			None if previous is None else buffer_view(previous)[ReconOrder.point_index(Y=row)],
+			angles_deg, payload.scan, iteration,
+		)
+	return changes
 
 
-def run_material_correction_kernel(psi, synthesis, correction, layout, stage, scan, denominator):
-	"""Apply one transverse filter without creating a worker-owned executor."""
-	index = layout.point_index(Theta=0)
-	stage.correct(
-		buffer_view(psi)[index], buffer_view(synthesis)[index], buffer_view(correction)[index], scan,
-		buffer_view(denominator),
-	)
+def run_material_correction_kernel(psi, synthesis, correction, payload, stage, work_range, denominator):
+	"""Apply assigned transverse filters using the run-owned executor."""
+	for projection in work_range.get_iter(IntIter):
+		index = payload.buffer_spec.layout.point_index(Theta=projection)
+		stage.correct(
+			buffer_view(psi)[index], buffer_view(synthesis)[index], buffer_view(correction)[index],
+			payload.scan, buffer_view(denominator),
+		)
 
 
 def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState:
-	"""Coordinate the composite loop using canonical units and managed scratch.
+	"""Coordinate the composite loop using explicit ranges and managed scratch.
 
 	Read-only configuration, acquisition angles, and reopenable buffers cross IPC.
 	All reusable arrays belong to the run storage and are retired even if a
@@ -283,7 +248,7 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 		executor is not None and state.storage is not None
 		and isinstance(state.working_array, ManagedBuffer)
 	)
-	worker_scan = _payload(state, state.source_window).scan
+	payload = _payload(state)
 
 	def dispatch(kernel, arguments):
 		return executor.submit_all(kernel, arguments) if parallel else [kernel(*args) for args in arguments]
@@ -292,17 +257,12 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 	specs = {request.artifact_key: request.buffer_spec for request in requests}
 	work = state.artifacts
 
-	def scoped(key, unit, index):
-		key = f"_multimaterial_{key}"
-		return work[key][_unit_index(unit, index, specs[key].shape)]
-
 	try:
 		dispatch(run_material_retrieval_kernel, (
 			(
-				state.working_array[_unit_index(unit, index, state.buffer_spec.shape)],
-				scoped("baseline", unit, index), state.layout, stage, worker_scan, denominator,
+				state.working_array, work["_multimaterial_baseline"], payload, stage, work_range, denominator,
 			)
-			for unit, index in _buffer_units(state, "Theta")
+			for work_range in _work_ranges(state, "Theta")
 		))
 		norms, changes = [], []
 		for iteration in range(stage.params.n_iter + 1):
@@ -312,21 +272,20 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 			)
 			counts = dispatch(run_material_classification_kernel, (
 				(
-					scoped("current", unit, index), scoped("psi", unit, index),
-					scoped("synthesis", unit, index),
-					None if "_multimaterial_previous_labels" not in work else scoped("previous_labels", unit, index),
-					state.layout, stage, worker_scan, angles, iteration,
+					work["_multimaterial_current"], work["_multimaterial_psi"],
+					work["_multimaterial_synthesis"], work.get("_multimaterial_previous_labels"),
+					payload, stage, work_range, angles, iteration,
 				)
-				for unit, index in _buffer_units(state, "Y")
+				for work_range in _work_ranges(state, "Y")
 			))
 			if iteration == stage.params.n_iter:
 				break
 			dispatch(run_material_correction_kernel, (
 				(
-					scoped("psi", unit, index), scoped("synthesis", unit, index),
-					scoped("correction", unit, index), state.layout, stage, worker_scan, denominator,
+					work["_multimaterial_psi"], work["_multimaterial_synthesis"],
+					work["_multimaterial_correction"], payload, stage, work_range, denominator,
 				)
-				for unit, index in _buffer_units(state, "Theta")
+				for work_range in _work_ranges(state, "Theta")
 			))
 			# Reuse the synthesized-phase plane after its last consumer this pass.
 			np.square(buffer_view(work["_multimaterial_correction"]), out=buffer_view(work["_multimaterial_psi"]))
@@ -341,39 +300,23 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 		_release_bounded_work(state, requests)
 
 
-def _scope_bounded_work_to_unit(
-	state: PipelineState, unit: DataRef, local_index: tuple[slice, ...],
-	work_keys: tuple[str, ...],
-) -> None:
-	"""Bind requested scratch handles to one canonical iterator-produced unit."""
+def _scope_bounded_work(state: PipelineState, work_keys: tuple[str, ...]) -> None:
+	"""Derive scratch views from the invocation's assigned range."""
 
 	for key in work_keys:
-		state.artifacts[key] = _unit_handle(state.artifacts[key], unit, local_index)
+		handle = state.artifacts[key]
+		state.artifacts[key] = handle[state.work_index(handle.shape)]
 
 
 def run_projection_kernel(
 	handle: ManagedBuffer,
 	stage: Stage,
 	payload: _WorkerState,
-	local_index: tuple[slice, ...],
+	work_range: DataRange,
 ) -> dict[str, Any]:
-	"""Module-level adapter that mutates one shared projection view."""
+	"""Module-level adapter that mutates only the assigned shared projections."""
 
-	state = _worker_state(handle, payload)
-	unit = payload.source_window
-	_scope_phase_envelope(state, unit, local_index)
-	index = local_index[unit.shape.axis_of("Theta")].start
-	projection_times = state.artifacts.get("projection_times")
-	if isinstance(projection_times, ManagedBuffer):
-		projection_times = projection_times.array()
-	if projection_times is not None and len(projection_times) == payload.buffer_spec.shape.Theta:
-		state.artifacts["projection_times"] = np.asarray(
-			projection_times[index:index + 1],
-		)
-	air_mask_key = getattr(stage.params, "air_mask_artifact", "air_mask")
-	air_mask = state.artifacts.get(air_mask_key)
-	if isinstance(air_mask, ManagedBuffer) and air_mask.array().ndim == 3:
-		state.artifacts[air_mask_key] = _unit_handle(air_mask, unit, local_index)
+	state = _worker_state(handle, payload, work_range)
 	before = set(state.artifacts)
 	_limit_worker_cpu_threads(stage)
 	result = stage.run(state)
@@ -387,26 +330,23 @@ def run_sinogram_chain_kernel(
 	handle: ManagedBuffer,
 	stages: tuple[Stage, ...],
 	payload: _WorkerState,
-	local_index: tuple[slice, ...],
+	work_range: DataRange,
 	collect_timings: bool = False,
 	work_keys: tuple[str, ...] = (),
 ) -> tuple[float, ...]:
-	"""Process one unit-shaped row through a complete bounded Stage chain."""
+	"""Process assigned rows through a complete bounded Stage chain."""
 
-	state = _worker_state(handle, payload)
-	_scope_bounded_work_to_unit(state, payload.source_window, local_index, work_keys)
-	data = np.asarray(state.working_array)
-	layout = state.layout
-	working = data[layout.point_index(Y=0)]
-	timings = []
-	for stage in stages:
-		_limit_worker_cpu_threads(stage)
-		started = time.perf_counter() if collect_timings else None
-		result = stage.run_sinogram(working, state)
-		if started is not None:
-			timings.append(time.perf_counter() - started)
-		if result is not None and result is not working:
-			working[...] = result
+	state = _worker_state(handle, payload, work_range)
+	timings = [0.0] * len(stages) if collect_timings else []
+	for working, row_state in _work_states(state, "Y", work_keys=work_keys):
+		for index, stage in enumerate(stages):
+			_limit_worker_cpu_threads(stage)
+			started = time.perf_counter() if collect_timings else None
+			result = stage.run_sinogram(working, row_state)
+			if started is not None:
+				timings[index] += time.perf_counter() - started
+			if result is not None and result is not working:
+				working[...] = result
 	return tuple(timings)
 
 
@@ -472,14 +412,14 @@ def _bounded_work_report(
 			for request in requests
 		),
 		"allocation_count": len(requests),
-		"indexing": "units_local_index",
+		"indexing": "buffer_sample_ordinals",
 	}
 
 
 def _release_bounded_work(
 	state: PipelineState, requests: tuple[BoundedWorkRequest, ...],
 ) -> None:
-	"""Remove and retire segment work only after all unit consumers complete."""
+	"""Remove and retire segment work only after all assigned work completes."""
 
 	for request in requests:
 		buffer = state.artifacts.pop(request.artifact_key)
@@ -514,6 +454,7 @@ def run_affine_fill_kernel(
 	target: ManagedBuffer,
 	stage: Stage,
 	payload: _WorkerState,
+	work_range: DataRange,
 ) -> None:
 	"""Transform one projection into a manager-owned fused output."""
 
@@ -523,11 +464,12 @@ def run_affine_fill_kernel(
 	source_values = source.array()
 	target_values = target.array()
 	row_count = payload.buffer_spec.shape.Y
-	image = source_values[type(source.shape).point_index(Theta=0)]
-	transform_affine_projection(
-		stage, image, payload.source_window, 0, payload.dataset.physical_shape, row_count,
-		target=target_values[type(target.shape).point_index(Theta=0)],
-	)
+	for projection in work_range.get_iter(IntIter):
+		image = source_values[type(source.shape).point_index(Theta=projection)]
+		transform_affine_projection(
+			stage, image, payload.source_window, projection, payload.dataset.physical_shape, row_count,
+			target=target_values[type(target.shape).point_index(Theta=projection)],
+		)
 
 
 def run_helical_fill_kernel(
@@ -551,7 +493,7 @@ def run_helical_fill_kernel(
 	target_image[valid] = source_image[source_rows[valid]]
 
 
-def _payload(state: PipelineState, source_window: DataRef) -> _WorkerState:
+def _payload(state: PipelineState) -> _WorkerState:
 	scan = state.scan
 	recon = state.recon
 	if isinstance(state.artifacts.get("flat_fields"), ManagedBuffer):
@@ -571,7 +513,7 @@ def _payload(state: PipelineState, source_window: DataRef) -> _WorkerState:
 		artifacts=dict(state.artifacts),
 		backend=state.backend,
 		dataset=state.dataset,
-		source_window=source_window,
+		source_window=state.source_window,
 		buffer_spec=state.buffer_spec,
 		domain=state.domain,
 	)
@@ -721,10 +663,9 @@ class PipelineExecutor:
 			worker_stage.params = stage.params.model_copy(update={"envelope_m": None})
 		results = self.submit_all(run_projection_kernel, (
 			(
-				_unit_handle(working_state.working_array, unit, local_index), worker_stage,
-				_payload(working_state, unit), local_index,
+				working_state.working_array, worker_stage, _payload(working_state), work_range,
 			)
-			for unit, local_index in _buffer_units(working_state, "Theta")
+			for work_range in _work_ranges(working_state, "Theta")
 		))
 		if stage.name.startswith("normalize."):
 			from lftomo.pipeline.stages.normalize import merge_normalization_dispatch
@@ -776,10 +717,9 @@ class PipelineExecutor:
 					return stage.run(state)
 				self.submit_all(run_projection_kernel, (
 					(
-						_unit_handle(state.working_array, unit, local_index), stage,
-						_payload(state, unit), local_index,
+						state.working_array, stage, _payload(state), work_range,
 					)
-					for unit, local_index in _buffer_units(state, "Theta")
+					for work_range in _work_ranges(state, "Theta")
 				))
 				return state
 			input_layout = state.layout
@@ -793,10 +733,9 @@ class PipelineExecutor:
 			)
 			self.submit_all(run_affine_fill_kernel, (
 				(
-					_unit_handle(state.working_array, unit, local_index),
-					_unit_handle(output, unit, local_index), stage, _payload(state, unit),
+					state.working_array, output, stage, _payload(state), work_range,
 				)
-				for unit, local_index in _buffer_units(state, "Theta")
+				for work_range in _work_ranges(state, "Theta")
 			))
 			result = commit_output(
 				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
@@ -905,10 +844,10 @@ def run_bounded_sinogram_segment(
 			try:
 				rows = executor.submit_all(run_sinogram_chain_kernel, (
 					(
-						_unit_handle(state.working_array, unit, local_index), tuple(stages),
-						_payload(state, unit), local_index, timing_observer is not None, work_keys,
+						state.working_array, tuple(stages), _payload(state), work_range,
+						timing_observer is not None, work_keys,
 					)
-					for unit, local_index in _buffer_units(state, "Y")
+					for work_range in _work_ranges(state, "Y")
 				))
 			except BaseException as error:
 				if failure_observer is not None:
@@ -922,7 +861,7 @@ def run_bounded_sinogram_segment(
 						member_samples[member_index].append(elapsed)
 		else:
 			# ndarray-only hermetic execution is deliberately serial.
-			for working, row_state in _unit_states(state, "Y", work_keys=work_keys):
+			for working, row_state in _work_states(state, "Y", work_keys=work_keys):
 				for member_index, stage in enumerate(stages):
 					if checkpoint is not None:
 						checkpoint()

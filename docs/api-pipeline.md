@@ -41,14 +41,32 @@ returns it; parameter-dependent implementations return
 class-level `runtime_requirements`; planning and execution read the resolved
 instance contract. Parameters are not mirrored as individual Stage attributes.
 
-`SinogramStage` supplies the Y-unit loop for `run_sinogram(sinogram, state)`;
-`ProjectionStage` supplies the Theta-unit loop for
-`run_projection(image, state)`. Both adapters derive unit geometry from the
-canonical window model and accept in-place mutation or returned replacement
-values. Plain `Stage` remains available for orchestration, managed output
+`SinogramStage` supplies the assigned Y loop for `run_sinogram(sinogram, state)`;
+`ProjectionStage` supplies the assigned Theta loop for
+`run_projection(image, state)`. Both adapters pass a numerical row or image view
+and accept in-place mutation or returned replacement values. The accompanying
+state retains the full working buffer and held source window; its `work_range`
+identifies the current invocation's assigned sample. Plain `Stage` remains
+available for orchestration, managed output
 handoffs, and external engines. There is no separate locality enum: bounded
 planning uses the row-kernel capability and contract, while `STAGE_DISPATCH`
 selects the executor.
+
+`PipelineState.work_range` is a `DataRange` in packed buffer sample ordinals,
+independent of source coordinates and storage layout. `None` assigns the full
+buffer. Use `state.work_indices("Theta")` or `state.work_indices("Y")` for work
+loops, and `state.work_index()` for vectorized operations over the assignment.
+`state.work_index(other_shape)` expresses the same assignment in another
+semantic layout. The full array's shape describes storage, not the work extent
+of a dispatched invocation.
+
+For source coordinates, map each assigned ordinal through
+`state.source_window.source_index(axis, index)`. This accounts for the held
+window's source start, realized halo, and sampling stride. Source Theta
+positions `[2, 5, 8]`, for example, occupy packed buffer ordinals `[0, 1, 2]`.
+`TomoWindow.internal` retains source stride and must not be used as a packed
+buffer index. Row/image views at numerical boundaries do not create child
+windows or change the held window's identity.
 
 ## Calibrated Paganin material lines
 
@@ -73,8 +91,8 @@ total spatial thickness in metres, supplied as a scalar, detector Y/X array,
 or Theta/Y/X array broadcastable over the full source. The canonical source
 window selects its rows and projection indices, including strided selections.
 Array envelopes are normalized once into a manager-owned window buffer before
-dispatch. Workers receive only unit views of that buffer; the serialized
-envelope is removed from worker configuration carriers. Original configuration
+dispatch. Numerical kernels receive views selected by their assignment; the
+serialized envelope is removed from worker configuration carriers. Original configuration
 remains unchanged for replay.
 The affine operation performs one approximate defect-correction step; it does
 not make the affine inversion exact. These plain values can be copied from the
@@ -163,9 +181,10 @@ Bounded segment and composite scratch is declared by `Stage.bounded_work_request
 resolved by `collect_bounded_work` before allocation. `BufferSpec` owns each
 request's shape and dtype; same-key requests share one compatible allocation
 for the complete segment. Generic execution owns allocation, initialization,
-canonical unit scoping and retirement through the existing storage backend.
+assignment-based views and retirement through the existing storage backend.
 The `bounded_work_allocations` artifact records each resolved role, shape,
-dtype and byte count. Vo's former `vo_scratch_allocations` report is replaced
+dtype and byte count, with `indexing="buffer_sample_ordinals"`. Vo's former
+`vo_scratch_allocations` report is replaced
 by this algorithm-independent report; benchmark result fields keep their
 existing meaning. Multimaterial planes, including the reconstruction-layout
 previous-label buffer, use this same hook and lifecycle; their initialization
@@ -192,9 +211,11 @@ without Linux's `/dev/shm` convention keep their existing allocation behavior.
 `PipelineRunContext` owns one persistent process pool as well as the storage
 manager. `STAGE_DISPATCH` classifies every `STAGE_REGISTRY` entry, and the
 registry-completeness test makes a new Stage fail until it is assigned process,
-thread, serial, or engine dispatch (or a documented exemption). Module-level
-worker kernels receive reopenable `ManagedBuffer` handles rather than volume or
-slice arrays. Projection kernels mutate disjoint views; bounded sinogram chains
+thread, serial, or engine dispatch (or a documented exemption). Projection,
+bounded-sinogram, affine-fill, and multimaterial workers receive full reopenable
+`ManagedBuffer` handles, the held source window, and an assigned `DataRange`.
+Projection kernels mutate only their
+assigned views; bounded sinogram chains
 gather projection-order row scratch inside the worker and scatter once; and
 layout, fused-affine, helical, and super-resolution fills write manager-owned
 prospective outputs before the parent commits the handoff.
@@ -232,7 +253,7 @@ The prefix cache's immutable path uses a separate `FileBackedNPArray`, which is
 a first-class read-only `ManagedBuffer`. Workers reopen its `.npy` mapping by
 path; mutating suffixes continue to receive an independent writable copy.
 
-Read Stages also establish three distinct coordinate records on `PipelineState`:
+Read Stages also establish distinct geometry records on `PipelineState`:
 
 - `dataset`: the full source `TomoDataSet`, including the complete angle vector;
 - `source_window`: the immutable global source selection, position, stride, and
@@ -241,7 +262,8 @@ Read Stages also establish three distinct coordinate records on `PipelineState`:
 
 Layout conversion and reconstruction update `buffer_spec`; they do not rewrite
 source coordinates. Output slice numbering therefore uses the source window's
-global Y position plus the buffer-local row.
+global Y position plus the buffer-local row. The invocation's `work_range`
+records scheduling only and does not duplicate these geometry records.
 
 Runner-level streaming is specified in [windowed-streaming.md](windowed-streaming.md).
 It resolves Stage pad contracts before allocation, rejects unsatisfied full-axis

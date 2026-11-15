@@ -106,7 +106,7 @@ def _build_stage_dispatch() -> dict[str, DispatchSpec]:
 		result[key] = _dispatch(
 			DispatchKind.PROCESS,
 			"manager_owned_parallel_fill",
-			reason="parent allocates output; unit windows own worker fill geometry",
+			reason="parent allocates output; workers fill assigned ranges of the held window",
 		)
 	for key in _PROCESS_WRITERS:
 		result[key] = _dispatch(DispatchKind.PROCESS, "write_tiff_slice_kernel")

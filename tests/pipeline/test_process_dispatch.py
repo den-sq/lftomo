@@ -1,7 +1,7 @@
 import os
-import pickle
 import sys
 import time
+from contextlib import nullcontext
 
 import numpy as np
 import pytest
@@ -16,6 +16,7 @@ from lftomo.pipeline.execution import (
 from lftomo.pipeline.stages import (
 	AffineSkewMovementStage,
 	BeamTrackingNormalizeStage,
+	BetaScaleStage,
 	BronnikovAidedCorrectionFilterStage,
 	BronnikovAidedCorrectionStage,
 	HelicalIndexRemapStage,
@@ -31,7 +32,7 @@ from lftomo.pipeline.stages import (
 	_build_stage_dispatch,
 )
 from lftomo.storage import ManagedBuffer
-from lftomo.util.shapes import Proj, ProjOrder, ReconOrder, X
+from lftomo.util.shapes import Proj, ProjOrder, ReconOrder, SinoOrder, Theta, X, Y
 from tests.sample_data import attach_source_geometry
 
 
@@ -90,7 +91,8 @@ class _ObservedBACStage(BronnikovAidedCorrectionStage):
 	def run_projection(self, image, state):
 		import torch
 
-		state.artifacts[f"bac_worker_{state.source_window.pos.Theta}"] = (
+		index = state.source_window.source_index("Theta", next(state.work_indices("Theta")))
+		state.artifacts[f"bac_worker_{index}"] = (
 			os.getpid(), torch.get_num_threads(),
 		)
 		return super().run_projection(image, state)
@@ -181,7 +183,8 @@ def test_engine_internal_core_budget_is_scoped_to_the_call(monkeypatch):
 	assert stage.params.ncore == 7
 
 
-def test_process_normalization_receives_only_handles_and_matches_serial(monkeypatch):
+@pytest.mark.parametrize("assignment", [None, Theta.drange(1, 5, 2)])
+def test_process_normalization_receives_only_handles_and_matches_serial(monkeypatch, assignment):
 	scan = _scan()
 	shape = ProjOrder(Theta=6, Y=2, X=8)
 	with PipelineRunContext(max_workers=2) as context:
@@ -189,7 +192,7 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 		raw.array()[...] = 10
 		state = attach_source_geometry(PipelineState(
 			raw, scan, _recon(), storage=context.storage, executor=context.executor,
-			domain=DataDomain.RAW,
+			domain=DataDomain.RAW, work_range=assignment,
 		), theta_start=1, theta_stride=2, physical_theta=12)
 		captured = []
 		original = context.executor.submit_all
@@ -207,25 +210,51 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 		assert all(isinstance(task[0], ManagedBuffer) for task in captured)
 		assert all(isinstance(task[2].artifacts["flat_fields"], ManagedBuffer) for task in captured)
 		assert all("flat_fields" not in task[2].scan.metadata for task in captured)
-		assert [task[2].source_window.pos.Theta for task in captured] == [1, 3, 5, 7, 9, 11]
-		assert [task[3][0].start for task in captured] == list(range(6))
-		assert all(task[0].shape == task[2].source_window.shape == ProjOrder(1, 2, 8)
-				for task in captured)
-		for task in captured:
-			handle, unit, local_index = pickle.loads(pickle.dumps(
-				(task[0], task[2].source_window, task[3]),
-			))
-			assert handle.shape == unit.shape
-			assert local_index == task[3]
 		assert "projection_start" not in result.artifacts
 		assert "projection_count" not in result.artifacts
-		expected = np.empty((6, 2, 8), dtype=np.float32)
-		for index in range(6):
+		expected = np.full((6, 2, 8), 10, dtype=np.float32)
+		for index in range(6) if assignment is None else (1, 3):
 			global_index = 1 + 2 * index
 			expected[index] = 10 / (
 				20 * (1 - global_index / 12) + 40 * (global_index / 12)
 			)
 		np.testing.assert_allclose(np.asarray(result.working_array), expected)
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+@pytest.mark.parametrize("managed", [False, True])
+def test_beta_scale_processes_only_assigned_projections_once(layout, managed):
+	shape = ProjOrder(4, 3, 5).to(layout)
+	values = np.arange(1, 61, dtype=np.float32).reshape(4, 3, 5)
+	if layout is SinoOrder:
+		values = values.transpose(1, 0, 2).copy()
+	scan = _scan(theta=4, rows=3, columns=5)
+	scaled = values.copy()
+	BetaScaleStage().run(PipelineState(
+		scaled, scan, _recon(), buffer_spec=BufferSpec(shape, values.dtype),
+		domain=DataDomain.ATTENUATION,
+	))
+	expected = values.copy()
+	index = layout.point_index(Theta=slice(1, 4, 2))
+	expected[index] = scaled[index]
+	with PipelineRunContext(max_workers=2) if managed else nullcontext() as context:
+		working = (
+			context.storage.allocate(shape, values.dtype, role="normalized")
+			if managed else values.copy()
+		)
+		if managed:
+			working.array()[...] = values
+		state = PipelineState(
+			working, scan, _recon(), buffer_spec=BufferSpec(shape, values.dtype),
+			storage=context.storage if managed else None,
+			executor=context.executor if managed else None,
+			domain=DataDomain.ATTENUATION, work_range=Theta.drange(1, 4, 2),
+		)
+		result = (
+			context.executor.run_stage(state, BetaScaleStage())
+			if managed else BetaScaleStage().run(state)
+		)
+		np.testing.assert_array_equal(np.asarray(result.working_array), expected)
 
 
 def test_process_phase_chain_matches_intentionally_coupled_stage():
@@ -430,19 +459,22 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		assert result.source_window.shape == expected.source_window.shape
 
 
-def test_bounded_process_child_mutation_is_visible_in_parent():
+@pytest.mark.parametrize("assignment", [None, Y.drange(1, 3, 2)])
+def test_bounded_process_child_mutation_is_visible_in_parent(assignment):
 	with PipelineRunContext(max_workers=2) as context:
 		working = context.storage.allocate(ProjOrder(4, 3, 5), np.float32, role="normalized")
 		working.array().fill(2)
 		state = PipelineState(
 			working, _scan(theta=4, rows=3, columns=5), _recon(),
 			storage=context.storage, executor=context.executor,
-			domain=DataDomain.TRANSMISSION,
+			domain=DataDomain.TRANSMISSION, work_range=assignment,
 		)
 		run_bounded_sinogram_segment(
 			state, [_AddSinogramStage()], executor=context.executor,
 		)
-		np.testing.assert_array_equal(working.array(), 5)
+		expected = np.full((4, 3, 5), 2, dtype=np.float32)
+		expected[:, slice(None) if assignment is None else slice(1, 3, 2), :] += 3
+		np.testing.assert_array_equal(working.array(), expected)
 
 
 def test_tiff_process_dispatch_passes_handles_not_slices(tmp_path, monkeypatch):

@@ -12,6 +12,10 @@ from lftomo.util.shapes import Y
 _ROOT = Path(__file__).resolve().parents[2]
 _SOURCE = _ROOT / "lftomo"
 _REMOVED_TYPES = {"AxisPad", "WindowRegion"}
+_REMOVED_UNIT_HELPERS = {
+	"_buffer_units", "_buffer_ref", "_unit_states", "_unit_index", "_unit_handle",
+	"_scope_bounded_work_to_unit",
+}
 
 
 def _production_trees():
@@ -23,6 +27,14 @@ def test_removed_padding_and_window_types_are_not_reintroduced():
 	found = []
 	for path, tree in _production_trees():
 		for node in ast.walk(tree):
+			name = getattr(node, "id", getattr(node, "attr", getattr(node, "name", None)))
+			if name in _REMOVED_UNIT_HELPERS or (
+				isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "units"
+			) or (
+				isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+				and node.func.attr == "units"
+			):
+				found.append(f"{path.relative_to(_ROOT)}:{node.lineno} retired unit geometry")
 			if isinstance(node, ast.ClassDef) and node.name in _REMOVED_TYPES:
 				found.append(f"{path.relative_to(_ROOT)}:{node.lineno} class {node.name}")
 			if isinstance(node, ast.ImportFrom):

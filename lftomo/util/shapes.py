@@ -407,6 +407,15 @@ class DataRange(object):
 	def get_iter(self, conv: 'TFIter' = None):
 		return _DataRangeIter(self.start, self.stop, self.step, conv)
 
+	def slice_index(self, shape: type[DataShape] | DataShape) -> tuple[slice, ...]:
+		"""Translate the stepped semantic axes into an array-layout boundary."""
+
+		layout = DataShape._shape_type(shape)
+		return layout.point_index(**{
+			name: slice(getattr(self.start, name), getattr(self.stop, name), getattr(self.step, name))
+			for name in self.step.names
+		})
+
 	@cached_property
 	def shape(self) -> DataShape:
 		""" Shape of the area iterated over. """

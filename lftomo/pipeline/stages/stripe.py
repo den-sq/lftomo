@@ -69,7 +69,7 @@ def _vo_work_planes(
 		return None, None, None
 	if float_buffer is None or index_buffer is None:
 		raise ValueError("Vo reusable work requires both floating-point and index planes")
-	if state.source_window is None or state.source_window.shape.Y != 1:
+	if state.assigned_range("Y").length.Y != 1:
 		raise ValueError("Vo reusable work requires a dispatched Y unit")
 	if float_buffer.shape.Y != 1 or index_buffer.shape.Y != 1:
 		raise ValueError("Vo reusable work must be scoped to its dispatched Y unit")

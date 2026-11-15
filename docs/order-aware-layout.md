@@ -286,6 +286,14 @@ scratch → run the whole sinogram-local **segment**
 per Stage) → scatter back. Rows are independent → bounded-concurrency
 parallelism. TomoPy's `remove_all_stripe` works this way internally.
 
+Each invocation retains the full working-buffer handle and held source window.
+Its `PipelineState.work_range` assigns packed buffer ordinals on the fan-out
+axis. Numerical views and matching scratch planes derive from that assignment;
+source positions derive through `TomoWindow.source_index`, including source
+offsets, sampling stride, and halo. The row view passed to `run_sinogram` is a
+numerical boundary, not a separate source window. This contract also applies
+to serial execution and projection-local kernels.
+
 `SinogramStage` supplies the row kernel adapter; `StageContract` declares
 bounded-view capability. `PipelinePlan`
 groups adjacent compatible Stages into execution segments and selects bounded
@@ -443,7 +451,8 @@ injection and prove ordinary YAML execution selects the same layout.
 
 ## 9. Resolved design decisions
 
-1. `SinogramStage` and `ProjectionStage` own unit iteration; contracts declare
+1. `SinogramStage` and `ProjectionStage` iterate assigned buffer samples;
+   contracts declare
    `bounded_views_from`. The planner chooses and the segment executor implements
    gather/scatter. Scratch strategy is not a
    per-Stage mutable mapping.

@@ -46,7 +46,10 @@ regression tests rather than in a second specification here.
 - Route owned or reusable work planes and material scratch through that seam.
   Bounded Stage work is declared through `Stage.bounded_work_requests` using
   `BufferSpec`; the generic execution lifecycle shares requests across the
-  segment, allocates them, scopes canonical unit views and retires them. Keep
+  segment, allocates them, derives views from assigned buffer ranges and
+  retires them. Workers retain the held window and full buffer; their assigned
+  `DataRange` owns only scheduling, and `TomoWindow` translates sample ordinals
+  to source coordinates. Keep
   algorithm-specific dtype, capacity, padding and initialization policy in the
   requesting Stage, not the executor. Temporary work is separate from published
   `managed_artifacts` and prefix-cache state.
