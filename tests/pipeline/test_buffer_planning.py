@@ -17,9 +17,12 @@ from lftomo.pipeline.stages import (
 	GridrecStage,
 	HelicalIndexRemapStage,
 	LayoutConvertStage,
+	ManualCenterStage,
 	NegativeLogStage,
 	PaganinFilterStage,
 	TIFFStackReadStage,
+	VoLargeStripeStage,
+	VoSortStripeStage,
 	WeightedNormalizeStage,
 )
 from lftomo.pipeline.planning import _read_spec
@@ -222,6 +225,49 @@ def test_planner_emits_liveness_alias_and_managed_artifact_allocations():
 		event for event in fully_pinned.allocation_schedule if event.role == "reconstruction"
 	)
 	assert fully_pinned_recon.action is BufferAction.ALLOCATE
+
+
+@pytest.mark.parametrize("sizes", [(3, 7), (7, 3)])
+def test_bounded_chain_reserves_shared_work_at_maximum_member_capacity(sizes):
+	scan = _scan(projections=12, rows=2, columns=16)
+	prefix = [
+		TIFFStackReadStage(order="projection"), WeightedNormalizeStage(), NegativeLogStage(),
+	]
+	baseline = validate_pipeline(prefix, scan, enable_aliasing=False)
+	plan = validate_pipeline(prefix + [
+		VoSortStripeStage(size=sizes[0]), VoLargeStripeStage(size=sizes[1]),
+	], scan, enable_aliasing=False)
+
+	work_bytes = {
+		"vo_float_work": 2 * 12 * 16 * 4,
+		"vo_index_work": 2 * 12 * 16 * 4,
+		"vo_median_pad_work": 2 * 12 * (16 + 6) * 4,
+	}
+	allocations = [
+		event for event in plan.allocation_schedule
+		if event.action is BufferAction.ALLOCATE and event.role in work_bytes
+	]
+	assert len(allocations) == 3
+	assert {event.role: event.bytes for event in allocations} == work_bytes
+	assert plan.shared_memory_peak_bytes - baseline.shared_memory_peak_bytes == sum(work_bytes.values())
+
+
+@pytest.mark.parametrize("order", ["projection", "sinogram"])
+@pytest.mark.parametrize("aliasing", [False, True])
+def test_separate_vo_dispatches_account_only_managed_work(order, aliasing):
+	scan = _scan(projections=12, rows=2, columns=16)
+	prefix = [TIFFStackReadStage(order=order), WeightedNormalizeStage(), NegativeLogStage()]
+	baseline = validate_pipeline(prefix, scan, enable_aliasing=aliasing)
+	plan = validate_pipeline(prefix + [
+		VoSortStripeStage(size=7), ManualCenterStage(value_px=8), VoLargeStripeStage(size=3),
+	], scan, enable_aliasing=aliasing)
+
+	larger_work = 2 * 12 * (16 + 16 + 22) * 4
+	smaller_work = 2 * 12 * (16 + 16 + 18) * 4
+	expected = larger_work if aliasing else larger_work + smaller_work
+	if order == "sinogram":
+		expected = 0
+	assert plan.shared_memory_peak_bytes - baseline.shared_memory_peak_bytes == expected
 
 
 def test_read_planning_uses_canonical_strided_window_geometry():
