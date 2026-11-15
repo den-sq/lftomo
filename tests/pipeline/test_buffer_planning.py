@@ -254,7 +254,7 @@ def test_bounded_chain_reserves_shared_work_at_maximum_member_capacity(sizes):
 
 @pytest.mark.parametrize("order", ["projection", "sinogram"])
 @pytest.mark.parametrize("aliasing", [False, True])
-def test_separate_vo_dispatches_reuse_retired_work_capacity(order, aliasing):
+def test_separate_vo_dispatches_account_only_managed_work(order, aliasing):
 	scan = _scan(projections=12, rows=2, columns=16)
 	prefix = [TIFFStackReadStage(order=order), WeightedNormalizeStage(), NegativeLogStage()]
 	baseline = validate_pipeline(prefix, scan, enable_aliasing=aliasing)
@@ -265,6 +265,8 @@ def test_separate_vo_dispatches_reuse_retired_work_capacity(order, aliasing):
 	larger_work = 2 * 12 * (16 + 16 + 22) * 4
 	smaller_work = 2 * 12 * (16 + 16 + 18) * 4
 	expected = larger_work if aliasing else larger_work + smaller_work
+	if order == "sinogram":
+		expected = 0
 	assert plan.shared_memory_peak_bytes - baseline.shared_memory_peak_bytes == expected
 
 

@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 
 from lftomo.pipeline.core import BufferSpec, Stage, collect_bounded_work
+from lftomo.pipeline.dispatch import dispatch_for_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.shapes import ImgSlice, ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import TomoDataSet, TomoWindow
@@ -295,11 +296,16 @@ def build_allocation_schedule(
 			live[artifact_role] = physical_role
 			publish(step.index, BufferAction.ALLOCATE, artifact_role,
 				artifact_bytes, physical_role, "producer_contract")
-		# Fused members share the collector's maximum capacities. Other Stages,
-		# including standalone sinogram dispatch, own one Stage's work lifetime.
+		# Bounded members share the collector's maximum capacities. Sequential
+		# sinogram dispatch retains its numerical fallback without managed work.
 		if (
 			step.input_buffer is not None
-			and (step.index not in bounded_steps or step.index in bounded_segments)
+			and (
+				step.index in bounded_segments or (
+					step.index not in bounded_steps
+					and dispatch_for_stage(stage).kernel != "run_sinogram_chain_kernel"
+				)
+			)
 		):
 			segment = bounded_segments.get(step.index)
 			work_stop = segment.stop if segment is not None else step.index + 1
