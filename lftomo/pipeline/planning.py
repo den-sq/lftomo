@@ -8,7 +8,8 @@ from typing import Any
 
 import numpy as np
 
-from lftomo.pipeline.core import BufferSpec, Stage
+from lftomo.pipeline.core import BufferSpec, Stage, collect_bounded_work
+from lftomo.pipeline.dispatch import dispatch_for_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.shapes import ImgSlice, ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import TomoDataSet, TomoWindow
@@ -245,6 +246,7 @@ def build_allocation_schedule(
 	steps: tuple[PlanStep, ...], stages: tuple[Stage, ...] | list[Stage], scan: Any, *,
 	enable_aliasing: bool = True, enable_engine_aliasing: bool = True,
 	external_pins: tuple[str, ...] = (),
+	segments: tuple[PlanSegment, ...] = (),
 ) -> tuple[BufferScheduleEvent, ...]:
 	"""Build the named physical-buffer schedule required for execution."""
 
@@ -253,6 +255,10 @@ def build_allocation_schedule(
 	live: dict[str, str] = {}
 	retired: dict[str, list[str]] = {}
 	current_role: str | None = None
+	bounded_steps = {
+		index for segment in segments if segment.kind is ExecutionKind.BOUNDED_SINOGRAM
+		for index in range(segment.start, segment.stop)
+	}
 
 	def publish(index: int, action: BufferAction, role: str, size: int,
 			physical_role: str, proof: str | None = None):
@@ -284,10 +290,17 @@ def build_allocation_schedule(
 			live[artifact_role] = physical_role
 			publish(step.index, BufferAction.ALLOCATE, artifact_role,
 				artifact_bytes, physical_role, "producer_contract")
-		if stage.name == "phase.multimaterial" and step.input_buffer is not None:
-			for key, (shape, dtype) in stage.work_specs(step.input_buffer.shape).items():
-				role = f"multimaterial_{key}"
-				size = shape.nbytes(dtype)
+		# Bounded sinogram scratch accounting remains a separate preflight
+		# follow-up (#360). Reuse the execution plan for fused segments and the dispatch
+		# registry for standalone bounded kernels rather than classify Stages here.
+		if (
+			step.input_buffer is not None and step.index not in bounded_steps
+			and dispatch_for_stage(stage).kernel != "run_sinogram_chain_kernel"
+		):
+			requests = collect_bounded_work((stage,), step.input_buffer)
+			for request in requests:
+				role = request.role
+				size = _nbytes(request.buffer_spec)
 				selected = next((
 					candidate for candidate in retired.get(role, ())
 					if candidate not in external_pins and physical[candidate] >= size
@@ -303,10 +316,10 @@ def build_allocation_schedule(
 				else:
 					action = BufferAction.ALIAS
 				live[role] = selected
-				publish(step.index, action, role, size, selected, "stage_work_specs")
-			# Scratch is private to this composite stage and has no later consumers.
-			for key in stage.work_specs(step.input_buffer.shape):
-				role = f"multimaterial_{key}"
+				publish(step.index, action, role, size, selected, "bounded_work_requests")
+			# Scratch is private to this Stage and has no later consumers.
+			for request in requests:
+				role = request.role
 				selected = live.pop(role)
 				retired.setdefault(role, []).append(selected)
 				publish(step.index, BufferAction.RETIRE, role, physical[selected], selected)

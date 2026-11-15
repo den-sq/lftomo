@@ -8,7 +8,9 @@ import numpy as np
 from pydantic import Field, model_validator
 from scipy import ndimage
 
-from lftomo.pipeline.core import PadRequirement, PipelineState, Stage, StageContract, StageParams
+from lftomo.pipeline.core import (
+	BoundedWorkRequest, BufferSpec, PadRequirement, PipelineState, Stage, StageContract, StageParams,
+)
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages.phase import slope_filter_shape
 from lftomo.prep.materials import fbp, fit_material_line, forward_project, predict_filter_error, segment_materials
@@ -76,8 +78,9 @@ class MultimaterialStage(Stage):
 			phase_fft_y=True, phase_fft_passes=params.n_iter + 1,
 		))
 
-	def work_specs(self, shape):
-		"""One canonical description used by allocation and memory planning."""
+	def bounded_work_requests(self, input_spec):
+		"""Declare the composite's mixed-layout scratch through the Stage hook."""
+		shape = input_spec.shape
 		specs = {
 			"baseline": (shape, np.dtype(np.float32)),
 			"current": (shape, np.dtype(np.float32)),
@@ -87,7 +90,13 @@ class MultimaterialStage(Stage):
 		}
 		if self.params.n_iter > 1:
 			specs["previous_labels"] = (ReconOrder.of(shape), np.dtype(np.int32))
-		return specs
+		return tuple(
+			BoundedWorkRequest(
+				artifact_key=f"_multimaterial_{key}", buffer_spec=BufferSpec(work_shape, dtype),
+				role=f"multimaterial_{key}", fill_value=0 if key == "correction" else None,
+			)
+			for key, (work_shape, dtype) in specs.items()
+		)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		from lftomo.pipeline.execution import run_multimaterial_stage
