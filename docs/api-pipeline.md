@@ -159,6 +159,17 @@ temporaries.
 Flat/dark calibration arrays and detector-sized phase filters are also
 manager-issued artifacts declared by their producer contracts.
 
+Bounded segment scratch is declared by `Stage.bounded_work_requests` and
+resolved by `collect_bounded_work` before allocation. `BufferSpec` owns each
+request's shape and dtype; same-key requests share one compatible allocation
+for the complete segment. Generic execution owns allocation, initialization,
+canonical unit scoping and retirement through the existing storage backend.
+The `bounded_work_allocations` artifact records each resolved role, shape,
+dtype and byte count. Vo's former `vo_scratch_allocations` report is replaced
+by this algorithm-independent report; benchmark result fields keep their
+existing meaning. These requests are inspectable without execution but are
+not yet included in the predictive allocation schedule or shared-memory peak.
+
 Before starting a run's manager or reading projection pixels, the runner checks
 the largest padded window's planned shared-memory peak against available
 `/dev/shm` space on Linux. That same plan supplies the run's buffer reservations.

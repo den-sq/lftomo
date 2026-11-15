@@ -3,6 +3,8 @@
 from lftomo.pipeline.core import (
 	Backend,
 	BufferSpec,
+	BoundedWorkRequest,
+	collect_bounded_work,
 	DaskArrayStub,
 	DaskStubBackend,
 	NumpyBackend,
@@ -82,6 +84,8 @@ from lftomo.util.shapes import Y
 __all__ = [
 	"Backend",
 	"BufferSpec",
+	"BoundedWorkRequest",
+	"collect_bounded_work",
 	"DaskArrayStub",
 	"DaskStubBackend",
 	"DispatchKind",

@@ -9,6 +9,8 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from lftomo.pipeline.core import (
+	BoundedWorkRequest,
+	BufferSpec,
 	PipelineState,
 	RuntimeRequirement,
 	SinogramStage,
@@ -18,12 +20,41 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.runtime import tomopy_requirement
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, X
+from lftomo.util.window import TomoWindow
 
 
 VO_FLOAT_WORK_ARTIFACT = "_vo_float_work"
 VO_INDEX_WORK_ARTIFACT = "_vo_index_work"
 VO_MEDIAN_PAD_WORK_ARTIFACT = "_vo_median_pad_work"
+
+
+def _vo_work_requests(
+	input_spec: BufferSpec, median_half_width: int,
+) -> tuple[BoundedWorkRequest, ...]:
+	"""Own Vo dtypes, sorting capacity and optional zero-filled line padding."""
+
+	shape = input_spec.shape.to(SinoOrder)
+	dtype = input_spec.dtype
+	if max(shape.Theta, shape.X) > np.iinfo(np.uint32).max:
+		raise ValueError("Vo sorting indices exceed uint32 capacity")
+	if not np.issubdtype(dtype, np.floating):
+		raise TypeError("Vo reusable work requires floating-point pipeline data")
+	requests = [
+		BoundedWorkRequest(VO_FLOAT_WORK_ARTIFACT, BufferSpec(shape, dtype), "vo_float_work"),
+		BoundedWorkRequest(VO_INDEX_WORK_ARTIFACT, BufferSpec(shape, np.uint32), "vo_index_work"),
+	]
+	if median_half_width and dtype in (np.dtype(np.float32), np.dtype(np.float64)) and dtype.isnative:
+		zero = shape.make_with(0)
+		window = TomoWindow(
+			shape, zero + X(median_half_width), zero, shape.make_with(1), dtype,
+		)
+		requests.append(BoundedWorkRequest(
+			VO_MEDIAN_PAD_WORK_ARTIFACT,
+			BufferSpec(window.with_pad().shape, dtype), "vo_median_pad_work",
+			fill_value=0, grow_axes=("X",),
+		))
+	return tuple(requests)
 
 
 def _vo_work_planes(
@@ -72,7 +103,6 @@ def _contract(runtime_requirements: tuple[RuntimeRequirement, ...] = ()) -> Stag
 class VoSortStripeStage(SinogramStage):
 	name = "stripe.vo_sort"
 	contract = _contract()
-	uses_vo_work = True
 
 	class Params(StageParams):
 		size: int = 21
@@ -84,6 +114,9 @@ class VoSortStripeStage(SinogramStage):
 		from lftomo.prep.stripe import _bottleneck_line_half_width
 
 		return _bottleneck_line_half_width(self.params.size) if self.params.dim == 1 else 0
+
+	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+		return _vo_work_requests(input_spec, self.vo_line_median_half_width)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_sort_array
@@ -98,7 +131,6 @@ class VoSortStripeStage(SinogramStage):
 class VoDeadStripeStage(SinogramStage):
 	name = "stripe.vo_dead"
 	contract = _contract()
-	uses_vo_work = True
 
 	class Params(StageParams):
 		snr: float = 3
@@ -110,6 +142,9 @@ class VoDeadStripeStage(SinogramStage):
 		from lftomo.prep.stripe import _bottleneck_line_half_width
 
 		return _bottleneck_line_half_width(self.params.size) if self.params.norm else 0
+
+	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+		return _vo_work_requests(input_spec, self.vo_line_median_half_width)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_dead_array, _remove_large_array
@@ -126,7 +161,6 @@ class VoDeadStripeStage(SinogramStage):
 class VoLargeStripeStage(SinogramStage):
 	name = "stripe.vo_large"
 	contract = _contract()
-	uses_vo_work = True
 
 	class Params(StageParams):
 		snr: float = 3
@@ -139,6 +173,9 @@ class VoLargeStripeStage(SinogramStage):
 		from lftomo.prep.stripe import _bottleneck_line_half_width
 
 		return _bottleneck_line_half_width(self.params.size)
+
+	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+		return _vo_work_requests(input_spec, self.vo_line_median_half_width)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_large_array
@@ -156,7 +193,6 @@ class VoFamilyStripeStage(SinogramStage):
 
 	name = "stripe.vo_family"
 	contract = _contract()
-	uses_vo_work = True
 
 	class Params(StageParams):
 		order: tuple[Literal["remove_dead_vo", "remove_large_vo", "remove_sort_vo"], ...] = (
@@ -175,6 +211,9 @@ class VoFamilyStripeStage(SinogramStage):
 		uses_large = "remove_large_vo" in self.params.order
 		uses_sort = "remove_sort_vo" in self.params.order and self.params.dim == 1
 		return _bottleneck_line_half_width(self.params.size) if uses_large or uses_sort else 0
+
+	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+		return _vo_work_requests(input_spec, self.vo_line_median_half_width)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_dead_array, _remove_large_array, _remove_sort_array

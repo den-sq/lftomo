@@ -63,6 +63,27 @@ bounded chains through its existing run-scoped executor; ndarray tests run
 serially. `ProjectionStage` similarly delegates to `run_projection_stage` for
 Theta units. Each base supplies `run`; authors implement the numerical kernel.
 
+For reusable work in a bounded sinogram segment, override
+`Stage.bounded_work_requests(input_spec)` and return `BoundedWorkRequest`
+values. Each request names its temporary artifact key and allocation role,
+and owns a `BufferSpec` plus an optional scalar `fill_value`. Express numerical
+padding through `TomoWindow` before deriving the allocation shape. The generic
+executor allocates once for the segment through the run's `StorageBackend`,
+passes only the current unit's reopenable handle to kernels, and retires it
+after all units complete, including on failure. Plain ndarray execution keeps
+the existing serial numerical fallback.
+
+Stages sharing a key share one allocation: dtype, layout, initialization and
+non-growing extents must agree. A request can explicitly permit larger capacity
+along `grow_axes`; Vo median padding uses `("X",)` so a chain shares its largest
+requested line canvas. Kernels must accept that capacity. Work must preserve
+the dispatched unit-axis extent. The hook takes only the current window's
+`BufferSpec`, so `collect_bounded_work(stages, input_spec)` can inspect exact
+requirements before execution without reading pixels or allocating storage.
+This work is temporary segment scratch, not a `managed_artifacts` producer or
+prefix-cache output. Allocation reports are derived from the resolved requests
+in `state.artifacts["bounded_work_allocations"]`.
+
 Declare layouts and numerical domains separately: `ProjOrder` and `SinoOrder`
 describe memory axes; `RAW`, `TRANSMISSION`, `ATTENUATION`, and `RECON` describe
 the values. This example accepts attenuation and preserves both domain and

@@ -44,9 +44,12 @@ regression tests rather than in a second specification here.
   implemented for shared memory by `lftomo.util.mem.SharedNPArray` and
   `SharedNPManager`, own production storage and lifecycle.
 - Route owned or reusable work planes and material scratch through that seam.
-  The fused Vo path prepares its row-indexed work in
-  `lftomo.pipeline.execution._prepare_vo_work`; extend that ownership rather
-  than allocating a competing work plane or adding a wrapper layer.
+  Bounded Stage work is declared through `Stage.bounded_work_requests` using
+  `BufferSpec`; the generic execution lifecycle shares requests across the
+  segment, allocates them, scopes canonical unit views and retires them. Keep
+  algorithm-specific dtype, capacity, padding and initialization policy in the
+  requesting Stage, not the executor. Temporary work is separate from published
+  `managed_artifacts` and prefix-cache state.
 - Declare unavoidable output temporaries created by external numerical
   libraries. Do not promise zero allocation when the external API cannot
   provide it.
