@@ -110,9 +110,10 @@ def test_clip_defaults_are_resolved_once_by_the_parameter_model():
 
 class _ObservedAffineStage(PaganinStage):
 	def run_projection(self, image, state):
-		state.artifacts[f"affine_worker_{state.source_window.pos.Theta}"] = os.getpid()
+		index = state.source_window.source_index("Theta", next(state.work_indices("Theta")))
+		state.artifacts[f"affine_worker_{index}"] = os.getpid()
 		envelope = state.artifacts["phase_envelope"]
-		state.artifacts[f"affine_envelope_{state.source_window.pos.Theta}"] = (
+		state.artifacts[f"affine_envelope_{index}"] = (
 			envelope.name, envelope.shape.Theta, self.params.envelope_m,
 			any("envelope_m" in config.params for config in state.recon.pipeline),
 		)
