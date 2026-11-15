@@ -94,6 +94,7 @@ class MultimaterialStage(Stage):
 			BoundedWorkRequest(
 				artifact_key=f"_multimaterial_{key}", buffer_spec=BufferSpec(work_shape, dtype),
 				role=f"multimaterial_{key}", fill_value=0 if key == "correction" else None,
+				required_for_fallback=True,
 			)
 			for key, (work_shape, dtype) in specs.items()
 		)

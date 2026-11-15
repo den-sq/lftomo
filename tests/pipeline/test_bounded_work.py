@@ -145,11 +145,12 @@ def test_vo_request_owner_checks_dtype_capacity_and_median_fallback():
 		assert len(stage.bounded_work_requests(BufferSpec(ProjOrder(16, 3, 24), dtype))) == 2
 
 
-def test_shared_key_rejects_conflicting_initialization():
+@pytest.mark.parametrize("conflict", [{"fill_value": 0}, {"required_for_fallback": True}])
+def test_shared_key_rejects_conflicting_policy(conflict):
 	spec = BufferSpec(ProjOrder(4, 2, 6), np.float32)
 	first = _RequestedWorkStage()
 	second = _RequestedWorkStage()
 	request, = first.bounded_work_requests(spec)
-	second.bounded_work_requests = lambda _spec: (replace(request, fill_value=0),)
+	second.bounded_work_requests = lambda _spec: (replace(request, **conflict),)
 	with pytest.raises(ValueError, match="incompatible bounded work"):
 		collect_bounded_work([first, second], spec)
