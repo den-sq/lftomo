@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from lftomo.config import Acquisition, Detector, Recon, Scan, TIFFStackProjections
+from lftomo.config import Acquisition, ConeGeometry, Detector, Recon, Scan, TIFFStackProjections
 from lftomo.config.phase import multimaterial_config
 from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState, validate_pipeline
 from lftomo.pipeline.dispatch import DispatchKind, STAGE_DISPATCH
@@ -253,14 +253,31 @@ def _calibration(case, kind="parallel"):
 	}
 
 
+def _calibration_scan(case, kind):
+	scan = _state(case).scan
+	if kind == "cone":
+		scan = scan.model_copy(update={
+			"geometry": ConeGeometry(source_to_sample_m=0.2, sample_to_detector_m=0.2),
+			"detector": scan.detector.model_copy(update={"pixel_size_um": 2 * case["pixel_m"] * 1e6}),
+		})
+	return scan
+
+
 @pytest.mark.parametrize("kind", ["parallel", "cone"])
-def test_export_boundary_consumes_geometry_and_refits_with_original_weights(kind):
+def test_export_boundary_preserves_scan_and_refits_with_original_weights(kind):
 	case = compact_multimaterial_case(noncollinear=True)
-	state = _state(case)
+	source_scan = _calibration_scan(case, kind)
+	scan_before = source_scan.model_dump()
 	artifact = _calibration(case, kind)
+	# A transferred table targets this scan even when its source calibration
+	# was acquired at a different energy.
+	artifact["calibration"]["energy_kev"] = 0.8 * case["energy_kev"]
 	before = json.dumps(artifact, sort_keys=True)
-	scan, config = multimaterial_config(artifact, state.scan, n_iter=2)
+	scan, config = multimaterial_config(artifact, source_scan, n_iter=2)
 	stage = MultimaterialStage(**config.params)
+	assert scan is source_scan
+	assert scan.model_dump() == scan_before
+	assert stage.params.n_iter == 2
 	assert stage.params.weights == (1, 2)
 	assert stage.params.line_fit["alpha"] == 0
 	assert stage.params.line_fit is stage.params.line_fit
@@ -271,6 +288,69 @@ def test_export_boundary_consumes_geometry_and_refits_with_original_weights(kind
 	assert scan.pixel_size_um == case["pixel_m"] * 1e6
 	assert scan.magnification == (2 if kind == "cone" else 1)
 	assert json.dumps(artifact, sort_keys=True) == before
+
+
+@pytest.mark.parametrize("kind", ["parallel", "cone"])
+def test_export_boundary_accepts_unit_conversion_roundoff(kind):
+	case = compact_multimaterial_case()
+	scan = _calibration_scan(case, kind)
+	artifact = _calibration(case, kind)
+	artifact["effective_energy_kev"] = np.nextafter(artifact["effective_energy_kev"], np.inf)
+	for field, value in artifact["geometry"].items():
+		if field != "kind":
+			artifact["geometry"][field] = np.nextafter(value, np.inf)
+	resolved, _ = multimaterial_config(artifact, scan)
+	assert resolved is scan
+
+
+@pytest.mark.parametrize("kind,field", [
+	("parallel", "effective_energy_kev"), ("cone", "effective_energy_kev"),
+	("parallel", "pixel_m"), ("parallel", "distance_m"),
+	("cone", "source_to_sample_m"), ("cone", "sample_to_detector_m"), ("cone", "detector_pixel_m"),
+])
+def test_export_boundary_rejects_acquisition_mismatches_without_mutation(kind, field):
+	case = compact_multimaterial_case()
+	scan = _calibration_scan(case, kind)
+	scan_before = scan.model_dump()
+	artifact = _calibration(case, kind)
+	metadata = artifact if field == "effective_energy_kev" else artifact["geometry"]
+	metadata[field] *= 1 + 1e-8
+	before = json.dumps(artifact, sort_keys=True)
+	with pytest.raises(ValueError, match=field):
+		multimaterial_config(artifact, scan)
+	assert scan.model_dump() == scan_before
+	assert json.dumps(artifact, sort_keys=True) == before
+
+
+@pytest.mark.parametrize("kind", ["parallel", "cone"])
+def test_export_boundary_rejects_different_geometry_kind(kind):
+	case = compact_multimaterial_case()
+	scan = _calibration_scan(case, kind)
+	artifact = _calibration(case, "cone" if kind == "parallel" else "parallel")
+	with pytest.raises(ValueError, match="kind"):
+		multimaterial_config(artifact, scan)
+
+
+def test_export_boundary_requires_native_cone_match_even_when_effective_geometry_matches():
+	case = compact_multimaterial_case()
+	reference_scan = _calibration_scan(case, "cone")
+	scan = reference_scan.model_copy(update={
+		"geometry": ConeGeometry(source_to_sample_m=0.3, sample_to_detector_m=0.15),
+		"detector": reference_scan.detector.model_copy(update={"pixel_size_um": 1.5 * case["pixel_m"] * 1e6}),
+	})
+	assert scan.pixel_size_um == pytest.approx(reference_scan.pixel_size_um)
+	assert scan.ssd_cm == pytest.approx(reference_scan.ssd_cm)
+	assert scan.magnification != reference_scan.magnification
+	with pytest.raises(ValueError, match="source_to_sample_m"):
+		multimaterial_config(_calibration(case, "cone"), scan)
+
+
+def test_export_boundary_rejects_unknown_parallel_propagation_distance():
+	case = compact_multimaterial_case()
+	scan = _calibration_scan(case, "parallel")
+	scan = scan.model_copy(update={"geometry": scan.geometry.model_copy(update={"ssd_cm": None})})
+	with pytest.raises(ValueError, match="distance_m"):
+		multimaterial_config(_calibration(case), scan)
 
 
 def test_export_boundary_rejects_unknown_schema_and_extreme_transfer():

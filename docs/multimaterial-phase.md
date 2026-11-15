@@ -59,15 +59,25 @@ acquisition `Scan`:
 from lftomo.config.phase import multimaterial_config
 
 scan, stage_config = multimaterial_config(export_document, acquisition_scan)
+assert scan is acquisition_scan
 # Insert stage_config after normalization and before reconstruction.
 # scan.to_yaml() and stage_config.to_yaml() produce ordinary lftomo config.
 ```
 
-The adapter applies the export's energy and native geometry to the returned
-Scan and preserves the remaining acquisition metadata. Parallel inputs convert
-metres to the existing configuration units. Cone inputs go into Scan's native
-cone geometry and Detector's native pixel pitch; Scan alone derives effective
-parallel geometry. The adapter consumes ordered coefficients and
+The supplied Scan remains authoritative: the adapter returns the same object
+and checks that its energy matches the export's target `effective_energy_kev`.
+The source `calibration.energy_kev` may differ after an energy transfer.
+Geometry kinds must match. Parallel geometry checks effective pixel size and
+propagation distance; cone geometry checks both native distances and detector
+pixel pitch. Scan alone continues to derive the effective cone geometry.
+Comparisons convert scan lengths to the export's metres and allow a relative
+tolerance of `1e-12` with zero absolute tolerance for unit-conversion roundoff.
+Missing scan propagation distance or a mismatch raises a `ValueError` naming
+the field and both values. Update acquisition metadata or export a compatible
+table explicitly before retrying; the adapter never fills or replaces scan
+energy or geometry.
+
+The adapter consumes ordered coefficients and
 `calibration.parameters.weights` into the stage configuration. An affine fit
 in the export is intentionally replaced by the reference loop's through-origin
 fit. The export's spatial affine envelope is not a multimaterial-loop input.
