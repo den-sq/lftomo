@@ -1,0 +1,329 @@
+{
+  "source": "https://github.com/den-sq/mctutil/blob/fbe3251c70de45180462ad24e556b7e1a86483ce/mctutil/phase/phase_tomo.py",
+  "source_sha256": "09d4d14871bd349b2d1897f8b45ac0496dd59971d80bd5e4d55935958f1b0e1c",
+  "numpy": "2.5.1",
+  "scipy": "1.18.0",
+  "original_phantom_source": "https://github.com/den-sq/mctutil/blob/fbe3251c70de45180462ad24e556b7e1a86483ce/tests/phase/validate_multimat_single.py",
+  "compact_phantom_source": "https://github.com/den-sq/mctutil/blob/fbe3251c70de45180462ad24e556b7e1a86483ce/tests/phase/test_phase_tomo_unit.py",
+  "input_verification": "Original and compact collinear projections and degree angles were array-equal to execution of their unchanged reference fixture source.",
+  "variant_definitions": {
+    "noncollinear": "Compact delta[1] = 1.8e-7 instead of 2e-9*120; all other material coefficients and baseline geometry retained.",
+    "rows4": "Four transverse rows; inclusion X center offsets linspace(-2e-6,2e-6,4) before full two-dimensional Fresnel propagation."
+  },
+  "defaults": {
+    "pad": true,
+    "air_ratio": 0.05,
+    "label_smooth": 3,
+    "sino_sigma": 1.0,
+    "classify_sigma": 1.5,
+    "weights": null
+  },
+  "output_fields": [
+    "B",
+    "correction_norms",
+    "label_change"
+  ],
+  "angle_contract": "Source degree angles are retained without radians round trips. Consumers deriving degree angles from canonical radians must account for floating roundoff in parity checks.",
+  "runs": {
+    "original_n1": {
+      "n_iter": 1,
+      "omega": 0.7,
+      "rows": [
+        32
+      ],
+      "shape": [
+        181,
+        64,
+        512
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 8e-07,
+      "distance_m": 0.05,
+      "mu_table": [
+        60.8,
+        100.0,
+        140.0
+      ],
+      "delta_table": [
+        9.12e-08,
+        1.5e-07,
+        1.2e-07
+      ],
+      "projections_sha256": "926d4d93b82059379a70f191875a1040f6a9ec41e675abc4e9ed1585e5f53022"
+    },
+    "compact_collinear_n0": {
+      "n_iter": 0,
+      "omega": 0.7,
+      "rows": [
+        0
+      ],
+      "shape": [
+        24,
+        1,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        2.4000000000000003e-07
+      ],
+      "projections_sha256": "cb4a8af98ba3bb3a7ff56153c8a85756fb7cb9d3fde1b3d300e5131c550fa1d8"
+    },
+    "compact_collinear_n1": {
+      "n_iter": 1,
+      "omega": 0.7,
+      "rows": [
+        0
+      ],
+      "shape": [
+        24,
+        1,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        2.4000000000000003e-07
+      ],
+      "projections_sha256": "cb4a8af98ba3bb3a7ff56153c8a85756fb7cb9d3fde1b3d300e5131c550fa1d8"
+    },
+    "compact_collinear_n2": {
+      "n_iter": 2,
+      "omega": 0.7,
+      "rows": [
+        0
+      ],
+      "shape": [
+        24,
+        1,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        2.4000000000000003e-07
+      ],
+      "projections_sha256": "cb4a8af98ba3bb3a7ff56153c8a85756fb7cb9d3fde1b3d300e5131c550fa1d8"
+    },
+    "compact_noncollinear_n0": {
+      "n_iter": 0,
+      "omega": 0.7,
+      "rows": [
+        0
+      ],
+      "shape": [
+        24,
+        1,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        1.8e-07
+      ],
+      "projections_sha256": "ba9c06047232777d778f6b913e8d1d80bb13108e9457f00f9744fd30ba3b50ba"
+    },
+    "compact_noncollinear_n1": {
+      "n_iter": 1,
+      "omega": 0.7,
+      "rows": [
+        0
+      ],
+      "shape": [
+        24,
+        1,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        1.8e-07
+      ],
+      "projections_sha256": "ba9c06047232777d778f6b913e8d1d80bb13108e9457f00f9744fd30ba3b50ba"
+    },
+    "compact_noncollinear_n2": {
+      "n_iter": 2,
+      "omega": 0.7,
+      "rows": [
+        0
+      ],
+      "shape": [
+        24,
+        1,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        1.8e-07
+      ],
+      "projections_sha256": "ba9c06047232777d778f6b913e8d1d80bb13108e9457f00f9744fd30ba3b50ba"
+    },
+    "compact_rows4_noncollinear_n0": {
+      "n_iter": 0,
+      "omega": 0.7,
+      "rows": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "shape": [
+        24,
+        4,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        1.8e-07
+      ],
+      "projections_sha256": "4bcd237e6004d738cee268b7ea88d0f88e66cef80d5a36ad22f622fb169e3441"
+    },
+    "compact_rows4_noncollinear_n1": {
+      "n_iter": 1,
+      "omega": 0.7,
+      "rows": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "shape": [
+        24,
+        4,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        1.8e-07
+      ],
+      "projections_sha256": "4bcd237e6004d738cee268b7ea88d0f88e66cef80d5a36ad22f622fb169e3441"
+    },
+    "compact_rows4_noncollinear_n2": {
+      "n_iter": 2,
+      "omega": 0.7,
+      "rows": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "shape": [
+        24,
+        4,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        1.8e-07
+      ],
+      "projections_sha256": "4bcd237e6004d738cee268b7ea88d0f88e66cef80d5a36ad22f622fb169e3441"
+    },
+    "compact_noncollinear_n1_omega1": {
+      "n_iter": 1,
+      "omega": 1.0,
+      "rows": [
+        0
+      ],
+      "shape": [
+        24,
+        1,
+        96
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 1e-06,
+      "distance_m": 0.01,
+      "mu_table": [
+        50.0,
+        120.0
+      ],
+      "delta_table": [
+        1.0000000000000001e-07,
+        1.8e-07
+      ],
+      "projections_sha256": "ba9c06047232777d778f6b913e8d1d80bb13108e9457f00f9744fd30ba3b50ba"
+    },
+    "original_full_n1": {
+      "n_iter": 1,
+      "omega": 0.7,
+      "rows": null,
+      "shape": [
+        181,
+        64,
+        512
+      ],
+      "energy_kev": 20.0,
+      "pixel_m": 8e-07,
+      "distance_m": 0.05,
+      "mu_table": [
+        60.8,
+        100.0,
+        140.0
+      ],
+      "delta_table": [
+        9.12e-08,
+        1.5e-07,
+        1.2e-07
+      ],
+      "projections_sha256": "926d4d93b82059379a70f191875a1040f6a9ec41e675abc4e9ed1585e5f53022",
+      "description": "Exact original validate_multimat_single.py input, with rows=None so every one of the64 source rows is reconstructed and corrected in its original transverse context."
+    }
+  }
+}

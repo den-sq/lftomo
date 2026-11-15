@@ -47,6 +47,7 @@ from .stripe import (
 	VoSortStripeStage,
 )
 from .super_resolve import DRHTStage, LDMStage
+from .multimaterial import MultimaterialStage
 from .write import HDF5VolumeWriteStage, NeuroglancerWriteStage, TIFFSlicesWriteStage
 
 
@@ -76,6 +77,7 @@ STAGE_REGISTRY = {
 	"phase.beta_scale": BetaScaleStage,
 	"phase.bronnikov_aided": BronnikovAidedCorrectionStage,
 	"phase.negative_log": NegativeLogStage,
+	"phase.multimaterial": MultimaterialStage,
 	"phase.paganin": PaganinStage,
 	"phase.paganin_filter": PaganinFilterStage,
 	"phase.paganin_phase_absorption": PaganinPhaseAbsorptionStage,
@@ -170,6 +172,7 @@ __all__ = [
 	"MovementCorrectStage",
 	"NeuroglancerWriteStage",
 	"NegativeLogStage",
+	"MultimaterialStage",
 	"PaganinFilterStage",
 	"PaganinPhaseAbsorptionStage",
 	"PaganinStage",

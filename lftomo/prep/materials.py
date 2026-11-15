@@ -123,12 +123,16 @@ def segment_materials(mu_map, mu_table, sigma=1.5, core_frac=0.3, core_erode=2):
 	return np.clip(labels, 0, len(mu_table))
 
 
-def predict_filter_error(psi, I0, energy_kev, pixel_m, distance_m, slope, pad=True, workers=-1):
+def predict_filter_error(
+	psi, I0, energy_kev, pixel_m, distance_m, slope, pad=True, workers=-1, *, denominator=None,
+):
 	"""Return the backward-error dB to subtract from slope-form retrieval.
 
 	dB = (lambda*z/2pi) / I0 * L_s^-1[div(I0*grad(psi))]. Inputs use
 	(..., ny, nx); a two-dimensional psi is promoted to (1, ny, nx).
 	Padding and FFT coordinates share the Paganin geometry implementation.
+	Composite callers can supply their existing shared ``denominator``; plain
+	library calls resolve it from the same canonical slope operator.
 	"""
 	psi = np.asarray(psi, float)
 	if psi.ndim == 2:
@@ -142,7 +146,8 @@ def predict_filter_error(psi, I0, energy_kev, pixel_m, distance_m, slope, pad=Tr
 	if window.with_pad().shape.Y >= 2:
 		gradient_y = np.gradient(padded_psi, pixel_m, axis=-2)
 		divergence += np.gradient(padded_intensity * gradient_y, pixel_m, axis=-2)
-	denominator = phase.slope_denominator(window, pixel_m, distance_m, slope)
+	if denominator is None:
+		denominator = phase.slope_denominator(window, pixel_m, distance_m, slope)
 	filtered = sfft.irfft2(
 		sfft.rfft2(divergence, workers=workers) / denominator,
 		s=window.with_pad().shape.as_tuple(), workers=workers,

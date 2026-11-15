@@ -178,3 +178,21 @@ def test_backward_error_uses_the_shared_window_and_paganin_kernel(reference, mon
 	assert windows[0].with_pad().shape.as_tuple() == (4, 72)
 	assert result.shape == (1, 3, 48)
 	np.testing.assert_allclose(result, arrays["error_padded"][:1], rtol=1e-12, atol=1e-16)
+
+
+def test_backward_error_consumes_prepared_denominator_without_rebuilding(reference, monkeypatch):
+	arrays, metadata = reference
+	window = phase.phase_fft_window(arrays["psi"].shape[-2:], True)
+	denominator = phase.slope_denominator(
+		window, metadata["pixel_m"], metadata["distance_m"], metadata["slope"],
+	)
+
+	def duplicate_operator(*args, **kwargs):
+		raise AssertionError("the supplied shared denominator must be authoritative")
+	monkeypatch.setattr(phase, "slope_denominator", duplicate_operator)
+	result = materials.predict_filter_error(
+		arrays["psi"], arrays["intensity"], metadata["energy_kev"],
+		metadata["pixel_m"], metadata["distance_m"], metadata["slope"],
+		workers=1, denominator=denominator,
+	)
+	np.testing.assert_allclose(result, arrays["error_padded"], rtol=1e-12, atol=1e-16)

@@ -83,14 +83,22 @@ def prepare_phase_filter(stage: Stage, state: PipelineState) -> None:
 	if getattr(stage.params, "slope", None) is None:
 		_resolved_phase_filter(state, shape, stage.params.alpha)
 	else:
-		_resolved_slope_filter(stage, state, shape)
+		_resolved_slope_filter(state, shape, slope=stage.params.slope, pad=stage.params.fft_pad)
 		_prepare_material_envelope(stage, state)
 
 
-def _resolved_slope_filter(stage: Stage, state: PipelineState, shape: tuple[int, int]) -> np.ndarray:
-	window = phase_fft_window(shape, stage.params.fft_pad)
+def slope_filter_shape(shape, pad: bool) -> ImgSlice:
+	"""Derive the shared real-frequency allocation from its canonical canvas."""
+	canvas = phase_fft_window((shape.Y, shape.X), pad).with_pad().shape
+	return ImgSlice(canvas.Y, canvas.X // 2 + 1)
+
+
+def _resolved_slope_filter(
+	state: PipelineState, shape: tuple[int, int], *, slope: float, pad: bool,
+) -> np.ndarray:
+	window = phase_fft_window(shape, pad)
 	pixel_m, distance_m = state.scan.pixel_size_um * 1e-6, state.scan.ssd_cm * 1e-2
-	signature = ("slope", window, pixel_m, distance_m, stage.params.slope)
+	signature = ("slope", window, pixel_m, distance_m, slope)
 	previous = state.artifacts.get("phase_filter_signature")
 	if (
 		previous is not None and previous[0] == "slope"
@@ -101,7 +109,7 @@ def _resolved_slope_filter(stage: Stage, state: PipelineState, shape: tuple[int,
 	):
 		return buffer_view(state.artifacts["phase_filter"])
 	return _managed_phase_filter(
-		state, slope_denominator(window, pixel_m, distance_m, stage.params.slope), signature,
+		state, slope_denominator(window, pixel_m, distance_m, slope), signature,
 	)
 
 
@@ -150,7 +158,9 @@ def _slope_filtered(stage: Stage, state: PipelineState, image: np.ndarray) -> np
 		image, state.scan.pixel_size_um * 1e-6, state.scan.ssd_cm * 1e-2,
 		stage.params.slope, material_alpha=stage.params.material_alpha,
 		envelope=_material_envelope(state), pad=stage.params.fft_pad,
-		denominator=_resolved_slope_filter(stage, state, image.shape), workers=1,
+		denominator=_resolved_slope_filter(
+			state, image.shape, slope=stage.params.slope, pad=stage.params.fft_pad,
+		), workers=1,
 	)
 
 
@@ -291,6 +301,12 @@ class PaganinFilterStage(ProjectionStage):
 		if self.params.enabled and self.params.slope is not None:
 			prepare_phase_filter(self, state)
 		return super().run(state)
+
+	def phase_filter_shape(self, shape) -> ImgSlice:
+		return (
+			ImgSlice(shape.Y, shape.X) if self.params.slope is None
+			else slope_filter_shape(shape, self.params.fft_pad)
+		)
 
 	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:
 		if not self.params.enabled:
