@@ -70,11 +70,14 @@ class PadRequirement:
 	fixed: DataShape = field(default_factory=lambda: ProjOrder(0, 0, 0))
 	fixed_after: DataShape | None = None
 	phase_fft_y: bool = False
+	phase_fft_passes: int = 1
 
 	def __post_init__(self):
 		_canonical_pad(self.fixed)
 		if self.fixed_after is not None:
 			_canonical_pad(self.fixed_after)
+		if self.phase_fft_passes < 1:
+			raise ValueError("phase FFT passes must be positive")
 
 	def resolve(self, scan: Any, input_shape: Any) -> tuple[ProjOrder, ProjOrder]:
 		before = _canonical_pad(self.fixed)
@@ -89,7 +92,7 @@ class PadRequirement:
 				float(scan.ssd_cm),
 				float(scan.energy_keV),
 			))
-			phase = Y(max(0, phase_y))
+			phase = Y(max(0, phase_y) * self.phase_fft_passes)
 			before = before + phase
 			after = after + phase
 		return before, after

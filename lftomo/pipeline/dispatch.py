@@ -68,6 +68,7 @@ _OUT_OF_PLACE_PROCESS = {
 	"geometry.affine_skew_movement", "geometry.helical_pitch",
 	"helical_correct.index_remap", "layout.convert",
 }
+_COMPOSITE_PROCESS = {"phase.multimaterial"}
 _THREAD_IO = {
 	"read.hdf5_dxchange", "read.tiff_stack", "write.hdf5_volume", "write.neuroglancer",
 }
@@ -86,7 +87,7 @@ def _build_stage_dispatch() -> dict[str, DispatchSpec]:
 
 	groups = (
 		_PROJECTION_PROCESS, _BOUNDED_PROCESS, _OUT_OF_PLACE_PROCESS,
-		_THREAD_IO, _PROCESS_WRITERS, _ENGINE, _SERIAL,
+		_THREAD_IO, _PROCESS_WRITERS, _ENGINE, _SERIAL, _COMPOSITE_PROCESS,
 	)
 	seen: set[str] = set()
 	for group in groups:
@@ -115,6 +116,11 @@ def _build_stage_dispatch() -> dict[str, DispatchSpec]:
 		result[key] = _dispatch(DispatchKind.ENGINE, "internal_core_budget")
 	for key in _SERIAL:
 		result[key] = _dispatch(DispatchKind.SERIAL, "stage.run")
+	for key in _COMPOSITE_PROCESS:
+		result[key] = _dispatch(
+			DispatchKind.PROCESS, "run_multimaterial_stage",
+			reason="parent coordinates iteration barriers; the run executor owns row and projection kernels",
+		)
 	return result
 
 

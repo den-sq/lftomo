@@ -10,7 +10,7 @@ import numpy as np
 
 from lftomo.pipeline.core import BufferSpec, Stage
 from lftomo.pipeline.domains import DataDomain
-from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
+from lftomo.util.shapes import ImgSlice, ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import TomoDataSet, TomoWindow
 
 
@@ -268,13 +268,10 @@ def build_allocation_schedule(
 			rows, width = step.output_buffer.shape.Y, step.output_buffer.shape.X
 			artifact_specs.append(("flat_fields", 4 * rows * width * np.dtype(np.float32).itemsize))
 		if "phase_filter" in stage.contract.produces_artifacts and step.output_buffer is not None:
-			rows, width = step.output_buffer.shape.Y, step.output_buffer.shape.X
-			if getattr(stage.params, "slope", None) is not None:
-				from lftomo.prep.phase import phase_fft_window
-
-				canvas = phase_fft_window((rows, width), stage.params.fft_pad).with_pad().shape
-				rows, width = canvas.Y, canvas.X // 2 + 1
-			artifact_specs.append(("phase_filter", rows * width * np.dtype(np.float64).itemsize))
+			shape = step.output_buffer.shape
+			resolve_shape = getattr(stage, "phase_filter_shape", None)
+			filter_shape = resolve_shape(shape) if resolve_shape is not None else ImgSlice(shape.Y, shape.X)
+			artifact_specs.append(("phase_filter", filter_shape.nbytes(np.float64)))
 		if "phase_envelope" in stage.contract.managed_artifacts and step.output_buffer is not None:
 			artifact_specs.append(("phase_envelope", step.output_buffer.shape.nbytes(np.float32)))
 		for artifact_role, artifact_bytes in artifact_specs:
@@ -287,6 +284,32 @@ def build_allocation_schedule(
 			live[artifact_role] = physical_role
 			publish(step.index, BufferAction.ALLOCATE, artifact_role,
 				artifact_bytes, physical_role, "producer_contract")
+		if stage.name == "phase.multimaterial" and step.input_buffer is not None:
+			for key, (shape, dtype) in stage.work_specs(step.input_buffer.shape).items():
+				role = f"multimaterial_{key}"
+				size = shape.nbytes(dtype)
+				selected = next((
+					candidate for candidate in retired.get(role, ())
+					if candidate not in external_pins and physical[candidate] >= size
+				), None) if enable_aliasing else None
+				if selected is None:
+					selected = role
+					suffix = 1
+					while selected in physical:
+						suffix += 1
+						selected = f"{role}:{suffix}"
+					physical[selected] = size
+					action = BufferAction.ALLOCATE
+				else:
+					action = BufferAction.ALIAS
+				live[role] = selected
+				publish(step.index, action, role, size, selected, "stage_work_specs")
+			# Scratch is private to this composite stage and has no later consumers.
+			for key in stage.work_specs(step.input_buffer.shape):
+				role = f"multimaterial_{key}"
+				selected = live.pop(role)
+				retired.setdefault(role, []).append(selected)
+				publish(step.index, BufferAction.RETIRE, role, physical[selected], selected)
 		role = step.output_role
 		if role is None or step.output_buffer is None:
 			continue

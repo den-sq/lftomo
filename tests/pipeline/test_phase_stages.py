@@ -16,6 +16,7 @@ from lftomo.pipeline.stages import (
 	BronnikovAidedCorrectionStage,
 	PaganinPhaseAbsorptionStage,
 	PaganinStage,
+	MultimaterialStage,
 	STAGE_REGISTRY,
 	create_stage,
 )
@@ -56,6 +57,7 @@ def test_registered_phase_stages_explicitly_declare_extent_sensitive_axes(key):
 	required_params = {
 		BronnikovAidedCorrectionStage: {"alpha": 2.0},
 		BronnikovAidedCorrectionFilterStage: {"alpha": 2.0},
+		MultimaterialStage: {"mu_table": [50, 120], "delta_table": [1e-7, 2.4e-7]},
 	}
 	kind, algorithm = key.split(".", 1)
 	stage = create_stage(StageConfig(

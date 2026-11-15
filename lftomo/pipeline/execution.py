@@ -23,7 +23,7 @@ from lftomo.pipeline.core import (
 	commit_output,
 )
 from lftomo.pipeline.dispatch import DispatchKind
-from lftomo.storage import ManagedBuffer
+from lftomo.storage import ManagedBuffer, buffer_view
 from lftomo.util.process import watch_parent_exit
 from lftomo.util.shapes import IntIter, ProjOrder, ReconOrder, SinoOrder, Theta
 from lftomo.util.window import DataRef, TomoWindow
@@ -221,6 +221,127 @@ def run_projection_stage(stage: Stage, state: PipelineState) -> PipelineState:
 		if result is not None and result is not image:
 			image[...] = result
 	return state
+
+
+def run_material_retrieval_kernel(source, baseline, layout, stage, scan, denominator):
+	"""Retrieve one projection into a coordinator-owned baseline plane."""
+	index = layout.point_index(Theta=0)
+	stage.retrieve(buffer_view(source)[index], buffer_view(baseline)[index], scan, buffer_view(denominator))
+
+
+def run_material_classification_kernel(current, psi, synthesis, previous, layout,
+		stage, scan, angles_deg, iteration):
+	"""Classify one source row and synthesize its material line integrals."""
+	index = layout.point_index(Y=0)
+	return stage.classify_row(
+		buffer_view(current)[index], buffer_view(psi)[index], buffer_view(synthesis)[index],
+		None if previous is None else buffer_view(previous)[ReconOrder.point_index(Y=0)],
+		angles_deg, scan, iteration,
+	)
+
+
+def run_material_correction_kernel(psi, synthesis, correction, layout, stage, scan, denominator):
+	"""Apply one transverse filter without creating a worker-owned executor."""
+	index = layout.point_index(Theta=0)
+	stage.correct(
+		buffer_view(psi)[index], buffer_view(synthesis)[index], buffer_view(correction)[index], scan,
+		buffer_view(denominator),
+	)
+
+
+def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState:
+	"""Coordinate the composite loop using canonical units and managed scratch.
+
+	Read-only configuration, acquisition angles, and reopenable buffers cross IPC.
+	All reusable arrays belong to the run storage and are retired even if a
+	classification fails. Direct NumPy callers execute the same kernels serially.
+	"""
+	if state.backend.name != "numpy" or state.layout not in (ProjOrder, SinoOrder):
+		raise TypeError("phase.multimaterial requires NumPy tomography data")
+	if not np.issubdtype(state.buffer_spec.dtype, np.floating):
+		raise TypeError("phase.multimaterial requires floating-point transmission")
+	if state.dataset is None or state.source_window is None:
+		raise ValueError("phase.multimaterial requires canonical source angles and window geometry")
+	angles = np.rad2deg(state.dataset.angles[state.source_window.axis_slice("Theta")])
+	if len(angles) != state.buffer_spec.shape.Theta:
+		raise ValueError("phase.multimaterial projection count disagrees with source angles")
+	# Resolve once in the authoritative parameter model, before worker copies.
+	stage.params.line_fit
+	from lftomo.pipeline.stages.phase import _resolved_slope_filter
+
+	_resolved_slope_filter(
+		state, (state.buffer_spec.shape.Y, state.buffer_spec.shape.X),
+		slope=stage.params.line_fit["slope"], pad=stage.params.pad,
+	)
+	denominator = state.artifacts["phase_filter"]
+	executor = state.executor or getattr(state.storage, "pipeline_executor", None)
+	parallel = (
+		executor is not None and state.storage is not None
+		and isinstance(state.working_array, ManagedBuffer)
+	)
+	worker_scan = _payload(state, state.source_window).scan
+
+	def dispatch(kernel, arguments):
+		return executor.submit_all(kernel, arguments) if parallel else [kernel(*args) for args in arguments]
+
+	specs = stage.work_specs(state.buffer_spec.shape)
+	work = {}
+
+	def scoped(key, unit, index):
+		return work[key][_unit_index(unit, index, specs[key][0])]
+
+	try:
+		for key, (shape, dtype) in specs.items():
+			work[key], _values = allocate_output(
+				state, shape, dtype, role=f"multimaterial_{key}",
+				reuse_from=(f"multimaterial_{key}",),
+			)
+		buffer_view(work["correction"]).fill(0)
+		dispatch(run_material_retrieval_kernel, (
+			(
+				state.working_array[_unit_index(unit, index, state.buffer_spec.shape)],
+				scoped("baseline", unit, index), state.layout, stage, worker_scan, denominator,
+			)
+			for unit, index in _buffer_units(state, "Theta")
+		))
+		norms, changes = [], []
+		for iteration in range(stage.params.n_iter + 1):
+			np.subtract(
+				buffer_view(work["baseline"]), buffer_view(work["correction"]),
+				out=buffer_view(work["current"]), casting="unsafe",
+			)
+			counts = dispatch(run_material_classification_kernel, (
+				(
+					scoped("current", unit, index), scoped("psi", unit, index),
+					scoped("synthesis", unit, index),
+					None if "previous_labels" not in work else scoped("previous_labels", unit, index),
+					state.layout, stage, worker_scan, angles, iteration,
+				)
+				for unit, index in _buffer_units(state, "Y")
+			))
+			if iteration == stage.params.n_iter:
+				break
+			dispatch(run_material_correction_kernel, (
+				(
+					scoped("psi", unit, index), scoped("synthesis", unit, index),
+					scoped("correction", unit, index), state.layout, stage, worker_scan, denominator,
+				)
+				for unit, index in _buffer_units(state, "Theta")
+			))
+			# Reuse the synthesized-phase plane after its last consumer this pass.
+			np.square(buffer_view(work["correction"]), out=buffer_view(work["psi"]))
+			norms.append(float(np.sqrt(buffer_view(work["psi"]).mean())))
+			if iteration:
+				changes.append(float(sum(counts) / np.prod(specs["previous_labels"][0].as_tuple())))
+		np.asarray(state.working_array)[...] = buffer_view(work["current"])
+		state.artifacts["correction_norms"] = norms
+		state.artifacts["label_change"] = changes
+		return state
+	finally:
+		if state.storage is not None:
+			for key, handle in work.items():
+				if isinstance(handle, ManagedBuffer):
+					state.storage.retire(handle, role=f"multimaterial_{key}")
 
 
 def _scope_vo_work_to_unit(
