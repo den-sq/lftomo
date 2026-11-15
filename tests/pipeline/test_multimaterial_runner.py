@@ -43,7 +43,7 @@ def test_runner_retains_reference_diagnostics_for_every_window_and_json(tmp_path
 		{"kind": "normalize", "algorithm": "weighted"},
 		{"kind": "phase", "algorithm": "multimaterial", "params": {
 			"mu_table": case["mu_table"].tolist(), "delta_table": case["delta_table"].tolist(),
-			"n_iter": 2,
+			"n_iter": 2, "padding": "reference",
 		}},
 	]})
 	pipeline_path = tmp_path / "pipeline.yaml"

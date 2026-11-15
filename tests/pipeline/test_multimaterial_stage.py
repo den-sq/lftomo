@@ -11,7 +11,7 @@ from lftomo.config.phase import multimaterial_config
 from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState, validate_pipeline
 from lftomo.storage import LocalArray
 from lftomo.pipeline.dispatch import DispatchKind, STAGE_DISPATCH
-from lftomo.pipeline.stages import MultimaterialStage, TIFFStackReadStage, WeightedNormalizeStage
+from lftomo.pipeline.stages import MultimaterialStage, PaganinStage, TIFFStackReadStage, WeightedNormalizeStage
 from lftomo.pipeline.stages import phase as phase_stages
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import ImgSlice, ProjOrder, SinoOrder, Y
@@ -68,6 +68,9 @@ def test_stage_contract_has_required_diagnostics_and_composed_halo():
 	assert stage.contract.managed_artifacts == ("phase_filter",)
 	assert stage.contract.produces_domain is DataDomain.ATTENUATION
 	assert stage.contract.required_pad.phase_fft_passes == 3
+	state = _state(case)
+	before, after = stage.contract.required_pad.resolve(state.scan, state.working_array.shape)
+	assert before.Y == after.Y == 108  # Three passes, each with an eight-length radius of 36.
 	assert STAGE_DISPATCH[stage.name].kind is DispatchKind.PROCESS
 	assert not STAGE_DISPATCH[stage.name].projection_units
 
@@ -78,7 +81,7 @@ def test_compact_fresnel_case_matches_unchanged_reference(reference, n_iter, non
 	arrays, _ = reference
 	case = compact_multimaterial_case(noncollinear=noncollinear)
 	state = _state(case)
-	Pipeline([_stage(case, n_iter=n_iter)]).run(state)
+	Pipeline([_stage(case, n_iter=n_iter, padding="reference")]).run(state)
 	prefix = f"compact_{'noncollinear' if noncollinear else 'collinear'}_n{n_iter}"
 	# The reference stores single-precision retrieval; angle unit conversion
 	# at the canonical acquisition boundary may differ at floating-point roundoff.
@@ -90,11 +93,24 @@ def test_compact_fresnel_case_matches_unchanged_reference(reference, n_iter, non
 	assert state.domain is DataDomain.ATTENUATION
 
 
+def test_default_kernel_zero_iteration_matches_single_material_without_air_renormalization():
+	case = compact_multimaterial_case(n_rows=4, row_varying=True, noncollinear=True)
+	stage = _stage(case, n_iter=0, air_ratio=None)
+	multimaterial = _state(case)
+	single_material = _state(case)
+	Pipeline([stage]).run(multimaterial)
+	Pipeline([PaganinStage(slope=stage.params.line_fit["slope"])]).run(single_material)
+	np.testing.assert_array_equal(multimaterial.working_array, single_material.working_array)
+	assert np.isfinite(multimaterial.working_array).all()
+	assert multimaterial.artifacts["correction_norms"] == []
+	assert multimaterial.artifacts["label_change"] == []
+
+
 def test_original_three_material_fixture_same_rows_and_context_match_reference(reference):
 	arrays, _ = reference
 	case = original_multimaterial_case()
 	state = _state(case)
-	Pipeline([_stage(case)]).run(state)
+	Pipeline([_stage(case, padding="reference")]).run(state)
 	expected = arrays["original_full_n1_B"]
 	np.testing.assert_allclose(state.working_array, expected, rtol=1e-6, atol=1e-7)
 	np.testing.assert_allclose(
@@ -107,11 +123,11 @@ def test_one_step_damping_is_partial_correction_from_original_baseline(reference
 	arrays, _ = reference
 	case = compact_multimaterial_case(noncollinear=True)
 	full = _state(case)
-	Pipeline([_stage(case, omega=1.0)]).run(full)
+	Pipeline([_stage(case, omega=1.0, padding="reference")]).run(full)
 	np.testing.assert_allclose(full.working_array, arrays["compact_noncollinear_n1_omega1_B"], rtol=1e-6, atol=1e-7)
 	baseline = arrays["compact_noncollinear_n0_B"]
 	damped = _state(case)
-	Pipeline([_stage(case)]).run(damped)
+	Pipeline([_stage(case, padding="reference")]).run(damped)
 	np.testing.assert_allclose(
 		damped.working_array, baseline - 0.7 * (baseline - full.working_array), rtol=1e-6, atol=1e-7,
 	)
@@ -119,18 +135,18 @@ def test_one_step_damping_is_partial_correction_from_original_baseline(reference
 
 
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
-def test_full_context_windows_and_strided_angles_match_whole_array(layout):
+def test_reference_padding_full_context_windows_and_strided_angles_match_whole_array(layout):
 	case = compact_multimaterial_case(n_rows=4, row_varying=True, noncollinear=True)
 	physical = ProjOrder(*case["projections"].shape)
 	whole_window = TomoWindow.from_bounds(physical, theta=(0, physical.Theta, 2))
 	whole = _state(case, layout=layout, window=whole_window)
-	Pipeline([_stage(case, n_iter=2)]).run(whole)
+	Pipeline([_stage(case, n_iter=2, padding="reference")]).run(whole)
 	for start in (0, 2):
 		window = TomoWindow.from_bounds(
 			physical, y=(start, start + 2), theta=(0, physical.Theta, 2), halo=Y(physical.Y),
 		)
 		state = _state(case, layout=layout, window=window)
-		Pipeline([_stage(case, n_iter=2)]).run(state)
+		Pipeline([_stage(case, n_iter=2, padding="reference")]).run(state)
 		index = layout.point_index(Y=window.internal.axis_slice("Y"))
 		expected = layout.point_index(Y=slice(start, start + 2))
 		np.testing.assert_array_equal(np.asarray(state.working_array)[index], np.asarray(whole.working_array)[expected])

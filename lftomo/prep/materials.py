@@ -125,6 +125,7 @@ def segment_materials(mu_map, mu_table, sigma=1.5, core_frac=0.3, core_erode=2):
 
 def predict_filter_error(
 	psi, I0, energy_kev, pixel_m, distance_m, slope, pad=True, workers=-1, *, denominator=None,
+	padding: phase.PhasePadding = "kernel", window: TomoWindow | None = None,
 ):
 	"""Return the backward-error dB to subtract from slope-form retrieval.
 
@@ -138,7 +139,11 @@ def predict_filter_error(
 	if psi.ndim == 2:
 		psi = psi[None]
 	I0 = np.broadcast_to(I0, psi.shape)
-	window = phase.phase_fft_window(psi.shape[-2:], pad)
+	if window is None:
+		window = phase.phase_fft_window(
+			psi.shape[-2:], pad, pixel_m=pixel_m, distance_m=distance_m,
+			slope=slope, padding=padding,
+		)
 	padded_psi = phase.phase_pad(psi, window)
 	padded_intensity = phase.phase_pad(I0, window)
 	gradient_x = np.gradient(padded_psi, pixel_m, axis=-1)

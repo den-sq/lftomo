@@ -51,3 +51,36 @@ The compatibility algorithms still perform negative-log internally and remain
 terminal. Use the decomposed algorithms when another transmission-preserving
 phase correction must be inserted. See the [phase-operation audit](phase-chain-audit.md)
 for the full semantics, BAC decomposition, supported orders, and tolerances.
+
+## Padding for calibrated material lines
+
+When `phase.paganin` or `phase.paganin_filter` specifies `slope`, its default
+`padding: kernel` derives the FFT extent from the low-pass operator. In metres,
+the decay length is `L = sqrt(distance_m * slope)`; each edge requires
+`ceil(8 * L / pixel_m)` pixels. The continuous kernel's mass outside the square
+with half-width `8L` is at most `2 * exp(-8)`, approximately **0.0671%**.
+This is a continuous-kernel tail bound, not a guarantee on retrieved-output
+error. Discretization, image boundaries, affine correction, and the negative
+log still affect the result.
+
+The source-window planner requests real Y context for each retrieval pass
+(two passes for an affine defect correction). The numerical FFT canvas then
+subtracts the **realized** source halo independently on each Y side, and
+edge-fills only the remaining deficit. X receives the full radius on both
+sides. Axes needing edge fill round up to a fast FFT length, with any extra
+pixels split between the two sides. When real halo covers both Y sides, Y is
+neither edge-filled nor rounded. `TomoWindow` owns these extents and the crop
+back to the held input buffer; downstream reconstruction trims source halo.
+
+Set `padding: reference` to reproduce the previous slope/affine padding:
+`next_fast_len(int(1.5 * dimension))` on each axis, irrespective of real source
+halo. This preserves the frozen reference results. `fft_pad: false` disables
+the numerical edge fill in either mode and uses a periodic FFT on the held
+buffer. The legacy `alpha` path, selected by omitting `slope`, retains its
+existing arithmetic, FFT extent, and source-padding behavior.
+
+The shared denominator remains a managed buffer prepared before dispatch.
+There is no reusable managed FFT canvas: `np.pad` in `lftomo.prep.phase`, FFT
+results, and affine gradient results remain per-call numerical temporaries.
+The prep functions `single_material_filter` and `retrieve_single` expose the
+same `padding` choice, using `pad=False` for the periodic path.

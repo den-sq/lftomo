@@ -64,6 +64,7 @@ class PlanStep:
 	allocation_buffer: BufferSpec | None = None
 	output_role: str | None = None
 	retires_role: str | None = None
+	input_window: TomoWindow | None = None
 
 
 @dataclass(frozen=True)
@@ -276,7 +277,8 @@ def build_allocation_schedule(
 		if "phase_filter" in stage.contract.produces_artifacts and step.output_buffer is not None:
 			shape = step.output_buffer.shape
 			resolve_shape = getattr(stage, "phase_filter_shape", None)
-			filter_shape = resolve_shape(shape) if resolve_shape is not None else ImgSlice(shape.Y, shape.X)
+			filter_shape = resolve_shape(shape, scan, step.input_window) \
+				if resolve_shape is not None else ImgSlice(shape.Y, shape.X)
 			artifact_specs.append(("phase_filter", filter_shape.nbytes(np.float64)))
 		if "phase_envelope" in stage.contract.managed_artifacts and step.output_buffer is not None:
 			artifact_specs.append(("phase_envelope", step.output_buffer.shape.nbytes(np.float32)))

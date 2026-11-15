@@ -71,6 +71,7 @@ class PadRequirement:
 	fixed_after: DataShape | None = None
 	phase_fft_y: bool = False
 	phase_fft_passes: int = 1
+	phase_slope: float | None = None
 
 	def __post_init__(self):
 		_canonical_pad(self.fixed)
@@ -83,10 +84,12 @@ class PadRequirement:
 		before = _canonical_pad(self.fixed)
 		after = before if self.fixed_after is None else _canonical_pad(self.fixed_after)
 		if self.phase_fft_y:
-			from lftomo.prep.phase import _phase_pad
+			from lftomo.prep.phase import _phase_pad, phase_kernel_radius
 
 			dimension = int(getattr(input_shape, "Y"))
-			phase_y = int(_phase_pad(
+			phase_y = phase_kernel_radius(
+				float(scan.pixel_size_um) * 1e-6, float(scan.ssd_cm) * 1e-2, self.phase_slope,
+			) if self.phase_slope is not None else int(_phase_pad(
 				dimension,
 				float(scan.pixel_size_um) * 1e-4,
 				float(scan.ssd_cm),

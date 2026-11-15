@@ -139,7 +139,7 @@ def test_backward_error_matches_physical_reference(reference, pad, single_row):
 	result = materials.predict_filter_error(
 		arrays["psi"][selection], arrays["intensity"][selection],
 		metadata["energy_kev"], metadata["pixel_m"], metadata["distance_m"], metadata["slope"],
-		pad=pad, workers=1,
+		pad=pad, workers=1, padding="reference",
 	)
 	key = ("single_row_" if single_row else "") + "error_" + ("padded" if pad else "unpad")
 	np.testing.assert_allclose(result, arrays[key], rtol=1e-12, atol=1e-16)
@@ -169,6 +169,7 @@ def test_backward_error_uses_the_shared_window_and_paganin_kernel(reference, mon
 	result = materials.predict_filter_error(
 		arrays["psi"][0], arrays["intensity"][0], metadata["energy_kev"],
 		metadata["pixel_m"], metadata["distance_m"], metadata["slope"], workers=1,
+		padding="reference",
 	)
 
 	assert len(windows) == 1
@@ -182,7 +183,7 @@ def test_backward_error_uses_the_shared_window_and_paganin_kernel(reference, mon
 
 def test_backward_error_consumes_prepared_denominator_without_rebuilding(reference, monkeypatch):
 	arrays, metadata = reference
-	window = phase.phase_fft_window(arrays["psi"].shape[-2:], True)
+	window = phase.phase_fft_window(arrays["psi"].shape[-2:], True, padding="reference")
 	denominator = phase.slope_denominator(
 		window, metadata["pixel_m"], metadata["distance_m"], metadata["slope"],
 	)
@@ -193,6 +194,6 @@ def test_backward_error_consumes_prepared_denominator_without_rebuilding(referen
 	result = materials.predict_filter_error(
 		arrays["psi"], arrays["intensity"], metadata["energy_kev"],
 		metadata["pixel_m"], metadata["distance_m"], metadata["slope"],
-		workers=1, denominator=denominator,
+		workers=1, denominator=denominator, window=window,
 	)
 	np.testing.assert_allclose(result, arrays["error_padded"], rtol=1e-12, atol=1e-16)

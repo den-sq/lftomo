@@ -18,14 +18,16 @@ params:
   classify_sigma: 1.5
   label_smooth: 3
   pad: true
+  padding: kernel
 ```
 
-The parameters mirror the supplied single-distance reference. The stage fits
-the table **through the origin**, retaining optional material weights. That
+The material and correction parameters follow the supplied single-distance
+reference. The stage fits the table **through the origin**, retaining optional
+material weights. That
 fit is the sole owner of the operative slope and off-line residuals. It does
 not accept a second, independently specified fit. `n_iter=0` returns the
-original slope-form retrieval, while still checking the reference's final
-classification. `omega=1` applies a full frozen-label correction in one step;
+slope-form retrieval with the selected padding, while still checking the
+reference's final classification. `omega=1` applies a full frozen-label correction in one step;
 the default `omega=0.7` applies a deliberately partial correction.
 
 For each iteration, the stage reconstructs each row using the reference's
@@ -97,14 +99,30 @@ Projection angles come from `TomoDataSet.angles` selected by the source window,
 including strided acquisition selections. No packed row list is treated as a
 new physical grid.
 
-The projection-wide air median and transverse FFT depend on context. Full
-source context gives the same result for each window's interior as processing
-the whole source with the same angle selection. Smaller windows follow the
-existing fixed-window-plus-padding parity contract and emit the existing
+The projection-wide air median and transverse FFT depend on context. Windows
+follow the existing fixed-window-plus-padding parity contract and emit the
 extent-sensitivity warning; no exact finite-halo equivalence is claimed.
-The planner composes a phase-padding requirement for retrieval and each
-correction pass. Numerical FFT edge padding separately uses the shared
-`TomoWindow` canvas from affine Paganin retrieval.
+
+With the default `padding: kernel`, the fitted slope sets the decay length
+`L = sqrt(distance_m * slope)`. Retrieval and each correction pass request
+`ceil(8 * L / pixel_m)` real source rows per side. The numerical FFT canvas
+supplements the realized halo independently on each Y side, edge-filling only
+the deficit; X receives the full radius on both sides. Only axes that need
+edge fill round up to a fast FFT length. If real halo covers both Y sides,
+there is no generated Y padding or Y rounding. The continuous kernel's mass
+outside a square with half-width `8L` is bounded by `2 * exp(-8)`, approximately
+**0.0671%**. This tail bound does not guarantee output error, exact window
+equivalence, or convergence of the multimaterial correction.
+
+Use `padding: reference` for the previous numerical extent,
+`next_fast_len(int(1.5 * dimension))`, including its behavior in the presence
+of real source halo. This mode preserves the frozen reference results; with
+full source context it also preserves exact interior parity with whole-source
+processing for the same angle selection. Kernel mode can use different
+numerical canvases for those windows because it accounts for their individual
+halos. `pad: false` retains periodic FFT behavior in either mode. Source and
+numerical padding use the same canonical `TomoWindow` geometry as affine
+Paganin retrieval; the legacy Paganin path is unchanged.
 
 The parent coordinates iteration barriers through the run's existing process
 executor. Row workers run FBP, segmentation, and material projection; projection
@@ -117,5 +135,6 @@ synthesis, phase residual, and (when needed) previous-label planes are managed,
 indexed by source/window rows, and retired on success or failure. Their
 shape/dtype specifications also feed
 memory planning. NumPy/SciPy FFT, gradient, FBP, watershed, and projection return
-arrays are per-kernel numerical temporaries; the stage does not retain a
-history of reconstructed volumes.
+arrays are per-kernel numerical temporaries, as is the `np.pad` edge-fill
+canvas. No reusable managed FFT canvas is allocated, and the stage does not
+retain a history of reconstructed volumes.

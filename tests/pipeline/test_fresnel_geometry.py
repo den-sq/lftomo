@@ -4,11 +4,13 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, ConeGeometry, Detector, Helical, Recon, Scan, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, PipelineState
+from lftomo.pipeline import BufferSpec, PipelineState, validate_pipeline
 from lftomo.storage import LocalArray
 from lftomo.pipeline.core import PadRequirement
 from lftomo.pipeline.planning import stage_output_spec
-from lftomo.pipeline.stages import HelicalIndexRemapStage, PaganinFilterStage
+from lftomo.pipeline.stages import (
+	HelicalIndexRemapStage, PaganinFilterStage, TIFFStackReadStage, WeightedNormalizeStage,
+)
 from lftomo.pipeline.stages import phase
 from lftomo.prep import phase as phase_prep
 from lftomo.util.shapes import ProjOrder
@@ -77,6 +79,25 @@ def test_native_geometry_change_invalidates_the_prepared_phase_filter():
 	np.testing.assert_array_equal(after, phase._paganin_transfer(
 		(8, 8), alpha=0.06, energy_kev=20, pixel_size_um=10 / 3, ssd_cm=100 / 3,
 	))
+
+
+def test_slope_kernel_planning_uses_effective_cone_geometry_and_preserves_dc():
+	state = _state()
+	stage = PaganinFilterStage(slope=1e-9)
+	before, after = stage.contract.required_pad.resolve(state.scan, state.working_array.shape)
+	# Effective z = 0.25 m and pixel = 5 um give ceil(8*sqrt(10)) = 26 rows.
+	assert before.Y == after.Y == 26
+	state.scan.metadata["flat_fields"] = np.stack([
+		np.ones((8, 8)), np.ones((8, 8)), np.zeros((8, 8)), np.zeros((8, 8)),
+	])
+	plan = validate_pipeline(
+		[TIFFStackReadStage(order="projection"), WeightedNormalizeStage(), stage], state.scan,
+	)
+	allocation = next(event for event in plan.allocation_schedule if event.role == "phase_filter")
+	assert allocation.bytes == 60 * 31 * np.dtype(np.float64).itemsize
+	stage.run(state)
+	np.testing.assert_allclose(state.working_array, 0.8, rtol=1e-7)
+	assert state.artifacts["phase_filter"].shape == (60, 31)
 
 
 def test_helical_planning_and_execution_use_effective_sample_pitch(monkeypatch):

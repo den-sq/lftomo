@@ -5,7 +5,7 @@ Module for phase retrieval.  Rewritten from tomopy.
 # ADD COPYRIGHT NOTICE - SEE TOMOPY
 
 from multiprocessing import cpu_count, Pool
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 from scipy import fft as sfft
@@ -29,23 +29,53 @@ def wavelength_m(energy_kev: float) -> float:
 	return 1.23984193e-9 / energy_kev
 
 
-def phase_fft_window(shape: tuple[int, int], pad: bool = True) -> TomoWindow:
+PhasePadding = Literal["kernel", "reference"]
+
+
+def phase_kernel_radius(pixel_m: float, distance_m: float, slope: float) -> int:
+	"""Eight decay lengths: continuous square-tail mass is at most 2*exp(-8)."""
+	if distance_m * slope < 0:
+		raise ValueError("kernel FFT padding requires a nonnegative distance*slope low-pass operator")
+	return int(np.ceil(8 * np.sqrt(distance_m * slope) / pixel_m))
+
+
+def phase_fft_window(
+	shape: tuple[int, int], pad: bool = True, *, pixel_m: float | None = None,
+	distance_m: float | None = None, slope: float | None = None,
+	padding: PhasePadding = "kernel", source_window: TomoWindow | None = None,
+) -> TomoWindow:
 	"""Own the numerical FFT canvas and its crop in the canonical window model.
 
-	This edge-filled numerical canvas is separate from source-context padding.
-	Odd extensions retain their asymmetric remainder in ``pad_after``.
+	Kernel padding supplements realized source Y halo up to eight decay lengths
+	on each side. FFT rounding extends only axes still needing edge fill.
+	Reference mode preserves phase_tomo's original 1.5x rule exactly.
 	"""
 
 	interior = Proj(*shape)
-	canvas = Proj(*(
-		sfft.next_fast_len(int(size * 1.5)) if pad else size for size in shape
-	))
-	before = Proj(*((outer - inner) // 2 for outer, inner in zip(
-		canvas.as_tuple(), interior.as_tuple(), strict=True,
-	)))
+	before = after = Proj(0, 0)
+	if pad and padding == "reference":
+		canvas = Proj(*(sfft.next_fast_len(int(size * 1.5)) for size in shape))
+		before = (canvas - interior) // Proj(2, 2)
+		after = canvas - interior - before
+	elif pad and padding == "kernel":
+		if pixel_m is None or distance_m is None or slope is None:
+			raise ValueError("kernel FFT padding requires pixel_m, distance_m, and slope")
+		radius = phase_kernel_radius(pixel_m, distance_m, slope)
+		before = Proj(max(0, radius - (source_window.pad_before.Y if source_window else 0)), radius)
+		after = Proj(max(0, radius - (source_window.pad_after.Y if source_window else 0)), radius)
+		minimum = interior + before + after
+		canvas = Proj(*(
+			sfft.next_fast_len(size) if size > original else size
+			for size, original in zip(minimum.as_tuple(), shape, strict=True)
+		))
+		remainder = canvas - minimum
+		before = before + remainder // Proj(2, 2)
+		after = after + remainder - remainder // Proj(2, 2)
+	elif pad:
+		raise ValueError(f"unknown phase padding mode: {padding!r}")
 	return TomoWindow(
 		interior, before, interior.make_with(0), interior.make_with(1),
-		pad_after=canvas - interior - before,
+		pad_after=after,
 	)
 
 
@@ -89,6 +119,7 @@ def single_material_filter(
 	projections: np.ndarray, pixel_m: float, distance_m: float, slope: float, *,
 	pad: bool = True, material_alpha: float = 0, envelope=None,
 	dtype=np.float32, workers: int = 1, denominator: np.ndarray | None = None,
+	padding: PhasePadding = "kernel", window: TomoWindow | None = None,
 ) -> np.ndarray:
 	"""Filter transmission with the material line and one affine defect step.
 
@@ -98,7 +129,11 @@ def single_material_filter(
 	"""
 
 	image = np.asarray(projections, dtype=dtype)
-	window = phase_fft_window(image.shape[-2:], pad)
+	if window is None:
+		window = phase_fft_window(
+			image.shape[-2:], pad, pixel_m=pixel_m, distance_m=distance_m,
+			slope=slope, padding=padding,
+		)
 	if denominator is None:
 		denominator = slope_denominator(window, pixel_m, distance_m, slope)
 	values = phase_pad(image, window)
@@ -149,13 +184,14 @@ def retrieve_single(
 	pad: bool = True, material_alpha: float = 0, envelope=None,
 	dtype=np.float32, workers: int = 1, denominator: np.ndarray | None = None,
 	epsilon: float = 1e-6,
+	padding: PhasePadding = "kernel", window: TomoWindow | None = None,
 ) -> np.ndarray:
 	"""Retrieve attenuation using the calibrated single-distance material line."""
 
 	transmission = single_material_filter(
 		projections, pixel_m, distance_m, slope, pad=pad,
 		material_alpha=material_alpha, envelope=envelope, dtype=dtype,
-		workers=workers, denominator=denominator,
+		workers=workers, denominator=denominator, padding=padding, window=window,
 	)
 	return negative_log(transmission, epsilon=epsilon, maximum=None)
 

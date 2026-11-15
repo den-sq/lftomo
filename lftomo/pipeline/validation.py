@@ -290,6 +290,7 @@ def validate_pipeline(
 			input_buffer=input_buffer, output_buffer=output_buffer,
 			allocation_buffer=allocation_buffer,
 			output_role=output_role, retires_role=retires_role,
+			input_window=current_window,
 		))
 		upstream_mutated = upstream_mutated or contract.mutates_input
 		row_identity_available = row_identity_available and not contract.resamples_detector

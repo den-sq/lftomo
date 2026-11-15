@@ -15,7 +15,10 @@ from lftomo.pipeline.stages import (
 	PaganinFilterStage, PaganinStage, TIFFStackReadStage, WeightedNormalizeStage,
 )
 from lftomo.pipeline.stages.phase import _paganin_transfer
-from lftomo.prep.phase import phase_fft_window, phase_pad, phase_unpad, retrieve_single
+from lftomo.prep.phase import (
+	phase_fft_window, phase_kernel_radius, phase_pad, phase_unpad, retrieve_single,
+	single_material_filter,
+)
 from lftomo.storage import ManagedBuffer
 from lftomo.util.shapes import Proj, ProjOrder, SinoOrder
 from lftomo.util.window import DataRef, TomoWindow
@@ -66,14 +69,14 @@ def test_affine_retrieval_matches_frozen_fresnel_fixture(reference, pad, kind):
 	envelope = reference["envelope"] if kind == "spatial" else 3e-4
 	actual = retrieve_single(
 		reference["transmission"], 1e-6, 0.01, 1e-9,
-		material_alpha=2e-8, envelope=envelope, pad=pad,
+		material_alpha=2e-8, envelope=envelope, pad=pad, padding="reference",
 	)
 	np.testing.assert_array_equal(actual, reference[f"{kind}_{int(pad)}"])
 	assert actual.dtype == np.float32
 
 
 def test_fft_padding_is_owned_by_the_canonical_window():
-	window = phase_fft_window((7, 10), True)
+	window = phase_fft_window((7, 10), True, padding="reference")
 	assert isinstance(window, TomoWindow)
 	assert window.pad_before == Proj(1, 2)
 	assert window.pad_after == Proj(2, 3)
@@ -82,7 +85,7 @@ def test_fft_padding_is_owned_by_the_canonical_window():
 	canvas = phase_pad(image, window)
 	np.testing.assert_array_equal(phase_unpad(canvas, window), image)
 	assert np.shares_memory(canvas, phase_unpad(canvas, window))
-	assert phase_fft_window((1, 10), True).with_pad().shape == Proj(1, 15)
+	assert phase_fft_window((1, 10), True, padding="reference").with_pad().shape == Proj(1, 15)
 	from lftomo.runner import _json_value
 	from lftomo.util.converter import CONVERTER
 
@@ -90,6 +93,56 @@ def test_fft_padding_is_owned_by_the_canonical_window():
 	restored = CONVERTER.structure(document["phase_filter_signature"][1], DataRef)
 	assert restored.pad_before == window.pad_before
 	assert restored.pad_after == window.pad_after
+
+
+def test_kernel_canvas_covers_eight_decay_lengths_on_each_side():
+	# L = sqrt(z*s)/pixel = sqrt(10) pixels; eight lengths need 26 pixels.
+	assert phase_kernel_radius(1e-6, 0.01, 1e-9) == 26
+	window = phase_fft_window((7, 10), pixel_m=1e-6, distance_m=0.01, slope=1e-9)
+	assert window.pad_before == Proj(26, 26)
+	assert window.pad_after == Proj(27, 27)
+	assert window.with_pad().shape == Proj(60, 63)
+	image = np.arange(70).reshape(7, 10)
+	canvas = phase_pad(image, window)
+	np.testing.assert_array_equal(phase_unpad(canvas, window), image)
+	assert canvas[0, 0] == image[0, 0]
+	assert canvas[-1, -1] == image[-1, -1]
+
+
+@pytest.mark.parametrize("rows, expected_before, expected_after, expected_rows", [
+	((2, 7), 6, 0, 21),  # The source boundary supplies only two of eight leading rows.
+	((20, 27), 0, 0, 23),  # Both sides are covered: retain the non-fast Y length 23.
+])
+def test_kernel_canvas_supplements_each_realized_source_halo_side(
+	rows, expected_before, expected_after, expected_rows,
+):
+	source = TomoWindow.from_bounds(ProjOrder(3, 40, 10), y=rows, halo=8)
+	held = source.with_pad().shape
+	window = phase_fft_window(
+		(held.Y, held.X), pixel_m=1e-6, distance_m=0.01, slope=1e-10,
+		source_window=source,
+	)
+	assert window.pad_before == Proj(expected_before, 8)
+	assert window.pad_after == Proj(expected_after, 9)
+	assert window.with_pad().shape == Proj(expected_rows, 27)
+	# Reference compatibility ignores real halo when sizing its numerical canvas.
+	reference = phase_fft_window((held.Y, held.X), padding="reference", source_window=source)
+	plain_reference = phase_fft_window((held.Y, held.X), padding="reference")
+	assert reference.pad_before == plain_reference.pad_before
+	assert reference.pad_after == plain_reference.pad_after
+
+
+@pytest.mark.parametrize("pad", [False, True])
+def test_slope_filter_preserves_dc_and_retrieval_returns_its_negative_log(pad):
+	transmission = np.full((2, 7, 10), 0.8)
+	filtered = single_material_filter(transmission, 1e-6, 0.01, 1e-9, pad=pad, dtype=np.float64)
+	attenuation = retrieve_single(transmission, 1e-6, 0.01, 1e-9, pad=pad, dtype=np.float64)
+	np.testing.assert_allclose(filtered, transmission, rtol=2e-15, atol=0)
+	np.testing.assert_allclose(attenuation, -np.log(transmission), rtol=2e-15, atol=0)
+	if not pad:
+		window = phase_fft_window(transmission.shape[-2:], pad=False)
+		assert window.pad_before == window.pad_after == Proj(0, 0)
+		assert window.with_pad().shape == Proj(7, 10)
 
 
 @pytest.mark.parametrize("params", [
@@ -128,7 +181,7 @@ def test_projection_dispatch_uses_source_envelope_and_managed_filter(reference, 
 		selected = selected.transpose(1, 0, 2).copy()
 	stage = _ObservedAffineStage(
 		slope=1e-9, material_alpha=2e-8,
-		envelope_m=reference["envelope"].tolist(), fft_pad=pad,
+		envelope_m=reference["envelope"].tolist(), fft_pad=pad, padding="reference",
 	)
 	with PipelineRunContext(max_workers=2) as context:
 		working = context.storage.allocate(layout(*selected.shape), selected.dtype, role="normalized")
@@ -169,6 +222,7 @@ def test_serial_affine_stage_prepares_envelope_once(reference, kind):
 	stage = PaganinStage(
 		slope=1e-9, material_alpha=2e-8,
 		envelope_m=3e-4 if kind == "scalar" else reference["envelope"].tolist(),
+		padding="reference",
 	)
 	stage.run(state)
 	np.testing.assert_array_equal(values, reference[f"{kind}_1"])
@@ -177,7 +231,7 @@ def test_serial_affine_stage_prepares_envelope_once(reference, kind):
 
 
 def test_planning_counts_the_real_frequency_canvas():
-	stage = PaganinStage(slope=1e-9, material_alpha=2e-8, envelope_m=[[3e-4]])
+	stage = PaganinStage(slope=1e-9, material_alpha=2e-8, envelope_m=[[3e-4]], padding="reference")
 	plan = validate_pipeline(
 		[TIFFStackReadStage(order="projection"), WeightedNormalizeStage(), stage],
 		_scan(theta=7, rows=10, columns=12),

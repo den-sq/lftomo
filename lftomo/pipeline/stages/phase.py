@@ -19,6 +19,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.prep.phase import (
+	PhasePadding,
 	negative_log as _negative_log,
 	phase_fft_window,
 	phase_frequency_squared,
@@ -83,21 +84,30 @@ def prepare_phase_filter(stage: Stage, state: PipelineState) -> None:
 	if getattr(stage.params, "slope", None) is None:
 		_resolved_phase_filter(state, shape, stage.params.alpha)
 	else:
-		_resolved_slope_filter(state, shape, slope=stage.params.slope, pad=stage.params.fft_pad)
+		_resolved_slope_filter(
+			state, shape, slope=stage.params.slope, pad=stage.params.fft_pad, padding=stage.params.padding,
+		)
 		_prepare_material_envelope(stage, state)
 
 
-def slope_filter_shape(shape, pad: bool) -> ImgSlice:
+def slope_filter_shape(shape, scan, source_window, *, slope: float, pad: bool, padding: PhasePadding) -> ImgSlice:
 	"""Derive the shared real-frequency allocation from its canonical canvas."""
-	canvas = phase_fft_window((shape.Y, shape.X), pad).with_pad().shape
+	canvas = phase_fft_window(
+		(shape.Y, shape.X), pad, pixel_m=scan.pixel_size_um * 1e-6,
+		distance_m=scan.ssd_cm * 1e-2, slope=slope, padding=padding, source_window=source_window,
+	).with_pad().shape
 	return ImgSlice(canvas.Y, canvas.X // 2 + 1)
 
 
 def _resolved_slope_filter(
 	state: PipelineState, shape: tuple[int, int], *, slope: float, pad: bool,
+	padding: PhasePadding = "kernel",
 ) -> np.ndarray:
-	window = phase_fft_window(shape, pad)
 	pixel_m, distance_m = state.scan.pixel_size_um * 1e-6, state.scan.ssd_cm * 1e-2
+	window = phase_fft_window(
+		shape, pad, pixel_m=pixel_m, distance_m=distance_m, slope=slope,
+		padding=padding, source_window=state.source_window,
+	)
 	signature = ("slope", window, pixel_m, distance_m, slope)
 	previous = state.artifacts.get("phase_filter_signature")
 	if (
@@ -154,13 +164,13 @@ def _material_envelope(state: PipelineState):
 
 
 def _slope_filtered(stage: Stage, state: PipelineState, image: np.ndarray) -> np.ndarray:
+	denominator = buffer_view(state.artifacts["phase_filter"])
+	window = state.artifacts["phase_filter_signature"][1]
 	return single_material_filter(
 		image, state.scan.pixel_size_um * 1e-6, state.scan.ssd_cm * 1e-2,
 		stage.params.slope, material_alpha=stage.params.material_alpha,
 		envelope=_material_envelope(state), pad=stage.params.fft_pad,
-		denominator=_resolved_slope_filter(
-			state, image.shape, slope=stage.params.slope, pad=stage.params.fft_pad,
-		), workers=1,
+		denominator=denominator, window=window, workers=1,
 	)
 
 
@@ -265,6 +275,7 @@ class PaganinFilterStage(ProjectionStage):
 		material_alpha: float = 0.0
 		envelope_m: float | list | None = None
 		fft_pad: bool = True
+		padding: PhasePadding = "kernel"
 
 		@model_validator(mode="after")
 		def validate_material_line(self):
@@ -277,15 +288,21 @@ class PaganinFilterStage(ProjectionStage):
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
 		if params.enabled:
+			contract = cls.contract
+			if params.slope is not None and params.padding == "kernel":
+				contract = replace(contract, required_pad=PadRequirement(
+					phase_fft_y=params.fft_pad, phase_slope=params.slope,
+					phase_fft_passes=2 if params.material_alpha != 0 else 1,
+				))
 			if params.material_alpha != 0:
 				return replace(
-					cls.contract,
+					contract,
 					produces_artifacts=cls.contract.produces_artifacts + ("phase_envelope",),
 					managed_artifacts=cls.contract.managed_artifacts + (
 						("phase_envelope",) if isinstance(params.envelope_m, list) else ()
 					),
 				)
-			return cls.contract
+			return contract
 		return replace(
 			cls.contract,
 			mutates_input=False,
@@ -302,10 +319,13 @@ class PaganinFilterStage(ProjectionStage):
 			prepare_phase_filter(self, state)
 		return super().run(state)
 
-	def phase_filter_shape(self, shape) -> ImgSlice:
+	def phase_filter_shape(self, shape, scan, source_window=None) -> ImgSlice:
 		return (
 			ImgSlice(shape.Y, shape.X) if self.params.slope is None
-			else slope_filter_shape(shape, self.params.fft_pad)
+			else slope_filter_shape(
+				shape, scan, source_window, slope=self.params.slope,
+				pad=self.params.fft_pad, padding=self.params.padding,
+			)
 		)
 
 	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:

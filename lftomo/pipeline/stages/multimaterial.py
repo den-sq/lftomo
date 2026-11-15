@@ -14,7 +14,7 @@ from lftomo.pipeline.core import (
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.stages.phase import slope_filter_shape
 from lftomo.prep.materials import fbp, fit_material_line, forward_project, predict_filter_error, segment_materials
-from lftomo.prep.phase import retrieve_single, wavelength_m
+from lftomo.prep.phase import PhasePadding, retrieve_single, wavelength_m
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 
 
@@ -48,6 +48,7 @@ class MultimaterialStage(Stage):
 		classify_sigma: float = Field(default=1.5, ge=0)
 		label_smooth: int = Field(default=3, ge=0)
 		pad: bool = True
+		padding: PhasePadding = "kernel"
 
 		@model_validator(mode="after")
 		def material_columns(self):
@@ -75,7 +76,9 @@ class MultimaterialStage(Stage):
 		from dataclasses import replace
 
 		return replace(cls.contract, required_pad=PadRequirement(
-			phase_fft_y=True, phase_fft_passes=params.n_iter + 1,
+			phase_fft_y=params.pad if params.padding == "kernel" else True,
+			phase_fft_passes=params.n_iter + 1,
+			phase_slope=params.line_fit["slope"] if params.padding == "kernel" else None,
 		))
 
 	def bounded_work_requests(self, input_spec):
@@ -104,13 +107,16 @@ class MultimaterialStage(Stage):
 
 		return run_multimaterial_stage(self, state)
 
-	def phase_filter_shape(self, shape):
-		return slope_filter_shape(shape, self.params.pad)
+	def phase_filter_shape(self, shape, scan, source_window=None):
+		return slope_filter_shape(
+			shape, scan, source_window, slope=self.params.line_fit["slope"],
+			pad=self.params.pad, padding=self.params.padding,
+		)
 
-	def retrieve(self, image, baseline, scan, denominator):
+	def retrieve(self, image, baseline, scan, denominator, window):
 		baseline[...] = retrieve_single(
 			image, scan.pixel_size_um * 1e-6, scan.ssd_cm / 100,
-			self.params.line_fit["slope"], pad=self.params.pad, workers=1, denominator=denominator,
+			self.params.line_fit["slope"], pad=self.params.pad, workers=1, denominator=denominator, window=window,
 		)
 		if self.params.air_ratio:
 			margin = max(1, int(self.params.air_ratio * image.shape[-1]))
@@ -141,7 +147,7 @@ class MultimaterialStage(Stage):
 			previous_labels[...] = labels
 		return changed
 
-	def correct(self, psi, synthesis, correction, scan, denominator):
+	def correct(self, psi, synthesis, correction, scan, denominator, window):
 		# FFT/gradient return arrays are temporary outputs of SciPy/NumPy; no
 		# nested executor or reusable, unmanaged work plane is created here.
 		np.negative(synthesis, out=synthesis)
@@ -149,7 +155,7 @@ class MultimaterialStage(Stage):
 		delta = predict_filter_error(
 			psi, synthesis, scan.energy_keV, scan.pixel_size_um * 1e-6,
 			scan.ssd_cm / 100, self.params.line_fit["slope"], pad=self.params.pad, workers=1,
-			denominator=denominator,
+			denominator=denominator, window=window,
 		)[0]
 		correction *= 1 - self.params.omega
 		correction += self.params.omega * delta

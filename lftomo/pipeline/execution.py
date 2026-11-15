@@ -189,6 +189,7 @@ def run_material_retrieval_kernel(source, baseline, payload, stage, work_range, 
 		stage.retrieve(
 			buffer_view(source)[index], buffer_view(baseline)[index],
 			payload.scan, buffer_view(denominator),
+			payload.artifacts["phase_filter_signature"][1],
 		)
 
 
@@ -213,6 +214,7 @@ def run_material_correction_kernel(psi, synthesis, correction, payload, stage, w
 		stage.correct(
 			buffer_view(psi)[index], buffer_view(synthesis)[index], buffer_view(correction)[index],
 			payload.scan, buffer_view(denominator),
+			payload.artifacts["phase_filter_signature"][1],
 		)
 
 
@@ -238,7 +240,7 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 
 	_resolved_slope_filter(
 		state, (state.working_array.shape.Y, state.working_array.shape.X),
-		slope=stage.params.line_fit["slope"], pad=stage.params.pad,
+		slope=stage.params.line_fit["slope"], pad=stage.params.pad, padding=stage.params.padding,
 	)
 	denominator = state.artifacts["phase_filter"]
 	executor = state.executor or getattr(state.storage, "pipeline_executor", None)

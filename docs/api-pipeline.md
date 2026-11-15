@@ -84,6 +84,7 @@ FFT extent, and defaults exactly.
     material_alpha: 2.0e-8
     envelope_m: 0.0003
     fft_pad: true
+    padding: kernel
 ```
 
 Nonzero `material_alpha` requires both `slope` and `envelope_m`. The envelope is
@@ -98,12 +99,17 @@ The affine operation performs one approximate defect-correction step; it does
 not make the affine inversion exact. These plain values can be copied from the
 mctutil calibration export without importing that package.
 
-For the slope path, `fft_pad: true` (the default) edge-fills each numerical FFT
-canvas to `next_fast_len(int(1.5 * dimension))`. `TomoWindow` owns this canvas,
-including asymmetric padding and interior crops. This generated numerical
-padding is separate from the source halo described in
-[windowed-streaming.md](windowed-streaming.md). The FFT remains extent-sensitive;
-arbitrary finite halos do not establish exact whole-volume equivalence.
+For the slope path, `fft_pad: true` and `padding: kernel` (the defaults) derive
+the numerical FFT canvas from eight kernel decay lengths, subtracting realized
+source halo independently on each Y side. Only axes still requiring edge fill
+round up to a fast FFT length. `padding: reference` retains the previous
+`next_fast_len(int(1.5 * dimension))` canvas regardless of real halo;
+`fft_pad: false` uses a periodic FFT. `TomoWindow` owns this canvas, including
+asymmetric padding and interior crops. See
+[Paganin padding](paganin-phase-stages.md#padding-for-calibrated-material-lines)
+for the tail bound and [windowed-streaming.md](windowed-streaming.md) for source
+context. The FFT remains extent-sensitive; arbitrary finite halos do not
+establish exact whole-volume equivalence.
 `phase.paganin_filter` returns filtered transmission. `phase.paganin` applies
 the terminal negative log with a slope-path default `epsilon: 1.0e-6`; an
 explicit `epsilon` retains its existing clipping policy. The legacy path keeps
