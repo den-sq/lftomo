@@ -359,13 +359,15 @@ def validate_pipeline(
 		index = stop
 
 	resolved_steps = tuple(steps)
+	resolved_segments = tuple(segments)
 	schedule = build_allocation_schedule(
 		resolved_steps, stages, scan,
 		enable_aliasing=enable_aliasing,
 		enable_engine_aliasing=enable_engine_aliasing,
 		external_pins=external_pins,
+		segments=resolved_segments,
 	)
 	return PipelinePlan(
-		steps=resolved_steps, segments=tuple(segments), warnings=tuple(warnings),
+		steps=resolved_steps, segments=resolved_segments, warnings=tuple(warnings),
 		allocation_schedule=schedule,
 	)

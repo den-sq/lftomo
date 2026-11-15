@@ -18,9 +18,9 @@ import numpy as np
 import psutil
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import DataDomain, Pipeline, PipelineRunContext, PipelineState
+from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState, collect_bounded_work
 from lftomo.pipeline.stages import VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
-from lftomo.pipeline.stages.stripe import _vo_work_planes
+from lftomo.pipeline.stages.stripe import VO_MEDIAN_PAD_WORK_ARTIFACT, _vo_work_planes
 from lftomo.prep.stripe import _remove_large_array, _remove_sort_array
 from lftomo.util.shapes import ProjOrder
 
@@ -45,25 +45,20 @@ class VoBenchmarkResult:
 
 
 def scratch_report(
-	shape: tuple[int, int, int], dtype=np.float32, *, median_pad_half_width: int = 0,
+	stages, input_spec: BufferSpec,
 ) -> dict[str, int]:
-	"""Return exact rows-proportional Vo scratch allocation for ``Theta,Y,X``."""
+	"""Adapt the same Stage requests used by execution to benchmark result fields."""
 
-	theta, rows, columns = shape
-	items = int(theta) * int(rows) * int(columns)
-	float_bytes = items * np.dtype(dtype).itemsize
-	index_bytes = items * np.dtype(np.uint32).itemsize
-	median_pad_bytes = (
-		int(rows) * int(theta) * (int(columns) + 2 * median_pad_half_width)
-		* np.dtype(dtype).itemsize
-		if median_pad_half_width else 0
-	)
+	by_role = {
+		request.role: request.buffer_spec.shape.nbytes(request.buffer_spec.dtype)
+		for request in collect_bounded_work(stages, input_spec)
+	}
 	return {
-		"input_bytes": float_bytes,
-		"float_work_bytes": float_bytes,
-		"index_work_bytes": index_bytes,
-		"median_pad_work_bytes": median_pad_bytes,
-		"managed_scratch_bytes": float_bytes + index_bytes + median_pad_bytes,
+		"input_bytes": input_spec.shape.nbytes(input_spec.dtype),
+		"float_work_bytes": by_role.get("vo_float_work", 0),
+		"index_work_bytes": by_role.get("vo_index_work", 0),
+		"median_pad_work_bytes": by_role.get("vo_median_pad_work", 0),
+		"managed_scratch_bytes": sum(by_role.values()),
 	}
 
 
@@ -115,9 +110,11 @@ def _scan(shape: tuple[int, int, int]) -> Scan:
 class _ScipyVoSortStage(VoSortStripeStage):
 	"""Pre-#209 reusable-work stage retaining the SciPy line median."""
 
-	@property
-	def vo_line_median_half_width(self) -> int:
-		return 0
+	def bounded_work_requests(self, input_spec):
+		return tuple(
+			request for request in super().bounded_work_requests(input_spec)
+			if request.artifact_key != VO_MEDIAN_PAD_WORK_ARTIFACT
+		)
 
 	def run_sinogram(self, sinogram, state):
 		work, index_work, _pad_work = _vo_work_planes(state, sinogram)
@@ -130,9 +127,11 @@ class _ScipyVoSortStage(VoSortStripeStage):
 class _ScipyVoLargeStage(VoLargeStripeStage):
 	"""Pre-#209 reusable-work stage retaining the SciPy line median."""
 
-	@property
-	def vo_line_median_half_width(self) -> int:
-		return 0
+	def bounded_work_requests(self, input_spec):
+		return tuple(
+			request for request in super().bounded_work_requests(input_spec)
+			if request.artifact_key != VO_MEDIAN_PAD_WORK_ARTIFACT
+		)
 
 	def run_sinogram(self, sinogram, state):
 		work, index_work, _pad_work = _vo_work_planes(state, sinogram)
@@ -195,13 +194,7 @@ def run(
 	if workers < 1:
 		raise ValueError("workers must be positive")
 	stages = _stages(operation, bottleneck=variant == "bottleneck")
-	median_half_width = max(
-		(int(getattr(stage, "vo_line_median_half_width", 0)) for stage in stages),
-		default=0,
-	)
-	bytes_report = scratch_report(
-		shape, median_pad_half_width=median_half_width,
-	)
+	bytes_report = scratch_report(stages, BufferSpec(ProjOrder(*shape), np.float32))
 	managed = bytes_report["managed_scratch_bytes"]
 	if plan_only:
 		return VoBenchmarkResult(

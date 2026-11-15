@@ -159,6 +159,26 @@ temporaries.
 Flat/dark calibration arrays and detector-sized phase filters are also
 manager-issued artifacts declared by their producer contracts.
 
+Bounded segment and composite scratch is declared by `Stage.bounded_work_requests` and
+resolved by `collect_bounded_work` before allocation. `BufferSpec` owns each
+request's shape and dtype; same-key requests share one compatible allocation
+for the complete segment. Generic execution owns allocation, initialization,
+canonical unit scoping and retirement through the existing storage backend.
+The `bounded_work_allocations` artifact records each resolved role, shape,
+dtype and byte count. Vo's former `vo_scratch_allocations` report is replaced
+by this algorithm-independent report; benchmark result fields keep their
+existing meaning. Multimaterial planes, including the reconstruction-layout
+previous-label buffer, use this same hook and lifecycle; their initialization
+and memory plan derive from these requests. Direct NumPy composite execution
+allocates only requests marked `required_for_fallback` through `allocate_output`
+and removes temporary keys
+on completion or failure. Mixed-axis composites report no single unit axis.
+
+Requests are inspectable without execution. Non-sinogram Stage requests are
+included in the predictive allocation schedule. Bounded sinogram scratch is
+still omitted from the shared-memory peak; [#360](https://github.com/den-sq/lftomo/issues/360)
+tracks accounting for it once per segment, including standalone sinogram dispatch.
+
 Before starting a run's manager or reading projection pixels, the runner checks
 the largest padded window's planned shared-memory peak against available
 `/dev/shm` space on Linux. That same plan supplies the run's buffer reservations.

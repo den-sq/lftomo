@@ -16,11 +16,13 @@ from typing import Any, Callable, Iterable, Iterator, Sequence
 import numpy as np
 
 from lftomo.pipeline.core import (
+	BoundedWorkRequest,
 	BufferSpec,
 	PipelineState,
 	Stage,
 	allocate_output,
 	commit_output,
+	collect_bounded_work,
 )
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.storage import ManagedBuffer, buffer_view
@@ -151,7 +153,7 @@ def _unit_handle(
 
 
 def _unit_states(
-	state: PipelineState, axis: str,
+	state: PipelineState, axis: str, *, work_keys: tuple[str, ...] = (),
 ) -> Iterator[tuple[np.ndarray, PipelineState]]:
 	"""Bind numerical views and states to the same canonical unit iterator."""
 
@@ -162,14 +164,16 @@ def _unit_states(
 			row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
 		)
 		scoped_envelope = axis == "Theta" and "phase_envelope" in state.artifacts
-		row_state.artifacts = dict(state.artifacts) if scoped_envelope else state.artifacts
+		scoped_keys = (*work_keys, *(("phase_envelope",) if scoped_envelope else ()))
+		row_state.artifacts = dict(state.artifacts) if scoped_keys else state.artifacts
 		row_state.source_window = unit
+		_scope_bounded_work_to_unit(row_state, unit, local_index, work_keys)
 		if scoped_envelope:
 			_scope_phase_envelope(row_state, unit, local_index)
 		yield row_data[state.layout.point_index(**{axis: 0})], row_state
-		if scoped_envelope:
+		if scoped_keys:
 			state.artifacts.update({
-				key: value for key, value in row_state.artifacts.items() if key != "phase_envelope"
+				key: value for key, value in row_state.artifacts.items() if key not in scoped_keys
 			})
 
 
@@ -284,19 +288,15 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 	def dispatch(kernel, arguments):
 		return executor.submit_all(kernel, arguments) if parallel else [kernel(*args) for args in arguments]
 
-	specs = stage.work_specs(state.buffer_spec.shape)
-	work = {}
+	requests = _prepare_bounded_work(state, (stage,))
+	specs = {request.artifact_key: request.buffer_spec for request in requests}
+	work = state.artifacts
 
 	def scoped(key, unit, index):
-		return work[key][_unit_index(unit, index, specs[key][0])]
+		key = f"_multimaterial_{key}"
+		return work[key][_unit_index(unit, index, specs[key].shape)]
 
 	try:
-		for key, (shape, dtype) in specs.items():
-			work[key], _values = allocate_output(
-				state, shape, dtype, role=f"multimaterial_{key}",
-				reuse_from=(f"multimaterial_{key}",),
-			)
-		buffer_view(work["correction"]).fill(0)
 		dispatch(run_material_retrieval_kernel, (
 			(
 				state.working_array[_unit_index(unit, index, state.buffer_spec.shape)],
@@ -307,14 +307,14 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 		norms, changes = [], []
 		for iteration in range(stage.params.n_iter + 1):
 			np.subtract(
-				buffer_view(work["baseline"]), buffer_view(work["correction"]),
-				out=buffer_view(work["current"]), casting="unsafe",
+				buffer_view(work["_multimaterial_baseline"]), buffer_view(work["_multimaterial_correction"]),
+				out=buffer_view(work["_multimaterial_current"]), casting="unsafe",
 			)
 			counts = dispatch(run_material_classification_kernel, (
 				(
 					scoped("current", unit, index), scoped("psi", unit, index),
 					scoped("synthesis", unit, index),
-					None if "previous_labels" not in work else scoped("previous_labels", unit, index),
+					None if "_multimaterial_previous_labels" not in work else scoped("previous_labels", unit, index),
 					state.layout, stage, worker_scan, angles, iteration,
 				)
 				for unit, index in _buffer_units(state, "Y")
@@ -329,39 +329,26 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 				for unit, index in _buffer_units(state, "Theta")
 			))
 			# Reuse the synthesized-phase plane after its last consumer this pass.
-			np.square(buffer_view(work["correction"]), out=buffer_view(work["psi"]))
-			norms.append(float(np.sqrt(buffer_view(work["psi"]).mean())))
+			np.square(buffer_view(work["_multimaterial_correction"]), out=buffer_view(work["_multimaterial_psi"]))
+			norms.append(float(np.sqrt(buffer_view(work["_multimaterial_psi"]).mean())))
 			if iteration:
-				changes.append(float(sum(counts) / np.prod(specs["previous_labels"][0].as_tuple())))
-		np.asarray(state.working_array)[...] = buffer_view(work["current"])
+				changes.append(float(sum(counts) / np.prod(specs["_multimaterial_previous_labels"].shape.as_tuple())))
+		np.asarray(state.working_array)[...] = buffer_view(work["_multimaterial_current"])
 		state.artifacts["correction_norms"] = norms
 		state.artifacts["label_change"] = changes
 		return state
 	finally:
-		if state.storage is not None:
-			for key, handle in work.items():
-				if isinstance(handle, ManagedBuffer):
-					state.storage.retire(handle, role=f"multimaterial_{key}")
+		_release_bounded_work(state, requests)
 
 
-def _scope_vo_work_to_unit(
+def _scope_bounded_work_to_unit(
 	state: PipelineState, unit: DataRef, local_index: tuple[slice, ...],
+	work_keys: tuple[str, ...],
 ) -> None:
-	"""Bind bounded-segment scratch handles to one iterator-produced row slice."""
+	"""Bind requested scratch handles to one canonical iterator-produced unit."""
 
-	from lftomo.pipeline.stages.stripe import (
-		VO_FLOAT_WORK_ARTIFACT,
-		VO_INDEX_WORK_ARTIFACT,
-		VO_MEDIAN_PAD_WORK_ARTIFACT,
-	)
-
-	for key in (
-		VO_FLOAT_WORK_ARTIFACT, VO_INDEX_WORK_ARTIFACT, VO_MEDIAN_PAD_WORK_ARTIFACT,
-	):
-		if key in state.artifacts:
-			state.artifacts[key] = _unit_handle(
-				state.artifacts[key], unit, local_index,
-			)
+	for key in work_keys:
+		state.artifacts[key] = _unit_handle(state.artifacts[key], unit, local_index)
 
 
 def run_projection_kernel(
@@ -402,11 +389,12 @@ def run_sinogram_chain_kernel(
 	payload: _WorkerState,
 	local_index: tuple[slice, ...],
 	collect_timings: bool = False,
+	work_keys: tuple[str, ...] = (),
 ) -> tuple[float, ...]:
 	"""Process one unit-shaped row through a complete bounded Stage chain."""
 
 	state = _worker_state(handle, payload)
-	_scope_vo_work_to_unit(state, payload.source_window, local_index)
+	_scope_bounded_work_to_unit(state, payload.source_window, local_index, work_keys)
 	data = np.asarray(state.working_array)
 	layout = state.layout
 	working = data[layout.point_index(Y=0)]
@@ -422,114 +410,81 @@ def run_sinogram_chain_kernel(
 	return tuple(timings)
 
 
-def _prepare_vo_work(
-	state: PipelineState,
-	stages: Sequence[Stage],
-	row_count: int,
-	sinogram_shape: tuple[int, int],
-) -> tuple[tuple[ManagedBuffer, str], ...]:
-	"""Allocate row-indexed work planes shared by a fused Vo chain."""
+def _prepare_bounded_work(
+	state: PipelineState, stages: Sequence[Stage], axis: str | None = None,
+) -> tuple[BoundedWorkRequest, ...]:
+	"""Allocate and initialize Stage-declared work once for the complete segment.
 
-	if not any(getattr(stage, "uses_vo_work", False) for stage in stages):
-		return ()
+	Requests required for serial fallback use allocate_output's existing
+	allocation boundary even without managed dispatch. A mixed-axis composite has
+	no single dispatched axis to validate against every requested layout.
+	"""
+
+	requests = collect_bounded_work(stages, state.buffer_spec)
 	if not isinstance(state.working_array, ManagedBuffer) or state.storage is None:
-		return ()
-	from lftomo.pipeline.stages.stripe import (
-		VO_FLOAT_WORK_ARTIFACT,
-		VO_INDEX_WORK_ARTIFACT,
-		VO_MEDIAN_PAD_WORK_ARTIFACT,
-	)
-
-	if any(key in state.artifacts for key in (
-		VO_FLOAT_WORK_ARTIFACT, VO_INDEX_WORK_ARTIFACT, VO_MEDIAN_PAD_WORK_ARTIFACT,
-	)):
-		raise ValueError("Vo work artifacts are private to one bounded segment")
-	theta_count, column_count = sinogram_shape
-	if max(theta_count, column_count) > np.iinfo(np.uint32).max:
-		raise ValueError("Vo sorting indices exceed uint32 capacity")
-	shape = SinoOrder(row_count, theta_count, column_count)
-	float_dtype = np.dtype(state.working_array.dtype)
-	if not np.issubdtype(float_dtype, np.floating):
-		raise TypeError("Vo reusable work requires floating-point pipeline data")
-	median_half_width = max(
-		(int(getattr(stage, "vo_line_median_half_width", 0)) for stage in stages),
-		default=0,
-	)
-	if float_dtype not in (np.dtype(np.float32), np.dtype(np.float64)) or not float_dtype.isnative:
-		median_half_width = 0
-	allocated: list[tuple[ManagedBuffer, str]] = []
+		requests = tuple(request for request in requests if request.required_for_fallback)
+	if any(request.artifact_key in state.artifacts for request in requests):
+		raise ValueError("bounded work artifacts are private to one segment")
+	if axis is not None and any(
+		getattr(request.buffer_spec.shape, axis) != getattr(state.buffer_spec.shape, axis)
+		for request in requests
+	):
+		raise ValueError(f"bounded work must preserve the dispatched {axis} extent")
+	allocated: list[BoundedWorkRequest] = []
 	try:
-		float_work = state.storage.allocate(shape, float_dtype, role="vo_float_work")
-		if isinstance(float_work, list):
-			raise TypeError("Vo floating-point work allocation returned multiple buffers")
-		allocated.append((float_work, "vo_float_work"))
-		index_work = state.storage.allocate(shape, np.uint32, role="vo_index_work")
-		if isinstance(index_work, list):
-			raise TypeError("Vo sorting-index work allocation returned multiple buffers")
-		allocated.append((index_work, "vo_index_work"))
-		median_pad_work = None
-		if median_half_width:
-			median_pad_shape = SinoOrder(
-				row_count, theta_count, column_count + 2 * median_half_width,
+		for request in requests:
+			spec = request.buffer_spec
+			buffer, values = allocate_output(
+				state, spec.shape, spec.dtype, role=request.role, reuse_from=(request.role,),
 			)
-			median_pad_work = state.storage.allocate(
-				median_pad_shape, float_dtype, role="vo_median_pad_work",
-			)
-			if isinstance(median_pad_work, list):
-				raise TypeError("Vo median-pad work allocation returned multiple buffers")
-			allocated.append((median_pad_work, "vo_median_pad_work"))
-			median_pad_work.array().fill(0)
+			state.artifacts[request.artifact_key] = buffer
+			allocated.append(request)
+			if request.fill_value is not None:
+				values.fill(request.fill_value)
 	except BaseException:
-		for buffer, role in allocated:
-			state.storage.retire(buffer, role=role)
+		_release_bounded_work(state, tuple(allocated))
 		raise
-	state.artifacts[VO_FLOAT_WORK_ARTIFACT] = float_work
-	state.artifacts[VO_INDEX_WORK_ARTIFACT] = index_work
-	if median_pad_work is not None:
-		state.artifacts[VO_MEDIAN_PAD_WORK_ARTIFACT] = median_pad_work
-	float_bytes = shape.nbytes(float_dtype)
-	index_bytes = shape.nbytes(np.uint32)
-	median_pad_bytes = (
-		median_pad_shape.nbytes(float_dtype)
-		if median_pad_work is not None else 0
-	)
-	report = {
+	if requests and state.storage is not None:
+		state.artifacts.setdefault("bounded_work_allocations", []).append(
+			_bounded_work_report(state, requests, axis),
+		)
+	return requests
+
+
+def _bounded_work_report(
+	state: PipelineState, requests: tuple[BoundedWorkRequest, ...], axis: str | None,
+) -> dict[str, Any]:
+	"""Derive allocation observations from the same resolved workspace requests."""
+
+	return {
 		"scope": "window" if state.source_window is not None else "whole_volume",
-		"rows": row_count,
-		"sinogram_shape": [theta_count, column_count],
-		"float_dtype": float_dtype.str,
-		"index_dtype": np.dtype(np.uint32).str,
-		"float_bytes": float_bytes,
-		"index_bytes": index_bytes,
-		"median_pad_half_width": median_half_width,
-		"median_pad_bytes": median_pad_bytes,
-		"managed_bytes": float_bytes + index_bytes + median_pad_bytes,
-		"allocation_count": 2 + int(median_pad_work is not None),
+		"unit_axis": axis,
+		"units": getattr(state.buffer_spec.shape, axis) if axis is not None else None,
+		"buffers": [{
+			"artifact_key": request.artifact_key,
+			"role": request.role,
+			"shape": request.buffer_spec.shape.as_dict(),
+			"dtype": request.buffer_spec.dtype.str,
+			"bytes": request.buffer_spec.shape.nbytes(request.buffer_spec.dtype),
+		} for request in requests],
+		"managed_bytes": sum(
+			request.buffer_spec.shape.nbytes(request.buffer_spec.dtype)
+			for request in requests
+		),
+		"allocation_count": len(requests),
 		"indexing": "units_local_index",
 	}
-	state.artifacts.setdefault("vo_scratch_allocations", []).append(report)
-	return tuple(allocated)
 
 
-def _release_vo_work(
-	state: PipelineState, allocated: tuple[tuple[ManagedBuffer, str], ...],
+def _release_bounded_work(
+	state: PipelineState, requests: tuple[BoundedWorkRequest, ...],
 ) -> None:
-	"""Retire temporary Vo planes after all dispatched rows have completed."""
+	"""Remove and retire segment work only after all unit consumers complete."""
 
-	if not allocated:
-		return
-	from lftomo.pipeline.stages.stripe import (
-		VO_FLOAT_WORK_ARTIFACT,
-		VO_INDEX_WORK_ARTIFACT,
-		VO_MEDIAN_PAD_WORK_ARTIFACT,
-	)
-
-	state.artifacts.pop(VO_FLOAT_WORK_ARTIFACT, None)
-	state.artifacts.pop(VO_INDEX_WORK_ARTIFACT, None)
-	state.artifacts.pop(VO_MEDIAN_PAD_WORK_ARTIFACT, None)
-	if state.storage is not None:
-		for buffer, role in allocated:
-			state.storage.retire(buffer, role=role)
+	for request in requests:
+		buffer = state.artifacts.pop(request.artifact_key)
+		if state.storage is not None and isinstance(buffer, ManagedBuffer):
+			state.storage.retire(buffer, role=request.role)
 
 
 def write_tiff_slice_kernel(
@@ -935,10 +890,13 @@ def run_bounded_sinogram_segment(
 	for stage in stages:
 		if not callable(getattr(stage, "run_sinogram", None)):
 			raise TypeError(f"{stage.name} declares bounded views but has no run_sinogram kernel")
-	shape = state.buffer_spec.shape
-	row_count = shape.Y
-	sinogram_shape = (shape.Theta, shape.X)
-	allocated = _prepare_vo_work(state, stages, row_count, sinogram_shape)
+	# The ndarray sinogram path retains its numerical fallback without imposing
+	# managed-work dtype/capacity requirements on that path.
+	requests = (
+		_prepare_bounded_work(state, stages, "Y")
+		if isinstance(state.working_array, ManagedBuffer) and state.storage is not None else ()
+	)
+	work_keys = tuple(request.artifact_key for request in requests)
 	member_samples: list[list[float]] = [[] for _stage in stages]
 	try:
 		if isinstance(state.working_array, ManagedBuffer) and executor is not None:
@@ -948,7 +906,7 @@ def run_bounded_sinogram_segment(
 				rows = executor.submit_all(run_sinogram_chain_kernel, (
 					(
 						_unit_handle(state.working_array, unit, local_index), tuple(stages),
-						_payload(state, unit), local_index, timing_observer is not None,
+						_payload(state, unit), local_index, timing_observer is not None, work_keys,
 					)
 					for unit, local_index in _buffer_units(state, "Y")
 				))
@@ -964,7 +922,7 @@ def run_bounded_sinogram_segment(
 						member_samples[member_index].append(elapsed)
 		else:
 			# ndarray-only hermetic execution is deliberately serial.
-			for working, row_state in _unit_states(state, "Y"):
+			for working, row_state in _unit_states(state, "Y", work_keys=work_keys):
 				for member_index, stage in enumerate(stages):
 					if checkpoint is not None:
 						checkpoint()
@@ -975,7 +933,7 @@ def run_bounded_sinogram_segment(
 					if result is not None and result is not working:
 						working[...] = result
 	finally:
-		_release_vo_work(state, allocated)
+		_release_bounded_work(state, requests)
 	if timing_observer is not None:
 		timing_observer(tuple(tuple(samples) for samples in member_samples))
 	return state
