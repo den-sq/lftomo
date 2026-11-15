@@ -40,8 +40,10 @@ reconfigure the downstream reconstruction algorithm.
 `PipelineState.artifacts`, including empty histories when appropriate. The
 runner retains them in each `window_results` entry. The first history contains
 one RMS correction per update; the second compares successive labels used for
-updates and has `max(n_iter - 1, 0)` entries. Re-segmenting with `n_iter > 1` has
-no contraction guarantee and can drift when residuals have opposite signs.
+updates and has `max(n_iter - 1, 0)` entries. Both histories cover the entire
+padded window buffer, including halo rows; with finite halos, overlapping rows
+contribute to each neighboring window's history. Re-segmenting with `n_iter > 1`
+has no contraction guarantee and can drift when residuals have opposite signs.
 These histories are required evidence for assessing that behavior.
 Read them through `RunResult.artifacts["window_results"][i]["artifacts"]` or
 the runner's `--json-output`. `recon_run.yaml` records resolved configuration
