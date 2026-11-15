@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
+from pydantic import (
+	BaseModel, ConfigDict, Field, TypeAdapter, ValidationError,
+	field_validator, model_serializer, model_validator,
+)
 
 from lftomo.util.shapes import Proj, ProjOrder
 
@@ -70,6 +73,49 @@ class Detector(ConfigModel):
 		if self.rows is None or self.columns is None:
 			raise ValueError("window planning requires detector rows and columns")
 		return Proj(Y=self.rows, X=self.columns)
+
+
+class ParallelGeometry(ConfigModel):
+	"""Measured effective geometry for an existing parallel-beam scan."""
+
+	kind: Literal["parallel"] = "parallel"
+	pixel_size_um: float = Field(gt=0, description="Effective sample pixel size in micrometers.")
+	ssd_cm: float | None = Field(default=None, gt=0, description="Propagation distance in centimeters.")
+
+	@property
+	def magnification(self) -> float:
+		return 1.0
+
+	@property
+	def effective_distance_cm(self) -> float | None:
+		return self.ssd_cm
+
+	def effective_pixel_size_um(self, detector: Detector) -> float:
+		return self.pixel_size_um
+
+
+class ConeGeometry(ConfigModel):
+	"""Native cone distances; derive equivalent parallel geometry by Fresnel scaling."""
+
+	kind: Literal["cone"] = "cone"
+	source_to_sample_m: float = Field(gt=0, allow_inf_nan=False, description="Source-to-sample distance in metres.")
+	sample_to_detector_m: float = Field(gt=0, allow_inf_nan=False, description="Sample-to-detector distance in metres.")
+
+	@property
+	def magnification(self) -> float:
+		return (self.source_to_sample_m + self.sample_to_detector_m) / self.source_to_sample_m
+
+	@property
+	def effective_distance_cm(self) -> float:
+		return 100 * self.source_to_sample_m * self.sample_to_detector_m / (
+			self.source_to_sample_m + self.sample_to_detector_m
+		)
+
+	def effective_pixel_size_um(self, detector: Detector) -> float:
+		return detector.pixel_size_um / self.magnification
+
+
+ScanGeometry = Annotated[ParallelGeometry | ConeGeometry, Field(discriminator="kind")]
 
 
 class Helical(ConfigModel):
@@ -166,8 +212,7 @@ class Scan(ConfigModel):
 	"""Per-dataset immutable acquisition metadata."""
 
 	energy_keV: float = Field(gt=0, description="Beam energy in keV.")
-	pixel_size_um: float = Field(gt=0, description="Effective reconstructed pixel size in micrometers.")
-	ssd_cm: float | None = Field(default=None, gt=0, description="Sample-to-scintillator distance in centimeters.")
+	geometry: ScanGeometry = Field(description="Authoritative native or effective physical scan geometry.")
 	n_projections: int = Field(
 		gt=0, description="Number of recorded projection arrays/files present in the source."
 	)
@@ -178,6 +223,43 @@ class Scan(ConfigModel):
 	acquisition: Acquisition = Field(description="Projection-count and angle metadata.")
 	projections: ProjectionSource = Field(description="Projection storage description.")
 	metadata: dict[str, Any] = Field(default_factory=dict, description="Additional lineage-specific metadata.")
+
+	@model_validator(mode="before")
+	@classmethod
+	def _normalize_geometry(cls, values):
+		if not isinstance(values, dict):
+			return values
+		values = dict(values)
+		legacy = {name: values.pop(name) for name in ("pixel_size_um", "ssd_cm") if name in values}
+		if "geometry" in values:
+			if legacy:
+				raise ValueError("provide geometry or legacy pixel_size_um/ssd_cm, not both")
+		else:
+			values["geometry"] = {"kind": "parallel", **legacy}
+		return values
+
+	@model_serializer(mode="wrap")
+	def _serialize_geometry(self, handler):
+		values = handler(self)
+		if isinstance(self.geometry, ParallelGeometry) and "geometry" in values:
+			geometry = values.pop("geometry")
+			geometry.pop("kind", None)
+			values.update(geometry)
+		return values
+
+	@property
+	def pixel_size_um(self) -> float:
+		"""Effective sample pitch, derived from the authoritative geometry."""
+		return self.geometry.effective_pixel_size_um(self.detector)
+
+	@property
+	def ssd_cm(self) -> float | None:
+		"""Equivalent parallel propagation distance for phase retrieval."""
+		return self.geometry.effective_distance_cm
+
+	@property
+	def magnification(self) -> float:
+		return self.geometry.magnification
 
 	def projection_shape(self) -> ProjOrder:
 		"""Return canonical recorded-projection geometry for this scan."""

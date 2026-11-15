@@ -15,6 +15,15 @@ compatible NumPy/TomoPy compiled stack from conda. Development environments
 that run the reconstruction tests should install `.[dev,tomopy]` after creating
 that conda environment.
 
+## Physical voxel geometry
+
+The reconstruction lattice uses detector-index coordinates. Its physical pixel
+pitch is `Scan.pixel_size_um`: the supplied sample pitch for parallel scans, or
+the detector pitch divided by the Fresnel magnification for native cone scans.
+The same geometry supplies the effective distance and pixel pitch used for
+phase filtering and its padding. Reconstruction algorithms and their amplitude
+conventions are unchanged; see [cone-beam configuration](configuration.md#cone-beam-fresnel-geometry).
+
 ## Projection angles
 
 When no explicit `angles` artifact is supplied, gridrec and center Stages use

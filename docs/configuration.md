@@ -35,7 +35,7 @@ it to measured facts.
 | Field | Meaning | Where to find it |
 |---|---|---|
 | `energy_keV` | Beam energy | Beamline/instrument metadata (dxchange: `measurement/instrument/monochromator/energy`, in eV) |
-| `pixel_size_um` | Effective pixel size at the sample | Detector metadata (dxchange: `measurement/instrument/detector/pixel_size`, in mm) |
+| `pixel_size_um` | Effective pixel size at the sample for parallel geometry; omit for native cone geometry below | Detector metadata (dxchange: `measurement/instrument/detector/pixel_size`, in mm) |
 | `n_projections` | Number of recorded projection images actually present | Length of the projection stack |
 | `degrees_per_fov` | Angular coverage per field of view, usually 180 or 360 | Scan setup |
 | `detector.pixel_size_um` | Detector pixel size | Detector metadata |
@@ -55,6 +55,43 @@ it to measured facts.
 - `metadata`: free-form, lineage-specific values. It also carries legacy
   four-map flat fields (`metadata.flat_fields`), see
   [Calibration](#calibration).
+
+### Cone-beam Fresnel geometry
+
+For a cone scan, replace the top-level `pixel_size_um` and `ssd_cm` inputs with
+native source-to-sample and sample-to-detector distances in metres:
+
+```yaml
+geometry:
+  kind: cone
+  source_to_sample_m: 0.5
+  sample_to_detector_m: 0.5
+detector:
+  pixel_size_um: 10
+  rows: 2048
+  columns: 2048
+```
+
+`detector.pixel_size_um` remains the sole detector-pitch input. `Scan.geometry`
+derives magnification `M = (R1 + R2) / R1`, effective propagation distance
+`R1 * R2 / (R1 + R2)`, and sample pitch `detector.pixel_size_um / M`.
+The example has magnification 2, effective distance 25 cm, and effective sample
+pitch 5 µm. Distances must be finite and positive.
+
+The read-only `Scan.pixel_size_um` and `Scan.ssd_cm` properties expose these
+effective values to the existing phase filter, phase-padding planner, helical
+pitch conversion, and reconstruction output metadata. `Scan.magnification`
+exposes the derived magnification. Reconstruction still uses its existing
+detector-index lattice and output conventions; physical voxel pitch is the
+effective sample pitch. This geometry derivation does not resample projections
+or change reconstruction amplitudes.
+
+Existing parallel scan files continue to accept and serialize top-level
+`pixel_size_um` and optional `ssd_cm`. On input those fields become one
+`ParallelGeometry` owned by `Scan.geometry`; the legacy serialized values are
+derived from that model. Cone files serialize only native geometry inputs,
+never effective values that could disagree with them. Supplying both
+`geometry` and the legacy top-level geometry fields is rejected.
 
 ### Angles
 
