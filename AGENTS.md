@@ -100,9 +100,16 @@ regression tests rather than in a second specification here.
   data-dependent Tier-2 or acceptance work unless the task calls for it and
   the required external data is available.
 - For architecture-sensitive behavior, prove the canonical seam was exercised;
-  output equivalence alone is insufficient. Prefer provenance assertions such
-  as allocation reports, lifecycle events, dispatch traces, or public-adapter
-  identity checks.
+  output equivalence alone is insufficient. The proof is PR evidence, not a
+  new test: state the seams the change uses, the existing seams searched, and
+  paste the evidence that each was exercised (an allocation report, lifecycle
+  events, a dispatch trace, or a public-adapter identity check) in the PR
+  template's `Shared-basis audit` and `Verification` sections.
+- Permanent seam enforcement is one repository-wide gate per seam, such as
+  `tests/pipeline/test_window_geometry_ownership.py`. A change that introduces
+  a seam adds its gate; a change that extends a seam extends the existing gate
+  if it does not already cover the extension. Do not add tests that only
+  assert how one change is wired to a seam.
 
 ## Code Review Rules
 
@@ -110,5 +117,7 @@ regression tests rather than in a second specification here.
   `Shared-basis audit` and retain any load-bearing decisions that were surfaced
   before implementation.
 - Treat an undeclared overlapping mechanism as a defect even when output tests
-  pass. Require exercise/provenance evidence when the change concerns storage,
+  pass. Require the PR's seam evidence when the change concerns storage,
   windowing, logging, lifecycle, dispatch, or another canonical ownership seam.
+- Treat a new seam without a repository-wide gate, or a test that only asserts
+  one change's wiring to a seam, as a finding.

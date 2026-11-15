@@ -106,10 +106,12 @@ The point of the unification is *net code reduction*.
 4. **S-issues end when the ledger clears.** Done means the listed
    deletions/fixes landed; nothing else rides along.
 
-Every stage PR additionally carries a **provenance test** — an assertion that
-the canonical seam was exercised (e.g. no `projection_start` key in
-artifacts; compatibility-helper imports gone), not just output equivalence — plus the
-existing numerical tests unchanged.
+Every stage PR additionally carries **provenance evidence** in the PR body —
+the canonical seams it uses, the existing seams searched, and evidence that
+each was exercised (e.g. no `projection_start` key in the run's artifacts;
+compatibility-helper imports gone), not just output equivalence — plus the
+existing numerical tests unchanged. Durable enforcement is the seam's
+repository-wide gate (see `AGENTS.md`), not a per-PR test.
 
 ## Data-copy ledger
 
