@@ -5,7 +5,9 @@ Module for phase retrieval.  Rewritten from tomopy.
 # ADD COPYRIGHT NOTICE - SEE TOMOPY
 
 from multiprocessing import cpu_count, Pool
+from dataclasses import replace
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import numpy as np
 from scipy import fft as sfft
@@ -49,12 +51,10 @@ def phase_fft_window(shape: tuple[int, int], pad: bool = True) -> TomoWindow:
 	)
 
 
-def phase_pad(array: np.ndarray, window: TomoWindow) -> np.ndarray:
+def phase_pad(array: np.ndarray, window: TomoWindow, *, out: np.ndarray | None = None) -> np.ndarray:
 	"""Edge-fill the canvas described by ``window`` around trailing Y/X axes."""
 
-	return np.pad(array, [(0, 0)] * (array.ndim - 2) + list(zip(
-		window.pad_before.as_tuple(), window.pad_after.as_tuple(), strict=True,
-	)), mode="edge")
+	return window.pad_array(array, out=out)
 
 
 def phase_unpad(array: np.ndarray, window: TomoWindow) -> np.ndarray:
@@ -89,23 +89,30 @@ def single_material_filter(
 	projections: np.ndarray, pixel_m: float, distance_m: float, slope: float, *,
 	pad: bool = True, material_alpha: float = 0, envelope=None,
 	dtype=np.float32, workers: int = 1, denominator: np.ndarray | None = None,
+	window: TomoWindow | None = None, padding_work: np.ndarray | None = None,
+	envelope_work: np.ndarray | None = None,
 ) -> np.ndarray:
 	"""Filter transmission with the material line and one affine defect step.
 
 	Nonzero ``material_alpha`` needs the spatial thickness envelope in metres.
+	A supplied ``window`` owns the canvas instead of the ``pad`` convenience
+	argument. Optional work arrays have its padded shape, including leading
+	batch axes, and the requested ``dtype``; their contents are overwritten.
 	The affine step is approximate. SciPy FFT and gradient outputs are unavoidable
 	numerical-library temporaries; persistent filters remain caller-owned.
 	"""
 
 	image = np.asarray(projections, dtype=dtype)
-	window = phase_fft_window(image.shape[-2:], pad)
+	window = phase_fft_window(image.shape[-2:], pad) if window is None else window
 	if denominator is None:
 		denominator = slope_denominator(window, pixel_m, distance_m, slope)
-	values = phase_pad(image, window)
+	values = phase_pad(image, window, out=padding_work)
 	if material_alpha != 0:
 		if envelope is None:
 			raise ValueError("nonzero material_alpha requires envelope_m for one-step defect correction")
-		thickness = phase_pad(np.broadcast_to(np.asarray(envelope, dtype=dtype), image.shape), window)
+		thickness = phase_pad(
+			np.broadcast_to(np.asarray(envelope, dtype=dtype), image.shape), window, out=envelope_work,
+		)
 		initial = np.clip(sfft.irfft2(
 			sfft.rfft2(values, workers=workers) / denominator,
 			s=window.with_pad().shape.as_tuple(), workers=workers,
@@ -149,13 +156,16 @@ def retrieve_single(
 	pad: bool = True, material_alpha: float = 0, envelope=None,
 	dtype=np.float32, workers: int = 1, denominator: np.ndarray | None = None,
 	epsilon: float = 1e-6,
+	window: TomoWindow | None = None, padding_work: np.ndarray | None = None,
+	envelope_work: np.ndarray | None = None,
 ) -> np.ndarray:
-	"""Retrieve attenuation using the calibrated single-distance material line."""
+	"""Retrieve attenuation, forwarding optional canonical canvas and owned work."""
 
 	transmission = single_material_filter(
 		projections, pixel_m, distance_m, slope, pad=pad,
 		material_alpha=material_alpha, envelope=envelope, dtype=dtype,
 		workers=workers, denominator=denominator,
+		window=window, padding_work=padding_work, envelope_work=envelope_work,
 	)
 	return negative_log(transmission, epsilon=epsilon, maximum=None)
 
@@ -216,7 +226,9 @@ def _phase_pad(dim, pixel_size, dist, energy, force_pow2=False):
 	return min(next_pow2, next_factors) if not force_pow2 else next_pow2
 
 
-def filter_shape(base_shape, pixel_size, dist, energy, height_pad=False):
+def legacy_phase_window(base_shape, pixel_size, dist, energy, height_pad=False) -> TomoWindow:
+	"""Own the compatibility algorithm's symmetric height-only FFT canvas."""
+
 	if height_pad:
 		from lftomo.util.log import log, LOG
 
@@ -226,13 +238,20 @@ def filter_shape(base_shape, pixel_size, dist, energy, height_pad=False):
 	else:
 		pad_height = 0
 
-	return ImgSlice(base_shape.Y + 2 * pad_height, base_shape.X)
+	shape = Proj(base_shape.Y, base_shape.X)
+	return TomoWindow(shape, Proj(pad_height, 0), Proj(0, 0), Proj(1, 1))
 
 
-def filter_create(mem_name, mem_dtype, base_shape, alpha, pixel_size, dist, energy, tp=False, height_pad=False):
+def filter_shape(base_shape, pixel_size, dist, energy, height_pad=False):
+	return legacy_phase_window(base_shape, pixel_size, dist, energy, height_pad).with_pad().shape.to(ImgSlice)
+
+
+def filter_create(mem_name, mem_dtype, base_shape, alpha, pixel_size, dist, energy, tp=False, height_pad=False,
+					*, window: TomoWindow | None = None):
 	from lftomo.util.mem import SharedNPArray
 
-	phase_mem = SharedNPArray(mem_name, filter_shape(base_shape, pixel_size, dist, energy, height_pad),
+	window = legacy_phase_window(base_shape, pixel_size, dist, energy, height_pad) if window is None else window
+	phase_mem = SharedNPArray(mem_name, window.with_pad().shape.to(ImgSlice),
 						mem_dtype, allocate=True)
 
 	_set_phase_filter(alpha, pixel_size, dist, energy, phase_mem, tp)
@@ -263,33 +282,44 @@ def phase_retrieval(dw: TomoWindow, source_mem: "SharedNPArray", phase_alpha, pi
 	def get_slice(sino_order, i):
 		return np.s_[:, i, :] if sino_order else np.s_[i, :, :]
 
+	from lftomo.util.mem import SharedNPArray
+
+	window = legacy_phase_window(source_mem.shape, pixel_size, dist, energy, height_pad)
 	phase_mem = filter_create("phase_filter", source_mem.dtype, source_mem.shape, phase_alpha,
-												pixel_size, dist, energy, tp, height_pad)
+								pixel_size, dist, energy, tp, height_pad, window=window)
+	padding_work = None
 	try:
+		if window.pad_before.Y:
+			padding_work = SharedNPArray(
+				f"phase-pad-{uuid4().hex}", replace(source_mem.shape, Y=window.with_pad().shape.Y),
+				source_mem.dtype, allocate=True,
+			)
 		with Pool(proc_count) as pool:
 			pool.starmap(_phase_retrieval, [(get_slice(sino_order, i), source_mem, phase_mem,
-												pixel_size, energy, dist, tp, height_pad)
+												pixel_size, energy, dist, tp, height_pad, cpu_count(),
+												window, None if padding_work is None else padding_work[get_slice(sino_order, i)])
 												for i in range(dw.shape.Theta)])
 	finally:
+		if padding_work is not None:
+			padding_work.shutdown()
 		phase_mem.shutdown()
 
 
 def _phase_retrieval(y_slice, work_mem: "SharedNPArray", phase_mem: "SharedNPArray",
 					pixel_size, energy, dist, tp=False, height_pad=False,
-					thread_fallback=cpu_count()):
+					thread_fallback=cpu_count(), window: TomoWindow | None = None, padding_work=None):
 	import numexpr as ne
 
 	with work_mem as tomo, phase_mem as phase_filter:
-		if height_pad:
-			pad_height = _phase_pad(work_mem.shape.Y, pixel_size, dist, energy)
-		else:
-			pad_height = 0
+		window = legacy_phase_window(work_mem.shape, pixel_size, dist, energy, height_pad) if window is None else window
 
-		if pad_height > 0:
-			tomo_complex = np.fft.fft2(np.pad(tomo[y_slice], ((pad_height, pad_height), (0, 0)), mode="edge"), axes=(-2, -1))
+		if window.pad_before.Y > 0:
+			tomo_complex = np.fft.fft2(phase_pad(
+				tomo[y_slice], window, out=None if padding_work is None else np.asarray(padding_work),
+			), axes=(-2, -1))
 			# log.write("Phase Type Check", f"{type(tomo_complex)}:{type(phase_filter)}", LOG.INFO)
 			tomo_complex *= phase_filter
-			tomo[y_slice] = np.real(np.fft.ifft2(tomo_complex[pad_height:-pad_height, :], axes=(-2, -1)))
+			tomo[y_slice] = np.real(np.fft.ifft2(phase_unpad(tomo_complex, window), axes=(-2, -1)))
 		else:
 			tomo_complex = np.fft.fft2(tomo[y_slice], axes=(-2, -1))
 			# log.write("Phase Type Check", f"{type(tomo_complex)}:{type(phase_filter)}", LOG.INFO)

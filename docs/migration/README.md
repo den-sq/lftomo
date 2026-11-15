@@ -127,7 +127,7 @@ drop silently. Every item, with its owning issue:
 | filter `.astype` parallel buffers bypassing `work_dtype` | B16 |
 | recon defensive `np.shares_memory` copy-backs | B18 |
 | pad-by-copy `np.pad` in geometry | B14 |
-| pad-by-copy `np.pad` in prep-phase | B26 |
+| prep-phase FFT edge fill: `DataRef.pad_array` into caller-owned canvases; pipeline canvases use managed bounded work, legacy batch canvases use shared storage | B26 — migrated |
 
 ## Consumer constraints (what the migration may NOT break)
 

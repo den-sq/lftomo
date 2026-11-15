@@ -12,7 +12,7 @@ from lftomo.pipeline.core import (
 	BoundedWorkRequest, BufferSpec, PadRequirement, PipelineState, Stage, StageContract, StageParams,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.pipeline.stages.phase import slope_filter_shape
+from lftomo.pipeline.stages.phase import phase_padding_requests, slope_filter_shape
 from lftomo.prep.materials import fbp, fit_material_line, forward_project, predict_filter_error, segment_materials
 from lftomo.prep.phase import retrieve_single, wavelength_m
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
@@ -79,7 +79,7 @@ class MultimaterialStage(Stage):
 		))
 
 	def bounded_work_requests(self, input_spec):
-		"""Declare the composite's mixed-layout scratch through the Stage hook."""
+		"""Declare composite planes and phase canvases through the Stage hook."""
 		shape = input_spec.shape
 		specs = {
 			"baseline": (shape, np.dtype(np.float32)),
@@ -97,7 +97,7 @@ class MultimaterialStage(Stage):
 				required_for_fallback=True,
 			)
 			for key, (work_shape, dtype) in specs.items()
-		)
+		) + phase_padding_requests(input_spec, pad=self.params.pad, predictor=self.params.n_iter > 0)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		from lftomo.pipeline.execution import run_multimaterial_stage
@@ -107,10 +107,11 @@ class MultimaterialStage(Stage):
 	def phase_filter_shape(self, shape):
 		return slope_filter_shape(shape, self.params.pad)
 
-	def retrieve(self, image, baseline, scan, denominator):
+	def retrieve(self, image, baseline, scan, denominator, *, window=None, padding_work=None):
 		baseline[...] = retrieve_single(
 			image, scan.pixel_size_um * 1e-6, scan.ssd_cm / 100,
 			self.params.line_fit["slope"], pad=self.params.pad, workers=1, denominator=denominator,
+			window=window, padding_work=padding_work,
 		)
 		if self.params.air_ratio:
 			margin = max(1, int(self.params.air_ratio * image.shape[-1]))
@@ -141,7 +142,8 @@ class MultimaterialStage(Stage):
 			previous_labels[...] = labels
 		return changed
 
-	def correct(self, psi, synthesis, correction, scan, denominator):
+	def correct(self, psi, synthesis, correction, scan, denominator, *, window=None,
+			psi_work=None, intensity_work=None):
 		# FFT/gradient return arrays are temporary outputs of SciPy/NumPy; no
 		# nested executor or reusable, unmanaged work plane is created here.
 		np.negative(synthesis, out=synthesis)
@@ -150,6 +152,7 @@ class MultimaterialStage(Stage):
 			psi, synthesis, scan.energy_keV, scan.pixel_size_um * 1e-6,
 			scan.ssd_cm / 100, self.params.line_fit["slope"], pad=self.params.pad, workers=1,
 			denominator=denominator,
+			window=window, psi_work=psi_work, intensity_work=intensity_work,
 		)[0]
 		correction *= 1 - self.params.omega
 		correction += self.params.omega * delta

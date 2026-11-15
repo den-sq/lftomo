@@ -499,3 +499,31 @@ def test_data_ref_rescope():
 	assert dfr.frange == Y.drange(1024, 1038, 1)
 	assert dfr.itemsize == 2
 	assert dfr.shape == ProjOrder(1900, 14, 2048)
+
+
+@pytest.mark.parametrize("before,after", [((1, 2), (2, 3)), ((0, 0), (0, 0)), ((0, 2), (0, 3))])
+@pytest.mark.parametrize("shape", [(3, 5), (1, 5)])
+def test_data_ref_fills_owned_edge_canvas_without_copying_target(before, after, shape):
+	ref = DataRef(ImgSlice(*shape), ImgSlice(*before), ImgSlice(10, 20), ImgSlice(1, 1),
+		pad_after=ImgSlice(*after))
+	# Leading batches and a non-contiguous input are numerical array boundaries.
+	source = np.arange(2 * 3 * shape[0] * shape[1] * 2, dtype=np.float32).reshape(2, 3, *shape, 2)[..., 0]
+	expected = np.pad(source, [(0, 0), (0, 0), *zip(before, after, strict=True)], mode="edge")
+	storage = np.empty((2, 3, *ref.with_pad().shape.as_tuple(), 2), dtype=source.dtype)
+	output = storage[..., 0]
+	assert ref.pad_array(source, out=output) is output
+	np.testing.assert_array_equal(output, expected)
+	np.testing.assert_array_equal(ref.pad_array(source), expected)
+	interior = output[..., before[0]:before[0] + shape[0], before[1]:before[1] + shape[1]]
+	assert np.shares_memory(interior, storage)
+	np.testing.assert_array_equal(interior, source)
+
+
+def test_data_ref_rejects_incompatible_owned_padding_storage():
+	ref = DataRef(ImgSlice(2, 3), ImgSlice(1, 2), ImgSlice(0, 0), ImgSlice(1, 1))
+	source = np.ones((2, 3), dtype=np.float32)
+	with pytest.raises(ValueError, match="input shape"):
+		ref.pad_array(source.T)
+	for output in (np.empty((2, 3), np.float32), np.empty((4, 7), np.float64)):
+		with pytest.raises(ValueError, match="canvas shape and input dtype"):
+			ref.pad_array(source, out=output)

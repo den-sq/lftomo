@@ -31,7 +31,9 @@ regression tests rather than in a second specification here.
   where their contracts apply.
 - An algorithm may use a numerical padding primitive to fill a buffer, but it
   must consume geometry derived from and expressed by the canonical window
-  model. It must not independently decide or represent that geometry.
+  model. `DataRef.pad_array` owns edge filling into caller-provided storage;
+  phase kernels use it with their canonical numerical FFT window. They must
+  not independently decide or represent that geometry.
 - Source-context requirements use semantic `DataShape` values and resolve into
   `TomoWindow.pad_before` / `pad_after`; generated affine canvas padding uses
   `TomoWindow.with_output_padding`. The removed `AxisPad` and `WindowRegion`

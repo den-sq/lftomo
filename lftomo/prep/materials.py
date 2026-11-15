@@ -125,6 +125,7 @@ def segment_materials(mu_map, mu_table, sigma=1.5, core_frac=0.3, core_erode=2):
 
 def predict_filter_error(
 	psi, I0, energy_kev, pixel_m, distance_m, slope, pad=True, workers=-1, *, denominator=None,
+	window=None, psi_work=None, intensity_work=None,
 ):
 	"""Return the backward-error dB to subtract from slope-form retrieval.
 
@@ -133,14 +134,19 @@ def predict_filter_error(
 	Padding and FFT coordinates share the Paganin geometry implementation.
 	Composite callers can supply their existing shared ``denominator``; plain
 	library calls resolve it from the same canonical slope operator.
+	An optional canonical ``window`` takes precedence over ``pad``. Work arrays
+	match the input rank and padded extents; ``psi_work`` uses float64 and
+	``intensity_work`` preserves the intensity dtype. Their contents are replaced.
 	"""
 	psi = np.asarray(psi, float)
 	if psi.ndim == 2:
 		psi = psi[None]
+		psi_work = None if psi_work is None else psi_work[None]
+		intensity_work = None if intensity_work is None else intensity_work[None]
 	I0 = np.broadcast_to(I0, psi.shape)
-	window = phase.phase_fft_window(psi.shape[-2:], pad)
-	padded_psi = phase.phase_pad(psi, window)
-	padded_intensity = phase.phase_pad(I0, window)
+	window = phase.phase_fft_window(psi.shape[-2:], pad) if window is None else window
+	padded_psi = phase.phase_pad(psi, window, out=psi_work)
+	padded_intensity = phase.phase_pad(I0, window, out=intensity_work)
 	gradient_x = np.gradient(padded_psi, pixel_m, axis=-1)
 	divergence = np.gradient(padded_intensity * gradient_x, pixel_m, axis=-1)
 	if window.with_pad().shape.Y >= 2:

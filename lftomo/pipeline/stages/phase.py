@@ -8,6 +8,8 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from lftomo.pipeline.core import (
+	BoundedWorkRequest,
+	BufferSpec,
 	PadRequirement,
 	PipelineState,
 	ProjectionStage,
@@ -27,6 +29,32 @@ from lftomo.prep.phase import (
 )
 from lftomo.storage import buffer_view
 from lftomo.util.shapes import ImgSlice, ProjOrder
+
+
+PHASE_PADDING_WORK = "phase_padding_work"
+PHASE_ENVELOPE_WORK = "phase_envelope_padding_work"
+PHASE_PSI_WORK = "phase_psi_padding_work"
+PHASE_INTENSITY_WORK = "phase_intensity_padding_work"
+
+
+def phase_padding_requests(input_spec: BufferSpec, *, pad: bool, envelope=False, predictor=False):
+	"""Derive reusable projection canvases from the canonical numerical window."""
+	window = phase_fft_window((input_spec.shape.Y, input_spec.shape.X), pad)
+	canvas = window.with_pad().shape
+	shape = ProjOrder(input_spec.shape.Theta, canvas.Y, canvas.X)
+	requests = [BoundedWorkRequest(PHASE_PADDING_WORK, BufferSpec(shape, np.float32), PHASE_PADDING_WORK)]
+	if envelope:
+		requests.append(BoundedWorkRequest(PHASE_ENVELOPE_WORK, BufferSpec(shape, np.float32), PHASE_ENVELOPE_WORK))
+	if predictor:
+		requests.extend(BoundedWorkRequest(key, BufferSpec(shape, np.float64), key)
+			for key in (PHASE_PSI_WORK, PHASE_INTENSITY_WORK))
+	return tuple(requests)
+
+
+def _phase_work(state: PipelineState, key: str):
+	"""Read only this projection's view of executor-owned canvas storage."""
+	handle = state.artifacts.get(key)
+	return None if handle is None else buffer_view(handle)[ProjOrder.point_index(Theta=0)]
 
 
 def _managed_phase_filter(
@@ -154,13 +182,16 @@ def _material_envelope(state: PipelineState):
 
 
 def _slope_filtered(stage: Stage, state: PipelineState, image: np.ndarray) -> np.ndarray:
+	denominator = _resolved_slope_filter(
+		state, image.shape, slope=stage.params.slope, pad=stage.params.fft_pad,
+	)
 	return single_material_filter(
 		image, state.scan.pixel_size_um * 1e-6, state.scan.ssd_cm * 1e-2,
 		stage.params.slope, material_alpha=stage.params.material_alpha,
 		envelope=_material_envelope(state), pad=stage.params.fft_pad,
-		denominator=_resolved_slope_filter(
-			state, image.shape, slope=stage.params.slope, pad=stage.params.fft_pad,
-		), workers=1,
+		denominator=denominator, window=state.artifacts["phase_filter_signature"][1],
+		padding_work=_phase_work(state, PHASE_PADDING_WORK),
+		envelope_work=_phase_work(state, PHASE_ENVELOPE_WORK), workers=1,
 	)
 
 
@@ -301,6 +332,13 @@ class PaganinFilterStage(ProjectionStage):
 		if self.params.enabled and self.params.slope is not None:
 			prepare_phase_filter(self, state)
 		return super().run(state)
+
+	def bounded_work_requests(self, input_spec: BufferSpec):
+		if not self.params.enabled or self.params.slope is None:
+			return ()
+		return phase_padding_requests(
+			input_spec, pad=self.params.fft_pad, envelope=self.params.material_alpha != 0,
+		)
 
 	def phase_filter_shape(self, shape) -> ImgSlice:
 		return (

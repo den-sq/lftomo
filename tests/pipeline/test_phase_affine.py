@@ -11,9 +11,11 @@ from lftomo.config import StageConfig
 from lftomo.pipeline import (
 	BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState, validate_pipeline,
 )
+from lftomo.pipeline.planning import BufferAction
 from lftomo.pipeline.stages import (
 	PaganinFilterStage, PaganinStage, TIFFStackReadStage, WeightedNormalizeStage,
 )
+from lftomo.pipeline.stages import phase as phase_stages
 from lftomo.pipeline.stages.phase import _paganin_transfer
 from lftomo.prep.phase import phase_fft_window, phase_pad, phase_unpad, retrieve_single
 from lftomo.storage import ManagedBuffer
@@ -116,12 +118,34 @@ class _ObservedAffineStage(PaganinStage):
 			envelope.name, envelope.shape.Theta, self.params.envelope_m,
 			any("envelope_m" in config.params for config in state.recon.pipeline),
 		)
-		return super().run_projection(image, state)
+		work = {key: state.artifacts[key] for key in (
+			phase_stages.PHASE_PADDING_WORK, phase_stages.PHASE_ENVELOPE_WORK,
+		)}
+		state.artifacts[f"affine_padding_{state.source_window.pos.Theta}"] = tuple(
+			(handle.name, handle.shape.Theta, float(handle.array().flat[0]))
+			for handle in work.values()
+		)
+		original = phase_stages.single_material_filter
+
+		def observed_filter(*args, **kwargs):
+			assert kwargs["window"] is state.artifacts["phase_filter_signature"][1]
+			for argument, key in (
+				("padding_work", phase_stages.PHASE_PADDING_WORK),
+				("envelope_work", phase_stages.PHASE_ENVELOPE_WORK),
+			):
+				assert np.shares_memory(kwargs[argument], work[key].array())
+			return original(*args, **kwargs)
+		phase_stages.single_material_filter = observed_filter
+		try:
+			return super().run_projection(image, state)
+		finally:
+			phase_stages.single_material_filter = original
 
 
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 @pytest.mark.parametrize("pad", [False, True])
-def test_projection_dispatch_uses_source_envelope_and_managed_filter(reference, layout, pad):
+@pytest.mark.parametrize("workers", [1, 2])
+def test_projection_dispatch_uses_source_envelope_and_managed_filter(reference, monkeypatch, layout, pad, workers):
 	selected = reference["transmission"][1:7:2, 2:7, :].copy()
 	if layout is SinoOrder:
 		selected = selected.transpose(1, 0, 2).copy()
@@ -129,7 +153,18 @@ def test_projection_dispatch_uses_source_envelope_and_managed_filter(reference, 
 		slope=1e-9, material_alpha=2e-8,
 		envelope_m=reference["envelope"].tolist(), fft_pad=pad,
 	)
-	with PipelineRunContext(max_workers=2) as context:
+	with PipelineRunContext(max_workers=workers) as context:
+		padding = {}
+		allocate = context.storage.allocate
+
+		def record_allocation(shape, dtype, **kwargs):
+			handle = allocate(shape, dtype, **kwargs)
+			if kwargs.get("role") in (phase_stages.PHASE_PADDING_WORK, phase_stages.PHASE_ENVELOPE_WORK):
+				padding[kwargs["role"]] = handle
+				for index, plane in enumerate(handle.array()):
+					plane.fill(index + 0.25)
+			return handle
+		monkeypatch.setattr(context.storage, "allocate", record_allocation)
 		working = context.storage.allocate(layout(*selected.shape), selected.dtype, role="normalized")
 		working.array()[...] = selected
 		state = _state(selected, layout, theta_start=1, theta_stride=2, y_start=2)
@@ -155,9 +190,43 @@ def test_projection_dispatch_uses_source_envelope_and_managed_filter(reference, 
 		) for index in (1, 3, 5))
 		assert state.recon.model_dump() == original_config
 		assert stage.params.envelope_m == reference["envelope"].tolist()
+		for local_index, source_index in enumerate((1, 3, 5)):
+			assert result.artifacts[f"affine_padding_{source_index}"] == tuple(
+				(padding[key].name, 1, local_index + 0.25)
+				for key in (phase_stages.PHASE_PADDING_WORK, phase_stages.PHASE_ENVELOPE_WORK)
+			)
+		requests = stage.bounded_work_requests(state.buffer_spec)
+		assert set(padding) == {request.artifact_key for request in requests}
+		assert not set(padding).intersection(result.artifacts)
+		for request in requests:
+			assert padding[request.artifact_key].shape == request.buffer_spec.shape
+			assert padding[request.artifact_key].dtype == np.float32
+			assert [event["action"] for event in context.storage.allocation_events
+				if event["role"] == request.role] == ["allocate", "retire"]
 		allocations = [event for event in context.storage.allocation_events
 			if event["action"] == "allocate" and event["role"] in ("phase_filter", "phase_envelope")]
 		assert [event["role"] for event in allocations] == ["phase_filter", "phase_envelope"]
+
+
+class _FailingAffineStage(PaganinStage):
+	def run_projection(self, image, state):
+		raise RuntimeError("projection kernel failed")
+
+
+def test_failed_projection_retires_managed_padding(reference):
+	values = reference["transmission"].copy()
+	stage = _FailingAffineStage(slope=1e-9, material_alpha=2e-8, envelope_m=3e-4)
+	with PipelineRunContext(max_workers=1) as context:
+		state = _state(values)
+		state.working_array = context.storage.allocate(state.buffer_spec.shape, values.dtype, role="normalized")
+		np.asarray(state.working_array)[...] = values
+		state.storage, state.executor = context.storage, context.executor
+		with pytest.raises(RuntimeError, match="projection kernel failed"):
+			Pipeline([stage]).run(state)
+		for request in stage.bounded_work_requests(state.buffer_spec):
+			assert request.artifact_key not in state.artifacts
+			assert [event["action"] for event in context.storage.allocation_events
+				if event["role"] == request.role] == ["allocate", "retire"]
 
 
 @pytest.mark.parametrize("kind", ["scalar", "spatial"])
@@ -185,3 +254,7 @@ def test_planning_counts_the_real_frequency_canvas():
 	assert allocation.bytes == 15 * 10 * np.dtype(np.float64).itemsize
 	envelope = next(event for event in plan.allocation_schedule if event.role == "phase_envelope")
 	assert envelope.bytes == 7 * 10 * 12 * np.dtype(np.float32).itemsize
+	for key in (phase_stages.PHASE_PADDING_WORK, phase_stages.PHASE_ENVELOPE_WORK):
+		events = [event for event in plan.allocation_schedule if event.role == key]
+		assert [event.action for event in events] == [BufferAction.ALLOCATE, BufferAction.RETIRE]
+		assert all(event.bytes == 7 * 15 * 18 * np.dtype(np.float32).itemsize for event in events)

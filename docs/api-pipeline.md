@@ -94,8 +94,18 @@ explicit `epsilon` retains its existing clipping policy. The legacy path keeps
 `lftomo.prep.phase.retrieve_single` exposes the same slope/affine calculation
 for composite algorithms. Its default numerical dtype is float32, matching the
 calibration reference. The shared phase filter/denominator is manager-owned
-and prepared once before projection dispatch. FFT, edge-fill and gradient results are
-temporary arrays created by the numerical libraries. SciPy FFT uses one worker
+and prepared once before projection dispatch. `DataRef.pad_array` fills the
+canonical canvas into caller-owned storage. Pipeline stages declare their
+float32 transmission/envelope canvases through `Stage.bounded_work_requests`;
+the executor allocates them by source-window projection, scopes them with
+`DataRef.units`, and retires them after dispatch. The memory schedule includes
+these canvases, whose allocation count is independent of worker count. Direct
+NumPy calls can supply `window`, `padding_work`, and `envelope_work`; otherwise
+the same fill operation allocates its return array. The legacy height-padding
+batch path likewise shares one projection-indexed canvas allocation and retains
+its existing Fourier-domain crop order.
+FFT and gradient results remain temporary arrays created by the numerical
+libraries. SciPy FFT uses one worker
 inside each projection task; the existing run executor owns parallelism.
 
 ## Managed working storage

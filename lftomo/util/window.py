@@ -108,6 +108,44 @@ class DataRef(object):
 			pos=self.pos - shift_before.extract(self.pos),
 		)
 
+	def pad_array(self, array: np.ndarray, *, out: np.ndarray | None = None) -> np.ndarray:
+		"""Edge-fill this reference's numerical canvas, optionally in owned storage.
+
+		The reference describes the trailing array axes; leading batch axes pass
+		through unchanged. Geometry is measured in array samples, independently
+		of the reference's position in its source. Only basic views are used to
+		fill the interior and edges, including asymmetric corners.
+		"""
+
+		array = np.asarray(array)
+		rank = len(self.shape.names)
+		if array.ndim < rank or array.shape[-rank:] != self.shape.as_tuple():
+			raise ValueError("padding input shape disagrees with the canonical reference")
+		canvas_shape = array.shape[:-rank] + self.with_pad().shape.as_tuple()
+		if out is None:
+			out = np.empty(canvas_shape, dtype=array.dtype)
+		elif out.shape != canvas_shape or out.dtype != array.dtype:
+			raise ValueError("padding output must match the canonical canvas shape and input dtype")
+		before = self.pad_before.as_dict()
+		interior = tuple(
+			slice(before.get(name, 0), before.get(name, 0) + size)
+			for name, size in zip(self.shape.names, self.shape.as_tuple(), strict=True)
+		)
+		out[(Ellipsis,) + interior] = array
+		for axis, section in enumerate(interior, start=array.ndim - rank):
+			for edge, target in (
+				(section.start, slice(0, section.start)),
+				(section.stop - 1, slice(section.stop, out.shape[axis])),
+			):
+				if target.start == target.stop:
+					continue
+				origin = [slice(None)] * array.ndim
+				destination = origin.copy()
+				origin[axis] = slice(edge, edge + 1)
+				destination[axis] = target
+				out[tuple(destination)] = out[tuple(origin)]
+		return out
+
 	def rescope(self, pos: DataShape = None, pad: DataShape = None, dtype: type = None,
 					shape: DataShape = None, *, pad_after: DataShape = None) -> Self:
 		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape

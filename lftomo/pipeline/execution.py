@@ -220,17 +220,27 @@ def run_projection_stage(stage: Stage, state: PipelineState) -> PipelineState:
 		raise TypeError(f"{stage.name} currently requires the NumPy backend")
 	if np.asarray(state.working_array).ndim != 3:
 		raise ValueError(f"{stage.name} expects a three-dimensional tomography array")
-	for image, projection_state in _unit_states(state, "Theta"):
-		result = stage.run_projection(image, projection_state)
-		if result is not None and result is not image:
-			image[...] = result
+	requests = _prepare_bounded_work(state, (stage,), "Theta")
+	# A process worker receives already scoped work with no storage backend.
+	work_keys = tuple(request.artifact_key for request in collect_bounded_work((stage,), state.buffer_spec)
+		if request.artifact_key in state.artifacts)
+	try:
+		for image, projection_state in _unit_states(state, "Theta", work_keys=work_keys):
+			result = stage.run_projection(image, projection_state)
+			if result is not None and result is not image:
+				image[...] = result
+	finally:
+		_release_bounded_work(state, requests)
 	return state
 
 
-def run_material_retrieval_kernel(source, baseline, layout, stage, scan, denominator):
+def run_material_retrieval_kernel(source, baseline, layout, stage, scan, denominator, window, padding_work):
 	"""Retrieve one projection into a coordinator-owned baseline plane."""
 	index = layout.point_index(Theta=0)
-	stage.retrieve(buffer_view(source)[index], buffer_view(baseline)[index], scan, buffer_view(denominator))
+	stage.retrieve(
+		buffer_view(source)[index], buffer_view(baseline)[index], scan, buffer_view(denominator),
+		window=window, padding_work=None if padding_work is None else buffer_view(padding_work)[0],
+	)
 
 
 def run_material_classification_kernel(current, psi, synthesis, previous, layout,
@@ -244,12 +254,15 @@ def run_material_classification_kernel(current, psi, synthesis, previous, layout
 	)
 
 
-def run_material_correction_kernel(psi, synthesis, correction, layout, stage, scan, denominator):
+def run_material_correction_kernel(psi, synthesis, correction, layout, stage, scan, denominator,
+		window, psi_work, intensity_work):
 	"""Apply one transverse filter without creating a worker-owned executor."""
 	index = layout.point_index(Theta=0)
 	stage.correct(
 		buffer_view(psi)[index], buffer_view(synthesis)[index], buffer_view(correction)[index], scan,
 		buffer_view(denominator),
+		window=window, psi_work=None if psi_work is None else buffer_view(psi_work)[0],
+		intensity_work=None if intensity_work is None else buffer_view(intensity_work)[0],
 	)
 
 
@@ -271,13 +284,16 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 		raise ValueError("phase.multimaterial projection count disagrees with source angles")
 	# Resolve once in the authoritative parameter model, before worker copies.
 	stage.params.line_fit
-	from lftomo.pipeline.stages.phase import _resolved_slope_filter
+	from lftomo.pipeline.stages.phase import (
+		PHASE_INTENSITY_WORK, PHASE_PADDING_WORK, PHASE_PSI_WORK, _resolved_slope_filter,
+	)
 
 	_resolved_slope_filter(
 		state, (state.buffer_spec.shape.Y, state.buffer_spec.shape.X),
 		slope=stage.params.line_fit["slope"], pad=stage.params.pad,
 	)
 	denominator = state.artifacts["phase_filter"]
+	window = state.artifacts["phase_filter_signature"][1]
 	executor = state.executor or getattr(state.storage, "pipeline_executor", None)
 	parallel = (
 		executor is not None and state.storage is not None
@@ -296,11 +312,16 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 		key = f"_multimaterial_{key}"
 		return work[key][_unit_index(unit, index, specs[key].shape)]
 
+	def padded(key, unit, index):
+		handle = state.artifacts.get(key)
+		return None if handle is None else handle[_unit_index(unit, index, specs[key].shape)]
+
 	try:
 		dispatch(run_material_retrieval_kernel, (
 			(
 				state.working_array[_unit_index(unit, index, state.buffer_spec.shape)],
 				scoped("baseline", unit, index), state.layout, stage, worker_scan, denominator,
+				window, padded(PHASE_PADDING_WORK, unit, index),
 			)
 			for unit, index in _buffer_units(state, "Theta")
 		))
@@ -325,6 +346,7 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 				(
 					scoped("psi", unit, index), scoped("synthesis", unit, index),
 					scoped("correction", unit, index), state.layout, stage, worker_scan, denominator,
+					window, padded(PHASE_PSI_WORK, unit, index), padded(PHASE_INTENSITY_WORK, unit, index),
 				)
 				for unit, index in _buffer_units(state, "Theta")
 			))
@@ -356,11 +378,13 @@ def run_projection_kernel(
 	stage: Stage,
 	payload: _WorkerState,
 	local_index: tuple[slice, ...],
+	work_keys: tuple[str, ...] = (),
 ) -> dict[str, Any]:
 	"""Module-level adapter that mutates one shared projection view."""
 
 	state = _worker_state(handle, payload)
 	unit = payload.source_window
+	_scope_bounded_work_to_unit(state, unit, local_index, work_keys)
 	_scope_phase_envelope(state, unit, local_index)
 	index = local_index[unit.shape.axis_of("Theta")].start
 	projection_times = state.artifacts.get("projection_times")
@@ -719,13 +743,18 @@ class PipelineExecutor:
 		if "phase_envelope" in working_state.artifacts and hasattr(stage.params, "envelope_m"):
 			worker_stage = copy(stage)
 			worker_stage.params = stage.params.model_copy(update={"envelope_m": None})
-		results = self.submit_all(run_projection_kernel, (
-			(
-				_unit_handle(working_state.working_array, unit, local_index), worker_stage,
-				_payload(working_state, unit), local_index,
-			)
-			for unit, local_index in _buffer_units(working_state, "Theta")
-		))
+		requests = _prepare_bounded_work(working_state, (stage,), "Theta")
+		work_keys = tuple(request.artifact_key for request in requests)
+		try:
+			results = self.submit_all(run_projection_kernel, (
+				(
+					_unit_handle(working_state.working_array, unit, local_index), worker_stage,
+					_payload(working_state, unit), local_index, work_keys,
+				)
+				for unit, local_index in _buffer_units(working_state, "Theta")
+			))
+		finally:
+			_release_bounded_work(working_state, requests)
 		if stage.name.startswith("normalize."):
 			from lftomo.pipeline.stages.normalize import merge_normalization_dispatch
 

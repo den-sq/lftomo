@@ -116,6 +116,12 @@ shape also supplies memory planning. Baseline, current retrieval, correction,
 synthesis, phase residual, and (when needed) previous-label planes are managed,
 indexed by source/window rows, and retired on success or failure. Their
 shape/dtype specifications also feed
-memory planning. NumPy/SciPy FFT, gradient, FBP, watershed, and projection return
+memory planning. The stage's bounded-work requests derive projection-indexed
+padding canvases from the same numerical window used by the denominator and
+crop. `DataRef.pad_array` edge-fills those managed canvases: float32 for initial
+retrieval, and two float64 canvases reused through every correction pass.
+The executor scopes and retires them through its shared bounded-work lifecycle;
+their allocation count does not depend on worker count or iteration count.
+NumPy/SciPy FFT, gradient, FBP, watershed, and projection return
 arrays are per-kernel numerical temporaries; the stage does not retain a
 history of reconstructed volumes.

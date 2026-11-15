@@ -12,6 +12,7 @@ from lftomo.config.phase import multimaterial_config
 from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState, validate_pipeline
 from lftomo.pipeline.dispatch import DispatchKind, STAGE_DISPATCH
 from lftomo.pipeline import execution
+from lftomo.pipeline.planning import BufferAction
 from lftomo.pipeline.stages import MultimaterialStage, TIFFStackReadStage, WeightedNormalizeStage
 from lftomo.pipeline.stages import phase as phase_stages
 from lftomo.storage import ManagedBuffer
@@ -79,7 +80,10 @@ def test_stage_declares_all_reusable_scratch_before_execution(layout, n_iter):
 	case = compact_multimaterial_case()
 	stage = _stage(case, n_iter=n_iter)
 	spec = BufferSpec(ProjOrder(*case["projections"].shape).to(layout), np.float32)
-	requests = {request.artifact_key: request for request in stage.bounded_work_requests(spec)}
+	requests = {
+		request.artifact_key: request for request in stage.bounded_work_requests(spec)
+		if request.artifact_key.startswith("_multimaterial_")
+	}
 	keys = {
 		"baseline", "current", "correction", "psi", "synthesis",
 	} | ({"previous_labels"} if n_iter > 1 else set())
@@ -166,10 +170,13 @@ def test_full_context_windows_and_strided_angles_match_whole_array(layout):
 
 
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
-def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatch, layout):
+@pytest.mark.parametrize("workers", [1, 2])
+def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatch, layout, workers):
 	case = compact_multimaterial_case(n_rows=4, row_varying=True, noncollinear=True)
 	stage = _stage(case, n_iter=2)
-	serial = _state(case, layout=layout)
+	physical = ProjOrder(*case["projections"].shape)
+	window = TomoWindow.from_bounds(physical, theta=(1, physical.Theta, 2))
+	serial = _state(case, layout=layout, window=window)
 	Pipeline([stage]).run(serial)
 	denominator_calls = []
 	build_denominator = phase_stages.slope_denominator
@@ -178,8 +185,8 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 		denominator_calls.append(args)
 		return build_denominator(*args)
 	monkeypatch.setattr(phase_stages, "slope_denominator", record_denominator)
-	with PipelineRunContext(max_workers=2) as context:
-		state = _state(case, layout=layout, storage=context.storage, executor=context.executor)
+	with PipelineRunContext(max_workers=workers) as context:
+		state = _state(case, layout=layout, window=window, storage=context.storage, executor=context.executor)
 		requests = stage.bounded_work_requests(state.buffer_spec)
 		prepared = []
 		prepare = execution._prepare_bounded_work
@@ -206,19 +213,34 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 		def record(kernel, arguments):
 			arguments = list(arguments)
 			assert all(isinstance(args[0], ManagedBuffer) for args in arguments)
-			for args in arguments:
+			for local_index, args in enumerate(arguments):
 				worker_scan = next(value for value in args if isinstance(value, Scan))
 				assert "flat_fields" not in worker_scan.metadata
-				if kernel.__name__ in ("run_material_retrieval_kernel", "run_material_correction_kernel"):
-					assert isinstance(args[-1], ManagedBuffer)
-					assert args[-1] is state.artifacts["phase_filter"]
 				if kernel.__name__ == "run_material_retrieval_kernel":
 					assert args[1].shape == replace(state.buffer_spec.shape, Theta=1)
-				if kernel.__name__ == "run_material_classification_kernel":
+					denominator, canvas, *work = args[-3:]
+					keys = (phase_stages.PHASE_PADDING_WORK,)
+				elif kernel.__name__ == "run_material_correction_kernel":
+					denominator, canvas, *work = args[-4:]
+					keys = (phase_stages.PHASE_PSI_WORK, phase_stages.PHASE_INTENSITY_WORK)
+				else:
+					assert kernel.__name__ == "run_material_classification_kernel"
 					assert all(handle.shape == replace(state.buffer_spec.shape, Y=1) for handle in args[:3])
 					previous = args[3]
 					assert previous.shape == replace(ReconOrder.of(state.buffer_spec.shape), Y=1)
 					assert previous.dtype == np.int32
+					continue
+				assert denominator is state.artifacts["phase_filter"]
+				assert canvas is state.artifacts["phase_filter_signature"][1]
+				for key, handle in zip(keys, work, strict=True):
+					assert isinstance(handle, ManagedBuffer)
+					parent = state.artifacts[key]
+					assert handle.name == parent.name
+					assert handle.shape == ProjOrder(1, canvas.with_pad().shape.Y, canvas.with_pad().shape.X)
+					# The handle must select the local projection, independent of
+					# the source's nonzero/strided Theta coordinates and layout.
+					handle.array().flat[0] = local_index + 0.25
+					assert parent.array()[local_index, 0, 0] == local_index + 0.25
 			calls.append((kernel.__name__, len(arguments)))
 			return original(kernel, arguments)
 		monkeypatch.setattr(context.executor, "submit_all", record)
@@ -230,6 +252,18 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 		np.testing.assert_array_equal(np.asarray(result.artifacts["phase_filter"]), serial.artifacts["phase_filter"])
 		assert len(denominator_calls) == 1
 		assert prepared == [requests]
+		report, = state.artifacts["bounded_work_allocations"]
+		assert report["unit_axis"] is None
+		assert report["units"] is None
+		assert report["buffers"] == [{
+			"artifact_key": request.artifact_key, "role": request.role,
+			"shape": request.buffer_spec.shape.as_dict(), "dtype": request.buffer_spec.dtype.str,
+			"bytes": request.buffer_spec.shape.nbytes(request.buffer_spec.dtype),
+		} for request in requests]
+		assert report["allocation_count"] == len(requests)
+		assert report["managed_bytes"] == sum(
+			request.buffer_spec.shape.nbytes(request.buffer_spec.dtype) for request in requests
+		)
 		assert all(request.artifact_key not in state.artifacts for request in requests)
 		assert state.scan.metadata["flat_fields"] is flats
 		assert [name for name, _ in calls] == [
@@ -240,6 +274,8 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 		expected_roles = {request.role for request in requests}
 		events = context.storage.allocation_events
 		assert expected_roles <= {event["role"] for event in events if event["action"] == "retire"}
+		assert all([event["action"] for event in events if event["role"] == role] == ["allocate", "retire"]
+			for role in expected_roles)
 		plan = validate_pipeline(
 			[TIFFStackReadStage(order="projection" if layout is ProjOrder else "sinogram"),
 				WeightedNormalizeStage(), stage], state.scan, mode="complete",
@@ -250,6 +286,10 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 			request.role: request.buffer_spec.shape.nbytes(request.buffer_spec.dtype)
 			for request in requests
 		}
+		assert all(
+			[event.action for event in plan.allocation_schedule if event.role == request.role]
+			== [BufferAction.ALLOCATE, BufferAction.RETIRE] for request in requests
+		)
 		planned_filter = next(event for event in plan.allocation_schedule if event.role == "phase_filter")
 		assert planned_filter.bytes == result.artifacts["phase_filter"].shape.nbytes(np.float64)
 		assert all("phase_filter" in event.live_roles for event in plan.allocation_schedule
@@ -286,6 +326,26 @@ def test_renamed_stage_plans_the_same_requests_without_a_phase_name_gate():
 	assert {event.role for event in plan.allocation_schedule if event.action.name == "RETIRE"} >= roles
 
 
+def test_zero_iteration_managed_stage_allocates_only_retrieval_canvas(reference):
+	arrays, _ = reference
+	case = compact_multimaterial_case(noncollinear=True)
+	stage = _stage(case, n_iter=0)
+	with PipelineRunContext(max_workers=1) as context:
+		state = _state(case, storage=context.storage, executor=context.executor)
+		Pipeline([stage]).run(state)
+		np.testing.assert_allclose(
+			state.working_array, arrays["compact_noncollinear_n0_B"], rtol=1e-6, atol=1e-7,
+		)
+		events = [event for event in context.storage.allocation_events
+			if event["role"] in (
+				phase_stages.PHASE_PADDING_WORK, phase_stages.PHASE_PSI_WORK, phase_stages.PHASE_INTENSITY_WORK,
+			)]
+		assert [(event["role"], event["action"]) for event in events] == [
+			(phase_stages.PHASE_PADDING_WORK, "allocate"), (phase_stages.PHASE_PADDING_WORK, "retire"),
+		]
+		assert phase_stages.PHASE_PADDING_WORK not in state.artifacts
+
+
 def test_missing_material_core_retires_scratch_without_publishing_diagnostics():
 	case = compact_multimaterial_case()
 	with PipelineRunContext(max_workers=1) as context:
@@ -314,7 +374,8 @@ def test_ndarray_scratch_uses_shared_lifecycle_and_is_removed(monkeypatch, failu
 		MultimaterialStage(mu_table=[50, 120, 10000], delta_table=[1e-7, 2.4e-7, 2e-5], n_iter=2)
 		if failure else _stage(case, n_iter=2)
 	)
-	requests = stage.bounded_work_requests(state.buffer_spec)
+	requests = tuple(request for request in stage.bounded_work_requests(state.buffer_spec)
+		if request.required_for_fallback)
 	prepare = execution._prepare_bounded_work
 	prepared = []
 
