@@ -427,9 +427,11 @@ def _prepare_bounded_work(
 	requests = collect_bounded_work(stages, state.buffer_spec)
 	if any(request.artifact_key in state.artifacts for request in requests):
 		raise ValueError("bounded work artifacts are private to one segment")
-	for request in requests:
-		if getattr(request.buffer_spec.shape, axis) != getattr(state.buffer_spec.shape, axis):
-			raise ValueError(f"bounded work must preserve the dispatched {axis} extent")
+	if any(
+		getattr(request.buffer_spec.shape, axis) != getattr(state.buffer_spec.shape, axis)
+		for request in requests
+	):
+		raise ValueError(f"bounded work must preserve the dispatched {axis} extent")
 	allocated: list[BoundedWorkRequest] = []
 	try:
 		for request in requests:
@@ -447,25 +449,35 @@ def _prepare_bounded_work(
 		_release_bounded_work(state, tuple(allocated))
 		raise
 	if requests:
-		state.artifacts.setdefault("bounded_work_allocations", []).append({
-			"scope": "window" if state.source_window is not None else "whole_volume",
-			"unit_axis": axis,
-			"units": getattr(state.buffer_spec.shape, axis),
-			"buffers": [{
-				"artifact_key": request.artifact_key,
-				"role": request.role,
-				"shape": request.buffer_spec.shape.as_dict(),
-				"dtype": request.buffer_spec.dtype.str,
-				"bytes": request.buffer_spec.shape.nbytes(request.buffer_spec.dtype),
-			} for request in requests],
-			"managed_bytes": sum(
-				request.buffer_spec.shape.nbytes(request.buffer_spec.dtype)
-				for request in requests
-			),
-			"allocation_count": len(requests),
-			"indexing": "units_local_index",
-		})
+		state.artifacts.setdefault("bounded_work_allocations", []).append(
+			_bounded_work_report(state, requests, axis),
+		)
 	return requests
+
+
+def _bounded_work_report(
+	state: PipelineState, requests: tuple[BoundedWorkRequest, ...], axis: str,
+) -> dict[str, Any]:
+	"""Derive allocation observations from the same resolved workspace requests."""
+
+	return {
+		"scope": "window" if state.source_window is not None else "whole_volume",
+		"unit_axis": axis,
+		"units": getattr(state.buffer_spec.shape, axis),
+		"buffers": [{
+			"artifact_key": request.artifact_key,
+			"role": request.role,
+			"shape": request.buffer_spec.shape.as_dict(),
+			"dtype": request.buffer_spec.dtype.str,
+			"bytes": request.buffer_spec.shape.nbytes(request.buffer_spec.dtype),
+		} for request in requests],
+		"managed_bytes": sum(
+			request.buffer_spec.shape.nbytes(request.buffer_spec.dtype)
+			for request in requests
+		),
+		"allocation_count": len(requests),
+		"indexing": "units_local_index",
+	}
 
 
 def _release_bounded_work(
