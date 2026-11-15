@@ -50,6 +50,54 @@ handoffs, and external engines. There is no separate locality enum: bounded
 planning uses the row-kernel capability and contract, while `STAGE_DISPATCH`
 selects the executor.
 
+## Calibrated Paganin material lines
+
+`phase.paganin` and `phase.paganin_filter` accept an optional `slope` in metres
+for the line `delta = material_alpha + slope * mu`. Their existing `alpha`
+parameter remains the historical delta/beta filter coefficient; it is not the
+material-line intercept. Omitting `slope` preserves the existing arithmetic,
+FFT extent, and defaults exactly.
+
+```yaml
+- kind: phase
+  algorithm: paganin
+  params:
+    slope: 1.0e-9
+    material_alpha: 2.0e-8
+    envelope_m: 0.0003
+    fft_pad: true
+```
+
+Nonzero `material_alpha` requires both `slope` and `envelope_m`. The envelope is
+total spatial thickness in metres, supplied as a scalar, detector Y/X array,
+or Theta/Y/X array broadcastable over the full source. The canonical source
+window selects its rows and projection indices, including strided selections.
+Array envelopes are normalized once into a manager-owned window buffer before
+dispatch. Workers receive only unit views of that buffer; the serialized
+envelope is removed from worker configuration carriers. Original configuration
+remains unchanged for replay.
+The affine operation performs one approximate defect-correction step; it does
+not make the affine inversion exact. These plain values can be copied from the
+mctutil calibration export without importing that package.
+
+For the slope path, `fft_pad: true` (the default) edge-fills each numerical FFT
+canvas to `next_fast_len(int(1.5 * dimension))`. `TomoWindow` owns this canvas,
+including asymmetric padding and interior crops. This generated numerical
+padding is separate from the source halo described in
+[windowed-streaming.md](windowed-streaming.md). The FFT remains extent-sensitive;
+arbitrary finite halos do not establish exact whole-volume equivalence.
+`phase.paganin_filter` returns filtered transmission. `phase.paganin` applies
+the terminal negative log with a slope-path default `epsilon: 1.0e-6`; an
+explicit `epsilon` retains its existing clipping policy. The legacy path keeps
+`epsilon: 1.0e-8`.
+
+`lftomo.prep.phase.retrieve_single` exposes the same slope/affine calculation
+for composite algorithms. Its default numerical dtype is float32, matching the
+calibration reference. The shared phase filter/denominator is manager-owned
+and prepared once before projection dispatch. FFT, edge-fill and gradient results are
+temporary arrays created by the numerical libraries. SciPy FFT uses one worker
+inside each projection task; the existing run executor owns parallelism.
+
 ## Managed working storage
 
 Production runs enter `PipelineRunContext`, which owns one `SharedNPManager`

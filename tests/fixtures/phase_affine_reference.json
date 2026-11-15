@@ -1,0 +1,12 @@
+{
+  "reference": "den-sq/mctutil",
+  "commit": "fbe3251c70de45180462ad24e556b7e1a86483ce",
+  "function": "mctutil.phase.phase_tomo.retrieve_phase(method=\"single\")",
+  "energy_kev": 20,
+  "pixel_m": 1e-06,
+  "distance_m": 0.01,
+  "slope_m": 1e-09,
+  "material_alpha": 2e-08,
+  "fixture": "Exact Fresnel propagation of seven translated Gaussian thickness maps with delta_proj=2e-8*T + 1e-9*B; no noise. Selected outputs use Theta=1:7:2 and Y=2:7 before retrieval.",
+  "oracle": "Numerical parity only; affine one-step accuracy is not asserted."
+}

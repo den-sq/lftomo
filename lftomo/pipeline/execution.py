@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, TimeoutError
 from concurrent.futures.process import BrokenProcessPool
+from copy import copy
 from dataclasses import dataclass
 import multiprocessing
 import os
@@ -160,9 +161,26 @@ def _unit_states(
 		row_state = state.with_array(
 			row_data, buffer_spec=BufferSpec(unit.shape, data.dtype),
 		)
-		row_state.artifacts = state.artifacts
+		scoped_envelope = axis == "Theta" and "phase_envelope" in state.artifacts
+		row_state.artifacts = dict(state.artifacts) if scoped_envelope else state.artifacts
 		row_state.source_window = unit
+		if scoped_envelope:
+			_scope_phase_envelope(row_state, unit, local_index)
 		yield row_data[state.layout.point_index(**{axis: 0})], row_state
+		if scoped_envelope:
+			state.artifacts.update({
+				key: value for key, value in row_state.artifacts.items() if key != "phase_envelope"
+			})
+
+
+def _scope_phase_envelope(state: PipelineState, unit: DataRef, local_index: tuple[slice, ...]) -> None:
+	"""Give a projection only its view of the prepared canonical envelope."""
+
+	envelope = state.artifacts.get("phase_envelope")
+	if isinstance(envelope, ManagedBuffer):
+		state.artifacts["phase_envelope"] = _unit_handle(envelope, unit, local_index)
+	elif isinstance(envelope, np.ndarray):
+		state.artifacts["phase_envelope"] = envelope[local_index]
 
 
 def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
@@ -235,6 +253,7 @@ def run_projection_kernel(
 
 	state = _worker_state(handle, payload)
 	unit = payload.source_window
+	_scope_phase_envelope(state, unit, local_index)
 	index = local_index[unit.shape.axis_of("Theta")].start
 	projection_times = state.artifacts.get("projection_times")
 	if isinstance(projection_times, ManagedBuffer):
@@ -458,13 +477,21 @@ def run_helical_fill_kernel(
 
 def _payload(state: PipelineState, source_window: DataRef) -> _WorkerState:
 	scan = state.scan
+	recon = state.recon
 	if isinstance(state.artifacts.get("flat_fields"), ManagedBuffer):
 		metadata = dict(scan.metadata)
 		metadata.pop("flat_fields", None)
 		scan = scan.model_copy(update={"metadata": metadata})
+	if "phase_envelope" in state.artifacts:
+		# Replay config is not a second carrier of the already prepared work plane.
+		recon = recon.model_copy(update={"pipeline": [
+			config.model_copy(update={"params": {
+				key: value for key, value in config.params.items() if key != "envelope_m"
+			}}) if config.kind == "phase" else config for config in recon.pipeline
+		]})
 	return _WorkerState(
 		scan=scan,
-		recon=state.recon,
+		recon=recon,
 		artifacts=dict(state.artifacts),
 		backend=state.backend,
 		dataset=state.dataset,
@@ -612,9 +639,13 @@ class PipelineExecutor:
 			prepare_phase_filter(stage, working_state)
 		if working_state.layout not in (ProjOrder, SinoOrder):
 			return stage.run(state)
+		worker_stage = stage
+		if "phase_envelope" in working_state.artifacts and hasattr(stage.params, "envelope_m"):
+			worker_stage = copy(stage)
+			worker_stage.params = stage.params.model_copy(update={"envelope_m": None})
 		results = self.submit_all(run_projection_kernel, (
 			(
-				_unit_handle(working_state.working_array, unit, local_index), stage,
+				_unit_handle(working_state.working_array, unit, local_index), worker_stage,
 				_payload(working_state, unit), local_index,
 			)
 			for unit, local_index in _buffer_units(working_state, "Theta")

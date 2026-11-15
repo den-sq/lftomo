@@ -790,6 +790,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 def _json_value(value: Any) -> Any:
 	if hasattr(value, "model_dump"):
 		return value.model_dump(mode="json")
+	if isinstance(value, TomoWindow):
+		return CONVERTER.unstructure(value)
 	if isinstance(value, Path):
 		return str(value)
 	if isinstance(value, dict):

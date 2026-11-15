@@ -269,7 +269,14 @@ def build_allocation_schedule(
 			artifact_specs.append(("flat_fields", 4 * rows * width * np.dtype(np.float32).itemsize))
 		if "phase_filter" in stage.contract.produces_artifacts and step.output_buffer is not None:
 			rows, width = step.output_buffer.shape.Y, step.output_buffer.shape.X
+			if getattr(stage.params, "slope", None) is not None:
+				from lftomo.prep.phase import phase_fft_window
+
+				canvas = phase_fft_window((rows, width), stage.params.fft_pad).with_pad().shape
+				rows, width = canvas.Y, canvas.X // 2 + 1
 			artifact_specs.append(("phase_filter", rows * width * np.dtype(np.float64).itemsize))
+		if "phase_envelope" in stage.contract.managed_artifacts and step.output_buffer is not None:
+			artifact_specs.append(("phase_envelope", step.output_buffer.shape.nbytes(np.float32)))
 		for artifact_role, artifact_bytes in artifact_specs:
 			physical_role = artifact_role
 			suffix = 1
