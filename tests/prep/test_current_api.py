@@ -168,9 +168,9 @@ def test_phase_filter_uses_current_shape_and_memory_api():
 
 def test_phase_retrieval_uses_dist_then_energy_for_height_padding():
 	shape = SinoOrder(Y=4, Theta=1, X=4)
-	pixel_size, dist, energy = 1e-3, 2.0, 20.0
+	pixel_size, dist, energy = 1e-4, 2.0, 20.0
 	pad = _phase_pad(shape.Y, pixel_size, dist, energy)
-	assert (pad, _phase_pad(shape.Y, pixel_size, energy, dist)) == (1, 2)
+	assert (pad, _phase_pad(shape.Y, pixel_size, energy, dist)) == (2, 196)
 	work = _shared(shape)
 	phase_filter = filter_create(
 		f"lftomo-test-{uuid4().hex}", np.float32, shape,

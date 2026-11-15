@@ -20,8 +20,6 @@ BOLTZMANN_CONSTANT = 1.3806488e-16  # [erg/k]
 SPEED_OF_LIGHT = 299792458e+2  # [cm/s]
 PLANCK_CONSTANT = 6.58211928e-19  # [keV*s]
 
-prime_set = {3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97}
-
 
 def wavelength_m(energy_kev: float) -> float:
 	"""Wavelength in metres used by the calibrated material-line model."""
@@ -195,25 +193,10 @@ def _wavelength(energy):
 	return 2 * np.pi * PLANCK_CONSTANT * SPEED_OF_LIGHT / energy
 
 
-def _prime_factor_pad(base_size, wide_size):
-	prime_factors = [[2]]
-	for _i in range(1, max(len(bin(wide_size)) // 4, 2)):
-		prime_factors = [x + [y] for x in prime_factors for y in prime_set if y not in x]
-
-	prime_factors = sorted(prime_factors, key=lambda item: sum(item))
-	for factor_set in prime_factors:
-		if np.prod(factor_set) >= wide_size:
-			return (np.prod(factor_set) - base_size) // 2
-
-
-def _phase_pad(dim, pixel_size, dist, energy, force_pow2=False):
+def _phase_pad(dim, pixel_size, dist, energy):
 	wavelength = _wavelength(energy)
 	pad_pix = np.ceil(np.pi * wavelength * dist / pixel_size ** 2)
-	# Next power of 2.
-	next_pow2 = int((pow(2, np.ceil(np.log2(dim + pad_pix))) - dim) * 0.5)
-	# Next smallest prime factors.
-	next_factors = _prime_factor_pad(dim, int(dim + pad_pix))
-	return min(next_pow2, next_factors) if not force_pow2 else next_pow2
+	return (sfft.next_fast_len(int(dim + pad_pix)) - dim) // 2
 
 
 def filter_shape(base_shape, pixel_size, dist, energy, height_pad=False):
