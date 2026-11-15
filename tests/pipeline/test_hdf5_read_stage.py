@@ -200,7 +200,7 @@ def test_hdf5_stage_reads_strided_theta_window_with_matching_angles(tmp_path):
 		np.deg2rad([30, 90, 150]),
 	)
 	assert result.source_window.shape.Theta == 5
-	assert result.working_array.shape[0] == 3
+	assert result.working_array.shape.Theta == 3
 	assert result.source_window.step == ProjOrder(Theta=2, Y=1, X=1)
 
 
