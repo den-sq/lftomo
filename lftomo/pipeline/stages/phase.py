@@ -18,8 +18,15 @@ from lftomo.pipeline.core import (
 	StageParams,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
+from lftomo.prep.phase import (
+	negative_log as _negative_log,
+	phase_fft_window,
+	phase_frequency_squared,
+	single_material_filter,
+	slope_denominator,
+)
 from lftomo.storage import buffer_view
-from lftomo.util.shapes import ImgSlice
+from lftomo.util.shapes import ImgSlice, ProjOrder
 
 
 def _managed_phase_filter(
@@ -66,12 +73,84 @@ def _resolved_phase_filter(
 def prepare_phase_filter(stage: Stage, state: PipelineState) -> None:
 	"""Create one shared filter before projection workers are dispatched."""
 
+	if getattr(stage.params, "slope", None) is not None and not stage.params.enabled:
+		return
 	data = np.asarray(state.working_array)
 	layout = type(state.buffer_spec.shape)
-	_resolved_phase_filter(
-		state, (
-			data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
-		), stage.params.alpha,
+	shape = (
+		data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
+	)
+	if getattr(stage.params, "slope", None) is None:
+		_resolved_phase_filter(state, shape, stage.params.alpha)
+	else:
+		_resolved_slope_filter(stage, state, shape)
+		_prepare_material_envelope(stage, state)
+
+
+def _resolved_slope_filter(stage: Stage, state: PipelineState, shape: tuple[int, int]) -> np.ndarray:
+	window = phase_fft_window(shape, stage.params.fft_pad)
+	pixel_m, distance_m = state.scan.pixel_size_um * 1e-6, state.scan.ssd_cm * 1e-2
+	signature = ("slope", window, pixel_m, distance_m, stage.params.slope)
+	previous = state.artifacts.get("phase_filter_signature")
+	if (
+		previous is not None and previous[0] == "slope"
+		and previous[2:] == signature[2:]
+		and previous[1].shape == window.shape
+		and previous[1].pad_before == window.pad_before
+		and previous[1].pad_after == window.pad_after
+	):
+		return buffer_view(state.artifacts["phase_filter"])
+	return _managed_phase_filter(
+		state, slope_denominator(window, pixel_m, distance_m, stage.params.slope), signature,
+	)
+
+
+def _prepare_material_envelope(stage: Stage, state: PipelineState) -> None:
+	"""Normalize the config boundary once into the window's owned envelope."""
+
+	value = stage.params.envelope_m
+	if value is None or stage.params.material_alpha == 0:
+		return
+	value = np.asarray(value)
+	previous = state.artifacts.get("phase_envelope")
+	if value.ndim == 0:
+		state.artifacts["phase_envelope"] = float(value)
+		if state.storage is not None and hasattr(previous, "name"):
+			state.storage.retire(previous, role="phase_envelope")
+		return
+	window = state.source_window
+	if window is None:
+		selected = np.broadcast_to(value, state.buffer_spec.shape.to(ProjOrder).as_tuple())
+	else:
+		physical = state.dataset.physical_shape if state.dataset is not None else state.scan.projection_shape()
+		full = np.broadcast_to(value, physical.as_tuple())
+		selected = full[tuple(window.with_pad().axis_slice(axis) for axis in ("Theta", "Y", "X"))]
+	selected = selected.transpose(tuple(ProjOrder.axis_of(axis) for axis in state.buffer_spec.shape.names))
+	if state.storage is None:
+		state.artifacts["phase_envelope"] = np.asarray(selected, dtype=np.float32)
+		return
+	envelope = state.storage.allocate(
+		state.buffer_spec.shape, np.float32, role="phase_envelope", reuse_from=("phase_envelope",),
+	)
+	envelope.array()[...] = selected
+	state.artifacts["phase_envelope"] = envelope
+	if hasattr(previous, "name"):
+		state.storage.retire(previous, role="phase_envelope")
+
+
+def _material_envelope(state: PipelineState):
+	value = state.artifacts.get("phase_envelope")
+	if value is None or np.isscalar(value):
+		return value
+	return buffer_view(value)[state.layout.point_index(Theta=0)]
+
+
+def _slope_filtered(stage: Stage, state: PipelineState, image: np.ndarray) -> np.ndarray:
+	return single_material_filter(
+		image, state.scan.pixel_size_um * 1e-6, state.scan.ssd_cm * 1e-2,
+		stage.params.slope, material_alpha=stage.params.material_alpha,
+		envelope=_material_envelope(state), pad=stage.params.fft_pad,
+		denominator=_resolved_slope_filter(stage, state, image.shape), workers=1,
 	)
 
 
@@ -95,9 +174,9 @@ def _wavelength_cm(energy_kev: float) -> float:
 def _angular_frequency_squared(shape: tuple[int, int], pixel_size_cm: float) -> np.ndarray:
 	"""Return the intentional DFT-bin angular grid documented in issue #199."""
 
-	ky = 2 * np.pi * np.fft.fftfreq(shape[0], d=pixel_size_cm)
-	kx = 2 * np.pi * np.fft.fftfreq(shape[1], d=pixel_size_cm)
-	return np.add.outer(np.square(ky), np.square(kx))
+	return phase_frequency_squared(
+		phase_fft_window(shape, pad=False), pixel_size_cm, real=False, angular=True,
+	)
 
 
 def _paganin_transfer(
@@ -121,26 +200,6 @@ def _paganin_filter(image: np.ndarray, transfer: np.ndarray) -> np.ndarray:
 
 	return np.real(np.fft.ifft2(np.fft.fft2(image) * transfer))
 
-
-def _negative_log(
-	image: np.ndarray,
-	*,
-	epsilon: float | None,
-	maximum: float | None,
-	invert: bool = False,
-) -> np.ndarray:
-	"""Apply the one terminal transmission-to-attenuation conversion."""
-
-	if epsilon is None:
-		if not np.isfinite(image).all() or np.any(image <= 0):
-			raise ValueError(
-				"phase.negative_log requires finite positive transmission when epsilon is null"
-			)
-		transmission = np.minimum(image, maximum) if maximum is not None else image
-	else:
-		transmission = np.clip(image, epsilon, maximum)
-	result = -np.log(transmission)
-	return -result if invert else result
 
 
 def _bac_filter_kernel(shape: tuple[int, int], alpha: float) -> np.ndarray:
@@ -193,10 +252,30 @@ class PaganinFilterStage(ProjectionStage):
 	class Params(StageParams):
 		alpha: float = Field(default=0.06, gt=0)
 		enabled: bool = True
+		slope: float | None = Field(default=None, gt=0)
+		material_alpha: float = 0.0
+		envelope_m: float | list | None = None
+		fft_pad: bool = True
+
+		@model_validator(mode="after")
+		def validate_material_line(self):
+			if self.material_alpha != 0 and (self.slope is None or self.envelope_m is None):
+				raise ValueError("nonzero material_alpha requires slope and envelope_m")
+			if self.envelope_m is not None and self.slope is None:
+				raise ValueError("envelope_m requires slope")
+			return self
 
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
 		if params.enabled:
+			if params.material_alpha != 0:
+				return replace(
+					cls.contract,
+					produces_artifacts=cls.contract.produces_artifacts + ("phase_envelope",),
+					managed_artifacts=cls.contract.managed_artifacts + (
+						("phase_envelope",) if isinstance(params.envelope_m, list) else ()
+					),
+				)
 			return cls.contract
 		return replace(
 			cls.contract,
@@ -209,9 +288,16 @@ class PaganinFilterStage(ProjectionStage):
 			required_pad=PadRequirement(),
 		)
 
+	def run(self, state: PipelineState) -> PipelineState:
+		if self.params.enabled and self.params.slope is not None:
+			prepare_phase_filter(self, state)
+		return super().run(state)
+
 	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:
 		if not self.params.enabled:
 			return None
+		if self.params.slope is not None:
+			return _slope_filtered(self, state, image)
 		transfer = _resolved_phase_filter(state, image.shape, self.params.alpha)
 		return _paganin_filter(image, transfer)
 
@@ -315,11 +401,17 @@ class PaganinStage(PaganinFilterStage):
 		epsilon: float | None = 1e-8
 		pad_y: bool = False
 
+		@model_validator(mode="before")
+		@classmethod
+		def material_line_epsilon(cls, values):
+			if values.get("slope") is not None and "epsilon" not in values:
+				values = {**values, "epsilon": 1e-6}
+			return values
+
 	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:
 		if not self.params.enabled:
 			return None
-		transfer = _resolved_phase_filter(state, image.shape, self.params.alpha)
-		filtered = _paganin_filter(image, transfer)
+		filtered = super().run_projection(image, state)
 		return _negative_log(filtered, epsilon=self.params.epsilon, maximum=None)
 
 
