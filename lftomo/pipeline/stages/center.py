@@ -115,16 +115,16 @@ class ManualCenterStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("center.manual currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = type(state.buffer_spec.shape)
 		if data.ndim != 3:
 			raise ValueError("center.manual expects a three-dimensional tomography array")
 		if self.params.tilt == 0:
 			return _store_center(state, self.params.value_px)
 		if state.source_window is None:
 			raise RuntimeError("center.manual tilt requires PipelineState.source_window")
-		y_size = data.shape[layout.axis_of("Y")]
-		source_y = int(state.source_window.pos.Y)
-		rows = source_y + np.arange(y_size, dtype=np.float32)
+		rows = np.asarray([
+			state.source_window.source_index("Y", index, include_padding=False)
+			for index in state.work_indices("Y")
+		], dtype=np.float32)
 		return _store_center(state, self.params.value_px + (rows - self.params.reference_y) * self.params.tilt)
 
 

@@ -208,7 +208,7 @@ def test_ndarray_real_chain_uses_one_live_scratch():
 	assert activity["peak"] * row_scratch_bytes < projection.nbytes
 
 
-def _managed_vo_chain(workers: int):
+def _managed_vo_chain(workers: int, *, source_geometry: bool = True):
 	projection = _fixture(rows=4)
 	scan = _scan(projection.shape[0], projection.shape[1], projection.shape[2])
 	stages = [
@@ -221,11 +221,13 @@ def _managed_vo_chain(workers: int):
 			ProjOrder(*projection.shape), np.float32, role="normalized",
 		)
 		working.array()[...] = projection
-		state = attach_source_geometry(PipelineState(
+		state = PipelineState(
 			working, scan, _state(projection, ProjOrder).recon,
 			storage=context.storage, executor=context.executor,
 			domain=DataDomain.ATTENUATION,
-		), y_start=7, physical_y=11)
+		)
+		if source_geometry:
+			attach_source_geometry(state, y_start=7, physical_y=11)
 		result = Pipeline(
 			stages, scan=scan, initial_layout=ProjOrder,
 			initial_domain=DataDomain.ATTENUATION, bounded_workers=workers,
@@ -238,7 +240,8 @@ def _managed_vo_chain(workers: int):
 		)
 
 
-def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
+@pytest.mark.parametrize("source_geometry", [True, False])
+def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray(source_geometry):
 	expected = _fixture(rows=4)
 	_pipeline([
 		VoDeadStripeStage(snr=2, size=5, norm=False),
@@ -246,10 +249,10 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
 		VoSortStripeStage(size=5),
 	], ProjOrder).run(_state(expected, ProjOrder))
 
-	actual, report, events, artifacts = _managed_vo_chain(2)
+	actual, report, events, artifacts = _managed_vo_chain(2, source_geometry=source_geometry)
 	np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 	assert report == {
-		"scope": "window", "unit_axis": "Y", "units": 4,
+		"scope": "window" if source_geometry else "whole_volume", "unit_axis": "Y", "units": 4,
 		"buffers": [
 			{
 				"artifact_key": "_vo_float_work", "role": "vo_float_work",
@@ -269,7 +272,7 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
 		],
 		"managed_bytes": 2 * 4 * 32 * 32 * 4 + 4 * 32 * 36 * 4,
 		"allocation_count": 3,
-		"indexing": "units_local_index",
+		"indexing": "buffer_sample_ordinals",
 	}
 	work_events = [
 		event for event in events

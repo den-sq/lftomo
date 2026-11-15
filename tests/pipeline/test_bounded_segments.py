@@ -15,7 +15,8 @@ from lftomo.pipeline import (
 	StageContract,
 )
 from lftomo.pipeline.stages import VoDeadStripeStage, VoSortStripeStage
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.pipeline.execution import run_bounded_sinogram_segment
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
 
 
 def scan_config(theta=12):
@@ -120,6 +121,18 @@ def test_ndarray_only_bounded_execution_is_serial_and_hermetic():
 	pipeline([AddSinogramStage("add", 1, activity)], workers=2).run(state(array, ProjOrder))
 
 	assert activity["peak"] == 1
+
+
+def test_bounded_chain_processes_only_assigned_rows_once():
+	array = np.zeros((12, 4, 8), dtype=np.float32)
+	input_state = state(array, ProjOrder)
+	input_state.work_range = Y.drange(1, 4, 2)
+	run_bounded_sinogram_segment(
+		input_state, [AddSinogramStage("first", 1), AddSinogramStage("second", 2)],
+	)
+	expected = np.zeros_like(array)
+	expected[:, 1:4:2, :] = 3
+	np.testing.assert_array_equal(array, expected)
 
 
 def test_real_vo_chain_matches_contiguous_sinogram_execution():

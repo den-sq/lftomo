@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field, replace
 import time
-from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Sequence
 import uuid
 
 import numpy as np
@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
 from lftomo.storage import ManagedBuffer, StorageBackend, buffer_view
-from lftomo.util.shapes import DataShape, ProjOrder, SinoOrder, Y
+from lftomo.util.shapes import DataRange, DataShape, IntIter, ProjOrder, SinoOrder, Y
 
 if TYPE_CHECKING:
 	from lftomo.pipeline.execution import PipelineExecutor
@@ -341,6 +341,7 @@ class PipelineState:
 	source_window: TomoWindow | None = None
 	buffer_spec: BufferSpec | None = None
 	domain: DataDomain | None = None
+	work_range: DataRange | None = None
 
 	def __post_init__(self):
 		if self.buffer_spec is None:
@@ -359,12 +360,52 @@ class PipelineState:
 			actual_dtype = getattr(view() if callable(view) else view, "dtype", None)
 		if actual_dtype is None or np.dtype(actual_dtype) != self.buffer_spec.dtype:
 			raise ValueError("working array dtype disagrees with BufferSpec.dtype")
+		if self.work_range is not None:
+			if len(self.work_range.step.names) != 1:
+				raise ValueError("work_range must assign exactly one buffer axis")
+			axis = self.work_range.step.names[0]
+			self.buffer_spec.shape.axis_of(axis)
+			start = int(getattr(self.work_range.start, axis))
+			stop = int(getattr(self.work_range.stop, axis))
+			step = int(getattr(self.work_range.step, axis))
+			if not 0 <= start <= stop <= getattr(self.buffer_spec.shape, axis) or step < 1:
+				raise ValueError("work_range must stay within its buffer axis with a positive step")
 
 	@property
 	def layout(self) -> type[DataShape] | None:
 		"""Return the stage-contract layout derived from the canonical shape."""
 
 		return None if self.buffer_spec is None else self.buffer_spec.layout
+
+	def assigned_range(self, axis: str) -> DataRange:
+		"""Return assigned packed positions, or the full unassigned buffer axis."""
+
+		if self.buffer_spec is None:
+			raise ValueError("assigned work requires a bound BufferSpec")
+		self.buffer_spec.shape.axis_of(axis)
+		if self.work_range is not None and axis in self.work_range.step.names:
+			return self.work_range
+		axis_type = next(
+			shape_type for shape_type in DataShape.__subclasses__()
+			if shape_type.names == (axis,)
+		)
+		return axis_type.drange(0, getattr(self.buffer_spec.shape, axis), 1)
+
+	def work_indices(self, axis: str) -> Iterator[int]:
+		"""Iterate the packed buffer positions assigned on a semantic axis."""
+
+		return self.assigned_range(axis).get_iter(IntIter)
+
+	def work_index(self, shape: type[DataShape] | DataShape | None = None) -> tuple[slice, ...]:
+		"""Express the assignment for the working buffer or another layout."""
+
+		if shape is None:
+			if self.buffer_spec is None:
+				raise ValueError("assigned work requires a bound BufferSpec")
+			shape = self.buffer_spec.shape
+		if self.work_range is None:
+			return DataShape._shape_type(shape).point_index()
+		return self.work_range.slice_index(shape)
 
 	def with_array(
 		self,
@@ -387,6 +428,7 @@ class PipelineState:
 			source_window=self.source_window,
 			buffer_spec=buffer_spec,
 			domain=self.domain if domain is None else domain,
+			work_range=self.work_range,
 		)
 
 
@@ -495,7 +537,7 @@ class SinogramStage(Stage):
 
 
 class ProjectionStage(Stage):
-	"""Stage with one kernel per projection, using canonical unit geometry."""
+	"""Stage with one kernel per projection in its assigned buffer range."""
 
 	contract = StageContract(
 		accepts=(ProjOrder, SinoOrder), prefers=ProjOrder, produces=PRESERVE,

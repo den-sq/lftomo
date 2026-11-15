@@ -177,31 +177,27 @@ def test_tomo_window():
 	assert isinstance(twi, TomoWindow)
 
 
-@pytest.mark.parametrize(
-	("shape", "axis", "pos", "step", "positions", "indices"),
-	[
-		(
-			ProjOrder(3, 2, 4), "Theta", ProjOrder(5, 10, 0), ProjOrder(2, 1, 1),
-			[5, 7, 9], [np.s_[0:1, :, :], np.s_[1:2, :, :], np.s_[2:3, :, :]],
-		),
-		(
-			SinoOrder(2, 3, 4), "Y", SinoOrder(10, 5, 0), SinoOrder(3, 2, 1),
-			[10, 13], [np.s_[0:1, :, :], np.s_[1:2, :, :]],
-		),
-	],
-)
-def test_data_ref_units_pair_local_indices_with_global_strided_positions(
-	shape, axis, pos, step, positions, indices,
-):
-	ref = DataRef(shape, shape.make_with(0), pos, step, np.float32)
-	units = list(ref.units(axis))
-
-	assert [getattr(unit.pos, axis) for unit, _local_index in units] == positions
-	assert [local_index for _unit, local_index in units] == indices
-	assert all(
-		unit.step == step and getattr(unit.shape, axis) == 1
-		for unit, _local_index in units
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+def test_window_maps_packed_buffer_positions_to_strided_source_with_halo(layout):
+	physical = layout(Theta=12, Y=10, X=8)
+	window = TomoWindow.from_bounds(
+		physical, y=(2, 6), theta=(2, 11, 3), halo=(Y(1), Y(3)),
 	)
+	source = np.arange(physical.prod()).reshape(physical.as_tuple())
+	buffer = source[window.with_pad().index]
+
+	assert [window.source_index("Theta", index) for index in range(3)] == [2, 5, 8]
+	assert [window.source_index("Y", index) for index in range(8)] == list(range(1, 9))
+	assert [window.source_index("Y", index, include_padding=False) for index in range(4)] == [2, 3, 4, 5]
+	assert list(window.internal.int_iter("Theta")) == [0, 3, 6]
+	for theta in range(3):
+		for row in range(8):
+			np.testing.assert_array_equal(
+				buffer[layout.point_index(Theta=theta, Y=row)],
+				source[layout.point_index(
+					Theta=window.source_index("Theta", theta), Y=window.source_index("Y", row),
+				)],
+			)
 
 
 def test_window_from_bounds_records_edge_clamped_halo_and_theta_stride():

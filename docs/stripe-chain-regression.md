@@ -29,8 +29,10 @@ interior, so different kernel sizes safely reuse borders that are zeroed once.
 Exact managed scratch is therefore `2 * Theta * Y * X * 4`, plus
 `Theta * Y * (X + 2H) * 4` when that pad plane is required. Allocation remains
 a pure function of the resolved window shape and authored kernels, not the
-process-worker count. Each task uses its already-dispatched row index to select
-the matching planes, so the handles remain valid when the run-scoped process
+process-worker count. Each task retains the full buffer handle and held window;
+its assigned `DataRange` selects the detector row and matching scratch planes.
+The window translates that packed-buffer ordinal to a source position when
+needed. These handles remain valid when the run-scoped process
 pool is terminated and recreated. Whole-volume mode deliberately uses the same
 topology and therefore accepts the correspondingly high ceiling; there is no
 fallback or leasing path.

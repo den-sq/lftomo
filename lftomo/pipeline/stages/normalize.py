@@ -159,7 +159,8 @@ class WeightedNormalizeStage(Stage):
 
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
-		for local_index, global_index in enumerate(state.source_window.int_iter("Theta")):
+		for local_index in state.work_indices("Theta"):
+			global_index = state.source_window.source_index("Theta", local_index)
 			image = working[layout.point_index(Theta=local_index)]
 			_weighted_normalize_projection(
 				image,
@@ -275,7 +276,6 @@ class BeamTrackingNormalizeStage(Stage):
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
 		projection_count = state.dataset.physical_shape.Theta
-		batch_count = state.buffer_spec.shape.Theta
 		schedule = self.params.schedule
 		fit = None
 		prepared = getattr(self, "_dispatch_schedule_fit", None)
@@ -283,11 +283,13 @@ class BeamTrackingNormalizeStage(Stage):
 			fit = prepared
 			schedule = fit.schedule
 		elif self.params.fit_schedule:
-			indices = np.unique(np.linspace(0, batch_count - 1, self.params.schedule_sample_count).astype(int))
-			fractions = (
-				state.source_window.pos.Theta
-				+ indices * state.source_window.step.Theta
-			) / max(projection_count - 1, 1)
+			assigned = np.fromiter(state.work_indices("Theta"), dtype=np.intp)
+			indices = assigned[np.unique(
+				np.linspace(0, len(assigned) - 1, self.params.schedule_sample_count).astype(int),
+			)]
+			fractions = np.asarray([
+				state.source_window.source_index("Theta", int(index)) for index in indices
+			]) / max(projection_count - 1, 1)
 			fit = calibrate_schedule(
 				np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
 				fractions, pre_gain, post_gain,
@@ -296,11 +298,8 @@ class BeamTrackingNormalizeStage(Stage):
 		gain_at = optimal_transport_interp(
 			pre_gain, post_gain, transport_sigma=self.params.transport_sigma, schedule=schedule,
 		)
-		for local_index in range(batch_count):
-			global_index = (
-				state.source_window.pos.Theta
-				+ local_index * state.source_window.step.Theta
-			)
+		for local_index in state.work_indices("Theta"):
+			global_index = state.source_window.source_index("Theta", local_index)
 			fraction = global_index / max(projection_count - 1, 1)
 			beam_time = float(schedule(fraction))
 			gain = gain_at(fraction)
@@ -367,15 +366,16 @@ class BeamKeyframesNormalizeStage(Stage):
 			if len(times) != data.shape[layout.axis_of("Theta")]:
 				raise ValueError("projection_times must match the current Theta window")
 		else:
-			times = (
-				state.source_window.pos.Theta
-				+ np.arange(state.buffer_spec.shape.Theta) * state.source_window.step.Theta
-			).astype(float)
+			times = None
 		dark = 0.0 if self.params.dark_component is None else bundle.read_component(
 			self.params.dark_component, y_start=start, y_stop=stop,
 		)
 		maximum_seen_gap = 0.0
-		for local_index, time in enumerate(times):
+		for local_index in state.work_indices("Theta"):
+			time = (
+				float(state.source_window.source_index("Theta", local_index))
+				if times is None else times[local_index]
+			)
 			bracket = bundle.read_time_bracket(
 				self.params.component, float(time), y_start=start, y_stop=stop,
 			)
@@ -486,7 +486,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		training_min = np.asarray(metadata.get("training_coefficient_min", []), dtype=float)
 		training_max = np.asarray(metadata.get("training_coefficient_max", []), dtype=float)
 		qcs, coefficients, violations = [], [], []
-		for index in range(data.shape[layout.axis_of("Theta")]):
+		for index in state.work_indices("Theta"):
 			image = data[layout.point_index(Theta=index)]
 			fit = fit_projection_beam(
 				image, basis, detector=detector,
@@ -590,11 +590,8 @@ class ThetaSwitchNormalizeStage(Stage):
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
 		total_count = state.dataset.physical_shape.Theta
-		for local_projection in range(state.buffer_spec.shape.Theta):
-			projection = (
-				state.source_window.pos.Theta
-				+ local_projection * state.source_window.step.Theta
-			)
+		for local_projection in state.work_indices("Theta"):
+			projection = state.source_window.source_index("Theta", local_projection)
 			if self.params.gain_averaging:
 				weight = projection / total_count
 				gain = pre_gain * (1 - weight) + post_gain * weight
@@ -639,14 +636,13 @@ def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 	if state.source_window is None or state.dataset is None:
 		raise RuntimeError(f"{stage.name} requires canonical source geometry")
 	projection_count = state.dataset.physical_shape.Theta
-	batch_count = state.buffer_spec.shape.Theta
-	indices = np.unique(
-		np.linspace(0, batch_count - 1, stage.params.schedule_sample_count).astype(int),
-	)
-	fractions = (
-		state.source_window.pos.Theta
-		+ indices * state.source_window.step.Theta
-	) / max(projection_count - 1, 1)
+	assigned = np.fromiter(state.work_indices("Theta"), dtype=np.intp)
+	indices = assigned[np.unique(
+		np.linspace(0, len(assigned) - 1, stage.params.schedule_sample_count).astype(int),
+	)]
+	fractions = np.asarray([
+		state.source_window.source_index("Theta", int(index)) for index in indices
+	]) / max(projection_count - 1, 1)
 	stage._dispatch_schedule_fit = calibrate_schedule(
 		np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
 		fractions, pre_gain, post_gain,

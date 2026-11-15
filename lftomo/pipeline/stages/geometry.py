@@ -72,10 +72,7 @@ def transform_affine_projection(
 	import cv2
 
 	if stage.params.movement_enabled and (stage.params.movement_y != 0 or stage.params.movement_x != 0):
-		fraction = (
-			source_window.pos.Theta
-			+ local_projection * source_window.step.Theta
-		) / physical_shape.Theta
+		fraction = source_window.source_index("Theta", local_projection) / physical_shape.Theta
 		image = shift(
 			image,
 			(stage.params.movement_y * fraction, stage.params.movement_x * fraction),
@@ -156,8 +153,7 @@ class SkewCorrectStage(Stage):
 			height / 2 if self.params.center_y_px is None else self.params.center_y_px,
 		)
 		matrix = cv2.getRotationMatrix2D(center, self.params.degrees, 1.0)
-		count = data.shape[layout.axis_of("Theta")]
-		for projection in range(count):
+		for projection in state.work_indices("Theta"):
 			image = data[layout.point_index(Theta=projection)]
 			image[:] = cv2.warpAffine(
 				image,
@@ -215,11 +211,8 @@ class MovementCorrectStage(Stage):
 			return state
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
-		for projection in range(data.shape[layout.axis_of("Theta")]):
-			fraction = (
-				state.source_window.pos.Theta
-				+ projection * state.source_window.step.Theta
-			) / state.dataset.physical_shape.Theta
+		for projection in state.work_indices("Theta"):
+			fraction = state.source_window.source_index("Theta", projection) / state.dataset.physical_shape.Theta
 			image = data[layout.point_index(Theta=projection)]
 			image[:] = shift(
 				image,
@@ -328,7 +321,7 @@ class AffineSkewMovementStage(Stage):
 		output_buffer, output = allocate_output(
 			state, shape, data.dtype, role="fused_geometry",
 		)
-		for projection in range(data.shape[input_layout.axis_of("Theta")]):
+		for projection in state.work_indices("Theta"):
 			image = data[input_layout.point_index(Theta=projection)]
 			transform_affine_projection(
 				self, image, state.source_window, projection,

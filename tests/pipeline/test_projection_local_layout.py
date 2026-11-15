@@ -17,8 +17,7 @@ from lftomo.pipeline.stages import (
 	ThetaSwitchNormalizeStage,
 	WeightedNormalizeStage,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
-from lftomo.util.window import DataRef
+from lftomo.util.shapes import ProjOrder, SinoOrder, Theta
 from tests.sample_data import attach_source_geometry
 
 
@@ -98,35 +97,17 @@ def test_state_layout_drives_paganin_without_constructor_order():
 	np.testing.assert_allclose(projection, sinogram.transpose(1, 0, 2), rtol=1e-6, atol=1e-6)
 
 
-def test_serial_phase_uses_canonical_units_for_strided_source(monkeypatch):
+def test_serial_phase_processes_only_assigned_projections_once():
 	working = np.full((4, 2, 3), 0.5, dtype=np.float32)
 	current = state(working, ProjOrder)
 	attach_source_geometry(
 		current, theta_start=1, theta_stride=2, physical_theta=8,
 	)
-	units = []
-	original_units = DataRef.units
-
-	def record(self, axis):
-		for unit, index in original_units(self, axis):
-			units.append(unit)
-			yield unit, index
-
-	stage = NegativeLogStage()
-	kernel = stage.run_projection
-
-	def inspect(image, unit_state):
-		assert unit_state.source_window is units[-1]
-		assert unit_state.buffer_spec.shape is units[-1].shape
-		assert unit_state.artifacts is current.artifacts
-		assert np.shares_memory(image, working)
-		return kernel(image, unit_state)
-
-	monkeypatch.setattr(DataRef, "units", record)
-	monkeypatch.setattr(stage, "run_projection", inspect)
-	assert stage.run(current) is current
-	assert [unit.pos.Theta for unit in units] == [1, 3, 5, 7]
-	np.testing.assert_allclose(working, -np.log(0.5))
+	current.work_range = Theta.drange(1, 4, 2)
+	expected = working.copy()
+	expected[1:4:2] = -np.log(expected[1:4:2])
+	assert NegativeLogStage().run(current) is current
+	np.testing.assert_allclose(working, expected)
 
 
 def test_pipeline_preserves_projection_layout_through_manual_center():

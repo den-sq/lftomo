@@ -400,7 +400,7 @@ class BetaScaleStage(Stage):
 			raise ValueError("phase.beta_scale expects a three-dimensional tomography array")
 		if not self.params.enabled:
 			return state
-		data /= 4 * np.pi / _wavelength_cm(state.scan.energy_keV)
+		data[state.work_index()] /= 4 * np.pi / _wavelength_cm(state.scan.energy_keV)
 		return state
 
 

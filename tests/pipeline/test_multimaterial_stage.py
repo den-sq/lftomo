@@ -167,7 +167,7 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 			arguments = list(arguments)
 			assert all(isinstance(args[0], ManagedBuffer) for args in arguments)
 			for args in arguments:
-				worker_scan = next(value for value in args if isinstance(value, Scan))
+				worker_scan = next(value.scan for value in args if hasattr(value, "scan"))
 				assert "flat_fields" not in worker_scan.metadata
 				if kernel.__name__ in ("run_material_retrieval_kernel", "run_material_correction_kernel"):
 					assert isinstance(args[-1], ManagedBuffer)

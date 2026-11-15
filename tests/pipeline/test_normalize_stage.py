@@ -14,7 +14,6 @@ from lftomo.pipeline import (
 	StageContract,
 )
 from lftomo.pipeline.stages.normalize import TaperBlendedNormalizeStage, WeightedNormalizeStage
-from lftomo.prep import flat
 from lftomo.prep.flat import weighted_normalize
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
@@ -100,7 +99,7 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 
 
 @pytest.mark.parametrize("layout,flat_origin", [(ProjOrder, "selected"), (SinoOrder, "physical")])
-def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window(monkeypatch, layout, flat_origin):
+def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window(layout, flat_origin):
 	physical = ProjOrder(Theta=8, Y=8, X=2)
 	detector_rows = np.arange(physical.Y, dtype=np.float32)
 	if flat_origin == "selected":
@@ -120,32 +119,11 @@ def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window(monkeypa
 		buffer_spec=BufferSpec(layout(*working.shape), working.dtype),
 		dataset=dataset, source_window=window,
 	)
-	projections = []
-	iterated = []
-	kernel = flat._weighted_normalize_projection
-	int_iter = TomoWindow.int_iter
-
-	def record_iter(ref, axis=None):
-		iterated.append((ref, axis))
-		return int_iter(ref, axis)
-
-	def record(target, source, fields, projection, projection_count, pre_sub):
-		assert projection_count == dataset.physical_shape.Theta
-		assert target is source
-		assert np.shares_memory(fields, flats)
-		projections.append((projection, target))
-		return kernel(target, source, fields, projection, projection_count, pre_sub)
-
-	monkeypatch.setattr(TomoWindow, "int_iter", record_iter)
-	monkeypatch.setattr(flat, "_weighted_normalize_projection", record)
 	result = WeightedNormalizeStage().run(state)
 
 	assert result.working_array.dtype == np.float32
 	np.testing.assert_array_equal(working, 10)
-	assert iterated == [(window, "Theta")]
-	assert [projection for projection, _ in projections] == [1, 4, 7]
-	for index, (projection, target) in enumerate(projections):
-		assert np.shares_memory(target, result.working_array)
+	for index, projection in enumerate((1, 4, 7)):
 		expected_gain = 20 + 10 * np.arange(2, 7)[:, None] + 2 * projection
 		expected = np.broadcast_to(10 / expected_gain, (5, 2))
 		np.testing.assert_allclose(result.working_array[layout.point_index(Theta=index)], expected)
