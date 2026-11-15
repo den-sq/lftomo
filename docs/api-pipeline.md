@@ -170,7 +170,8 @@ by this algorithm-independent report; benchmark result fields keep their
 existing meaning. Multimaterial planes, including the reconstruction-layout
 previous-label buffer, use this same hook and lifecycle; their initialization
 and memory plan derive from these requests. Direct NumPy composite execution
-uses `allocate_output`'s existing ndarray fallback and removes temporary keys
+allocates only requests marked `required_for_fallback` through `allocate_output`
+and removes temporary keys
 on completion or failure. Mixed-axis composites report no single unit axis.
 
 Requests are inspectable without execution. Non-sinogram Stage requests are

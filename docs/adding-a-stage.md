@@ -66,7 +66,10 @@ Theta units. Each base supplies `run`; authors implement the numerical kernel.
 For reusable work in a bounded segment or composite Stage, override
 `Stage.bounded_work_requests(input_spec)` and return `BoundedWorkRequest`
 values. Each request names its temporary artifact key and allocation role,
-and owns a `BufferSpec` plus an optional scalar `fill_value`. Express numerical
+and owns a `BufferSpec` plus an optional scalar `fill_value`. Set
+`required_for_fallback=True` for composite work required even without managed
+dispatch; optional canvases retain their per-unit numerical fallback instead.
+Express numerical
 padding through `TomoWindow` before deriving the allocation shape. The generic
 executor allocates once for the segment through the run's `StorageBackend`,
 passes only the current unit's reopenable handle to kernels, and retires it

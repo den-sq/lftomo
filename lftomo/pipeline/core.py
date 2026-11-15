@@ -262,6 +262,8 @@ class BoundedWorkRequest:
 	``buffer_spec`` is the minimum capacity. Only ``grow_axes`` may grow when
 	other members request the same key; other extents, dtype and initialization
 	must agree. A request describes temporary work, not a published artifact.
+	``required_for_fallback`` retains algorithm-required work when execution
+	has no managed input/storage pair; optional work uses the numerical fallback.
 	"""
 
 	artifact_key: str
@@ -269,6 +271,7 @@ class BoundedWorkRequest:
 	role: str
 	fill_value: float | int | None = None
 	grow_axes: tuple[str, ...] = ()
+	required_for_fallback: bool = False
 
 
 def collect_bounded_work(
@@ -288,6 +291,7 @@ def collect_bounded_work(
 				before.layout is not after.layout or before.dtype != after.dtype
 				or previous.role != request.role or previous.fill_value != request.fill_value
 				or previous.grow_axes != request.grow_axes
+				or previous.required_for_fallback != request.required_for_fallback
 			):
 				raise ValueError(f"incompatible bounded work requests for {request.artifact_key!r}")
 			extents = {}

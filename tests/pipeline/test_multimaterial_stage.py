@@ -93,6 +93,7 @@ def test_stage_declares_all_reusable_scratch_before_execution(layout, n_iter):
 		assert request.buffer_spec == BufferSpec(expected_shape, expected_dtype)
 		assert request.role == "multimaterial_" + key
 		assert request.fill_value == (0 if key == "correction" else None)
+		assert request.required_for_fallback
 		assert request.artifact_key not in stage.contract.produces_artifacts
 
 

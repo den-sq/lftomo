@@ -288,7 +288,7 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 	def dispatch(kernel, arguments):
 		return executor.submit_all(kernel, arguments) if parallel else [kernel(*args) for args in arguments]
 
-	requests = _prepare_bounded_work(state, (stage,), required=True)
+	requests = _prepare_bounded_work(state, (stage,))
 	specs = {request.artifact_key: request.buffer_spec for request in requests}
 	work = state.artifacts
 
@@ -411,18 +411,18 @@ def run_sinogram_chain_kernel(
 
 
 def _prepare_bounded_work(
-	state: PipelineState, stages: Sequence[Stage], axis: str | None = None, *, required: bool = False,
+	state: PipelineState, stages: Sequence[Stage], axis: str | None = None,
 ) -> tuple[BoundedWorkRequest, ...]:
 	"""Allocate and initialize Stage-declared work once for the complete segment.
 
-	Composite algorithms require scratch even without a storage backend; use
-	allocate_output's ndarray fallback in that case. A mixed-axis composite has
+	Requests required for serial fallback use allocate_output's existing
+	allocation boundary even without managed dispatch. A mixed-axis composite has
 	no single dispatched axis to validate against every requested layout.
 	"""
 
-	if not required and (not isinstance(state.working_array, ManagedBuffer) or state.storage is None):
-		return ()
 	requests = collect_bounded_work(stages, state.buffer_spec)
+	if not isinstance(state.working_array, ManagedBuffer) or state.storage is None:
+		requests = tuple(request for request in requests if request.required_for_fallback)
 	if any(request.artifact_key in state.artifacts for request in requests):
 		raise ValueError("bounded work artifacts are private to one segment")
 	if axis is not None and any(
@@ -890,7 +890,12 @@ def run_bounded_sinogram_segment(
 	for stage in stages:
 		if not callable(getattr(stage, "run_sinogram", None)):
 			raise TypeError(f"{stage.name} declares bounded views but has no run_sinogram kernel")
-	requests = _prepare_bounded_work(state, stages, "Y")
+	# The ndarray sinogram path retains its numerical fallback without imposing
+	# managed-work dtype/capacity requirements on that path.
+	requests = (
+		_prepare_bounded_work(state, stages, "Y")
+		if isinstance(state.working_array, ManagedBuffer) and state.storage is not None else ()
+	)
 	work_keys = tuple(request.artifact_key for request in requests)
 	member_samples: list[list[float]] = [[] for _stage in stages]
 	try:
