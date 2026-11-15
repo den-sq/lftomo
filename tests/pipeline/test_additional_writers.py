@@ -3,8 +3,9 @@ from types import SimpleNamespace
 
 import h5py
 import numpy as np
+import pytest
 
-from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
+from lftomo.config import Acquisition, ConeGeometry, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
 from lftomo.pipeline.stages import HDF5VolumeWriteStage, NeuroglancerWriteStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, ReconOrder, Y
@@ -77,7 +78,8 @@ def test_hdf5_writer_places_streaming_interiors_at_global_output_rows(tmp_path):
 		np.testing.assert_array_equal(handle["recon"][2:], 2)
 
 
-def test_neuroglancer_writer_transposes_blocks_for_cloudvolume(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cone,resolution_nm", [(False, 700), (True, 350)])
+def test_neuroglancer_writer_transposes_blocks_for_cloudvolume(tmp_path, monkeypatch, cone, resolution_nm):
 	calls = {}
 
 	class FakeCloudVolume:
@@ -103,11 +105,14 @@ def test_neuroglancer_writer_transposes_blocks_for_cloudvolume(tmp_path, monkeyp
 	)
 	working = np.arange(2 * 3 * 4, dtype=np.uint16).reshape(2, 3, 4)
 	stage = create_stage(config)
-	result = Pipeline([stage]).run(_state(working, config, tmp_path))
+	state = _state(working, config, tmp_path)
+	if cone:
+		state.scan.geometry = ConeGeometry(source_to_sample_m=0.5, sample_to_detector_m=0.5)
+	result = Pipeline([stage]).run(state)
 
 	assert STAGE_REGISTRY["write.neuroglancer"] is NeuroglancerWriteStage
 	assert calls["info"]["volume_size"] == [4, 3, 2]
-	assert calls["info"]["resolution"] == [700, 700, 700]
+	assert calls["info"]["resolution"] == [resolution_nm] * 3
 	assert calls["writes"][0][1].shape == (4, 3, 1)
 	np.testing.assert_array_equal(
 		np.concatenate([value for _key, value in calls["writes"]], axis=2),

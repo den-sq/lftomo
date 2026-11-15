@@ -135,7 +135,7 @@ def test_projection_dispatch_uses_source_envelope_and_managed_filter(reference, 
 		state = _state(selected, layout, theta_start=1, theta_stride=2, y_start=2)
 		state.working_array = working
 		state.storage, state.executor = context.storage, context.executor
-		state.scan.ssd_cm = 1
+		state.scan.geometry.ssd_cm = 1
 		state.recon.pipeline = [StageConfig(
 			kind="phase", algorithm="paganin", params=stage.params.model_dump(),
 		)]
@@ -164,7 +164,7 @@ def test_projection_dispatch_uses_source_envelope_and_managed_filter(reference, 
 def test_serial_affine_stage_prepares_envelope_once(reference, kind):
 	values = reference["transmission"].copy()
 	state = _state(values)
-	state.scan.ssd_cm = 1
+	state.scan.geometry.ssd_cm = 1
 	stage = PaganinStage(
 		slope=1e-9, material_alpha=2e-8,
 		envelope_m=3e-4 if kind == "scalar" else reference["envelope"].tolist(),
