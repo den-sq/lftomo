@@ -1,0 +1,37 @@
+{
+  "source": "https://github.com/den-sq/mctutil/blob/fbe3251c70de45180462ad24e556b7e1a86483ce/mctutil/phase/phase_tomo.py",
+  "numpy": "2.5.1",
+  "scipy": "1.18.0",
+  "description": "Reference outputs for a two-material circular phantom and row-varying exit-wave phase residuals. Each stored expected output was evaluated directly by the unchanged source function; production tests need no mctutil installation.",
+  "units": {
+    "pixel_m": "m",
+    "mu_table": "1/m",
+    "delta_table": "dimensionless",
+    "psi": "radians",
+    "intensity": "transmission"
+  },
+  "pixel_m": 1e-06,
+  "energy_kev": 20.0,
+  "distance_m": 0.01,
+  "slope": 1.5029585798816567e-09,
+  "phantom": {
+    "size": 48,
+    "matrix_radius_px": 16,
+    "inclusion_radius_px": 5,
+    "inclusion_center_px": [
+      6,
+      -3
+    ],
+    "correction_row_x_shifts_px": [
+      -2,
+      0,
+      3
+    ]
+  },
+  "reference_calls": {
+    "sinogram": "forward_project(image, angles_deg, pixel_m)",
+    "reconstruction": "fbp(sinogram, angles_deg, pixel_m)",
+    "labels": "segment_materials(image, mu_table)",
+    "error": "predict_filter_error(psi, intensity, energy_kev, pixel_m, distance_m, through_origin_fit.slope, pad=specified, workers=1)"
+  }
+}
