@@ -232,7 +232,7 @@ def _managed_vo_chain(workers: int):
 		).run(state)
 		return (
 			np.asarray(result.working_array).copy(),
-			dict(result.artifacts["vo_scratch_allocations"][0]),
+			dict(result.artifacts["bounded_work_allocations"][0]),
 			context.storage.allocation_events,
 			dict(result.artifacts),
 		)
@@ -249,15 +249,24 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray():
 	actual, report, events, artifacts = _managed_vo_chain(2)
 	np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 	assert report == {
-		"scope": "window",
-		"rows": 4,
-		"sinogram_shape": [32, 32],
-		"float_dtype": np.dtype(np.float32).str,
-		"index_dtype": np.dtype(np.uint32).str,
-		"float_bytes": 4 * 32 * 32 * 4,
-		"index_bytes": 4 * 32 * 32 * 4,
-		"median_pad_half_width": 2,
-		"median_pad_bytes": 4 * 32 * 36 * 4,
+		"scope": "window", "unit_axis": "Y", "units": 4,
+		"buffers": [
+			{
+				"artifact_key": "_vo_float_work", "role": "vo_float_work",
+				"shape": {"Y": 4, "Theta": 32, "X": 32},
+				"dtype": np.dtype(np.float32).str, "bytes": 4 * 32 * 32 * 4,
+			},
+			{
+				"artifact_key": "_vo_index_work", "role": "vo_index_work",
+				"shape": {"Y": 4, "Theta": 32, "X": 32},
+				"dtype": np.dtype(np.uint32).str, "bytes": 4 * 32 * 32 * 4,
+			},
+			{
+				"artifact_key": "_vo_median_pad_work", "role": "vo_median_pad_work",
+				"shape": {"Y": 4, "Theta": 32, "X": 36},
+				"dtype": np.dtype(np.float32).str, "bytes": 4 * 32 * 36 * 4,
+			},
+		],
 		"managed_bytes": 2 * 4 * 32 * 32 * 4 + 4 * 32 * 36 * 4,
 		"allocation_count": 3,
 		"indexing": "units_local_index",

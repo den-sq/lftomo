@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import time
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal, Sequence
 import uuid
 
 import numpy as np
@@ -255,6 +255,53 @@ class BufferSpec:
 		return type(self.shape)
 
 
+@dataclass(frozen=True)
+class BoundedWorkRequest:
+	"""One segment-owned workspace, shared by its artifact key.
+
+	``buffer_spec`` is the minimum capacity. Only ``grow_axes`` may grow when
+	other members request the same key; other extents, dtype and initialization
+	must agree. A request describes temporary work, not a published artifact.
+	"""
+
+	artifact_key: str
+	buffer_spec: BufferSpec
+	role: str
+	fill_value: float | int | None = None
+	grow_axes: tuple[str, ...] = ()
+
+
+def collect_bounded_work(
+	stages: Sequence[Stage], input_spec: BufferSpec,
+) -> tuple[BoundedWorkRequest, ...]:
+	"""Resolve shared capacities from Stage-owned requirements without allocating."""
+
+	requests: dict[str, BoundedWorkRequest] = {}
+	for stage in stages:
+		for request in stage.bounded_work_requests(input_spec):
+			previous = requests.get(request.artifact_key)
+			if previous is None:
+				requests[request.artifact_key] = request
+				continue
+			before, after = previous.buffer_spec, request.buffer_spec
+			if (
+				before.layout is not after.layout or before.dtype != after.dtype
+				or previous.role != request.role or previous.fill_value != request.fill_value
+				or previous.grow_axes != request.grow_axes
+			):
+				raise ValueError(f"incompatible bounded work requests for {request.artifact_key!r}")
+			extents = {}
+			for axis in before.shape.names:
+				first, second = getattr(before.shape, axis), getattr(after.shape, axis)
+				if axis not in request.grow_axes and first != second:
+					raise ValueError(f"bounded work {request.artifact_key!r} cannot grow along {axis}")
+				extents[axis] = max(first, second)
+			requests[request.artifact_key] = replace(
+				previous, buffer_spec=BufferSpec(before.layout(**extents), before.dtype),
+			)
+	return tuple(requests.values())
+
+
 def _buffer_spec(buffer: Any) -> BufferSpec | None:
 	shape = getattr(buffer, "shape", None)
 	if shape is None:
@@ -417,6 +464,11 @@ class Stage(ABC):
 		"""Return the source-coordinate window published after this Stage."""
 
 		return source
+
+	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+		"""Declare reusable segment work from the current window's buffer geometry."""
+
+		return ()
 
 
 class SinogramStage(Stage):
