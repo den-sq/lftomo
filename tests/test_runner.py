@@ -20,7 +20,7 @@ from lftomo.calibration import (
 	load_manifest,
 	stream_sha256,
 )
-from lftomo.config import Recon, Scan
+from lftomo.config import Recon, Scan, StageConfig
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import (
 	_center_artifacts,
@@ -257,9 +257,9 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	assert reservations == [(event.role, event.bytes) for event in plans[0].allocation_schedule]
 
 
-@pytest.mark.parametrize("window_rows", [None, 1])
+@pytest.mark.parametrize("window_rows, vo_chain", [(None, False), (1, False), (2, True)])
 def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
-	tmp_path, monkeypatch, window_rows,
+	tmp_path, monkeypatch, window_rows, vo_chain,
 ):
 	import lftomo.runner as runner_module
 	import lftomo.util.mem as mem_module
@@ -279,6 +279,13 @@ def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 	write_yaml(scan_path, document)
 	recon, _ = load_recon("b10-recon-canonical")
 	recon.pipeline[0].params.update(y_start=1076, y_stop=1086)
+	if vo_chain:
+		recon.pipeline[0].params.update(y_stop=1084, theta_stride=5)
+		recon.pipeline[3:4] = [
+			StageConfig(kind="stripe", algorithm="vo_sort", params={"size": 21}),
+			StageConfig(kind="stripe", algorithm="vo_large", params={"snr": 3, "size": 51}),
+		]
+		recon.process_workers = 4
 	pipeline_path = tmp_path / "pipeline.yaml"
 	write_yaml(pipeline_path, recon.model_dump(mode="json"))
 
@@ -307,9 +314,10 @@ def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 		raise ReachedManager
 	monkeypatch.setattr(runner_module.PipelineRunContext, "__enter__", stop_before_manager)
 
-	if window_rows is None:
+	window_config = WindowConfig(rows=window_rows) if window_rows is not None else None
+	if window_rows is None or vo_chain:
 		with pytest.raises(MemoryError) as error:
-			run_reconstruction(pipeline_path, scan_path)
+			run_reconstruction(pipeline_path, scan_path, window_config=window_config)
 		assert len(plans) == 1
 		peak = plans[0].shared_memory_peak_bytes
 		assert peak > available
@@ -318,9 +326,11 @@ def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 		assert f"available /dev/shm space {available} bytes" in message
 		assert "shared memory" in message
 		assert "--window-rows" in message and "--shm-size" in message
+		if vo_chain:
+			assert peak == 88_979_360
 	else:
 		with pytest.raises(ReachedManager):
-			run_reconstruction(pipeline_path, scan_path, window_config=WindowConfig(rows=window_rows))
+			run_reconstruction(pipeline_path, scan_path, window_config=window_config)
 		assert len(plans) == 1
 		assert 0 < plans[0].shared_memory_peak_bytes < available
 

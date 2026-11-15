@@ -9,7 +9,6 @@ from typing import Any
 import numpy as np
 
 from lftomo.pipeline.core import BufferSpec, Stage, collect_bounded_work
-from lftomo.pipeline.dispatch import dispatch_for_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.util.shapes import ImgSlice, ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import TomoDataSet, TomoWindow
@@ -255,10 +254,16 @@ def build_allocation_schedule(
 	live: dict[str, str] = {}
 	retired: dict[str, list[str]] = {}
 	current_role: str | None = None
+	bounded_segments = {
+		segment.start: segment for segment in segments
+		if segment.kind is ExecutionKind.BOUNDED_SINOGRAM
+	}
 	bounded_steps = {
-		index for segment in segments if segment.kind is ExecutionKind.BOUNDED_SINOGRAM
+		index for segment in bounded_segments.values()
 		for index in range(segment.start, segment.stop)
 	}
+	requests = ()
+	work_stop = 0
 
 	def publish(index: int, action: BufferAction, role: str, size: int,
 			physical_role: str, proof: str | None = None):
@@ -290,14 +295,15 @@ def build_allocation_schedule(
 			live[artifact_role] = physical_role
 			publish(step.index, BufferAction.ALLOCATE, artifact_role,
 				artifact_bytes, physical_role, "producer_contract")
-		# Bounded sinogram scratch accounting remains a separate preflight
-		# follow-up (#360). Reuse the execution plan for fused segments and the dispatch
-		# registry for standalone bounded kernels rather than classify Stages here.
+		# Fused members share the collector's maximum capacities. Other Stages,
+		# including standalone sinogram dispatch, own one Stage's work lifetime.
 		if (
-			step.input_buffer is not None and step.index not in bounded_steps
-			and dispatch_for_stage(stage).kernel != "run_sinogram_chain_kernel"
+			step.input_buffer is not None
+			and (step.index not in bounded_steps or step.index in bounded_segments)
 		):
-			requests = collect_bounded_work((stage,), step.input_buffer)
+			segment = bounded_segments.get(step.index)
+			work_stop = segment.stop if segment is not None else step.index + 1
+			requests = collect_bounded_work(stages[step.index:work_stop], step.input_buffer)
 			for request in requests:
 				role = request.role
 				size = _nbytes(request.buffer_spec)
@@ -317,7 +323,8 @@ def build_allocation_schedule(
 					action = BufferAction.ALIAS
 				live[role] = selected
 				publish(step.index, action, role, size, selected, "bounded_work_requests")
-			# Scratch is private to this Stage and has no later consumers.
+		# Scratch stays live until the complete bounded segment has finished.
+		if step.index + 1 == work_stop:
 			for request in requests:
 				role = request.role
 				selected = live.pop(role)
