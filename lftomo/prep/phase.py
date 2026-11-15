@@ -5,14 +5,16 @@ Module for phase retrieval.  Rewritten from tomopy.
 # ADD COPYRIGHT NOTICE - SEE TOMOPY
 
 from multiprocessing import cpu_count, Pool
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy import fft as sfft
 
-from lftomo.util.log import log, LOG
-from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import ImgSlice, Proj
 from lftomo.util.window import TomoWindow
+
+if TYPE_CHECKING:
+	from lftomo.util.mem import SharedNPArray
 
 BOLTZMANN_CONSTANT = 1.3806488e-16  # [erg/k]
 SPEED_OF_LIGHT = 299792458e+2  # [cm/s]
@@ -216,6 +218,8 @@ def _phase_pad(dim, pixel_size, dist, energy, force_pow2=False):
 
 def filter_shape(base_shape, pixel_size, dist, energy, height_pad=False):
 	if height_pad:
+		from lftomo.util.log import log, LOG
+
 		pad_height = _phase_pad(base_shape.Y, pixel_size, dist, energy)
 		log.write("Phase Prep", f"Pad Height {pad_height} on {base_shape.Y}, {pixel_size}, {dist}, {energy}",
 							log_level=LOG.INFO)
@@ -226,6 +230,8 @@ def filter_shape(base_shape, pixel_size, dist, energy, height_pad=False):
 
 
 def filter_create(mem_name, mem_dtype, base_shape, alpha, pixel_size, dist, energy, tp=False, height_pad=False):
+	from lftomo.util.mem import SharedNPArray
+
 	phase_mem = SharedNPArray(mem_name, filter_shape(base_shape, pixel_size, dist, energy, height_pad),
 						mem_dtype, allocate=True)
 
@@ -235,6 +241,8 @@ def filter_create(mem_name, mem_dtype, base_shape, alpha, pixel_size, dist, ener
 
 
 def _set_phase_filter(alpha, pixel_size, dist, energy, phase_mem, tp=False):
+	from lftomo.util.log import log, LOG
+
 	with phase_mem as phase_filter:
 		log.write("Phase Prep", log_level=LOG.INFO,
 			statement=f'Filter: {phase_mem.shape} | {phase_mem} | {pixel_size} | {dist} | {energy} | {np.mean(phase_filter)}')
@@ -249,7 +257,7 @@ def _set_phase_filter(alpha, pixel_size, dist, energy, phase_mem, tp=False):
 			statement=f'Filter: {phase_mem.shape} | {phase_mem} | {pixel_size} | {dist} | {energy} | {np.mean(phase_filter)}')
 
 
-def phase_retrieval(dw: TomoWindow, source_mem: SharedNPArray, phase_alpha, pixel_size, energy, dist, sino_order=True,
+def phase_retrieval(dw: TomoWindow, source_mem: "SharedNPArray", phase_alpha, pixel_size, energy, dist, sino_order=True,
 					tp=False, height_pad=False, proc_count=cpu_count()):
 
 	def get_slice(sino_order, i):
@@ -266,7 +274,7 @@ def phase_retrieval(dw: TomoWindow, source_mem: SharedNPArray, phase_alpha, pixe
 		phase_mem.shutdown()
 
 
-def _phase_retrieval(y_slice, work_mem: SharedNPArray, phase_mem: SharedNPArray,
+def _phase_retrieval(y_slice, work_mem: "SharedNPArray", phase_mem: "SharedNPArray",
 					pixel_size, energy, dist, tp=False, height_pad=False,
 					thread_fallback=cpu_count()):
 	import numexpr as ne

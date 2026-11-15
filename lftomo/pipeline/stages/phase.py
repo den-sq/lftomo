@@ -201,7 +201,6 @@ def _paganin_filter(image: np.ndarray, transfer: np.ndarray) -> np.ndarray:
 	return np.real(np.fft.ifft2(np.fft.fft2(image) * transfer))
 
 
-
 def _bac_filter_kernel(shape: tuple[int, int], alpha: float) -> np.ndarray:
 	"""Return HoToPy BAC's dimensionless regularized Laplace kernel."""
 
