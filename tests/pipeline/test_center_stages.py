@@ -8,13 +8,14 @@ from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFS
 from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	EntropyLocalCenterStage,
+	GridrecStage,
 	ManualCenterStage,
 	PhaseCorrelationCenterStage,
 	STAGE_REGISTRY,
 	VoCenterStage,
 	create_stage,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
 from lftomo.util.window import TomoWindow
 from tests.sample_data import attach_source_geometry
 
@@ -77,6 +78,42 @@ def test_manual_center_stores_scalar_or_tilt_profile():
 	)
 	result = Pipeline([create_stage(tilt_config)]).run(_state(working, [tilt_config]))
 	np.testing.assert_allclose(result.artifacts["center"], [3.75, 4, 4.25, 4.5])
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+def test_manual_tilt_uses_source_rows_when_gridrec_crops_halo(monkeypatch, layout):
+	physical = ProjOrder(Theta=6, Y=40, X=8)
+	window = TomoWindow.from_bounds(physical, y=(10, 14), halo=Y(2), dtype=np.float32)
+	shape = window.with_pad().shape.to(layout)
+	working = np.ones(shape.as_tuple(), dtype=np.float32)
+	state = PipelineState(
+		LocalArray(working, shape),
+		Scan(
+			energy_keV=20, pixel_size_um=1,
+			n_projections=physical.Theta, degrees_per_fov=180,
+			detector=Detector(pixel_size_um=1, rows=physical.Y, columns=physical.X),
+			acquisition=Acquisition(n_projections=physical.Theta, rotation_end_deg=180),
+			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
+		),
+		Recon(pipeline=[]), source_window=window,
+	)
+	calls = {}
+
+	def recon(data, _angles, **kwargs):
+		calls["data_shape"] = data.shape
+		calls["center"] = kwargs["center"]
+		kwargs["init_recon"].fill(0)
+		return kwargs["init_recon"]
+
+	monkeypatch.setattr("tomopy.recon", recon)
+	result = Pipeline([
+		ManualCenterStage(value_px=4, tilt=0.25, reference_y=10),
+		GridrecStage(circle_mask=False),
+	]).run(state)
+
+	assert calls["data_shape"] == layout(Theta=6, Y=4, X=8).as_tuple()
+	np.testing.assert_array_equal(calls["center"], [4, 4.25, 4.5, 4.75])
+	np.testing.assert_array_equal(result.artifacts["center"], [3.5, 3.75, 4, 4.25, 4.5, 4.75, 5, 5.25])
 
 
 def test_vo_center_transposes_data_and_fits_tilt(monkeypatch):
