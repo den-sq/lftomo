@@ -69,7 +69,7 @@ def test_stage_contract_has_required_diagnostics_and_composed_halo():
 	assert stage.contract.produces_domain is DataDomain.ATTENUATION
 	assert stage.contract.required_pad.phase_fft_passes == 3
 	assert STAGE_DISPATCH[stage.name].kind is DispatchKind.PROCESS
-	assert not STAGE_DISPATCH[stage.name].projection_units
+	assert not STAGE_DISPATCH[stage.name].per_projection
 
 
 @pytest.mark.parametrize("n_iter", [0, 1, 2])

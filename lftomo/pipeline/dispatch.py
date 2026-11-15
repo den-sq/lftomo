@@ -21,7 +21,7 @@ class DispatchSpec:
 	kind: DispatchKind
 	kernel: str | None = None
 	reason: str | None = None
-	projection_units: bool = False
+	per_projection: bool = False
 
 	def __post_init__(self):
 		if self.kind is DispatchKind.EXEMPT and not self.reason:
@@ -32,11 +32,11 @@ def _dispatch(
 	kind: DispatchKind,
 	kernel: str,
 	*,
-	projection_units: bool = False,
+	per_projection: bool = False,
 	reason: str | None = None,
 ) -> DispatchSpec:
 	return DispatchSpec(
-		kind=kind, kernel=kernel, projection_units=projection_units, reason=reason,
+		kind=kind, kernel=kernel, per_projection=per_projection, reason=reason,
 	)
 
 
@@ -98,7 +98,7 @@ def _build_stage_dispatch() -> dict[str, DispatchSpec]:
 	result = {}
 	for key in _PROJECTION_PROCESS:
 		result[key] = _dispatch(
-			DispatchKind.PROCESS, "run_projection_kernel", projection_units=True,
+			DispatchKind.PROCESS, "run_projection_kernel", per_projection=True,
 		)
 	for key in _BOUNDED_PROCESS:
 		result[key] = _dispatch(DispatchKind.PROCESS, "run_sinogram_chain_kernel")

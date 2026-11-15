@@ -143,7 +143,7 @@ def _scope_phase_envelope(state: PipelineState) -> None:
 
 
 def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
-	"""Apply a Stage's ``run_sinogram`` kernel to each detector-row unit.
+	"""Apply a Stage's ``run_sinogram`` kernel to each assigned detector row.
 
 	The kernel receives a writable, potentially strided ``(Theta, X)`` view
 	and a state holding the full buffer, source window, and assigned row range.
@@ -606,14 +606,14 @@ class PipelineExecutor:
 			raise
 
 	def run_projection_stage(self, state: PipelineState, stage: Stage) -> PipelineState:
-		"""Dispatch safe projection units while retaining parent-owned handoff."""
+		"""Dispatch assigned projections while retaining parent-owned handoff."""
 
 		if not isinstance(state.working_array, ManagedBuffer):
 			return stage.run(state)
 		from lftomo.pipeline.stages import dispatch_for_stage
 
 		spec = dispatch_for_stage(stage)
-		if spec.kind is not DispatchKind.PROCESS or not spec.projection_units:
+		if spec.kind is not DispatchKind.PROCESS or not spec.per_projection:
 			return stage.run(state)
 
 		original = state
