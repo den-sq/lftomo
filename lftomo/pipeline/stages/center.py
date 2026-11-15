@@ -122,7 +122,7 @@ class ManualCenterStage(Stage):
 		if state.source_window is None:
 			raise RuntimeError("center.manual tilt requires PipelineState.source_window")
 		rows = np.asarray([
-			state.source_window.source_index("Y", index, include_padding=False)
+			state.source_window.source_index("Y", index)
 			for index in state.work_indices("Y")
 		], dtype=np.float32)
 		return _store_center(state, self.params.value_px + (rows - self.params.reference_y) * self.params.tilt)
