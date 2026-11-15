@@ -8,7 +8,7 @@ import numpy as np
 from pydantic import model_validator
 
 from lftomo.pipeline.core import (
-	BufferSpec, PipelineState, Stage, StageContract, StageParams,
+	PipelineState, Stage, StageContract, StageParams,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -98,12 +98,12 @@ class HelicalIndexRemapStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("HelicalIndexRemapStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		if data.ndim != 3:
 			raise ValueError("helical_correct.index_remap expects a (Y, Theta, X) sinogram array")
 		if not self.params.enabled:
 			return state
-		source_shape = state.buffer_spec.shape
+		source_shape = state.working_array.shape
 		count = source_shape.Theta
 		y_size = source_shape.Y
 		if state.source_window is None:
@@ -134,7 +134,7 @@ class HelicalIndexRemapStage(Stage):
 					data[layout.point_index(Theta=projection)][source[valid]]
 				)
 		result = commit_output(
-			state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+			state, output, retire_as=None,
 		)
 		result.artifacts["helical_row_shifts"] = shifts
 		return result

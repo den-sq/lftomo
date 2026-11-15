@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import BilateralFilterStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import SinoOrder
 from tests.sample_data import attach_source_geometry
@@ -11,7 +11,7 @@ from tests.sample_data import attach_source_geometry
 
 def _state(array, config):
 	return attach_source_geometry(PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, SinoOrder(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -22,7 +22,6 @@ def _state(array, config):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	))
 
 
@@ -50,7 +49,7 @@ def test_bilateral_stage_is_registered_and_filters_each_projection(monkeypatch):
 	assert len(calls) == 3
 	assert all(call[0] == np.float32 for call in calls)
 	assert all(call[1:5] == (5, 2, 3, cv2.BORDER_DEFAULT) and call[5] for call in calls)
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	assert result.working_array.dtype == np.float32
 	np.testing.assert_array_equal(working, 2)
 
@@ -75,7 +74,7 @@ def test_disabled_bilateral_stage_is_noop(monkeypatch):
 
 	result = Pipeline([create_stage(config)]).run(_state(working, config))
 
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 
 
 def test_float32_work_buffer_is_bit_exact_with_public_conversion():

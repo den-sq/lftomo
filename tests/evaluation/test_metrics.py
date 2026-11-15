@@ -18,7 +18,7 @@ from lftomo.evaluation import (
 	validate_experiment_metric_references,
 )
 from lftomo.experiment import ExperimentConfig
-from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineState, PRESERVE
+from lftomo.pipeline import LocalArray, DataDomain, Pipeline, PipelineState, PRESERVE
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.reference import NumericalTolerance, compare_slice
 from lftomo.util.shapes import ReconOrder
@@ -38,11 +38,10 @@ def _scan(slices=3, size=24):
 
 def _state(array, *, artifacts=None):
 	return PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, ReconOrder(*array.shape)),
 		scan=_scan(*array.shape[:1], size=array.shape[2]),
 		recon=Recon(pipeline=[StageConfig(kind="evaluate", algorithm="metrics")]),
 		artifacts=artifacts or {},
-		buffer_spec=BufferSpec(ReconOrder(*array.shape), array.dtype),
 		domain=DataDomain.RECON,
 	)
 
@@ -201,7 +200,7 @@ def test_evaluation_stage_preserves_array_contract_and_emits_json_artifact(monke
 	).run(state)
 	artifact = EvaluationArtifact.model_validate(result.artifacts["metrics"])
 
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	np.testing.assert_array_equal(working, before)
 	assert result.layout is ReconOrder
 	assert result.domain is DataDomain.RECON

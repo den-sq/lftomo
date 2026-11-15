@@ -9,7 +9,7 @@ import numpy as np
 from pydantic import field_validator
 
 from lftomo.pipeline.core import (
-	BufferSpec, PipelineState, Stage, StageContract, StageParams, allocate_output, commit_output,
+	PipelineState, Stage, StageContract, StageParams, allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import PRESERVE
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -76,12 +76,12 @@ class LayoutConvertStage(Stage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("layout.convert expects a three-dimensional tomography array")
-		input_shape = state.buffer_spec.shape
+		input_shape = state.working_array.shape
 		shape = input_shape.to(target)
 		output, converted = allocate_output(
 			state, shape, data.dtype, role=f"layout:{target.__name__}",
 		)
 		converted[...] = input_shape.transposed_view(data, target)
 		return commit_output(
-			state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+			state, output, retire_as=None,
 		)

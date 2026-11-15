@@ -15,7 +15,6 @@ import tifffile as tf
 import yaml
 
 from lftomo.pipeline import (
-	BufferSpec,
 	DataDomain,
 	NumpyBackend,
 	PipelineRunContext,
@@ -26,6 +25,7 @@ from lftomo.pipeline import (
 from lftomo.pipeline.runtime import tomopy_numpy_incompatible
 from lftomo.pipeline.stages import create_stage
 from lftomo.runner import _resolve_flat_fields, load_recon, load_scan
+from lftomo.storage import LocalArray
 from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import ChunkGrid, Interval, ProjOrder, Theta, Y
 from lftomo.util.window import TomoDataSet
@@ -290,8 +290,8 @@ def _run_phase_contrast_projection_order(
 		if volume is None:
 			raise ValueError("phase-contrast input contains no projections")
 		state = PipelineState(
-			working_array=volume, scan=scan, recon=recon, backend=NumpyBackend(),
-			buffer_spec=BufferSpec(ProjOrder(*volume.shape), volume.dtype),
+			working_array=LocalArray(volume, ProjOrder(*volume.shape)),
+			scan=scan, recon=recon, backend=NumpyBackend(),
 			domain=DataDomain.ATTENUATION,
 			dataset=dataset,
 			source_window=source_window,
@@ -301,9 +301,7 @@ def _run_phase_contrast_projection_order(
 		local_start = min(selected) - y.start
 		local_stop = max(selected) - y.start + 1
 		cropped = volume[:, local_start:local_stop, :]
-		state = state.with_array(
-			cropped, buffer_spec=BufferSpec(ProjOrder(*cropped.shape), cropped.dtype),
-		)
+		state = state.with_array(LocalArray(cropped, ProjOrder(*cropped.shape)))
 		for stage in post_stages:
 			state = stage.run(state)
 		return np.asarray(state.working_array).astype(np.float32, copy=True)
@@ -413,12 +411,10 @@ def run_reference_archive(root: str | Path, producer: str,
 					start = min(selected) - window.start.Y
 					stop = max(selected) - window.start.Y + 1
 					values = np.asarray(state.working_array)[start:stop].copy()
-					shape = type(state.buffer_spec.shape)(**{
-						**state.buffer_spec.shape.as_dict(), "Y": stop - start,
+					shape = type(state.working_array.shape)(**{
+						**state.working_array.shape.as_dict(), "Y": stop - start,
 					})
-					state = state.with_array(
-						values, buffer_spec=BufferSpec(shape, values.dtype),
-					)
+					state = state.with_array(LocalArray(values, shape))
 					cropped = True
 				state = stage.run(state)
 			if not cropped:

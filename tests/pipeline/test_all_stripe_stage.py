@@ -1,14 +1,14 @@
 import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import AllOfTheStripeStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import SinoOrder
 
 
 def _state(array, config):
 	return PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, SinoOrder(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -19,7 +19,6 @@ def _state(array, config):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	)
 
 
@@ -54,5 +53,5 @@ def test_all_of_the_stripe_is_registered_and_transposes_for_tomopy(monkeypatch):
 		"nchunk": None,
 	}
 	assert calls["shares_input"] is True
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	np.testing.assert_array_equal(working, before + 10)

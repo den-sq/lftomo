@@ -32,7 +32,7 @@ from lftomo.pipeline import (
 	StageObserver,
 )
 from lftomo.pipeline.domains import DataDomain
-from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
+from lftomo.storage import FileBackedNPArray, LocalArray, ManagedBuffer, TypedBuffer, buffer_view
 from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import DataRange, DataShape, Interval
 from lftomo.util.window import DataRef, TomoDataSet, TomoWindow
@@ -71,8 +71,8 @@ def _sha256_file(path: Path, chunk_bytes: int = 1024 * 1024) -> str:
 def _fingerprint(value: Any) -> Any:
 	"""Return a deterministic identity document or reject an unsafe value."""
 
-	if isinstance(value, ManagedBuffer):
-		return _fingerprint(value.array())
+	if isinstance(value, TypedBuffer):
+		return _fingerprint(np.asarray(value))
 	if isinstance(value, type):
 		return {"kind": "type", "value": f"{value.__module__}.{value.__qualname__}"}
 	if hasattr(value, "to_document"):
@@ -201,8 +201,8 @@ def _state_value_from_document(document: Any) -> Any:
 	raise ValueError(f"unknown snapshot value document kind {kind!r}")
 
 
-def _buffer_spec_to_document(value: BufferSpec | None) -> dict[str, Any] | None:
-	return None if value is None else CONVERTER.unstructure(value)
+def _buffer_spec_to_document(value: TypedBuffer | None) -> dict[str, Any] | None:
+	return None if value is None else CONVERTER.unstructure(BufferSpec.from_buffer(value))
 
 
 def _buffer_spec_from_document(document: dict[str, Any] | None) -> BufferSpec | None:
@@ -573,9 +573,10 @@ def _run_stages(
 def _clone_initial_state(state: PipelineState) -> PipelineState:
 	working = np.asarray(state.working_array)
 	working_copy = (
-		working.copy() if state.storage is None or working.size == 0 else
+		working.copy() if working.size == 0 else
+		LocalArray(working.copy(), state.working_array.shape) if state.storage is None else
 		state.storage.fork(
-			state.working_array, shape=state.buffer_spec.shape,
+			state.working_array, shape=state.working_array.shape,
 			label="experiment.prefix-fork",
 		)
 	)
@@ -588,13 +589,12 @@ def _clone_initial_state(state: PipelineState) -> PipelineState:
 		storage=state.storage,
 		dataset=state.dataset,
 		source_window=state.source_window,
-		buffer_spec=state.buffer_spec,
 		domain=state.domain,
 	)
 
 
 def _equivalent(left: Any, right: Any, *, rtol: float, atol: float) -> bool:
-	if isinstance(left, ManagedBuffer) or isinstance(right, ManagedBuffer):
+	if isinstance(left, TypedBuffer) or isinstance(right, TypedBuffer):
 		try:
 			left = buffer_view(left)
 			right = buffer_view(right)
@@ -788,14 +788,18 @@ class PrefixCacheStore:
 		except Exception as error:
 			raise PrefixCacheIntegrityError(f"snapshot state is invalid: {error}") from error
 		try:
-			mapped = FileBackedNPArray(entry / "working.npy")
+			mapped = FileBackedNPArray(
+				entry / "working.npy", shape=None if buffer_spec is None else buffer_spec.shape,
+			)
+			if buffer_spec is not None and mapped.dtype != buffer_spec.dtype:
+				raise ValueError("working array dtype disagrees with serialized BufferSpec.dtype")
 		except Exception as error:
 			raise PrefixCacheIntegrityError(f"snapshot array cannot be loaded: {error}") from error
 		if requires_copy:
 			working = (
-				np.array(mapped.array(), copy=True) if current.storage is None else
+				LocalArray(np.array(mapped.array(), copy=True), mapped.shape) if current.storage is None else
 				current.storage.fork(
-					mapped, shape=buffer_spec.shape,
+					mapped, shape=mapped.shape,
 					label="experiment.cache-fork",
 				)
 			)
@@ -803,13 +807,13 @@ class PrefixCacheStore:
 		else:
 			working = mapped
 		for name, relative in manifest.artifact_files.items():
-			artifact_map = FileBackedNPArray(entry / relative)
+			artifact_spec = artifact_specs[name]
+			artifact_map = FileBackedNPArray(entry / relative, shape=artifact_spec.shape)
 			if requires_copy:
-				artifact_spec = artifact_specs[name]
 				artifacts[name] = (
 					np.array(artifact_map.array(), copy=True) if current.storage is None else
 					current.storage.fork(
-						artifact_map, shape=artifact_spec.shape,
+						artifact_map, shape=artifact_map.shape,
 						label=f"experiment.cache-artifact:{name}",
 					)
 				)
@@ -827,7 +831,6 @@ class PrefixCacheStore:
 			storage=current.storage,
 			dataset=dataset,
 			source_window=source_window,
-			buffer_spec=buffer_spec,
 			domain=domain,
 		)
 		return state, manifest, time.perf_counter() - started
@@ -887,9 +890,7 @@ class PrefixCacheStore:
 				)
 			state_path = build / "state.json"
 			managed_artifact_specs = {
-				name: _buffer_spec_to_document(BufferSpec(
-					state.artifacts[name].shape, state.artifacts[name].dtype,
-				))
+				name: _buffer_spec_to_document(state.artifacts[name])
 				for name in managed_artifacts
 			}
 			_write_json(state_path, {
@@ -900,7 +901,9 @@ class PrefixCacheStore:
 				"source_window": (
 					None if state.source_window is None else CONVERTER.unstructure(state.source_window)
 				),
-				"buffer_spec": _buffer_spec_to_document(state.buffer_spec),
+				"buffer_spec": _buffer_spec_to_document(
+					state.working_array if isinstance(state.working_array, TypedBuffer) else None,
+				),
 				"managed_artifact_specs": managed_artifact_specs,
 				"domain": None if state.domain is None else state.domain.name,
 			})

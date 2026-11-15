@@ -5,7 +5,7 @@ import sys
 from types import ModuleType
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, DataDomain, PRESERVE, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, DataDomain, PRESERVE, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	BronnikovAidedCorrectionFilterStage, BronnikovAidedCorrectionStage,
 	STAGE_REGISTRY, create_stage,
@@ -17,7 +17,7 @@ from tests.sample_data import attach_source_geometry
 def _state(array, config, layout=SinoOrder):
 	shape = layout(*array.shape)
 	return attach_source_geometry(PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, shape),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -28,7 +28,6 @@ def _state(array, config, layout=SinoOrder):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(shape, array.dtype),
 	))
 
 
@@ -72,7 +71,7 @@ def test_bac_aliases_are_registered_and_process_each_projection(monkeypatch, hot
 	assert BronnikovAidedCorrectionFilterStage(alpha=2).contract.resources.cpu_thread_pool is None
 	assert len(calls) == working.shape[1]
 	assert all(call[:3] == ((3, 5), 2, 1.25) for call in calls)
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	np.testing.assert_array_equal(working, -(before + 2))
 
 
@@ -101,7 +100,7 @@ def test_disabled_bac_is_noop(monkeypatch, hotopy_holo):
 	stage = create_stage(config)
 	result = Pipeline([stage]).run(_state(working, config))
 
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	np.testing.assert_array_equal(working, 1)
 	assert stage.contract.accepts_domain == (
 		DataDomain.TRANSMISSION, DataDomain.ATTENUATION,

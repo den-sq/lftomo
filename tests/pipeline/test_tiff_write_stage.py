@@ -3,7 +3,7 @@ import pytest
 import tifffile as tf
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, NumpyBackend, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, NumpyBackend, Pipeline, PipelineState
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.util.io import np_convert
 from lftomo.util.shapes import ProjOrder, ReconOrder
@@ -12,8 +12,7 @@ from lftomo.util.window import TomoWindow
 
 def _state(array, output, config, sample_id="sample-a"):
 	return PipelineState(
-		working_array=array,
-		buffer_spec=BufferSpec(ReconOrder(*array.shape), array.dtype),
+		working_array=LocalArray(array, ReconOrder(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1.0,

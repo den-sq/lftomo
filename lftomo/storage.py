@@ -23,8 +23,8 @@ _VIEW_SHAPES = {
 }
 
 
-class ManagedBuffer(ABC):
-	"""A reopenable array buffer with explicit storage ownership."""
+class TypedBuffer(ABC):
+	"""Array storage that owns its semantic shape and dtype."""
 
 	@property
 	@abstractmethod
@@ -41,8 +41,24 @@ class ManagedBuffer(ABC):
 		"""Open and return the process-local NumPy view."""
 
 	@abstractmethod
-	def __getitem__(self, view: Any) -> "ManagedBuffer":
-		"""Return a reopenable basic-index view without materializing a copy."""
+	def __getitem__(self, view: Any) -> "TypedBuffer":
+		"""Return a typed basic-index view without materializing a copy."""
+
+	def __array__(self, dtype=None, copy=None) -> np.ndarray:
+		"""Expose the numerical view at a NumPy boundary."""
+
+		result = self.array()
+		if dtype is not None:
+			if copy is False and np.dtype(dtype) != result.dtype:
+				raise ValueError("dtype conversion cannot be honored with copy=False")
+			result = result.astype(dtype, copy=False)
+		if copy:
+			result = result.copy()
+		return result
+
+
+class ManagedBuffer(TypedBuffer):
+	"""A reopenable typed buffer with explicit storage ownership."""
 
 	def close(self) -> None:
 		"""Release this process's attachment, if one is open."""
@@ -84,6 +100,41 @@ def basic_view_shape(shape: DataShape, views: list[Any]) -> DataShape:
 	if shape_type is None:
 		raise TypeError(f"no canonical DataShape for basic view axes {tuple(names)!r}")
 	return shape_type(*values)
+
+
+class LocalArray(TypedBuffer):
+	"""Borrow an in-process array without granting managed-storage ownership.
+
+	The input shape names the axes and verifies the boundary once. Only the
+	axis layout is retained; extents and dtype come from the borrowed array.
+	"""
+
+	def __init__(self, array: Any, shape: DataShape):
+		if isinstance(array, TypedBuffer):
+			raise TypeError("use an existing TypedBuffer directly instead of wrapping it in LocalArray")
+		if not isinstance(shape, DataShape):
+			raise TypeError("LocalArray.shape must be a DataShape")
+		if tuple(array.shape) != shape.as_tuple():
+			raise ValueError("LocalArray shape disagrees with the borrowed array")
+		self._array = array
+		self._layout = type(shape)
+
+	@property
+	def shape(self) -> DataShape:
+		return self._layout(*self._array.shape)
+
+	@property
+	def dtype(self) -> np.dtype:
+		return np.dtype(self._array.dtype)
+
+	def array(self) -> np.ndarray:
+		return np.asarray(self._array)
+
+	def __getitem__(self, view: Any) -> "LocalArray":
+		if is_advanced_index(view):
+			raise IndexError("advanced indices copy data and cannot represent a typed buffer view")
+		shape = basic_view_shape(self.shape, [view])
+		return type(self)(self._array[view], shape)
 
 
 class FileBackedNPArray(ManagedBuffer):
@@ -138,18 +189,6 @@ class FileBackedNPArray(ManagedBuffer):
 			view = view[index]
 		view.flags.writeable = False
 		return view
-
-	def __array__(self, dtype=None, copy=None) -> np.ndarray:
-		"""Return the mapped view used by NumPy at PipelineState boundaries."""
-
-		result = self.array()
-		if dtype is not None:
-			if copy is False and np.dtype(dtype) != result.dtype:
-				raise ValueError("dtype conversion cannot be honored with copy=False")
-			result = result.astype(dtype, copy=False)
-		if copy:
-			result = result.copy()
-		return result
 
 	def __getitem__(self, view: Any) -> "FileBackedNPArray":
 		if is_advanced_index(view):
@@ -285,7 +324,7 @@ class PipelineRunContext:
 def buffer_view(buffer: Any) -> np.ndarray:
 	"""Return a process-local NumPy view of a pipeline buffer."""
 
-	if isinstance(buffer, ManagedBuffer):
+	if isinstance(buffer, TypedBuffer):
 		return buffer.array()
 	if isinstance(buffer, np.ndarray):
 		return buffer

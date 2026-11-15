@@ -5,7 +5,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
-	BufferSpec,
+	LocalArray,
 	NumpyBackend,
 	Pipeline,
 	PipelineRunContext,
@@ -78,10 +78,9 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 	expected = _classic(source, flats)
 	working = source.copy()
 	state = attach_source_geometry(PipelineState(
-		working_array=working,
+		working_array=LocalArray(working, SinoOrder(*working.shape)),
 		scan=_scan(flats),
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
-		buffer_spec=BufferSpec(SinoOrder(*working.shape), working.dtype),
 	))
 
 	result = Pipeline([
@@ -90,7 +89,7 @@ def test_weighted_normalize_stage_matches_classic_function_in_pipeline():
 		PassThroughStage("noop"),
 	], backend=NumpyBackend()).run(state)
 
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	assert WeightedNormalizeStage.contract.mutates_input is False
 	assert WeightedNormalizeStage.contract.window_axes == ("Y",)
 	assert WeightedNormalizeStage.contract.consumes_artifacts == ()
@@ -115,8 +114,8 @@ def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window(layout, 
 	)
 	working = np.full(layout(Y=5, Theta=3, X=2).as_tuple(), 10, dtype=np.uint16)
 	state = PipelineState(
-		working, _scan(flats, rows=8, projections=8), Recon(pipeline=[StageConfig(kind="normalize")]),
-		buffer_spec=BufferSpec(layout(*working.shape), working.dtype),
+		LocalArray(working, layout(*working.shape)), _scan(flats, rows=8, projections=8),
+		Recon(pipeline=[StageConfig(kind="normalize")]),
 		dataset=dataset, source_window=window,
 	)
 	result = WeightedNormalizeStage().run(state)
@@ -126,7 +125,7 @@ def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window(layout, 
 	for index, projection in enumerate((1, 4, 7)):
 		expected_gain = 20 + 10 * np.arange(2, 7)[:, None] + 2 * projection
 		expected = np.broadcast_to(10 / expected_gain, (5, 2))
-		np.testing.assert_allclose(result.working_array[layout.point_index(Theta=index)], expected)
+		np.testing.assert_allclose(np.asarray(result.working_array)[layout.point_index(Theta=index)], expected)
 	assert result.artifacts["flat_fields"].shape == (4, 5, 2)
 	assert state.scan.metadata["flat_fields"].shape == (4, len(detector_rows), 2)
 
@@ -167,17 +166,16 @@ def test_taper_normalize_projection_batch_uses_global_theta_weights():
 	scan = _scan(flats)
 	scan.n_projections = 4
 	state = attach_source_geometry(PipelineState(
-		working_array=working,
+		working_array=LocalArray(working, ProjOrder(*working.shape)),
 		scan=scan,
 		recon=Recon(pipeline=[StageConfig(kind="normalize")]),
-		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
 	), theta_start=2, physical_theta=4)
 	stage = TaperBlendedNormalizeStage()
 
 	result = stage.run(state)
 
 	assert stage.contract.accepted_layouts == (ProjOrder, SinoOrder)
-	np.testing.assert_allclose(result.working_array[0], 10 / 30)
-	np.testing.assert_allclose(result.working_array[1], 10 / 35)
+	np.testing.assert_allclose(np.asarray(result.working_array)[0], 10 / 30)
+	np.testing.assert_allclose(np.asarray(result.working_array)[1], 10 / 35)
 	assert "projection_start" not in result.artifacts
 	assert "projection_count" not in result.artifacts

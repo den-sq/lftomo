@@ -6,7 +6,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
-	BufferSpec,
+	LocalArray,
 	DataDomain,
 	DomainCompatibilityError,
 	PRESERVE,
@@ -52,10 +52,9 @@ def _fixture(layout):
 def _run(stages, data, layout):
 	config = StageConfig(kind="phase", algorithm="negative_log")
 	state = attach_source_geometry(PipelineState(
-		working_array=data,
+		working_array=LocalArray(data, layout(*data.shape)),
 		scan=_scan(),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(layout(*data.shape), data.dtype),
 		domain=DataDomain.TRANSMISSION,
 	))
 	return Pipeline(
@@ -247,9 +246,8 @@ def test_disabled_correction_is_a_domain_preserving_noop():
 	before = data.copy()
 	stage = BronnikovAidedCorrectionFilterStage(alpha=2.0, enabled=False)
 	state = PipelineState(
-		working_array=data, scan=_scan(),
+		working_array=LocalArray(data, ProjOrder(*data.shape)), scan=_scan(),
 		recon=Recon(pipeline=[StageConfig(kind="phase", algorithm="bac_correction")]),
-		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype),
 		domain=DataDomain.ATTENUATION,
 	)
 

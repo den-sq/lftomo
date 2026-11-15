@@ -22,7 +22,7 @@ from lftomo.pipeline.core import (
 	allocate_output,
 	commit_output,
 )
-from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
+from lftomo.storage import LocalArray, ManagedBuffer, PipelineRunContext, StorageBackend, TypedBuffer
 from lftomo.pipeline.dispatch import DispatchKind, DispatchSpec
 from lftomo.pipeline.execution import PipelineExecutor, WorkerTimeoutError, run_sinogram_stage
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
@@ -137,6 +137,8 @@ __all__ = [
 	"allocate_output",
 	"commit_output",
 	"ManagedBuffer",
+	"TypedBuffer",
+	"LocalArray",
 	"PipelineRunContext",
 	"StorageBackend",
 	"WorkerTimeoutError",

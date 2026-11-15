@@ -43,7 +43,7 @@ def test_segment_failure_removes_and_retires_every_allocated_request(monkeypatch
 		attach_source_geometry(state, y_start=7, physical_y=9)
 		stage = _RequestedWorkStage(fail=not fail_allocation)
 		if fail_allocation:
-			request, = stage.bounded_work_requests(state.buffer_spec)
+			request, = stage.bounded_work_requests(BufferSpec.from_buffer(state.working_array))
 			monkeypatch.setattr(stage, "bounded_work_requests", lambda _spec: (
 				request, replace(request, artifact_key="_second_work", role="second_work"),
 			))

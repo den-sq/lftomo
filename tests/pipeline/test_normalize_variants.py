@@ -1,7 +1,7 @@
 import numpy as np
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	STAGE_REGISTRY,
 	TaperBlendedNormalizeStage,
@@ -14,7 +14,7 @@ from tests.sample_data import attach_source_geometry
 
 def _state(array, config, flats):
 	return attach_source_geometry(PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, SinoOrder(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -26,7 +26,6 @@ def _state(array, config, flats):
 			metadata={"flat_fields": flats},
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	))
 
 
@@ -45,8 +44,8 @@ def test_theta_switch_uses_pre_then_post_fields():
 	result = Pipeline([create_stage(config)]).run(_state(working, config, _flats()))
 
 	assert STAGE_REGISTRY["normalize.theta_switch"] is ThetaSwitchNormalizeStage
-	np.testing.assert_allclose(result.working_array[:, :3], 1.25)
-	np.testing.assert_allclose(result.working_array[:, 3], 0.5)
+	np.testing.assert_allclose(np.asarray(result.working_array)[:, :3], 1.25)
+	np.testing.assert_allclose(np.asarray(result.working_array)[:, 3], 0.5)
 
 
 def test_theta_switch_can_linearly_blend_fields():
@@ -58,8 +57,8 @@ def test_theta_switch_can_linearly_blend_fields():
 	working = np.full((2, 4, 3), 12, dtype=np.float32)
 	result = Pipeline([create_stage(config)]).run(_state(working, config, _flats()))
 
-	np.testing.assert_allclose(result.working_array[:, 0], 1.25)
-	np.testing.assert_allclose(result.working_array[:, 2], 9 / 12)
+	np.testing.assert_allclose(np.asarray(result.working_array)[:, 0], 1.25)
+	np.testing.assert_allclose(np.asarray(result.working_array)[:, 2], 9 / 12)
 
 
 def test_phase_contrast_alias_accepts_pinned_path_parameters():

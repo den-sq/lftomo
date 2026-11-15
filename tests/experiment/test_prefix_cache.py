@@ -37,9 +37,9 @@ from lftomo.experiment import (
 from lftomo.experiment.runner import ExperimentInputs, TrialExecution
 from lftomo.experiment.prefix_cache import _fingerprint, _hash_document
 from lftomo.util.converter import CONVERTER
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
+from lftomo.pipeline import Pipeline, PipelineRunContext, PipelineState, Stage, StageContract
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
+from lftomo.storage import FileBackedNPArray, LocalArray, ManagedBuffer, buffer_view
 from lftomo.util.shapes import ProjOrder, X, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
@@ -62,9 +62,7 @@ class SourceStage(Stage):
 			with self.calls["lock"]:
 				self.calls["count"] += 1
 		values = self.values.copy()
-		state = state.with_array(
-			values, buffer_spec=BufferSpec(ProjOrder(*values.shape), values.dtype),
-		)
+		state = state.with_array(LocalArray(values, ProjOrder(*values.shape)))
 		state.artifacts["nested"] = {
 			"history": ["source"],
 			"array": np.arange(3, dtype=np.float32),
@@ -158,9 +156,7 @@ class ManagedArtifactSourceStage(Stage):
 
 	def run(self, state):
 		values = self.values.copy()
-		state = state.with_array(
-			values, buffer_spec=BufferSpec(ProjOrder(*values.shape), values.dtype),
-		)
+		state = state.with_array(LocalArray(values, ProjOrder(*values.shape)))
 		mask = self.values > self.values.mean()
 		if state.storage is not None:
 			managed = state.storage.allocate(
@@ -672,9 +668,7 @@ def test_initial_working_array_content_is_part_of_cache_identity(tmp_path):
 	def execute(values):
 		initial = state(candidates[0].configs)
 		working = np.asarray(values, dtype=np.float32).reshape(1, 1, -1)
-		initial = initial.with_array(
-			working, buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
-		)
+		initial = initial.with_array(LocalArray(working, ProjOrder(*working.shape)))
 		return executor.execute(
 			decision,
 			initial,
@@ -909,8 +903,8 @@ class FullRunnerCachedExecutor:
 		stages = tuple(create_stage(item) for item in configs)
 		working = self.source.copy()
 		initial = PipelineState(
-			working_array=working, scan=scan(), recon=identity.resolved_recon,
-			buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
+			working_array=LocalArray(working, ProjOrder(*working.shape)),
+			scan=scan(), recon=identity.resolved_recon,
 			domain=DataDomain.TRANSMISSION,
 		)
 		result, event = self.cache.execute(
@@ -949,8 +943,8 @@ class FullRunnerIndependentExecutor:
 		stages = tuple(create_stage(item) for item in configs)
 		working = self.source.copy()
 		result = Pipeline(list(stages)).run(PipelineState(
-			working_array=working, scan=scan(), recon=identity.resolved_recon,
-			buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
+			working_array=LocalArray(working, ProjOrder(*working.shape)),
+			scan=scan(), recon=identity.resolved_recon,
 			domain=DataDomain.TRANSMISSION,
 		))
 		path = output_root / "screen.npy"

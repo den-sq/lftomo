@@ -3,7 +3,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
-	BufferSpec,
+	LocalArray,
 	CompletePipelineError,
 	DataDomain,
 	DomainCompatibilityError,
@@ -80,17 +80,16 @@ def test_layout_contract_resolves_canonical_declarations():
 	assert contract.output_layout(ProjOrder) is SinoOrder
 
 
-def test_with_array_binds_new_spec_and_preserves_domain():
+def test_with_array_binds_new_buffer_and_preserves_domain():
 	array = np.zeros((3, 2, 4))
 	state = PipelineState(
-		working_array=array, scan=scan_config(), recon=recon_config(),
-		buffer_spec=BufferSpec(ProjOrder(*array.shape), array.dtype),
+		working_array=LocalArray(array, ProjOrder(*array.shape)), scan=scan_config(), recon=recon_config(),
 		domain=DataDomain.TRANSMISSION,
 	)
 
 	replacement = np.ones((3, 2, 4))
 	result = state.with_array(
-		replacement, buffer_spec=BufferSpec(ProjOrder(*replacement.shape), replacement.dtype),
+		LocalArray(replacement, ProjOrder(*replacement.shape)),
 	)
 
 	assert result.layout is ProjOrder
@@ -110,9 +109,8 @@ def test_layout_convert_is_explicit_contiguous_and_visible_in_plan():
 	)
 	array = np.arange(24).reshape(3, 2, 4)
 	state = PipelineState(
-		working_array=array, scan=scan_config(),
+		working_array=LocalArray(array, ProjOrder(*array.shape)), scan=scan_config(),
 		recon=recon_config(),
-		buffer_spec=BufferSpec(ProjOrder(*array.shape), array.dtype),
 		domain=DataDomain.TRANSMISSION,
 	)
 
@@ -121,7 +119,7 @@ def test_layout_convert_is_explicit_contiguous_and_visible_in_plan():
 	assert isinstance(stage, LayoutConvertStage)
 	assert result.layout is SinoOrder
 	assert result.domain is DataDomain.TRANSMISSION
-	assert result.working_array.flags.c_contiguous
+	assert np.asarray(result.working_array).flags.c_contiguous
 	assert np.array_equal(result.working_array, np.arange(24).reshape(3, 2, 4).transpose(1, 0, 2))
 	assert plan.full_volume_materializations[0].kind is MaterializationKind.LAYOUT_CONVERSION
 

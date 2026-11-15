@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict
 
 from lftomo.config import Recon, Scan
 from lftomo.pipeline.domains import ContractEffect, DataDomain, PRESERVE
-from lftomo.storage import ManagedBuffer, StorageBackend, buffer_view
+from lftomo.storage import LocalArray, ManagedBuffer, StorageBackend, TypedBuffer, buffer_view
 from lftomo.util.shapes import DataRange, DataShape, IntIter, ProjOrder, SinoOrder, Y
 
 if TYPE_CHECKING:
@@ -213,6 +213,19 @@ class DaskArrayStub:
 	def shape(self):
 		return self.array.shape
 
+	@property
+	def dtype(self):
+		return self.array.dtype
+
+	def __array__(self, dtype=None, copy=None):
+		if copy is False and dtype is not None and np.dtype(dtype) != self.dtype:
+			raise ValueError("dtype conversion cannot be honored with copy=False")
+		result = np.asarray(self.array, dtype=dtype)
+		return result.copy() if copy else result
+
+	def __getitem__(self, view):
+		return type(self)(self.array[view])
+
 	def compute(self) -> np.ndarray:
 		"""Return the wrapped NumPy array, mirroring dask.array's method name."""
 
@@ -240,7 +253,7 @@ class DaskStubBackend(Backend):
 
 @dataclass(frozen=True)
 class BufferSpec:
-	"""Canonical logical shape and dtype of one working allocation."""
+	"""Shape and dtype descriptor for planning and serialized boundaries."""
 
 	shape: DataShape
 	dtype: np.dtype
@@ -253,6 +266,12 @@ class BufferSpec:
 	@property
 	def layout(self) -> type[DataShape]:
 		return type(self.shape)
+
+	@classmethod
+	def from_buffer(cls, buffer: TypedBuffer) -> "BufferSpec":
+		"""Describe a live buffer at a planning or serialization boundary."""
+
+		return cls(buffer.shape, buffer.dtype)
 
 
 @dataclass(frozen=True)
@@ -306,31 +325,11 @@ def collect_bounded_work(
 	return tuple(requests.values())
 
 
-def _buffer_spec(buffer: Any) -> BufferSpec | None:
-	shape = getattr(buffer, "shape", None)
-	if shape is None:
-		return None
-	if not isinstance(shape, DataShape):
-		if isinstance(buffer, ManagedBuffer):
-			raise TypeError("ManagedBuffer.shape must be a DataShape")
-		return None
-	try:
-		if not all(int(value) > 0 for value in shape.as_tuple()):
-			return None
-	except TypeError:
-		return None
-	dtype = getattr(buffer, "dtype", None)
-	if dtype is None and hasattr(buffer, "array"):
-		view = buffer.array
-		dtype = getattr(view() if callable(view) else view, "dtype", None)
-	return None if dtype is None else BufferSpec(shape, np.dtype(dtype))
-
-
 @dataclass
 class PipelineState:
 	"""Mutable state object passed from Stage to Stage."""
 
-	working_array: Any
+	working_array: TypedBuffer | np.ndarray
 	scan: Scan
 	recon: Recon
 	artifacts: dict[str, Any] = field(default_factory=dict)
@@ -339,57 +338,47 @@ class PipelineState:
 	executor: PipelineExecutor | None = None
 	dataset: TomoDataSet | None = None
 	source_window: TomoWindow | None = None
-	buffer_spec: BufferSpec | None = None
 	domain: DataDomain | None = None
 	work_range: DataRange | None = None
 
 	def __post_init__(self):
-		if self.buffer_spec is None:
-			self.buffer_spec = _buffer_spec(self.working_array)
-		if self.buffer_spec is None:
+		if not isinstance(self.working_array, TypedBuffer):
 			if np.asarray(self.working_array).size:
-				raise TypeError("non-empty plain arrays require an explicit BufferSpec")
+				raise TypeError("non-empty working arrays require a TypedBuffer; wrap borrowed arrays in LocalArray")
 			return
-		actual = getattr(self.working_array, "shape", ())
-		actual_shape = actual.as_tuple() if isinstance(actual, DataShape) else tuple(actual)
-		if actual_shape != self.buffer_spec.shape.as_tuple():
-			raise ValueError("working array shape disagrees with BufferSpec.shape")
-		actual_dtype = getattr(self.working_array, "dtype", None)
-		if actual_dtype is None and hasattr(self.working_array, "array"):
-			view = self.working_array.array
-			actual_dtype = getattr(view() if callable(view) else view, "dtype", None)
-		if actual_dtype is None or np.dtype(actual_dtype) != self.buffer_spec.dtype:
-			raise ValueError("working array dtype disagrees with BufferSpec.dtype")
+		shape = self.working_array.shape
+		if not isinstance(shape, DataShape):
+			raise TypeError("TypedBuffer.shape must be a DataShape")
 		if self.work_range is not None:
 			if len(self.work_range.step.names) != 1:
 				raise ValueError("work_range must assign exactly one buffer axis")
 			axis = self.work_range.step.names[0]
-			self.buffer_spec.shape.axis_of(axis)
+			shape.axis_of(axis)
 			start = int(getattr(self.work_range.start, axis))
 			stop = int(getattr(self.work_range.stop, axis))
 			step = int(getattr(self.work_range.step, axis))
-			if not 0 <= start <= stop <= getattr(self.buffer_spec.shape, axis) or step < 1:
+			if not 0 <= start <= stop <= getattr(shape, axis) or step < 1:
 				raise ValueError("work_range must stay within its buffer axis with a positive step")
 
 	@property
 	def layout(self) -> type[DataShape] | None:
 		"""Return the stage-contract layout derived from the canonical shape."""
 
-		return None if self.buffer_spec is None else self.buffer_spec.layout
+		return type(self.working_array.shape) if isinstance(self.working_array, TypedBuffer) else None
 
 	def assigned_range(self, axis: str) -> DataRange:
 		"""Return assigned packed positions, or the full unassigned buffer axis."""
 
-		if self.buffer_spec is None:
-			raise ValueError("assigned work requires a bound BufferSpec")
-		self.buffer_spec.shape.axis_of(axis)
+		if not isinstance(self.working_array, TypedBuffer):
+			raise ValueError("assigned work requires a bound TypedBuffer")
+		self.working_array.shape.axis_of(axis)
 		if self.work_range is not None and axis in self.work_range.step.names:
 			return self.work_range
 		axis_type = next(
 			shape_type for shape_type in DataShape.__subclasses__()
 			if shape_type.names == (axis,)
 		)
-		return axis_type.drange(0, getattr(self.buffer_spec.shape, axis), 1)
+		return axis_type.drange(0, getattr(self.working_array.shape, axis), 1)
 
 	def work_indices(self, axis: str) -> Iterator[int]:
 		"""Iterate the packed buffer positions assigned on a semantic axis."""
@@ -400,22 +389,23 @@ class PipelineState:
 		"""Express the assignment for the working buffer or another layout."""
 
 		if shape is None:
-			if self.buffer_spec is None:
-				raise ValueError("assigned work requires a bound BufferSpec")
-			shape = self.buffer_spec.shape
+			if not isinstance(self.working_array, TypedBuffer):
+				raise ValueError("assigned work requires a bound TypedBuffer")
+			shape = self.working_array.shape
 		if self.work_range is None:
 			return DataShape._shape_type(shape).point_index()
 		return self.work_range.slice_index(shape)
 
 	def with_array(
 		self,
-		working_array: Any,
+		working_array: TypedBuffer,
 		*,
-		buffer_spec: BufferSpec | None = None,
 		domain: DataDomain | None = None,
 	) -> "PipelineState":
-		"""Return a shallow-copy state with a newly bound array and BufferSpec."""
+		"""Return a shallow-copy state with a newly bound typed buffer."""
 
+		if not isinstance(working_array, TypedBuffer):
+			raise TypeError("with_array requires a TypedBuffer")
 		return PipelineState(
 			working_array=working_array,
 			scan=self.scan,
@@ -426,7 +416,6 @@ class PipelineState:
 			executor=self.executor,
 			dataset=self.dataset,
 			source_window=self.source_window,
-			buffer_spec=buffer_spec,
 			domain=self.domain if domain is None else domain,
 			work_range=self.work_range,
 		)
@@ -441,12 +430,12 @@ def allocate_output(
 	reuse_from: tuple[str, ...] = (),
 	alias_from_current: bool = False,
 	proof: str | None = None,
-) -> tuple[Any, np.ndarray]:
+) -> tuple[TypedBuffer, np.ndarray]:
 	"""Allocate a prospective output without changing or retiring current state."""
 
 	if state.storage is None:
 		array = np.empty(shape.as_tuple(), dtype=dtype)
-		return array, array
+		return LocalArray(array, shape), array
 	alias_from = state.working_array if alias_from_current and hasattr(state.working_array, "name") else None
 	buffer = state.storage.allocate(
 		shape, np.dtype(dtype), role=role, reuse_from=reuse_from,
@@ -457,15 +446,14 @@ def allocate_output(
 
 def commit_output(
 	state: PipelineState,
-	output: Any,
+	output: TypedBuffer,
 	*,
 	retire_as: str | None,
-	buffer_spec: BufferSpec,
 	domain: DataDomain | None = None,
 ) -> PipelineState:
 	"""Publish a filled output, then retire its predecessor after the handoff."""
 
-	result = state.with_array(output, buffer_spec=buffer_spec, domain=domain)
+	result = state.with_array(output, domain=domain)
 	if (
 		state.storage is not None
 		and output is not state.working_array
@@ -771,7 +759,7 @@ class Pipeline:
 					expected_domain = stage.contract.output_domain(expected_domain)
 				if expected_layout is not None and state.layout is not expected_layout:
 					raise ValueError(
-						"Stage output BufferSpec disagrees with its declared layout contract"
+						"Stage output buffer disagrees with its declared layout contract"
 					)
 				state.domain = expected_domain
 				if self.execution_observer is not None:
@@ -837,7 +825,7 @@ class Pipeline:
 				output_domain = stage.contract.output_domain(input_domain)
 				if output_layout is not None and state.layout is not output_layout:
 					raise ValueError(
-						"Stage output BufferSpec disagrees with its declared layout contract"
+						"Stage output buffer disagrees with its declared layout contract"
 					)
 				if output_domain is not None:
 					state.domain = output_domain

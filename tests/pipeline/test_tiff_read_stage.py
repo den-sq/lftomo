@@ -20,6 +20,7 @@ from lftomo.pipeline import (
 	StageContract,
 	resolve_streaming_plan,
 )
+from lftomo.storage import LocalArray
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.planning import _read_spec
@@ -103,7 +104,7 @@ def _run(state, *stages):
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
 		assert isinstance(result.working_array, SharedNPArray)
 		return result.with_array(
-			np.asarray(result.working_array).copy(), buffer_spec=result.buffer_spec,
+			LocalArray(np.asarray(result.working_array).copy(), result.working_array.shape),
 		)
 
 
@@ -126,7 +127,7 @@ def test_registered_tiff_stack_stage_reads_natural_order_into_pipeline(tmp_path)
 	np.testing.assert_array_equal(result.working_array, np.transpose(stack, (1, 0, 2)))
 	assert result.dataset.physical_shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=0)
-	assert result.buffer_spec.layout is SinoOrder
+	assert result.layout is SinoOrder
 
 
 def test_tiff_stack_stage_reads_multi_page_tiff(tmp_path):

@@ -9,7 +9,7 @@ from lftomo.calibration import (
 	ProducerInfo, TIFFRandomFrameSource, TimeAxis, build_flat_series_digest,
 )
 from lftomo.config import Recon, Scan, StageConfig
-from lftomo.pipeline import BufferSpec, NumpyBackend, PipelineState, validate_pipeline
+from lftomo.pipeline import LocalArray, NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.stages import BeamKeyframesNormalizeStage, create_stage
 from lftomo.util.shapes import ProjOrder
@@ -54,10 +54,9 @@ def test_event_keyframes_beat_endpoint_model_and_keep_detector_defect_fixed(tmp_
 	ref = _build_bundle(tmp_path, keyframes, [0, 5, 10])
 	projections = keyframes.copy()
 	state = attach_source_geometry(PipelineState(
-		projections, _scan(20, 28, 3), Recon.model_validate({"pipeline": []}),
+		LocalArray(projections, ProjOrder(*projections.shape)), _scan(20, 28, 3), Recon.model_validate({"pipeline": []}),
 		artifacts={"calibration_bundle": ref, "projection_times": np.array([0, 5, 10])},
 		backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*projections.shape), projections.dtype),
 		domain=DataDomain.RAW,
 	))
 	BeamKeyframesNormalizeStage(transport_sigma=2).run(state)
@@ -83,10 +82,9 @@ def test_heldout_midpoints_beat_a_scan_endpoint_model(tmp_path):
 	endpoint_error = np.std(heldout / endpoint - 1)
 	working = heldout.copy()
 	state = attach_source_geometry(PipelineState(
-		working, _scan(20, 28, 2), Recon.model_validate({"pipeline": []}),
+		LocalArray(working, ProjOrder(*working.shape)), _scan(20, 28, 2), Recon.model_validate({"pipeline": []}),
 		artifacts={"calibration_bundle": ref, "projection_times": np.array([2.5, 7.5])},
 		backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
 		domain=DataDomain.RAW,
 	))
 	BeamKeyframesNormalizeStage(transport_sigma=2).run(state)
@@ -133,9 +131,8 @@ def test_keyframe_stage_rejects_missing_times_and_large_gaps(tmp_path):
 	ref = _build_bundle(tmp_path, keyframes, [0, 10])
 	working = np.ones((1, 4, 5), np.float32)
 	state = attach_source_geometry(PipelineState(
-		working, _scan(4, 5, 1), Recon.model_validate({"pipeline": []}),
+		LocalArray(working, ProjOrder(*working.shape)), _scan(4, 5, 1), Recon.model_validate({"pipeline": []}),
 		artifacts={"calibration_bundle": ref}, backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*working.shape), working.dtype),
 		domain=DataDomain.RAW,
 	))
 	with pytest.raises(ValueError, match="projection_times"):

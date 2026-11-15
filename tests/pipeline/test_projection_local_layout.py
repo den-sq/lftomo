@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, DataDomain, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	BilateralFilterStage,
 	BronnikovAidedCorrectionStage,
@@ -41,11 +41,10 @@ def scan_config(n_projections=3, rows=2, columns=4):
 def state(array, layout, config=None):
 	config = config or StageConfig(kind="test")
 	return attach_source_geometry(PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, layout(*array.shape)),
 		scan=scan_config(array.shape[0] if layout is ProjOrder else array.shape[1],
 			array.shape[1] if layout is ProjOrder else array.shape[0], array.shape[2]),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 		domain=DataDomain.TRANSMISSION,
 	))
 

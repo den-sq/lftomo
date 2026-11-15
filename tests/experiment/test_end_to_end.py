@@ -30,9 +30,10 @@ from lftomo.experiment.runner import ExperimentInputs, TrialExecution
 from lftomo.experiment.cli import load_experiment_config
 from lftomo.experiment.selection import select_candidates
 from lftomo.experiment.models import OutputRecord
-from lftomo.pipeline import BufferSpec, NumpyBackend, Pipeline, PipelineState
+from lftomo.pipeline import NumpyBackend, Pipeline, PipelineState
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.stages import create_stage
+from lftomo.storage import LocalArray
 from lftomo.util.shapes import ProjOrder
 
 from lftomo.util.window import TomoWindow
@@ -135,21 +136,21 @@ def run_fragment(recon, source):
 		"stripe.vo_sort", "stripe.vo_large", "phase.paganin_filter", "phase.negative_log",
 	]
 	state = PipelineState(
-		working_array=source.copy(),
+		working_array=LocalArray(source.copy(), ProjOrder(*source.shape)),
 		scan=scan(),
 		recon=recon,
 		backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*source.shape), source.dtype),
 		domain=DataDomain.TRANSMISSION,
 	)
-	return Pipeline(
+	result = Pipeline(
 		stages,
 		backend=NumpyBackend(),
 		validation_mode="fragment",
 		initial_layout=ProjOrder,
 		initial_domain=DataDomain.TRANSMISSION,
 		bounded_workers=2,
-	).run(state).working_array
+	).run(state)
+	return np.asarray(result.working_array)
 
 
 class HermeticWorkflowExecutor:

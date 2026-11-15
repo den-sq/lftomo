@@ -5,7 +5,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
-	BufferSpec,
+	LocalArray,
 	DataDomain,
 	ExecutionKind,
 	ExecutionSpanPhase,
@@ -17,6 +17,7 @@ from lftomo.pipeline import (
 	Stage,
 	StageContract,
 )
+from lftomo.storage import TypedBuffer
 from lftomo.util.shapes import ProjOrder, SinoOrder, X
 from lftomo.util.window import TomoWindow
 
@@ -41,13 +42,12 @@ def _recon():
 def _state(array, *, storage=None, executor=None):
 	shape = np.asarray(array).shape
 	return PipelineState(
-		array,
+		array if isinstance(array, TypedBuffer) else LocalArray(array, ProjOrder(*shape)),
 		_scan(theta=shape[0], rows=shape[1], columns=shape[2]),
 		_recon(),
 		backend=NumpyBackend(),
 		storage=storage,
 		executor=executor,
-		buffer_spec=BufferSpec(ProjOrder(*shape), np.asarray(array).dtype),
 		domain=DataDomain.ATTENUATION,
 	)
 

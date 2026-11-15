@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, DataDomain, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	AffineSkewMovementStage,
 	MovementCorrectStage,
@@ -18,7 +18,7 @@ from tests.sample_data import attach_source_geometry
 def _state(array, config, layout=SinoOrder):
 	shape = layout(*array.shape)
 	return attach_source_geometry(PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, shape),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -29,7 +29,6 @@ def _state(array, config, layout=SinoOrder):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(shape, array.dtype),
 	))
 
 
@@ -122,13 +121,13 @@ def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(mo
 
 	assert stage.contract.fused_transition is True
 	assert result.layout is ProjOrder
-	assert result.working_array.flags.c_contiguous
+	assert np.asarray(result.working_array).flags.c_contiguous
 	expected = np.pad(working.transpose(1, 0, 2), ((0, 0), (0, 0), (1, 1)), mode="edge")
 	np.testing.assert_array_equal(result.working_array, expected)
 	assert result.source_window.pos == ProjOrder(Theta=0, Y=0, X=-1)
 	assert result.source_window.shape == ProjOrder(Theta=3, Y=2, X=6)
-	assert result.buffer_spec.shape == result.source_window.shape
-	assert result.buffer_spec.layout is ProjOrder
+	assert result.working_array.shape == result.source_window.shape
+	assert result.layout is ProjOrder
 
 
 def test_fused_transition_is_direction_parametric():
@@ -191,4 +190,4 @@ def test_nontransition_affine_preserves_aaa523_style_projection_layout():
 
 	assert stage.contract.fused_transition is False
 	assert result.layout is ProjOrder
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working

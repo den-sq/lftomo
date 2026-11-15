@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import GridrecStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import TomoWindow
@@ -11,7 +11,7 @@ from lftomo.util.window import TomoWindow
 def _state(array, config, artifacts=None, layout=ProjOrder):
 	shape = layout(*array.shape)
 	return PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, shape),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -23,7 +23,6 @@ def _state(array, config, artifacts=None, layout=ProjOrder):
 		),
 		recon=Recon(pipeline=[config]),
 		artifacts={} if artifacts is None else artifacts,
-		buffer_spec=BufferSpec(shape, array.dtype),
 		source_window=TomoWindow.from_bounds(shape.to(ProjOrder), dtype=array.dtype),
 	)
 
@@ -103,7 +102,7 @@ def test_gridrec_projection_order_accepts_center_param_and_crops(monkeypatch):
 	np.testing.assert_allclose(calls["center"], [2.0, 2.1])
 	assert calls["filter_name"] == "butterworth"
 	assert calls["filter_par"] == [0.2, 2]
-	assert result.working_array.shape == (2, 3, 2)
+	assert np.asarray(result.working_array).shape == (2, 3, 2)
 
 
 def test_gridrec_uses_local_core_rows_and_keeps_global_window(monkeypatch):
@@ -134,7 +133,7 @@ def test_gridrec_uses_local_core_rows_and_keeps_global_window(monkeypatch):
 
 	np.testing.assert_array_equal(calls["data"], working[:, 1:3, 1:6])
 	np.testing.assert_allclose(calls["center"], [2.1, 2.2])
-	assert result.working_array.shape == (2, 5, 3)
+	assert np.asarray(result.working_array).shape == (2, 5, 3)
 	assert result.source_window is window
 
 
