@@ -1,6 +1,7 @@
 """Reference parity and canonical ownership of the composite phase stage."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -10,10 +11,11 @@ from lftomo.config import Acquisition, ConeGeometry, Detector, Recon, Scan, TIFF
 from lftomo.config.phase import multimaterial_config
 from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState, validate_pipeline
 from lftomo.pipeline.dispatch import DispatchKind, STAGE_DISPATCH
+from lftomo.pipeline import execution
 from lftomo.pipeline.stages import MultimaterialStage, TIFFStackReadStage, WeightedNormalizeStage
 from lftomo.pipeline.stages import phase as phase_stages
 from lftomo.storage import ManagedBuffer
-from lftomo.util.shapes import ImgSlice, ProjOrder, SinoOrder, Y
+from lftomo.util.shapes import ImgSlice, ProjOrder, ReconOrder, SinoOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 from tests.fixtures.phase_multimaterial import compact_multimaterial_case, original_multimaterial_case
 
@@ -69,6 +71,29 @@ def test_stage_contract_has_required_diagnostics_and_composed_halo():
 	assert stage.contract.required_pad.phase_fft_passes == 3
 	assert STAGE_DISPATCH[stage.name].kind is DispatchKind.PROCESS
 	assert not STAGE_DISPATCH[stage.name].projection_units
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+@pytest.mark.parametrize("n_iter", [0, 1, 2])
+def test_stage_declares_all_reusable_scratch_before_execution(layout, n_iter):
+	case = compact_multimaterial_case()
+	stage = _stage(case, n_iter=n_iter)
+	spec = BufferSpec(ProjOrder(*case["projections"].shape).to(layout), np.float32)
+	requests = {request.artifact_key: request for request in stage.bounded_work_requests(spec)}
+	keys = {
+		"baseline", "current", "correction", "psi", "synthesis",
+	} | ({"previous_labels"} if n_iter > 1 else set())
+	assert set(requests) == {"_multimaterial_" + key for key in keys}
+	for key, request in requests.items():
+		key = key.removeprefix("_multimaterial_")
+		expected_shape = ReconOrder.of(spec.shape) if key == "previous_labels" else spec.shape
+		expected_dtype = np.int32 if key == "previous_labels" else (
+			np.float32 if key in ("baseline", "current") else np.float64
+		)
+		assert request.buffer_spec == BufferSpec(expected_shape, expected_dtype)
+		assert request.role == "multimaterial_" + key
+		assert request.fill_value == (0 if key == "correction" else None)
+		assert request.artifact_key not in stage.contract.produces_artifacts
 
 
 @pytest.mark.parametrize("n_iter", [0, 1, 2])
@@ -154,6 +179,21 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 	monkeypatch.setattr(phase_stages, "slope_denominator", record_denominator)
 	with PipelineRunContext(max_workers=2) as context:
 		state = _state(case, layout=layout, storage=context.storage, executor=context.executor)
+		requests = stage.bounded_work_requests(state.buffer_spec)
+		prepared = []
+		prepare = execution._prepare_bounded_work
+
+		def record_prepare(target, stages, axis=None, **kwargs):
+			result = prepare(target, stages, axis, **kwargs)
+			assert target is state
+			assert tuple(stages) == (stage,)
+			assert axis is None
+			assert result == requests
+			np.testing.assert_array_equal(np.asarray(state.artifacts["_multimaterial_correction"]), 0)
+			prepared.append(result)
+			return result
+
+		monkeypatch.setattr(execution, "_prepare_bounded_work", record_prepare)
 		flats = np.ones((4, state.buffer_spec.shape.Y, state.buffer_spec.shape.X), dtype=np.float32)
 		state.scan.metadata["flat_fields"] = flats
 		state.artifacts["flat_fields"] = context.storage.allocate(
@@ -171,6 +211,13 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 				if kernel.__name__ in ("run_material_retrieval_kernel", "run_material_correction_kernel"):
 					assert isinstance(args[-1], ManagedBuffer)
 					assert args[-1] is state.artifacts["phase_filter"]
+				if kernel.__name__ == "run_material_retrieval_kernel":
+					assert args[1].shape == replace(state.buffer_spec.shape, Theta=1)
+				if kernel.__name__ == "run_material_classification_kernel":
+					assert all(handle.shape == replace(state.buffer_spec.shape, Y=1) for handle in args[:3])
+					previous = args[3]
+					assert previous.shape == replace(ReconOrder.of(state.buffer_spec.shape), Y=1)
+					assert previous.dtype == np.int32
 			calls.append((kernel.__name__, len(arguments)))
 			return original(kernel, arguments)
 		monkeypatch.setattr(context.executor, "submit_all", record)
@@ -181,13 +228,15 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 			assert result.artifacts[key] == serial.artifacts[key]
 		np.testing.assert_array_equal(np.asarray(result.artifacts["phase_filter"]), serial.artifacts["phase_filter"])
 		assert len(denominator_calls) == 1
+		assert prepared == [requests]
+		assert all(request.artifact_key not in state.artifacts for request in requests)
 		assert state.scan.metadata["flat_fields"] is flats
 		assert [name for name, _ in calls] == [
 			"run_material_retrieval_kernel", "run_material_classification_kernel",
 			"run_material_correction_kernel", "run_material_classification_kernel",
 			"run_material_correction_kernel", "run_material_classification_kernel",
 		]
-		expected_roles = {"multimaterial_" + name for name in stage.work_specs(state.buffer_spec.shape)}
+		expected_roles = {request.role for request in requests}
 		events = context.storage.allocation_events
 		assert expected_roles <= {event["role"] for event in events if event["action"] == "retire"}
 		plan = validate_pipeline(
@@ -197,8 +246,8 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 		)
 		planned = {event.role: event.bytes for event in plan.allocation_schedule if event.role in expected_roles}
 		assert planned == {
-			"multimaterial_" + key: shape.nbytes(dtype)
-			for key, (shape, dtype) in stage.work_specs(state.buffer_spec.shape).items()
+			request.role: request.buffer_spec.shape.nbytes(request.buffer_spec.dtype)
+			for request in requests
 		}
 		planned_filter = next(event for event in plan.allocation_schedule if event.role == "phase_filter")
 		assert planned_filter.bytes == result.artifacts["phase_filter"].shape.nbytes(np.float64)
@@ -206,6 +255,34 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 			if event.role in expected_roles)
 		assert len([event for event in events if event["action"] == "allocate"
 			and event["role"] == "phase_filter"]) == 1
+
+
+def test_renamed_stage_plans_the_same_requests_without_a_phase_name_gate():
+	class RenamedMultimaterialStage(MultimaterialStage):
+		name = "custom.material_correction"
+
+	case = compact_multimaterial_case()
+	state = _state(case)
+	state.scan.metadata["flat_fields"] = np.ones(
+		(4, state.buffer_spec.shape.Y, state.buffer_spec.shape.X), dtype=np.float32,
+	)
+	stage = RenamedMultimaterialStage(
+		mu_table=case["mu_table"], delta_table=case["delta_table"], n_iter=2,
+	)
+	plan = validate_pipeline(
+		[TIFFStackReadStage(order="projection"), WeightedNormalizeStage(), stage],
+		state.scan, mode="complete", dataset=state.dataset, source_window=state.source_window,
+	)
+	requests = stage.bounded_work_requests(state.buffer_spec)
+	roles = {request.role for request in requests}
+	assert {
+		event.role: event.bytes for event in plan.allocation_schedule
+		if event.role in roles and event.action.name == "ALLOCATE"
+	} == {
+		request.role: request.buffer_spec.shape.nbytes(request.buffer_spec.dtype)
+		for request in requests
+	}
+	assert {event.role for event in plan.allocation_schedule if event.action.name == "RETIRE"} >= roles
 
 
 def test_missing_material_core_retires_scratch_without_publishing_diagnostics():
@@ -218,8 +295,49 @@ def test_missing_material_core_retires_scratch_without_publishing_diagnostics():
 			Pipeline([stage]).run(state)
 		np.testing.assert_array_equal(np.asarray(state.working_array), before)
 		assert "correction_norms" not in state.artifacts
-		roles = {"multimaterial_" + key for key in stage.work_specs(state.buffer_spec.shape)}
+		requests = stage.bounded_work_requests(state.buffer_spec)
+		roles = {request.role for request in requests}
 		assert roles <= {event["role"] for event in context.storage.allocation_events if event["action"] == "retire"}
+		assert all(request.artifact_key not in state.artifacts for request in requests)
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_ndarray_scratch_uses_shared_lifecycle_and_is_removed(monkeypatch, failure):
+	case = compact_multimaterial_case(noncollinear=True)
+	state = _state(case)
+	public_artifacts = {key: object() for key in (
+		"baseline", "current", "correction", "psi", "synthesis", "previous_labels",
+	)}
+	state.artifacts.update(public_artifacts)
+	stage = (
+		MultimaterialStage(mu_table=[50, 120, 10000], delta_table=[1e-7, 2.4e-7, 2e-5], n_iter=2)
+		if failure else _stage(case, n_iter=2)
+	)
+	requests = stage.bounded_work_requests(state.buffer_spec)
+	prepare = execution._prepare_bounded_work
+	prepared = []
+
+	def record_prepare(target, stages, axis=None, **kwargs):
+		result = prepare(target, stages, axis, **kwargs)
+		assert result == requests
+		assert all(isinstance(target.artifacts[request.artifact_key], np.ndarray) for request in result)
+		np.testing.assert_array_equal(target.artifacts["_multimaterial_correction"], 0)
+		prepared.append(result)
+		return result
+
+	monkeypatch.setattr(execution, "_prepare_bounded_work", record_prepare)
+	if failure:
+		before = state.working_array.copy()
+		with pytest.raises(ValueError, match="no core pixels for class 3"):
+			Pipeline([stage]).run(state)
+		np.testing.assert_array_equal(state.working_array, before)
+		assert "correction_norms" not in state.artifacts
+	else:
+		Pipeline([stage]).run(state)
+		assert state.domain is DataDomain.ATTENUATION
+	assert prepared == [requests]
+	assert all(request.artifact_key not in state.artifacts for request in requests)
+	assert all(state.artifacts[key] is value for key, value in public_artifacts.items())
 
 
 def test_borrowed_managed_input_without_allocator_uses_serial_scratch(monkeypatch):
@@ -229,12 +347,17 @@ def test_borrowed_managed_input_without_allocator_uses_serial_scratch(monkeypatc
 	with PipelineRunContext(max_workers=1) as context:
 		state = _state(case, storage=context.storage, executor=context.executor)
 		state.storage = None
+		stage = _stage(case)
+		requests = stage.bounded_work_requests(state.buffer_spec)
 
 		def unexpected_dispatch(*args):
 			raise AssertionError("unmanaged scratch must not be sent as process output")
 		monkeypatch.setattr(context.executor, "submit_all", unexpected_dispatch)
-		Pipeline([_stage(case)]).run(state)
+		Pipeline([stage]).run(state)
 		np.testing.assert_array_equal(np.asarray(state.working_array), expected.working_array)
+		assert all(request.artifact_key not in state.artifacts for request in requests)
+		assert not any(event["role"] in {request.role for request in requests}
+			for event in context.storage.allocation_events)
 
 
 def _calibration(case, kind="parallel"):

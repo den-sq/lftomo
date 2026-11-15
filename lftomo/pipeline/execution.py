@@ -288,19 +288,15 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 	def dispatch(kernel, arguments):
 		return executor.submit_all(kernel, arguments) if parallel else [kernel(*args) for args in arguments]
 
-	specs = stage.work_specs(state.buffer_spec.shape)
-	work = {}
+	requests = _prepare_bounded_work(state, (stage,), required=True)
+	specs = {request.artifact_key: request.buffer_spec for request in requests}
+	work = state.artifacts
 
 	def scoped(key, unit, index):
-		return work[key][_unit_index(unit, index, specs[key][0])]
+		key = f"_multimaterial_{key}"
+		return work[key][_unit_index(unit, index, specs[key].shape)]
 
 	try:
-		for key, (shape, dtype) in specs.items():
-			work[key], _values = allocate_output(
-				state, shape, dtype, role=f"multimaterial_{key}",
-				reuse_from=(f"multimaterial_{key}",),
-			)
-		buffer_view(work["correction"]).fill(0)
 		dispatch(run_material_retrieval_kernel, (
 			(
 				state.working_array[_unit_index(unit, index, state.buffer_spec.shape)],
@@ -311,14 +307,14 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 		norms, changes = [], []
 		for iteration in range(stage.params.n_iter + 1):
 			np.subtract(
-				buffer_view(work["baseline"]), buffer_view(work["correction"]),
-				out=buffer_view(work["current"]), casting="unsafe",
+				buffer_view(work["_multimaterial_baseline"]), buffer_view(work["_multimaterial_correction"]),
+				out=buffer_view(work["_multimaterial_current"]), casting="unsafe",
 			)
 			counts = dispatch(run_material_classification_kernel, (
 				(
 					scoped("current", unit, index), scoped("psi", unit, index),
 					scoped("synthesis", unit, index),
-					None if "previous_labels" not in work else scoped("previous_labels", unit, index),
+					None if "_multimaterial_previous_labels" not in work else scoped("previous_labels", unit, index),
 					state.layout, stage, worker_scan, angles, iteration,
 				)
 				for unit, index in _buffer_units(state, "Y")
@@ -333,19 +329,16 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 				for unit, index in _buffer_units(state, "Theta")
 			))
 			# Reuse the synthesized-phase plane after its last consumer this pass.
-			np.square(buffer_view(work["correction"]), out=buffer_view(work["psi"]))
-			norms.append(float(np.sqrt(buffer_view(work["psi"]).mean())))
+			np.square(buffer_view(work["_multimaterial_correction"]), out=buffer_view(work["_multimaterial_psi"]))
+			norms.append(float(np.sqrt(buffer_view(work["_multimaterial_psi"]).mean())))
 			if iteration:
-				changes.append(float(sum(counts) / np.prod(specs["previous_labels"][0].as_tuple())))
-		np.asarray(state.working_array)[...] = buffer_view(work["current"])
+				changes.append(float(sum(counts) / np.prod(specs["_multimaterial_previous_labels"].shape.as_tuple())))
+		np.asarray(state.working_array)[...] = buffer_view(work["_multimaterial_current"])
 		state.artifacts["correction_norms"] = norms
 		state.artifacts["label_change"] = changes
 		return state
 	finally:
-		if state.storage is not None:
-			for key, handle in work.items():
-				if isinstance(handle, ManagedBuffer):
-					state.storage.retire(handle, role=f"multimaterial_{key}")
+		_release_bounded_work(state, requests)
 
 
 def _scope_bounded_work_to_unit(
@@ -418,16 +411,21 @@ def run_sinogram_chain_kernel(
 
 
 def _prepare_bounded_work(
-	state: PipelineState, stages: Sequence[Stage], axis: str,
+	state: PipelineState, stages: Sequence[Stage], axis: str | None = None, *, required: bool = False,
 ) -> tuple[BoundedWorkRequest, ...]:
-	"""Allocate and initialize Stage-declared work once for the complete segment."""
+	"""Allocate and initialize Stage-declared work once for the complete segment.
 
-	if not isinstance(state.working_array, ManagedBuffer) or state.storage is None:
+	Composite algorithms require scratch even without a storage backend; use
+	allocate_output's ndarray fallback in that case. A mixed-axis composite has
+	no single dispatched axis to validate against every requested layout.
+	"""
+
+	if not required and (not isinstance(state.working_array, ManagedBuffer) or state.storage is None):
 		return ()
 	requests = collect_bounded_work(stages, state.buffer_spec)
 	if any(request.artifact_key in state.artifacts for request in requests):
 		raise ValueError("bounded work artifacts are private to one segment")
-	if any(
+	if axis is not None and any(
 		getattr(request.buffer_spec.shape, axis) != getattr(state.buffer_spec.shape, axis)
 		for request in requests
 	):
@@ -436,19 +434,17 @@ def _prepare_bounded_work(
 	try:
 		for request in requests:
 			spec = request.buffer_spec
-			buffer = state.storage.allocate(
-				spec.shape, spec.dtype, role=request.role, reuse_from=(request.role,),
+			buffer, values = allocate_output(
+				state, spec.shape, spec.dtype, role=request.role, reuse_from=(request.role,),
 			)
-			if isinstance(buffer, list):
-				raise TypeError("bounded work allocation returned multiple buffers")
 			state.artifacts[request.artifact_key] = buffer
 			allocated.append(request)
 			if request.fill_value is not None:
-				buffer.array().fill(request.fill_value)
+				values.fill(request.fill_value)
 	except BaseException:
 		_release_bounded_work(state, tuple(allocated))
 		raise
-	if requests:
+	if requests and state.storage is not None:
 		state.artifacts.setdefault("bounded_work_allocations", []).append(
 			_bounded_work_report(state, requests, axis),
 		)
@@ -456,14 +452,14 @@ def _prepare_bounded_work(
 
 
 def _bounded_work_report(
-	state: PipelineState, requests: tuple[BoundedWorkRequest, ...], axis: str,
+	state: PipelineState, requests: tuple[BoundedWorkRequest, ...], axis: str | None,
 ) -> dict[str, Any]:
 	"""Derive allocation observations from the same resolved workspace requests."""
 
 	return {
 		"scope": "window" if state.source_window is not None else "whole_volume",
 		"unit_axis": axis,
-		"units": getattr(state.buffer_spec.shape, axis),
+		"units": getattr(state.buffer_spec.shape, axis) if axis is not None else None,
 		"buffers": [{
 			"artifact_key": request.artifact_key,
 			"role": request.role,
@@ -487,7 +483,7 @@ def _release_bounded_work(
 
 	for request in requests:
 		buffer = state.artifacts.pop(request.artifact_key)
-		if state.storage is not None:
+		if state.storage is not None and isinstance(buffer, ManagedBuffer):
 			state.storage.retire(buffer, role=request.role)
 
 

@@ -63,7 +63,7 @@ bounded chains through its existing run-scoped executor; ndarray tests run
 serially. `ProjectionStage` similarly delegates to `run_projection_stage` for
 Theta units. Each base supplies `run`; authors implement the numerical kernel.
 
-For reusable work in a bounded sinogram segment, override
+For reusable work in a bounded segment or composite Stage, override
 `Stage.bounded_work_requests(input_spec)` and return `BoundedWorkRequest`
 values. Each request names its temporary artifact key and allocation role,
 and owns a `BufferSpec` plus an optional scalar `fill_value`. Express numerical
