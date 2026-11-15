@@ -393,6 +393,10 @@ def test_pipeline_has_one_working_array_boundary_idiom():
 	legacy_accessor = "_".join(("working", "view"))
 	legacy = []
 	boundary_bypasses = []
+	parallel_work_apis = []
+	retired_work_apis = {
+		"work_specs", "uses_vo_work", "_prepare_vo_work", "_scope_vo_work_to_unit", "_release_vo_work",
+	}
 	direct_allocators = []
 	stage_paths = {
 		*(root / "pipeline").rglob("*.py"),
@@ -404,6 +408,9 @@ def test_pipeline_has_one_working_array_boundary_idiom():
 		if legacy_accessor in text:
 			legacy.append(path.relative_to(repository))
 		for node in ast.walk(tree):
+			identifier = getattr(node, "id", None) or getattr(node, "attr", None) or getattr(node, "name", None)
+			if identifier in retired_work_apis:
+				parallel_work_apis.append(f"{path.relative_to(repository)}:{node.lineno} {identifier}")
 			if not isinstance(node, ast.Call):
 				continue
 			working_argument = (
@@ -449,3 +456,4 @@ def test_pipeline_has_one_working_array_boundary_idiom():
 	assert legacy == []
 	assert boundary_bypasses == []
 	assert direct_allocators == []
+	assert parallel_work_apis == []
