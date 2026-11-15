@@ -71,7 +71,8 @@ padding through `TomoWindow` before deriving the allocation shape. The generic
 executor allocates once for the segment through the run's `StorageBackend`,
 passes only the current unit's reopenable handle to kernels, and retires it
 after all units complete, including on failure. Plain ndarray execution keeps
-the existing serial numerical fallback.
+the existing serial numerical fallback. Retired work can be reused by its named
+role on a later segment or window; requested initialization runs again on reuse.
 
 Stages sharing a key share one allocation: dtype, layout, initialization and
 non-growing extents must agree. A request can explicitly permit larger capacity
