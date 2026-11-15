@@ -8,14 +8,16 @@ are visible.
 
 ## Choose the execution pattern
 
-`SinogramStage` and `ProjectionStage` provide the unit-iteration adapters.
-Use plain `Stage` for orchestration or a whole-array operation. Dispatch remains
-a separate declaration in `lftomo/pipeline/dispatch.py`:
+`SinogramStage` and `ProjectionStage` iterate the rows or projections assigned
+to the current invocation. Use plain `Stage` for orchestration or a whole-array
+operation that is not process-dispatched. Dispatch remains a separate
+declaration in `lftomo/pipeline/dispatch.py`:
 
 | Work | Stage pattern | Dispatch group | Existing example |
 | --- | --- | --- | --- |
-| Independent projections | Extend `ProjectionStage` and implement `run_projection(image, state)` for a `(Y, X)` view; the base handles Theta units. | `_PROJECTION_PROCESS` | `BilateralFilterStage` |
-| Independent detector rows | Extend `SinogramStage` and implement `run_sinogram(sinogram, state)` for a `(Theta, X)` view; the base handles Y units and declares bounded views from `ProjOrder`. | `_BOUNDED_PROCESS` | `VoSortStripeStage` |
+| Independent projections | Extend `ProjectionStage` and implement `run_projection(image, state)` for a `(Y, X)` view; the base iterates the assigned projections. | `_PROJECTION_PROCESS` | `BilateralFilterStage` |
+| Independent projections, Stage-owned loop | Plain `Stage` whose `run` iterates `state.work_indices("Theta")` (or indexes with `state.work_index()`) and derives source positions with `state.source_window.source_index`; see below. | `_PROJECTION_PROCESS` | `ThetaSwitchNormalizeStage`, `BetaScaleStage` |
+| Independent detector rows | Extend `SinogramStage` and implement `run_sinogram(sinogram, state)` for a `(Theta, X)` view; the base iterates the assigned rows and declares bounded views from `ProjOrder`. | `_BOUNDED_PROCESS` | `VoSortStripeStage` |
 | A new output allocation | Allocate through `allocate_output`, fill it, then publish through `commit_output`; derive geometry from the current typed buffer and `TomoWindow`. | `_OUT_OF_PLACE_PROCESS` for an existing supported fill path | `LayoutConvertStage` |
 | An external engine owns parallelism | `run(state)` calls the engine with its assigned core budget; declare runtime dependencies and resource needs. | `_ENGINE` | `GridrecStage` |
 
@@ -53,8 +55,8 @@ class SinogramScaleStage(SinogramStage):
 ```
 
 `SinogramStage.run` delegates to the public `run_sinogram_stage` adapter, which
-calls the kernel once per detector row with a `(Theta, X)` NumPy view and a
-a state retaining the full working buffer and held `source_window`.
+calls the kernel once per assigned detector row with a `(Theta, X)` NumPy view
+and a state retaining the full working buffer and held `source_window`.
 `state.work_range` assigns packed-buffer ordinals; `state.work_indices("Y")`
 iterates them and `state.source_window.source_index("Y", index)` derives their
 source positions, including source stride and realized padding.
@@ -63,14 +65,26 @@ array which the helper copies into that row. The helper returns the original
 parent state and creates no executor. `Pipeline` invokes the same kernel for
 bounded chains through its existing run-scoped executor; ndarray tests run
 serially. `ProjectionStage` similarly delegates to `run_projection_stage` for
-Theta units. Each base supplies `run`; authors implement the numerical kernel.
+its assigned projections. Each base supplies `run`; authors implement the
+numerical kernel.
+
+A plain `Stage` with its own `run` may also be placed in `_PROJECTION_PROCESS`.
+Process dispatch then calls that `run` once per assigned projection, and every
+worker receives the full working buffer with `state.work_range` naming its
+projection. `run` must therefore process only the assigned projections: loop over
+`state.work_indices("Theta")`, or index with `state.work_index()` for a vectorized
+operation, and take source positions from
+`state.source_window.source_index("Theta", index)`. A loop over the whole array
+(`range(data.shape[...])`, or `data *= ...` without the index) still passes
+serial tests, where the assignment is the whole buffer, but under process dispatch
+it repeats the whole buffer in every worker.
 
 For reusable work in a bounded segment or composite Stage, override
 `Stage.bounded_work_requests(input_spec)` and return `BoundedWorkRequest`
 values. Each request names its temporary artifact key and allocation role,
 and owns a `BufferSpec` plus an optional scalar `fill_value`. Set
 `required_for_fallback=True` for composite work required even without managed
-dispatch; optional canvases retain their per-unit numerical fallback instead.
+dispatch; optional canvases retain their serial numerical fallback instead.
 Express numerical
 padding through `TomoWindow` before deriving the allocation shape. The generic
 executor allocates once for the segment through the run's `StorageBackend`,
@@ -84,7 +98,7 @@ Stages sharing a key share one allocation: dtype, layout, initialization and
 non-growing extents must agree. A request can explicitly permit larger capacity
 along `grow_axes`; Vo median padding uses `("X",)` so a chain shares its largest
 requested line canvas. Kernels must accept that capacity. Work must preserve
-the dispatched unit-axis extent. The hook takes only the current window's
+the extent of the dispatched axis. The hook takes only the current window's
 allocation `BufferSpec`, so `collect_bounded_work(stages, input_spec)` can inspect exact
 requirements before execution without reading pixels or allocating storage.
 At runtime, collection derives this temporary descriptor from the typed working

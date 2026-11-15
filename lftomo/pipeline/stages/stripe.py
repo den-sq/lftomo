@@ -70,9 +70,9 @@ def _vo_work_planes(
 	if float_buffer is None or index_buffer is None:
 		raise ValueError("Vo reusable work requires both floating-point and index planes")
 	if state.assigned_range("Y").length.Y != 1:
-		raise ValueError("Vo reusable work requires a dispatched Y unit")
+		raise ValueError("Vo reusable work requires a one-row Y assignment")
 	if float_buffer.shape.Y != 1 or index_buffer.shape.Y != 1:
-		raise ValueError("Vo reusable work must be scoped to its dispatched Y unit")
+		raise ValueError("Vo reusable work must be scoped to its assigned row")
 	float_work = float_buffer.array()[0]
 	index_work = index_buffer.array()[0]
 	if float_work.shape != sinogram.shape or index_work.shape != sinogram.shape:
@@ -80,7 +80,7 @@ def _vo_work_planes(
 	median_pad_work = None
 	if median_pad_buffer is not None:
 		if median_pad_buffer.shape.Y != 1:
-			raise ValueError("Vo median-pad work must be scoped to its dispatched Y unit")
+			raise ValueError("Vo median-pad work must be scoped to its assigned row")
 		median_pad_work = median_pad_buffer.array()[0]
 		if (
 			median_pad_work.shape[0] != sinogram.shape[0]
