@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState, run_sinogram_stage
+from lftomo.pipeline import LocalArray, Pipeline, PipelineState, run_sinogram_stage
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.storage import PipelineRunContext
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -11,7 +11,7 @@ from tests.sample_data import attach_source_geometry
 
 def _state(array, layout, config):
 	return PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, layout(*array.shape)),
 		scan=Scan(
 			energy_keV=20, pixel_size_um=1,
 			n_projections=array.shape[layout.axis_of("Theta")], degrees_per_fov=180,
@@ -22,7 +22,6 @@ def _state(array, layout, config):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 	)
 
 
@@ -55,7 +54,7 @@ def test_registered_vo_stage_mutates_tier1_striped_sinogram(algorithm, params):
 	assert stage.contract.required_metadata == ()
 	assert stage.contract.consumes_artifacts == ()
 	assert stage.contract.produces_artifacts == ()
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	assert np.isfinite(working).all()
 	assert not np.array_equal(working, before)
 

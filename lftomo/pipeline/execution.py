@@ -43,7 +43,6 @@ class _WorkerState:
 	backend: Any
 	dataset: Any
 	source_window: TomoWindow | None
-	buffer_spec: BufferSpec
 	domain: Any
 
 
@@ -96,7 +95,6 @@ def _worker_state(
 		storage=None,
 		dataset=payload.dataset,
 		source_window=payload.source_window,
-		buffer_spec=payload.buffer_spec,
 		domain=payload.domain,
 		work_range=work_range,
 	)
@@ -187,7 +185,7 @@ def run_projection_stage(stage: Stage, state: PipelineState) -> PipelineState:
 def run_material_retrieval_kernel(source, baseline, payload, stage, work_range, denominator):
 	"""Retrieve assigned projections into a coordinator-owned baseline plane."""
 	for projection in work_range.get_iter(IntIter):
-		index = payload.buffer_spec.layout.point_index(Theta=projection)
+		index = type(source.shape).point_index(Theta=projection)
 		stage.retrieve(
 			buffer_view(source)[index], buffer_view(baseline)[index],
 			payload.scan, buffer_view(denominator),
@@ -199,7 +197,7 @@ def run_material_classification_kernel(current, psi, synthesis, previous, payloa
 	"""Classify assigned rows and synthesize their material line integrals."""
 	changes = 0
 	for row in work_range.get_iter(IntIter):
-		index = payload.buffer_spec.layout.point_index(Y=row)
+		index = type(current.shape).point_index(Y=row)
 		changes += stage.classify_row(
 			buffer_view(current)[index], buffer_view(psi)[index], buffer_view(synthesis)[index],
 			None if previous is None else buffer_view(previous)[ReconOrder.point_index(Y=row)],
@@ -211,7 +209,7 @@ def run_material_classification_kernel(current, psi, synthesis, previous, payloa
 def run_material_correction_kernel(psi, synthesis, correction, payload, stage, work_range, denominator):
 	"""Apply assigned transverse filters using the run-owned executor."""
 	for projection in work_range.get_iter(IntIter):
-		index = payload.buffer_spec.layout.point_index(Theta=projection)
+		index = type(psi.shape).point_index(Theta=projection)
 		stage.correct(
 			buffer_view(psi)[index], buffer_view(synthesis)[index], buffer_view(correction)[index],
 			payload.scan, buffer_view(denominator),
@@ -227,19 +225,19 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 	"""
 	if state.backend.name != "numpy" or state.layout not in (ProjOrder, SinoOrder):
 		raise TypeError("phase.multimaterial requires NumPy tomography data")
-	if not np.issubdtype(state.buffer_spec.dtype, np.floating):
+	if not np.issubdtype(state.working_array.dtype, np.floating):
 		raise TypeError("phase.multimaterial requires floating-point transmission")
 	if state.dataset is None or state.source_window is None:
 		raise ValueError("phase.multimaterial requires canonical source angles and window geometry")
 	angles = np.rad2deg(state.dataset.angles[state.source_window.axis_slice("Theta")])
-	if len(angles) != state.buffer_spec.shape.Theta:
+	if len(angles) != state.working_array.shape.Theta:
 		raise ValueError("phase.multimaterial projection count disagrees with source angles")
 	# Resolve once in the authoritative parameter model, before worker copies.
 	stage.params.line_fit
 	from lftomo.pipeline.stages.phase import _resolved_slope_filter
 
 	_resolved_slope_filter(
-		state, (state.buffer_spec.shape.Y, state.buffer_spec.shape.X),
+		state, (state.working_array.shape.Y, state.working_array.shape.X),
 		slope=stage.params.line_fit["slope"], pad=stage.params.pad,
 	)
 	denominator = state.artifacts["phase_filter"]
@@ -254,7 +252,6 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 		return executor.submit_all(kernel, arguments) if parallel else [kernel(*args) for args in arguments]
 
 	requests = _prepare_bounded_work(state, (stage,))
-	specs = {request.artifact_key: request.buffer_spec for request in requests}
 	work = state.artifacts
 
 	try:
@@ -291,7 +288,7 @@ def run_multimaterial_stage(stage: Stage, state: PipelineState) -> PipelineState
 			np.square(buffer_view(work["_multimaterial_correction"]), out=buffer_view(work["_multimaterial_psi"]))
 			norms.append(float(np.sqrt(buffer_view(work["_multimaterial_psi"]).mean())))
 			if iteration:
-				changes.append(float(sum(counts) / np.prod(specs["_multimaterial_previous_labels"].shape.as_tuple())))
+				changes.append(float(sum(counts) / work["_multimaterial_previous_labels"].shape.prod()))
 		np.asarray(state.working_array)[...] = buffer_view(work["_multimaterial_current"])
 		state.artifacts["correction_norms"] = norms
 		state.artifacts["label_change"] = changes
@@ -360,13 +357,13 @@ def _prepare_bounded_work(
 	no single dispatched axis to validate against every requested layout.
 	"""
 
-	requests = collect_bounded_work(stages, state.buffer_spec)
+	requests = collect_bounded_work(stages, BufferSpec.from_buffer(state.working_array))
 	if not isinstance(state.working_array, ManagedBuffer) or state.storage is None:
 		requests = tuple(request for request in requests if request.required_for_fallback)
 	if any(request.artifact_key in state.artifacts for request in requests):
 		raise ValueError("bounded work artifacts are private to one segment")
 	if axis is not None and any(
-		getattr(request.buffer_spec.shape, axis) != getattr(state.buffer_spec.shape, axis)
+		getattr(request.buffer_spec.shape, axis) != getattr(state.working_array.shape, axis)
 		for request in requests
 	):
 		raise ValueError(f"bounded work must preserve the dispatched {axis} extent")
@@ -394,23 +391,24 @@ def _prepare_bounded_work(
 def _bounded_work_report(
 	state: PipelineState, requests: tuple[BoundedWorkRequest, ...], axis: str | None,
 ) -> dict[str, Any]:
-	"""Derive allocation observations from the same resolved workspace requests."""
+	"""Report allocated geometry from the buffers fulfilling Stage requests."""
 
+	buffers = []
+	for request in requests:
+		buffer = state.artifacts[request.artifact_key]
+		buffers.append({
+			"artifact_key": request.artifact_key,
+			"role": request.role,
+			"shape": buffer.shape.as_dict(),
+			"dtype": buffer.dtype.str,
+			"bytes": buffer.shape.nbytes(buffer.dtype),
+		})
 	return {
 		"scope": "window" if state.source_window is not None else "whole_volume",
 		"unit_axis": axis,
-		"units": getattr(state.buffer_spec.shape, axis) if axis is not None else None,
-		"buffers": [{
-			"artifact_key": request.artifact_key,
-			"role": request.role,
-			"shape": request.buffer_spec.shape.as_dict(),
-			"dtype": request.buffer_spec.dtype.str,
-			"bytes": request.buffer_spec.shape.nbytes(request.buffer_spec.dtype),
-		} for request in requests],
-		"managed_bytes": sum(
-			request.buffer_spec.shape.nbytes(request.buffer_spec.dtype)
-			for request in requests
-		),
+		"units": getattr(state.working_array.shape, axis) if axis is not None else None,
+		"buffers": buffers,
+		"managed_bytes": sum(buffer["bytes"] for buffer in buffers),
 		"allocation_count": len(requests),
 		"indexing": "buffer_sample_ordinals",
 	}
@@ -463,7 +461,7 @@ def run_affine_fill_kernel(
 
 	source_values = source.array()
 	target_values = target.array()
-	row_count = payload.buffer_spec.shape.Y
+	row_count = source.shape.Y
 	for projection in work_range.get_iter(IntIter):
 		image = source_values[type(source.shape).point_index(Theta=projection)]
 		transform_affine_projection(
@@ -514,7 +512,6 @@ def _payload(state: PipelineState) -> _WorkerState:
 		backend=state.backend,
 		dataset=state.dataset,
 		source_window=state.source_window,
-		buffer_spec=state.buffer_spec,
 		domain=state.domain,
 	)
 
@@ -632,7 +629,7 @@ class PipelineExecutor:
 			if "flat_fields" in state.scan.metadata:
 				_managed_flat_fields(state)
 			working_state = state.with_array(
-				output, buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(output.dtype)),
+				output,
 			)
 			air_mask_key = getattr(stage.params, "air_mask_artifact", "air_mask")
 			air_mask = working_state.artifacts.get(air_mask_key)
@@ -642,7 +639,7 @@ class PipelineExecutor:
 				and working_state.storage is not None
 			):
 				managed_mask = working_state.storage.allocate(
-					working_state.buffer_spec.shape, air_mask.dtype, role="air_mask",
+					working_state.working_array.shape, air_mask.dtype, role="air_mask",
 				)
 				managed_mask.array()[...] = air_mask
 				working_state.artifacts[air_mask_key] = managed_mask
@@ -673,7 +670,6 @@ class PipelineExecutor:
 			merge_normalization_dispatch(stage, working_state, results)
 			result = commit_output(
 				original, output, retire_as="raw_staging",
-				buffer_spec=BufferSpec(original.buffer_spec.shape, np.dtype(output.dtype)),
 			)
 			result.artifacts.update(working_state.artifacts)
 			return result
@@ -694,20 +690,20 @@ class PipelineExecutor:
 				raise TypeError("layout.convert requires ProjOrder or SinoOrder input")
 			if state.layout is stage.contract.produces:
 				raise ValueError("layout.convert target is already the current layout")
-			shape = state.buffer_spec.shape.to(stage.contract.produces)
+			shape = state.working_array.shape.to(stage.contract.produces)
 			output, _target = allocate_output(
 				state, shape, data.dtype, role=f"layout:{stage.contract.produces.__name__}",
 			)
 			positions = Theta.drange(0, shape.Theta, 1).get_iter(IntIter)
 			self.submit_all(run_layout_fill_kernel, (
 				(
-					state.working_array[type(state.buffer_spec.shape).point_index(Theta=index)],
+					state.working_array[state.layout.point_index(Theta=index)],
 					output[type(shape).point_index(Theta=index)],
 				)
 				for index in positions
 			))
 			return commit_output(
-				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+				state, output, retire_as=None,
 			)
 
 		if isinstance(stage, AffineSkewMovementStage):
@@ -727,7 +723,7 @@ class PipelineExecutor:
 				raise ValueError("fused affine transition requires a known tomography layout")
 			if input_layout is stage.target_layout:
 				raise ValueError("fused affine transition must change layout")
-			shape = stage.output_shape(state.buffer_spec.shape)
+			shape = stage.output_shape(state.working_array.shape)
 			output, _target = allocate_output(
 				state, shape, data.dtype, role="fused_geometry",
 			)
@@ -738,7 +734,7 @@ class PipelineExecutor:
 				for work_range in _work_ranges(state, "Theta")
 			))
 			result = commit_output(
-				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+				state, output, retire_as=None,
 			)
 			if state.source_window is not None:
 				result.source_window = stage.output_window(state.source_window)
@@ -751,7 +747,7 @@ class PipelineExecutor:
 		if isinstance(stage, HelicalIndexRemapStage):
 			if not stage.params.enabled:
 				return state
-			source_shape = state.buffer_spec.shape
+			source_shape = state.working_array.shape
 			if state.source_window is None:
 				raise RuntimeError("helical remap requires PipelineState.source_window")
 			shape, shifts, start, stop = stage.output_geometry(
@@ -773,7 +769,7 @@ class PipelineExecutor:
 				for index in positions
 			))
 			result = commit_output(
-				state, output, retire_as=None, buffer_spec=BufferSpec(shape, data.dtype),
+				state, output, retire_as=None,
 			)
 			result.artifacts["helical_row_shifts"] = shifts
 			return result

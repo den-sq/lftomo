@@ -9,7 +9,7 @@ from lftomo.calibration import (
 	HDF5RandomFrameSource, build_beam_basis, fit_projection_beam,
 )
 from lftomo.config import Recon, Scan, StageConfig
-from lftomo.pipeline import BufferSpec, NumpyBackend, PipelineState, validate_pipeline
+from lftomo.pipeline import LocalArray, NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.stages import (
 	BeamBasisFitNormalizeStage,
@@ -140,9 +140,8 @@ def test_stage_preserves_both_layouts_and_reports_coefficients_and_qc(tmp_path):
 		(SinoOrder, projections.transpose(1, 0, 2).copy()),
 	):
 		state = attach_source_geometry(PipelineState(
-			values, _scan(40, 52, 3), Recon.model_validate({"pipeline": []}),
+			LocalArray(values, layout(*values.shape)), _scan(40, 52, 3), Recon.model_validate({"pipeline": []}),
 			artifacts={"calibration_bundle": ref}, backend=NumpyBackend(),
-			buffer_spec=BufferSpec(layout(*values.shape), values.dtype),
 			domain=DataDomain.RAW,
 		))
 		BeamBasisFitNormalizeStage(maximum_out_of_basis=1.1).run(state)
@@ -170,17 +169,15 @@ def test_gross_mask_contamination_is_caught_by_stage_qc(tmp_path):
 		"air_mask": np.ones_like(beam, dtype=bool),
 	}
 	state = attach_source_geometry(PipelineState(
-		projection.copy(), _scan(40, 52, 1), Recon.model_validate({"pipeline": []}),
+		LocalArray(projection.copy(), ProjOrder(*projection.shape)), _scan(40, 52, 1), Recon.model_validate({"pipeline": []}),
 		artifacts=artifacts.copy(), backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*projection.shape), projection.dtype),
 		domain=DataDomain.RAW,
 	))
 	with pytest.raises(ValueError, match="failed QC"):
 		BeamBasisFitNormalizeStage().run(state)
 	diagnostic = attach_source_geometry(PipelineState(
-		projection.copy(), _scan(40, 52, 1), Recon.model_validate({"pipeline": []}),
+		LocalArray(projection.copy(), ProjOrder(*projection.shape)), _scan(40, 52, 1), Recon.model_validate({"pipeline": []}),
 		artifacts=artifacts.copy(), backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*projection.shape), projection.dtype),
 		domain=DataDomain.RAW,
 	))
 	BeamBasisFitNormalizeStage(fail_on_qc=False).run(diagnostic)

@@ -44,7 +44,7 @@ def _sinograms(state: PipelineState) -> tuple[np.ndarray, type]:
 	data = np.asarray(state.working_array)
 	if data.ndim != 3:
 		raise ValueError("center Stages expect a (Y, Theta, X) sinogram array")
-	return data, type(state.buffer_spec.shape)
+	return data, state.layout
 
 
 def _angles(state: PipelineState, theta_count: int) -> np.ndarray:

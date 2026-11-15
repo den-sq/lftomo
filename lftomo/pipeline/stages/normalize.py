@@ -21,7 +21,6 @@ from lftomo.calibration import (
 	optimal_transport_interp,
 )
 from lftomo.pipeline.core import (
-	BufferSpec,
 	PipelineState,
 	Stage,
 	StageParams,
@@ -44,7 +43,7 @@ def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 	if state.storage is None and source.dtype == work_dtype:
 		return state.working_array, source
 	output, data = allocate_output(
-		state, state.buffer_spec.shape, work_dtype, role="normalized",
+		state, state.working_array.shape, work_dtype, role="normalized",
 		reuse_from=("normalized", "reconstruction"),
 	)
 	data[...] = source
@@ -54,7 +53,6 @@ def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
 def _finish_normalization(state: PipelineState, output: object) -> PipelineState:
 	return commit_output(
 		state, output, retire_as="raw_staging",
-		buffer_spec=BufferSpec(state.buffer_spec.shape, np.dtype(output.dtype)),
 	)
 
 
@@ -148,7 +146,7 @@ class WeightedNormalizeStage(Stage):
 
 		output, working = _normalization_output(state)
 		flats = _managed_flat_fields(state)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		if working.ndim != 3:
 			raise ValueError("weighted-normalize expects a three-dimensional working array")
 		y_size = working.shape[layout.axis_of("Y")]
@@ -266,7 +264,7 @@ class BeamTrackingNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BeamTrackingNormalizeStage currently requires the NumPy backend")
 		output, data = _normalization_output(state)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_tracking expects a three-dimensional array")
 		y_size = data.shape[layout.axis_of("Y")]
@@ -342,7 +340,7 @@ class BeamKeyframesNormalizeStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		output, data = _normalization_output(state)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		y_size = data.shape[layout.axis_of("Y")]
 		if state.source_window is None:
 			raise RuntimeError(f"{self.name} requires PipelineState.source_window")
@@ -451,7 +449,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("BeamBasisFitNormalizeStage currently requires the NumPy backend")
 		output, data = _normalization_output(state)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_basis_fit expects a three-dimensional array")
 		ref = state.artifacts.get("calibration_bundle")
@@ -582,7 +580,7 @@ class ThetaSwitchNormalizeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("ThetaSwitchNormalizeStage currently requires the NumPy backend")
 		output, data = _normalization_output(state)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		if data.ndim != 3:
 			raise ValueError("normalize.theta_switch expects a three-dimensional tomography array")
 		flats = _flat_fields(state, data, layout)
@@ -628,7 +626,7 @@ def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 	if not isinstance(stage, BeamTrackingNormalizeStage) or not stage.params.fit_schedule:
 		return
 	data = np.asarray(state.working_array)
-	layout = type(state.buffer_spec.shape)
+	layout = state.layout
 	y_size = data.shape[layout.axis_of("Y")]
 	pre_gain, post_gain, _pre_dark, _post_dark = _tracking_fields(
 		state, y_size, stage.params.component_names,

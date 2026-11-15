@@ -2,7 +2,8 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import Backend, BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import Backend, Pipeline, PipelineState
+from lftomo.storage import LocalArray
 from lftomo.pipeline.stages import AstraCudaStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, SinoOrder, Y
 from lftomo.util.window import TomoWindow
@@ -21,7 +22,7 @@ ALGORITHMS = {
 
 def _state(array, config, backend=None, layout=ProjOrder):
 	return PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, layout(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -33,7 +34,6 @@ def _state(array, config, backend=None, layout=ProjOrder):
 		),
 		recon=Recon(pipeline=[config]),
 		backend=backend or Backend("cuda", supports_gpu=True),
-		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 	)
 
 
@@ -82,7 +82,7 @@ def test_astra_stage_passes_bridge_options_and_iterations(monkeypatch):
 		"extra_options": {},
 		"num_iter": 7,
 	}
-	assert result.working_array.shape == (2, 8, 8)
+	assert np.asarray(result.working_array).shape == (2, 8, 8)
 	assert result.source_window is state.source_window
 
 

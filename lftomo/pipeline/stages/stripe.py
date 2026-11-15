@@ -289,13 +289,13 @@ class AllOfTheStripeStage(Stage):
 		if state.backend.name != "numpy":
 			raise TypeError("AllOfTheStripeStage currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		if data.ndim != 3:
 			raise ValueError("stripe.all_of_the_stripe expects a (Y, Theta, X) sinogram array")
 
 		import tomopy
 
-		shape = state.buffer_spec.shape
+		shape = state.working_array.shape
 		tomopy_input = shape.transposed_view(data, ProjOrder)
 		# TomoPy copies this view into its own multiprocessing shared array and
 		# returns that allocation. The final assignment is therefore the required

@@ -9,7 +9,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
-	BufferSpec,
+	LocalArray,
 	DataDomain,
 	ExecutionKind,
 	Pipeline,
@@ -54,10 +54,9 @@ def _state(array: np.ndarray, layout: type) -> PipelineState:
 	theta = array.shape[0] if layout is ProjOrder else array.shape[1]
 	rows = array.shape[1] if layout is ProjOrder else array.shape[0]
 	return PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, layout(*array.shape)),
 		scan=_scan(theta, rows, array.shape[2]),
 		recon=Recon(pipeline=[StageConfig(kind="test")]),
-		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 		domain=DataDomain.ATTENUATION,
 	)
 

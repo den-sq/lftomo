@@ -11,7 +11,7 @@ import numpy as np
 from scipy.ndimage import shift
 
 from lftomo.pipeline.core import (
-	BufferSpec, PadRequirement, PipelineState, Stage, StageContract, StageParams,
+	PadRequirement, PipelineState, Stage, StageContract, StageParams,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -141,7 +141,7 @@ class SkewCorrectStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data = _array(state, self.name)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		if not self.params.enabled or self.params.degrees == 0:
 			return state
 		import cv2
@@ -206,7 +206,7 @@ class MovementCorrectStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		data = _array(state, self.name)
-		layout = type(state.buffer_spec.shape)
+		layout = state.layout
 		if not self.params.enabled or (self.params.y == 0 and self.params.x == 0):
 			return state
 		if state.source_window is None or state.dataset is None:
@@ -315,7 +315,7 @@ class AffineSkewMovementStage(Stage):
 			raise ValueError("fused affine transition must change layout")
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
-		source_shape = state.buffer_spec.shape
+		source_shape = state.working_array.shape
 		row_count = source_shape.Y
 		shape = self.output_shape(source_shape)
 		output_buffer, output = allocate_output(
@@ -330,7 +330,6 @@ class AffineSkewMovementStage(Stage):
 			)
 		result = commit_output(
 			state, output_buffer, retire_as=None,
-			buffer_spec=BufferSpec(shape, data.dtype),
 		)
 		if state.source_window is not None:
 			result.source_window = self.output_window(state.source_window)

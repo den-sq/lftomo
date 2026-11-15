@@ -122,16 +122,18 @@ Production runs enter `PipelineRunContext`, which owns one `SharedNPManager`
 for the complete run. `SharedNPManager` implements `StorageBackend` directly,
 and the handles it returns are `SharedNPArray` objects implementing
 `ManagedBuffer` directly; there is no wrapper around the existing shared-memory
-objects. At a Stage or state boundary, the single access idiom for the
+objects. All nonempty working buffers implement `TypedBuffer`, which owns their
+semantic `DataShape`, dtype, and layout. `ManagedBuffer` adds the reopenable
+storage contract. Borrowed NumPy or Dask inputs use `LocalArray(array, shape)`;
+they remain local and execute serially. At a Stage or state boundary, the single access idiom for the
 process-local NumPy view is `np.asarray(state.working_array)`. This is a
-no-copy conversion for managed buffers and plain NumPy arrays; tests pin that
+no-copy conversion for managed buffers and borrowed NumPy arrays; tests pin that
 contract. Code that deliberately needs a private copy uses
 `np.asarray(state.working_array).copy()` rather than
 `np.array(state.working_array)`.
 
-Direct `state.working_array.array()` is not the Stage-boundary idiom because
-plain NumPy arrays, which remain valid for hermetic Stage tests, do not expose
-that method. Low-level worker kernels and storage code that receive a
+The Stage boundary uses the NumPy conversion protocol uniformly. Low-level
+worker kernels and storage code that receive a
 `ManagedBuffer` handle directly still use its `array()` method to open the
 process-local mapping.
 
@@ -169,7 +171,9 @@ prefix/cache/trial pins prevent either reuse while they are live. Set
 `Recon.tomopy_input_aliasing: false` to disable only the engine-dependent pair.
 
 The validated `PipelinePlan` exposes each Stage's input/output `BufferSpec` and
-an allocation/alias/retirement schedule. Its `shared_memory_peak_bytes` sums
+an allocation/alias/retirement schedule. These are unbound allocation
+descriptors; runtime Stages read shape, dtype, and layout from the current
+typed buffer instead of retaining a matching spec on state. Its `shared_memory_peak_bytes` sums
 physical allocations in that schedule; aliases add no storage, and retired
 segments remain allocated until run-context shutdown. This estimate excludes
 allocations absent from the schedule, worker-private scratch and external-engine
@@ -180,7 +184,9 @@ manager-issued artifacts declared by their producer contracts.
 Bounded segment and composite scratch is declared by `Stage.bounded_work_requests` and
 resolved by `collect_bounded_work` before allocation. `BufferSpec` owns each
 request's shape and dtype; same-key requests share one compatible allocation
-for the complete segment. Generic execution owns allocation, initialization,
+for the complete segment. Runtime collection derives its input descriptor with
+`BufferSpec.from_buffer` at this planning boundary and discards it after
+allocation. Generic execution owns allocation, initialization,
 assignment-based views and retirement through the existing storage backend.
 The `bounded_work_allocations` artifact records each resolved role, shape,
 dtype and byte count, with `indexing="buffer_sample_ordinals"`. Vo's former
@@ -252,15 +258,18 @@ closes the executor before the manager unlinks its buffers.
 The prefix cache's immutable path uses a separate `FileBackedNPArray`, which is
 a first-class read-only `ManagedBuffer`. Workers reopen its `.npy` mapping by
 path; mutating suffixes continue to receive an independent writable copy.
+Serialized shape and dtype are consumed when restoring that typed buffer,
+rather than retained as another runtime geometry record.
 
 Read Stages also establish distinct geometry records on `PipelineState`:
 
 - `dataset`: the full source `TomoDataSet`, including the complete angle vector;
 - `source_window`: the immutable global source selection, position, stride, and
   padding; and
-- `buffer_spec`: the current allocation's shape, dtype, and layout.
+- `working_array.shape` and `working_array.dtype`: the current buffer's
+  allocation geometry and dtype; the shape type supplies its layout.
 
-Layout conversion and reconstruction update `buffer_spec`; they do not rewrite
+Layout conversion and reconstruction publish a new typed buffer; they do not rewrite
 source coordinates. Output slice numbering therefore uses the source window's
 global Y position plus the buffer-local row. The invocation's `work_range`
 records scheduling only and does not duplicate these geometry records.

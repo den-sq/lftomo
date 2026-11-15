@@ -16,7 +16,7 @@ a separate declaration in `lftomo/pipeline/dispatch.py`:
 | --- | --- | --- | --- |
 | Independent projections | Extend `ProjectionStage` and implement `run_projection(image, state)` for a `(Y, X)` view; the base handles Theta units. | `_PROJECTION_PROCESS` | `BilateralFilterStage` |
 | Independent detector rows | Extend `SinogramStage` and implement `run_sinogram(sinogram, state)` for a `(Theta, X)` view; the base handles Y units and declares bounded views from `ProjOrder`. | `_BOUNDED_PROCESS` | `VoSortStripeStage` |
-| A new output allocation | Allocate through `allocate_output`, fill it, then publish through `commit_output`; derive geometry from `BufferSpec` and `TomoWindow`. | `_OUT_OF_PLACE_PROCESS` for an existing supported fill path | `LayoutConvertStage` |
+| A new output allocation | Allocate through `allocate_output`, fill it, then publish through `commit_output`; derive geometry from the current typed buffer and `TomoWindow`. | `_OUT_OF_PLACE_PROCESS` for an existing supported fill path | `LayoutConvertStage` |
 | An external engine owns parallelism | `run(state)` calls the engine with its assigned core budget; declare runtime dependencies and resource needs. | `_ENGINE` | `GridrecStage` |
 
 The out-of-place group classifies a Stage; it does not generate a worker fill
@@ -85,10 +85,12 @@ non-growing extents must agree. A request can explicitly permit larger capacity
 along `grow_axes`; Vo median padding uses `("X",)` so a chain shares its largest
 requested line canvas. Kernels must accept that capacity. Work must preserve
 the dispatched unit-axis extent. The hook takes only the current window's
-`BufferSpec`, so `collect_bounded_work(stages, input_spec)` can inspect exact
+allocation `BufferSpec`, so `collect_bounded_work(stages, input_spec)` can inspect exact
 requirements before execution without reading pixels or allocating storage.
+At runtime, collection derives this temporary descriptor from the typed working
+buffer; it is not stored on `PipelineState` or sent as worker geometry.
 This work is temporary segment scratch, not a `managed_artifacts` producer or
-prefix-cache output. Allocation reports are derived from the resolved requests
+prefix-cache output. Allocation reports are derived from the allocated buffers
 in `state.artifacts["bounded_work_allocations"]`.
 
 Declare layouts and numerical domains separately: `ProjOrder` and `SinoOrder`
@@ -175,7 +177,7 @@ from lftomo.config import (
 	Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections,
 )
 from lftomo.pipeline import (
-	BufferSpec, DataDomain, ExecutionKind, Pipeline, PipelineState,
+	DataDomain, ExecutionKind, LocalArray, Pipeline, PipelineState,
 )
 from lftomo.pipeline.stages import SinogramScaleStage, create_stage
 from lftomo.util.shapes import ProjOrder, SinoOrder
@@ -194,8 +196,8 @@ def test_sinogram_scale(layout):
 	working = np.arange(60, dtype=np.float32).reshape(shape.as_tuple())
 	expected = working * 2
 	state = PipelineState(
-		working_array=working, scan=scan, recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(shape, working.dtype), domain=DataDomain.ATTENUATION,
+		working_array=LocalArray(working, shape), scan=scan, recon=Recon(pipeline=[config]),
+		domain=DataDomain.ATTENUATION,
 	)
 	stage = create_stage(config)
 	pipeline = Pipeline(
@@ -205,7 +207,7 @@ def test_sinogram_scale(layout):
 	result = pipeline.run(state)
 
 	assert isinstance(stage, SinogramScaleStage)
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	assert result.layout is layout
 	assert result.domain is DataDomain.ATTENUATION
 	np.testing.assert_array_equal(working, expected)

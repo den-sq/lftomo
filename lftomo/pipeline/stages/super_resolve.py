@@ -18,7 +18,6 @@ import numpy as np
 from pydantic import Field
 
 from lftomo.pipeline.core import (
-	BufferSpec,
 	PipelineState,
 	RuntimeRequirement,
 	Stage,
@@ -112,7 +111,7 @@ def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> P
 	output, target = allocate_output(state, shape, np.float32, role="super_resolution")
 	target[...] = ProjOrder(*values.shape).transposed_view(values, SinoOrder)
 	result = commit_output(
-		state, output, retire_as=None, buffer_spec=BufferSpec(shape, np.dtype(np.float32)),
+		state, output, retire_as=None,
 	)
 	result.artifacts["super_resolution"] = metadata
 	return result

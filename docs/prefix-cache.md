@@ -66,6 +66,12 @@ The working array is stored as NumPy `.npy` and restored with a read-only
 the immutable file-backed handle directly. An incorrect mutation contract therefore
 fails instead of changing the snapshot.
 
+The schema-2 snapshot format retains its serialized `BufferSpec` documents.
+Publication derives these descriptors from typed buffers. Restore consumes
+their semantic shape once to reopen each typed mapping and checks the working
+array's dtype against the serialized descriptor. The restored state carries
+only the typed buffer as its allocation geometry authority.
+
 Large process-shared artifact arrays use the same policy only when their producing
 `StageContract` names them in `managed_artifacts` (which must be a subset of
 `produces_artifacts`). Each is streamed from its buffer view to an integrity-hashed

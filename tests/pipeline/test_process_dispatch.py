@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState
+from lftomo.pipeline import LocalArray, DataDomain, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.core import Stage, StageContract
 from lftomo.pipeline.dispatch import DispatchKind
 from lftomo.pipeline.execution import (
@@ -146,9 +146,8 @@ def test_completed_kernel_error_does_not_discard_healthy_pool():
 
 def test_ndarray_bounded_segment_checks_cancellation_before_each_kernel():
 	state = PipelineState(
-		np.ones((2, 3, 4), dtype=np.float32),
+		LocalArray(np.ones((2, 3, 4), dtype=np.float32), ProjOrder(2, 3, 4)),
 		_scan(theta=2, rows=3, columns=4), _recon(),
-		buffer_spec=BufferSpec(ProjOrder(2, 3, 4), np.dtype(np.float32)),
 		domain=DataDomain.ATTENUATION,
 	)
 	checkpoints = []
@@ -172,8 +171,7 @@ def test_engine_internal_core_budget_is_scoped_to_the_call(monkeypatch):
 
 	monkeypatch.setattr(stage, "run", capture)
 	state = PipelineState(
-		np.ones((4, 2, 8), dtype=np.float32), _scan(theta=4), _recon(),
-		buffer_spec=BufferSpec(ProjOrder(4, 2, 8), np.dtype(np.float32)),
+		LocalArray(np.ones((4, 2, 8), dtype=np.float32), ProjOrder(4, 2, 8)), _scan(theta=4), _recon(),
 		domain=DataDomain.TRANSMISSION,
 	)
 	PipelineExecutor(2).run_stage(state, stage)
@@ -231,7 +229,7 @@ def test_beta_scale_processes_only_assigned_projections_once(layout, managed):
 	scan = _scan(theta=4, rows=3, columns=5)
 	scaled = values.copy()
 	BetaScaleStage().run(PipelineState(
-		scaled, scan, _recon(), buffer_spec=BufferSpec(shape, values.dtype),
+		LocalArray(scaled, shape), scan, _recon(),
 		domain=DataDomain.ATTENUATION,
 	))
 	expected = values.copy()
@@ -240,12 +238,12 @@ def test_beta_scale_processes_only_assigned_projections_once(layout, managed):
 	with PipelineRunContext(max_workers=2) if managed else nullcontext() as context:
 		working = (
 			context.storage.allocate(shape, values.dtype, role="normalized")
-			if managed else values.copy()
+			if managed else LocalArray(values.copy(), shape)
 		)
 		if managed:
 			working.array()[...] = values
 		state = PipelineState(
-			working, scan, _recon(), buffer_spec=BufferSpec(shape, values.dtype),
+			working, scan, _recon(),
 			storage=context.storage if managed else None,
 			executor=context.executor if managed else None,
 			domain=DataDomain.ATTENUATION, work_range=Theta.drange(1, 4, 2),
@@ -263,8 +261,7 @@ def test_process_phase_chain_matches_intentionally_coupled_stage():
 	scan = _scan(theta=4)
 	expected = values.copy()
 	PaganinStage(alpha=0.06).run(PipelineState(
-		expected, scan, _recon(),
-		buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
+		LocalArray(expected, ProjOrder(*expected.shape)), scan, _recon(),
 		domain=DataDomain.TRANSMISSION,
 	))
 	with PipelineRunContext(max_workers=2) as context:
@@ -297,8 +294,7 @@ def test_real_bac_process_threads_follow_worker_budget_without_raising_user_limi
 	expected = values.copy()
 	BronnikovAidedCorrectionStage(alpha=2, gamma=1.25, device="cpu").run(
 		attach_source_geometry(PipelineState(
-			expected, scan, _recon(),
-			buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
+			LocalArray(expected, ProjOrder(*expected.shape)), scan, _recon(),
 			domain=DataDomain.TRANSMISSION,
 		)),
 	)
@@ -363,8 +359,7 @@ class BronnikovAidedCorrection:
 	scan = _scan(theta=4, rows=8, columns=8)
 	expected = values.copy()
 	BronnikovAidedCorrectionStage(alpha=2, gamma=1.25).run(PipelineState(
-		expected, scan, _recon(),
-		buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
+		LocalArray(expected, ProjOrder(*expected.shape)), scan, _recon(),
 		domain=DataDomain.TRANSMISSION,
 	))
 	with PipelineRunContext(max_workers=2) as context:
@@ -390,8 +385,7 @@ def test_process_beam_tracking_matches_serial_and_merges_qc():
 	params = {"schedule": {"kind": "linear", "alpha": 0, "beta": 1}}
 	expected = values.copy()
 	expected_input = attach_source_geometry(PipelineState(
-		expected, scan, _recon(),
-		buffer_spec=BufferSpec(ProjOrder(*expected.shape), expected.dtype),
+		LocalArray(expected, ProjOrder(*expected.shape)), scan, _recon(),
 		domain=DataDomain.RAW,
 	))
 	expected_state = BeamTrackingNormalizeStage(**params).run(expected_input)
@@ -424,8 +418,7 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 	scan = _scan(theta=4, rows=6, columns=8)
 	expected_values = values.copy()
 	expected_input = attach_source_geometry(PipelineState(
-		expected_values, scan, _recon(),
-		buffer_spec=BufferSpec(ProjOrder(*expected_values.shape), expected_values.dtype),
+		LocalArray(expected_values, ProjOrder(*expected_values.shape)), scan, _recon(),
 		domain=DataDomain.TRANSMISSION,
 	))
 	expected = stage.run(expected_input)

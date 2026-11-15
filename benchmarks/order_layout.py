@@ -17,7 +17,7 @@ import numpy as np
 import psutil
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, DataDomain, Pipeline, PipelineState
 from lftomo.pipeline.stages import VoDeadStripeStage, VoLargeStripeStage, VoSortStripeStage
 from lftomo.util.shapes import ProjOrder, SinoOrder
 
@@ -94,9 +94,8 @@ def _allocate(shape: tuple[int, int, int], scratch: Path | None, arm: str) -> np
 def _state(array: np.ndarray, layout: type) -> PipelineState:
 	theta = array.shape[0] if layout is ProjOrder else array.shape[1]
 	return PipelineState(
-		working_array=array, scan=_scan(theta),
+		working_array=LocalArray(array, layout(*array.shape)), scan=_scan(theta),
 		recon=Recon(pipeline=[StageConfig(kind="benchmark")]),
-		buffer_spec=BufferSpec(layout(*array.shape), array.dtype),
 		domain=DataDomain.ATTENUATION,
 	)
 

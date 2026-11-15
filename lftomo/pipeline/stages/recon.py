@@ -10,7 +10,6 @@ import numpy as np
 from pydantic import Field, PositiveInt, TypeAdapter, ValidationError, model_validator
 
 from lftomo.pipeline.core import (
-	BufferSpec,
 	PipelineState,
 	ResourceHints,
 	Stage,
@@ -108,7 +107,7 @@ class GridrecStage(Stage):
 		if values.ndim == 0:
 			return float(values)
 		if self.params.center is None and values.ndim == 1 \
-				and len(values) == state.buffer_spec.shape.Y:
+				and len(values) == state.working_array.shape.Y:
 			values = values[input_y]
 		if values.ndim != 1 or len(values) != slice_count:
 			raise ValueError(f"gridrec center array must contain one value for each of {slice_count} slices")
@@ -191,7 +190,7 @@ class GridrecStage(Stage):
 
 	def _finish_reconstruction(
 		self, state: PipelineState, output, target: np.ndarray, tomopy,
-		shape: ReconOrder, output_x: slice, *, ncore: int | None,
+		output_x: slice, *, ncore: int | None,
 	) -> PipelineState:
 		if self.params.circle_mask:
 			tomopy.circ_mask(
@@ -204,7 +203,6 @@ class GridrecStage(Stage):
 		cropped = output[ReconOrder.point_index(X=output_x)]
 		return commit_output(
 			state, cropped, retire_as=None,
-			buffer_spec=BufferSpec(shape, np.dtype(np.float32)),
 		)
 
 	def run(self, state: PipelineState) -> PipelineState:
@@ -213,9 +211,9 @@ class GridrecStage(Stage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError("recon.gridrec expects a three-dimensional tomography array")
-		layout = type(state.buffer_spec.shape)
-		allocation_shape, output_shape, input_x, output_x = self.output_geometry(
-			state.buffer_spec.shape, state.source_window,
+		layout = state.layout
+		allocation_shape, _output_shape, input_x, output_x = self.output_geometry(
+			state.working_array.shape, state.source_window,
 		)
 		data, input_y = self._input_view(state, data, layout, input_x)
 		sinogram_order = layout is SinoOrder
@@ -239,7 +237,7 @@ class GridrecStage(Stage):
 			**kwargs,
 		)
 		return self._finish_reconstruction(
-			state, output, target, tomopy, output_shape, output_x, ncore=self.params.ncore,
+			state, output, target, tomopy, output_x, ncore=self.params.ncore,
 		)
 
 
@@ -282,9 +280,9 @@ class AstraCudaStage(GridrecStage):
 		data = np.asarray(state.working_array)
 		if data.ndim != 3:
 			raise ValueError(f"{self.name} expects a three-dimensional tomography array")
-		layout = type(state.buffer_spec.shape)
-		allocation_shape, output_shape, input_x, output_x = self.output_geometry(
-			state.buffer_spec.shape, state.source_window,
+		layout = state.layout
+		allocation_shape, _output_shape, input_x, output_x = self.output_geometry(
+			state.working_array.shape, state.source_window,
 		)
 		data, input_y = self._input_view(state, data, layout, input_x)
 		sinogram_order = layout is SinoOrder
@@ -316,7 +314,7 @@ class AstraCudaStage(GridrecStage):
 			**kwargs,
 		)
 		return self._finish_reconstruction(
-			state, output, target, tomopy, output_shape, output_x, ncore=1,
+			state, output, target, tomopy, output_x, ncore=1,
 		)
 
 

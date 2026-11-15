@@ -76,7 +76,7 @@ def prepare_phase_filter(stage: Stage, state: PipelineState) -> None:
 	if getattr(stage.params, "slope", None) is not None and not stage.params.enabled:
 		return
 	data = np.asarray(state.working_array)
-	layout = type(state.buffer_spec.shape)
+	layout = state.layout
 	shape = (
 		data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
 	)
@@ -128,17 +128,17 @@ def _prepare_material_envelope(stage: Stage, state: PipelineState) -> None:
 		return
 	window = state.source_window
 	if window is None:
-		selected = np.broadcast_to(value, state.buffer_spec.shape.to(ProjOrder).as_tuple())
+		selected = np.broadcast_to(value, state.working_array.shape.to(ProjOrder).as_tuple())
 	else:
 		physical = state.dataset.physical_shape if state.dataset is not None else state.scan.projection_shape()
 		full = np.broadcast_to(value, physical.as_tuple())
 		selected = full[tuple(window.with_pad().axis_slice(axis) for axis in ("Theta", "Y", "X"))]
-	selected = selected.transpose(tuple(ProjOrder.axis_of(axis) for axis in state.buffer_spec.shape.names))
+	selected = selected.transpose(tuple(ProjOrder.axis_of(axis) for axis in state.working_array.shape.names))
 	if state.storage is None:
 		state.artifacts["phase_envelope"] = np.asarray(selected, dtype=np.float32)
 		return
 	envelope = state.storage.allocate(
-		state.buffer_spec.shape, np.float32, role="phase_envelope", reuse_from=("phase_envelope",),
+		state.working_array.shape, np.float32, role="phase_envelope", reuse_from=("phase_envelope",),
 	)
 	envelope.array()[...] = selected
 	state.artifacts["phase_envelope"] = envelope

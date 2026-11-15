@@ -106,7 +106,7 @@ def test_existing_shared_types_directly_implement_storage_contracts():
 
 
 def test_pipeline_state_rejects_an_untyped_managed_buffer_at_the_storage_seam():
-	with pytest.raises(TypeError, match="ManagedBuffer.shape must be a DataShape"):
+	with pytest.raises(TypeError, match="TypedBuffer.shape must be a DataShape"):
 		PipelineState(_UntypedBuffer(), _scan(), _recon())
 
 
@@ -394,6 +394,7 @@ def test_pipeline_has_one_working_array_boundary_idiom():
 	legacy = []
 	boundary_bypasses = []
 	parallel_work_apis = []
+	runtime_specs = []
 	retired_work_apis = {
 		"work_specs", "uses_vo_work", "_prepare_vo_work", "_scope_vo_work_to_unit", "_release_vo_work",
 	}
@@ -411,8 +412,30 @@ def test_pipeline_has_one_working_array_boundary_idiom():
 			identifier = getattr(node, "id", None) or getattr(node, "attr", None) or getattr(node, "name", None)
 			if identifier in retired_work_apis:
 				parallel_work_apis.append(f"{path.relative_to(repository)}:{node.lineno} {identifier}")
+			if isinstance(node, ast.ClassDef) and node.name in {"PipelineState", "_WorkerState"}:
+				for member in node.body:
+					if (
+						isinstance(member, ast.AnnAssign)
+						and isinstance(member.target, ast.Name)
+						and member.target.id == "buffer_spec"
+					):
+						runtime_specs.append(f"{path.relative_to(repository)}:{member.lineno}")
+			if isinstance(node, ast.Attribute) and node.attr == "buffer_spec":
+				receiver = getattr(node.value, "id", "")
+				if (
+					receiver in {"state", "initial", "current", "result", "payload", "parent"}
+					or receiver.endswith("_state")
+					or isinstance(node.ctx, ast.Store)
+				):
+					runtime_specs.append(f"{path.relative_to(repository)}:{node.lineno}")
 			if not isinstance(node, ast.Call):
 				continue
+			call_name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+			if (
+				call_name in {"PipelineState", "_WorkerState", "with_array", "commit_output"}
+				and any(keyword.arg == "buffer_spec" for keyword in node.keywords)
+			):
+				runtime_specs.append(f"{path.relative_to(repository)}:{node.lineno}")
 			working_argument = (
 				node.args
 				and isinstance(node.args[0], ast.Attribute)
@@ -457,3 +480,4 @@ def test_pipeline_has_one_working_array_boundary_idiom():
 	assert boundary_bypasses == []
 	assert direct_allocators == []
 	assert parallel_work_apis == []
+	assert runtime_specs == []

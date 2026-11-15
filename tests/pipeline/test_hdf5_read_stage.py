@@ -15,6 +15,7 @@ from lftomo.pipeline import (
 	NumpyBackend, Pipeline, PipelineRunContext, PipelineState, WindowConfig,
 	resolve_streaming_plan,
 )
+from lftomo.storage import LocalArray
 from lftomo.pipeline.stages import STAGE_REGISTRY, create_stage
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, Y
@@ -53,7 +54,7 @@ def _run(state, *stages):
 		result = Pipeline(list(stages), backend=NumpyBackend()).run(state)
 		assert isinstance(result.working_array, SharedNPArray)
 		return result.with_array(
-			np.asarray(result.working_array).copy(), buffer_spec=result.buffer_spec,
+			LocalArray(np.asarray(result.working_array).copy(), result.working_array.shape),
 		)
 
 
@@ -81,7 +82,7 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	assert result.dataset.physical_shape == ProjOrder(Theta=count, Y=size, X=size)
 	assert result.source_window.pos == ProjOrder(Theta=1, Y=2, X=0)
 	assert result.source_window.shape == ProjOrder(Theta=2, Y=3, X=size)
-	assert result.buffer_spec.layout is SinoOrder
+	assert result.layout is SinoOrder
 
 
 def test_read_state_retains_the_planned_canonical_window(tmp_path):
@@ -199,7 +200,7 @@ def test_hdf5_stage_reads_strided_theta_window_with_matching_angles(tmp_path):
 		np.deg2rad([30, 90, 150]),
 	)
 	assert result.source_window.shape.Theta == 5
-	assert result.working_array.shape[0] == 3
+	assert result.working_array.shape.Theta == 3
 	assert result.source_window.step == ProjOrder(Theta=2, Y=1, X=1)
 
 

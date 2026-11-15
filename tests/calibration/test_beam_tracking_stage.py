@@ -11,7 +11,7 @@ from lftomo.calibration import (
 	optimal_transport_interp,
 )
 from lftomo.config import Recon, Scan, StageConfig
-from lftomo.pipeline import BufferSpec, NumpyBackend, PipelineState, validate_pipeline
+from lftomo.pipeline import LocalArray, NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.stages import (
 	BeamTrackingNormalizeStage,
@@ -78,8 +78,8 @@ def test_beam_tracking_preserves_layout_and_removes_nonlinear_drift(layout):
 		}},
 	]})
 	state = attach_source_geometry(PipelineState(
-		data, _scan(flats), recon, backend=NumpyBackend(),
-		buffer_spec=BufferSpec(layout(*data.shape), data.dtype), domain=DataDomain.RAW,
+		LocalArray(data, layout(*data.shape)), _scan(flats), recon, backend=NumpyBackend(),
+		domain=DataDomain.RAW,
 	))
 	result = BeamTrackingNormalizeStage(
 		transport_sigma=3, schedule=schedule.__dict__,
@@ -93,17 +93,15 @@ def test_tracking_beats_weighted_normalization():
 	projections, flats, schedule = _fixture()
 	tracked = projections.copy()
 	tracked_state = attach_source_geometry(PipelineState(
-		tracked, _scan(flats), Recon.model_validate({"pipeline": []}),
+		LocalArray(tracked, ProjOrder(*tracked.shape)), _scan(flats), Recon.model_validate({"pipeline": []}),
 		backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*tracked.shape), tracked.dtype),
 		domain=DataDomain.RAW,
 	))
 	BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__).run(tracked_state)
 	weighted = projections.copy()
 	weighted_state = attach_source_geometry(PipelineState(
-		weighted, _scan(flats), Recon.model_validate({"pipeline": []}),
+		LocalArray(weighted, ProjOrder(*weighted.shape)), _scan(flats), Recon.model_validate({"pipeline": []}),
 		backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*weighted.shape), weighted.dtype),
 		domain=DataDomain.RAW,
 	))
 	WeightedNormalizeStage().run(weighted_state)
@@ -116,8 +114,8 @@ def test_stage_reads_four_maps_from_bundle_at_runtime(tmp_path):
 	scan.metadata.pop("flat_fields")
 	data = projections.copy()
 	state = attach_source_geometry(PipelineState(
-		data, scan, Recon.model_validate({"pipeline": []}), backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype), domain=DataDomain.RAW,
+		LocalArray(data, ProjOrder(*data.shape)), scan, Recon.model_validate({"pipeline": []}), backend=NumpyBackend(),
+		domain=DataDomain.RAW,
 		artifacts={"calibration_bundle": _bundle(tmp_path, flats)},
 	))
 	BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__).run(state)
@@ -128,8 +126,9 @@ def test_strided_theta_window_uses_global_projection_coordinates():
 	projections, flats, schedule = _fixture()
 	data = projections[2:7:2].copy()
 	state = attach_source_geometry(PipelineState(
-		data, _scan(flats), Recon.model_validate({"pipeline": []}), backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype), domain=DataDomain.RAW,
+		LocalArray(data, ProjOrder(*data.shape)), _scan(flats), Recon.model_validate({"pipeline": []}),
+		backend=NumpyBackend(),
+		domain=DataDomain.RAW,
 	), theta_start=2, theta_stride=2, physical_theta=9)
 	stage = BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__)
 	stage.run(state)
@@ -151,9 +150,9 @@ def test_extrapolated_schedule_clamps_dark_fields_to_measured_endpoints():
 	]).astype(np.float32)
 	schedule = BeamSchedule(alpha=-1, beta=3)
 	state = attach_source_geometry(PipelineState(
-		data, _scan(flats, count=2), Recon.model_validate({"pipeline": []}),
+		LocalArray(data, ProjOrder(*data.shape)), _scan(flats, count=2), Recon.model_validate({"pipeline": []}),
 		backend=NumpyBackend(),
-		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype), domain=DataDomain.RAW,
+		domain=DataDomain.RAW,
 	))
 	BeamTrackingNormalizeStage(schedule=schedule.__dict__).run(state)
 	np.testing.assert_allclose(data, 0.5, atol=1e-6)

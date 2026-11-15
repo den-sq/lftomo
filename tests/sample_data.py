@@ -10,21 +10,21 @@ def attach_source_geometry(
 ):
 	"""Attach canonical full-source metadata and current-window coordinates in tests."""
 
-	shape = state.buffer_spec.shape.to(ProjOrder)
+	shape = state.working_array.shape.to(ProjOrder)
 	physical_theta = state.scan.n_projections if physical_theta is None else physical_theta
 	physical_y = y_start + shape.Y if physical_y is None else physical_y
 	physical = ProjOrder(physical_theta, physical_y, shape.X)
 	angles = np.linspace(0, np.pi, physical_theta, endpoint=False)
 	state.dataset = TomoDataSet.from_range(
 		CTFov(physical_theta, 180, 1), physical, Y(physical.Y),
-		dtype=state.buffer_spec.dtype, angles=angles,
+		dtype=state.working_array.dtype, angles=angles,
 	)
 	theta_stop = theta_start + (shape.Theta - 1) * theta_stride + 1
 	state.source_window = TomoWindow.from_bounds(
 		physical,
 		y=(y_start, y_start + shape.Y),
 		theta=(theta_start, theta_stop, theta_stride),
-		dtype=state.buffer_spec.dtype,
+		dtype=state.working_array.dtype,
 	)
 	return state
 

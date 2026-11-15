@@ -5,6 +5,7 @@ import pytest
 
 from lftomo.config import Acquisition, ConeGeometry, Detector, Helical, Recon, Scan, TIFFStackProjections
 from lftomo.pipeline import BufferSpec, PipelineState
+from lftomo.storage import LocalArray
 from lftomo.pipeline.core import PadRequirement
 from lftomo.pipeline.planning import stage_output_spec
 from lftomo.pipeline.stages import HelicalIndexRemapStage, PaganinFilterStage
@@ -17,8 +18,7 @@ from tests.sample_data import attach_source_geometry
 def _state():
 	data = np.full((3, 8, 8), 0.8, dtype=np.float32)
 	return attach_source_geometry(PipelineState(
-		working_array=data,
-		buffer_spec=BufferSpec(ProjOrder(*data.shape), data.dtype),
+		working_array=LocalArray(data, ProjOrder(*data.shape)),
 		scan=Scan(
 			energy_keV=20,
 			geometry=ConeGeometry(source_to_sample_m=0.5, sample_to_detector_m=0.5),
@@ -47,7 +47,7 @@ def test_phase_filter_and_padding_derive_from_the_same_cone_geometry(monkeypatch
 
 	monkeypatch.setattr(phase, "_paganin_transfer", record_transfer)
 	monkeypatch.setattr(phase_prep, "_phase_pad", record_pad)
-	before, after = PadRequirement(phase_fft_y=True).resolve(state.scan, state.buffer_spec.shape)
+	before, after = PadRequirement(phase_fft_y=True).resolve(state.scan, state.working_array.shape)
 	stage = PaganinFilterStage(alpha=0.06)
 	phase.prepare_phase_filter(stage, state)
 	prepared = state.artifacts["phase_filter"]
@@ -91,10 +91,11 @@ def test_helical_planning_and_execution_use_effective_sample_pitch(monkeypatch):
 
 	monkeypatch.setattr(stage, "output_geometry", record_geometry)
 	planned = stage_output_spec(
-		stage, state.buffer_spec, state.scan, dataset=state.dataset, source_window=state.source_window,
+		stage, BufferSpec.from_buffer(state.working_array), state.scan,
+		dataset=state.dataset, source_window=state.source_window,
 	)
 	source_window = state.source_window
 	result = stage.run(state)
 	assert calls == [(1.0, source_window), (1.0, source_window)]
-	assert result.buffer_spec == planned
+	assert BufferSpec.from_buffer(result.working_array) == planned
 	np.testing.assert_array_equal(result.artifacts["helical_row_shifts"], [0, 1, 2])

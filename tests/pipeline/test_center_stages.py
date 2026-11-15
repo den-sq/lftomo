@@ -5,7 +5,7 @@ import pytest
 import yaml
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
 	EntropyLocalCenterStage,
 	ManualCenterStage,
@@ -21,7 +21,7 @@ from tests.sample_data import attach_source_geometry
 
 def _state(array, configs):
 	return attach_source_geometry(PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, SinoOrder(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -32,7 +32,6 @@ def _state(array, configs):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=configs),
-		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	))
 
 
@@ -69,7 +68,7 @@ def test_manual_center_stores_scalar_or_tilt_profile():
 	scalar_config = StageConfig(kind="center", algorithm="manual", params={"value_px": 4.25})
 	result = Pipeline([create_stage(scalar_config)]).run(_state(working, [scalar_config]))
 	assert result.artifacts["center"] == pytest.approx(4.25)
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 
 	tilt_config = StageConfig(
 		kind="center",

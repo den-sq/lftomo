@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from lftomo.config import Acquisition, ConeGeometry, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import HDF5VolumeWriteStage, NeuroglancerWriteStage, STAGE_REGISTRY, create_stage
 from lftomo.util.shapes import ProjOrder, ReconOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
@@ -14,8 +14,7 @@ from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 def _state(array, config, output):
 	return PipelineState(
-		working_array=array,
-		buffer_spec=BufferSpec(ReconOrder(*array.shape), array.dtype),
+		working_array=LocalArray(array, ReconOrder(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=0.7,

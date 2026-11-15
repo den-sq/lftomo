@@ -113,7 +113,7 @@ class TIFFSlicesWriteStage(Stage):
 
 			calls = [
 				(
-					state.working_array[type(state.buffer_spec.shape).point_index(
+					state.working_array[state.layout.point_index(
 						Y=slice(local, local + 1),
 					)], path, dtype,
 				)
@@ -127,7 +127,7 @@ class TIFFSlicesWriteStage(Stage):
 		else:
 			# ndarray-only hermetic tests remain serial; slices are never pickled.
 			for local, path in enumerate(paths):
-				index = type(state.buffer_spec.shape).point_index(Y=slice(local, local + 1))
+				index = state.layout.point_index(Y=slice(local, local + 1))
 				_write_array_slice(working[index][0], path, dtype)
 		_record_outputs(state, paths)
 		return state

@@ -7,7 +7,7 @@ import pytest
 
 import lftomo.pipeline.stages.super_resolve as super_resolve_module
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineRunContext, PipelineState
+from lftomo.pipeline import LocalArray, Pipeline, PipelineRunContext, PipelineState
 from lftomo.pipeline.stages import DRHTStage, LDMStage, STAGE_REGISTRY, create_stage
 from lftomo.pipeline.stages.super_resolve import _DRHT_SCRATCH_NAMES
 from lftomo.util.shapes import SinoOrder
@@ -15,8 +15,7 @@ from lftomo.util.shapes import SinoOrder
 
 def _state(array, config, mask):
 	return PipelineState(
-		working_array=array,
-		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
+		working_array=LocalArray(array, SinoOrder(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1,
@@ -51,7 +50,7 @@ def test_drht_explicit_fallback_interpolates_missing_angles():
 	working[:, 2] = 3
 	result = Pipeline([create_stage(config)]).run(_state(working, config, [True, False, True]))
 
-	np.testing.assert_allclose(result.working_array[:, 1], 2)
+	np.testing.assert_allclose(np.asarray(result.working_array)[:, 1], 2)
 	assert result.artifacts["super_resolution"]["fallback"] == "interpolation"
 
 

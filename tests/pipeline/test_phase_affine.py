@@ -9,7 +9,7 @@ import pytest
 
 from lftomo.config import StageConfig
 from lftomo.pipeline import (
-	BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState, validate_pipeline,
+	LocalArray, DataDomain, Pipeline, PipelineRunContext, PipelineState, validate_pipeline,
 )
 from lftomo.pipeline.stages import (
 	PaganinFilterStage, PaganinStage, TIFFStackReadStage, WeightedNormalizeStage,
@@ -32,8 +32,8 @@ def reference():
 def _state(values, layout=ProjOrder, *, theta_start=0, theta_stride=1, y_start=0):
 	shape = layout(*values.shape)
 	return attach_source_geometry(PipelineState(
-		values, _scan(theta=7, rows=10, columns=12), _recon(),
-		buffer_spec=BufferSpec(shape, values.dtype), domain=DataDomain.TRANSMISSION,
+		LocalArray(values, shape), _scan(theta=7, rows=10, columns=12), _recon(),
+		domain=DataDomain.TRANSMISSION,
 	), theta_start=theta_start, theta_stride=theta_stride, y_start=y_start,
 		physical_theta=7, physical_y=10)
 

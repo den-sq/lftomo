@@ -3,7 +3,7 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import (
-	BufferSpec,
+	LocalArray,
 	DataDomain,
 	DomainCompatibilityError,
 	PRESERVE,
@@ -26,7 +26,7 @@ from tests.sample_data import attach_source_geometry
 
 def _state(array, config):
 	return attach_source_geometry(PipelineState(
-		working_array=array,
+		working_array=LocalArray(array, SinoOrder(*array.shape)),
 		scan=Scan(
 			energy_keV=20,
 			pixel_size_um=1.0,
@@ -38,7 +38,6 @@ def _state(array, config):
 			projections=TIFFStackProjections(format="tiff_stack", path="projections"),
 		),
 		recon=Recon(pipeline=[config]),
-		buffer_spec=BufferSpec(SinoOrder(*array.shape), array.dtype),
 	))
 
 
@@ -77,7 +76,7 @@ def test_standard_paganin_stage_is_registered_and_filters_tier1_fixture():
 	result = Pipeline([create_stage(config)]).run(_state(working, config))
 
 	assert STAGE_REGISTRY["phase.paganin"] is PaganinStage
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	assert np.isfinite(working).all()
 	assert working[8, 0, 8] > working[0, 0, 0]
 
@@ -92,7 +91,7 @@ def test_disabled_standard_paganin_preserves_data_and_contract():
 
 	result = Pipeline([stage]).run(_state(working, config))
 
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	np.testing.assert_array_equal(working, before)
 	assert stage.contract.produces_domain is PRESERVE
 	assert stage.contract.mutates_input is False
@@ -110,7 +109,7 @@ def test_coupled_phase_absorption_is_distinct_registered_algorithm():
 	result = Pipeline([create_stage(config)]).run(_state(working, config))
 
 	assert STAGE_REGISTRY["phase.paganin_phase_absorption"] is PaganinPhaseAbsorptionStage
-	assert result.working_array is working
+	assert np.asarray(result.working_array) is working
 	assert np.isfinite(working).all()
 	assert not np.allclose(working, standard, rtol=1e-5, atol=0)
 	assert np.all(working >= 0)

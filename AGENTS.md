@@ -40,6 +40,12 @@ regression tests rather than in a second specification here.
 
 ### Managed storage and work planes
 
+- `lftomo.storage.TypedBuffer` owns bound buffer shape, dtype, and layout.
+  Execution reads those facts from the buffer; `LocalArray` adapts borrowed
+  NumPy or Dask arrays at input. `BufferSpec` is only an unbound allocation or
+  serialization descriptor, never a second geometry record on runtime state
+  or worker payloads. Deserialize it into a typed buffer once, and derive it
+  from a typed buffer only at a planning or serialization boundary.
 - `lftomo.storage.ManagedBuffer`, `StorageBackend`, and `PipelineRunContext`,
   implemented for shared memory by `lftomo.util.mem.SharedNPArray` and
   `SharedNPManager`, own production storage and lifecycle.

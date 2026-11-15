@@ -9,6 +9,7 @@ import pytest
 from lftomo.config import Acquisition, ConeGeometry, Detector, Recon, Scan, TIFFStackProjections
 from lftomo.config.phase import multimaterial_config
 from lftomo.pipeline import BufferSpec, DataDomain, Pipeline, PipelineRunContext, PipelineState, validate_pipeline
+from lftomo.storage import LocalArray
 from lftomo.pipeline.dispatch import DispatchKind, STAGE_DISPATCH
 from lftomo.pipeline.stages import MultimaterialStage, TIFFStackReadStage, WeightedNormalizeStage
 from lftomo.pipeline.stages import phase as phase_stages
@@ -27,7 +28,7 @@ def _state(case, *, layout=ProjOrder, window=None, storage=None, executor=None):
 		values = values.transpose(1, 0, 2).copy()
 	shape = layout(*values.shape)
 	if storage is None:
-		working = values
+		working = LocalArray(values, shape)
 	else:
 		working = storage.allocate(shape, values.dtype, role="normalized")
 		working.array()[...] = values
@@ -41,7 +42,7 @@ def _state(case, *, layout=ProjOrder, window=None, storage=None, executor=None):
 	)
 	return PipelineState(
 		working, scan, Recon(pipeline=[]), storage=storage, executor=executor,
-		buffer_spec=BufferSpec(shape, values.dtype), domain=DataDomain.TRANSMISSION,
+		domain=DataDomain.TRANSMISSION,
 		dataset=TomoDataSet.from_range(
 			CTFov(physical.Theta, 180, 1), physical, Y(physical.Y),
 			dtype=data.dtype, angles=np.deg2rad(case["angles_deg"]),
@@ -154,8 +155,8 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 	monkeypatch.setattr(phase_stages, "slope_denominator", record_denominator)
 	with PipelineRunContext(max_workers=2) as context:
 		state = _state(case, layout=layout, storage=context.storage, executor=context.executor)
-		requests = stage.bounded_work_requests(state.buffer_spec)
-		flats = np.ones((4, state.buffer_spec.shape.Y, state.buffer_spec.shape.X), dtype=np.float32)
+		requests = stage.bounded_work_requests(BufferSpec.from_buffer(state.working_array))
+		flats = np.ones((4, state.working_array.shape.Y, state.working_array.shape.X), dtype=np.float32)
 		state.scan.metadata["flat_fields"] = flats
 		state.artifacts["flat_fields"] = context.storage.allocate(
 			ImgSlice(*flats.shape[-2:]), np.float32, role="test_flat_fields",
@@ -219,7 +220,7 @@ def test_missing_material_core_retires_scratch_without_publishing_diagnostics():
 			Pipeline([stage]).run(state)
 		np.testing.assert_array_equal(np.asarray(state.working_array), before)
 		assert "correction_norms" not in state.artifacts
-		requests = stage.bounded_work_requests(state.buffer_spec)
+		requests = stage.bounded_work_requests(BufferSpec.from_buffer(state.working_array))
 		roles = {request.role for request in requests}
 		assert roles <= {event["role"] for event in context.storage.allocation_events if event["action"] == "retire"}
 
@@ -236,9 +237,9 @@ def test_ndarray_scratch_preserves_caller_artifacts_and_is_removed(failure):
 		MultimaterialStage(mu_table=[50, 120, 10000], delta_table=[1e-7, 2.4e-7, 2e-5], n_iter=2)
 		if failure else _stage(case, n_iter=2)
 	)
-	requests = stage.bounded_work_requests(state.buffer_spec)
+	requests = stage.bounded_work_requests(BufferSpec.from_buffer(state.working_array))
 	if failure:
-		before = state.working_array.copy()
+		before = np.asarray(state.working_array).copy()
 		with pytest.raises(ValueError, match="no core pixels for class 3"):
 			Pipeline([stage]).run(state)
 		np.testing.assert_array_equal(state.working_array, before)
