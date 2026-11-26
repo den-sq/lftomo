@@ -11,7 +11,7 @@ import numpy as np
 from lftomo.pipeline.core import BufferSpec, Stage, collect_bounded_work
 from lftomo.pipeline.dispatch import dispatch_for_stage
 from lftomo.pipeline.domains import DataDomain
-from lftomo.util.mem import select_buffer_alias
+from lftomo.storage import select_buffer_alias
 from lftomo.util.shapes import ImgSlice, ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import TomoDataSet, TomoWindow
 

@@ -8,7 +8,7 @@ from pathlib import Path
 import shutil
 import tempfile
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Callable, Self
 
 import numpy as np
 
@@ -253,6 +253,26 @@ class FileBackedNPArray(ManagedBuffer):
 
 	def __reduce__(self):
 		return type(self), (self.__path, self.__base_shape, self.__views, self.__mode)
+
+
+def select_buffer_alias(
+	required: int, retired: dict[str, list[str]], reuse_from: tuple[str, ...], *,
+	capacity: Callable[[str], int], pinned: Callable[[str], bool],
+	alias_from: str | None = None, proof: str | None = None,
+) -> tuple[str | None, str | None]:
+	"""Select a physical alias using the manager's ordered capacity policy.
+
+	The owner supplies capacity and pin facts; planning can use the same policy
+	without constructing or importing a production allocator or storage backend.
+	"""
+
+	for role in reuse_from:
+		for candidate in retired.get(role, ()):
+			if not pinned(candidate) and capacity(candidate) >= required:
+				return candidate, f"retired:{role}"
+	if alias_from is not None and not pinned(alias_from) and capacity(alias_from) >= required:
+		return alias_from, proof
+	return None, None
 
 
 class StorageBackend(ABC):

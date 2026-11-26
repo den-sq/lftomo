@@ -8,7 +8,7 @@ import signal
 from sys import platform, stdout
 import threading
 from time import sleep
-from typing import Callable, TextIO
+from typing import TextIO
 
 import numpy as np
 
@@ -19,6 +19,7 @@ from lftomo.storage import (
 	StorageBackend,
 	buffer_view,
 	is_advanced_index,
+	select_buffer_alias,
 )
 
 from .shapes import DataShape
@@ -26,26 +27,6 @@ from .log import log, LOG
 from .process import watch_parent_exit
 
 MEM_INTERVAL_TIMER = 1.0
-
-
-def select_buffer_alias(
-	required: int, retired: dict[str, list[str]], reuse_from: tuple[str, ...], *,
-	capacity: Callable[[str], int], pinned: Callable[[str], bool],
-	alias_from: str | None = None, proof: str | None = None,
-) -> tuple[str | None, str | None]:
-	"""Select a physical alias using the manager's ordered capacity policy.
-
-	The owner supplies capacity and pin facts; planning can use the same policy
-	without constructing a second production allocator or storage backend.
-	"""
-
-	for role in reuse_from:
-		for candidate in retired.get(role, ()):
-			if not pinned(candidate) and capacity(candidate) >= required:
-				return candidate, f"retired:{role}"
-	if alias_from is not None and not pinned(alias_from) and capacity(alias_from) >= required:
-		return alias_from, proof
-	return None, None
 
 
 class SharedNPManager(SharedMemoryManager, StorageBackend):
