@@ -275,6 +275,27 @@ class TomoWindow(DataRef):
 			start -= int(getattr(self.pad_before, axis, 0))
 		return start + int(buffer_index) * int(getattr(self.step, axis, 1))
 
+	def packed_index(self, selection: "TomoWindow", layout: type[DataShape] | None = None) -> tuple[slice, ...]:
+		"""Translate a contained source window into this window's packed samples.
+
+		Both references describe the actual covered region; callers explicitly
+		include a halo with ``with_pad()`` when indexing a padded allocation.
+		"""
+
+		indices = {}
+		for axis in self.shape.names:
+			parent = self.axis_slice(axis)
+			child = selection.axis_slice(axis)
+			if child.start < parent.start or child.stop > parent.stop:
+				raise ValueError(f"selection falls outside materialized {axis} coverage")
+			if (child.start - parent.start) % parent.step or child.step % parent.step:
+				raise ValueError(f"selection does not align with materialized {axis} samples")
+			start = (child.start - parent.start) // parent.step
+			count = len(range(child.start, child.stop, child.step))
+			step = child.step // parent.step
+			indices[axis] = slice(start, start + count * step, step)
+		return tuple(indices[axis] for axis in (layout or type(self.shape)).names)
+
 	def recon_shape(self) -> ReconOrder:
 		"""Return the square physical reconstruction shape for the core window.
 

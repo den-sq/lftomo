@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from lftomo.pipeline.core import Backend, NumpyBackend, Stage
+from lftomo.pipeline.core import Backend, BufferSpec, NumpyBackend, Stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.planning import (
 	Materialization,
@@ -122,6 +122,7 @@ def validate_pipeline(
 	mode: ValidationMode | str = ValidationMode.FRAGMENT,
 	initial_layout: type[Any] | None = None,
 	initial_domain: DataDomain | None = None,
+	initial_buffer: BufferSpec | None = None,
 	enable_aliasing: bool = True,
 	enable_engine_aliasing: bool = True,
 	external_pins: tuple[str, ...] = (),
@@ -139,7 +140,9 @@ def validate_pipeline(
 		current_layout = None
 		current_domain = None
 	else:
-		current_layout = initial_layout
+		if initial_buffer is not None and initial_layout not in (None, initial_buffer.layout):
+			raise ValueError("initial layout disagrees with the input buffer")
+		current_layout = initial_layout if initial_buffer is None else initial_buffer.layout
 		current_domain = initial_domain
 
 	backend = backend or NumpyBackend()
@@ -150,7 +153,7 @@ def validate_pipeline(
 	attenuation_transitions = 0
 	steps: list[PlanStep] = []
 	warnings: list[str] = []
-	current_buffer = None
+	current_buffer = initial_buffer
 	current_window = source_window
 
 	for index, stage in enumerate(stages):
@@ -366,6 +369,7 @@ def validate_pipeline(
 		enable_engine_aliasing=enable_engine_aliasing,
 		external_pins=external_pins,
 		segments=resolved_segments,
+		initial_buffer=initial_buffer,
 	)
 	return PipelinePlan(
 		steps=resolved_steps, segments=resolved_segments, warnings=tuple(warnings),

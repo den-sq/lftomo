@@ -212,7 +212,7 @@ def probe_source_metadata(scan, stage: Stage) -> SourceMetadata:
 def _read_window(state: PipelineState) -> TomoWindow:
 	if state.dataset is None or state.source_window is None:
 		raise RuntimeError("read stages require the plan-time dataset and source window")
-	return state.source_window.with_pad(["Y"])
+	return state.source_window.with_pad()
 
 
 def _bind_source_state(

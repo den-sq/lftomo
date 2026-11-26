@@ -122,11 +122,19 @@ affected axes in `extent_sensitive_axes`. For example, the phase filters use
 both detector extents. Use `()` to explicitly declare no sensitivity. The
 default `None` means undeclared; the registry-wide phase declaration test
 rejects it for every `phase.*` Stage. Streaming reads the instance contract
-and warns when it partitions a declared axis, currently `Y`; there is no
+and warns when it partitions a declared axis (`Y`, `Theta`, or `X`); there is no
 phase-name list to update. This property describes numerical sensitivity:
 `required_pad` declares needed source context, while `requires_full_axes`
 prohibits splitting an axis. Extent sensitivity allows splitting with the
 warning that fixed-window parity does not imply whole-volume equivalence.
+
+Declare supported iteration directions in `window_axes`. A Stage can specify
+`required_window_axis` or `preferred_window_axis`; both must belong to its
+supported axes and cannot name a required full axis. For example, a projection
+FFT can prefer `Theta` to retain complete detector images, while a sinogram
+operator supports `Y`. The runner groups directions into sweeps and materializes
+their boundaries. See [windowed streaming](windowed-streaming.md) for size limits,
+intermediate lifecycle, and boundary restrictions.
 
 The nested `Params` model owns configured values. `StageParams` rejects unknown
 keys and is immutable; use `Field` bounds and `Literal` choices for scalar

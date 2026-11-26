@@ -131,16 +131,18 @@ run 0 [f6623d9703a3767a]: /path/to/recon
 `recon/` then contains one float32 TIFF per reconstructed row (`01080.tif`, …)
 and `recon_run.yaml`, a run record (not a pipeline file). Its `resolved_recon`
 section is the `Recon` that produced the slices, with every `Recon` field filled
-in, and `streaming_dataset` records the window plan that was used. Saved on its
+in, and `streaming_segments` records the directional window plans used. Saved on its
 own as a YAML file, `resolved_recon` reruns the same pipeline, but the window
-plan is not restored from it: pass the same `--window-rows` / `--extra-pad-y`
-again. A different window plan changes the memory needed, and can change the
-result of FFT-based phase Stages (BAC, Paganin), whose filter extent follows the
-window.
+plan is not restored from it: pass the same window options again. BAC and slope
+Paganin use Theta batches with the complete selected detector extent. Legacy
+alpha Paganin still follows its Y window and padding extent, which can change
+its numerical result. See [windowed streaming](windowed-streaming.md).
 
 Useful options: `--json-output` prints machine-readable run summaries;
 `--window-rows N` streams the volume through windows of N detector rows to bound
-memory; `--gpu` declares CUDA support for GPU Stages.
+memory; `--window-theta N` controls projection batches for phase retrieval;
+`--intermediate-root PATH` selects temporary storage for direction changes;
+`--gpu` declares CUDA support for GPU Stages.
 
 ## 6. Run the same thing from Python
 
@@ -169,10 +171,10 @@ for the return value and the optional controls.
 - **`insufficient shared memory: planned peak ...`** The runner keeps its working
   arrays in POSIX shared memory (`/dev/shm`) and checks their planned peak against
   the free space before reading projections. Containers often limit it. Docker's
-  default of 64 MB holds about one row of a large scan: one 2560-pixel reconstructed
-  slice with its 1969 projections planned 54 MiB. Raise the limit (for Docker,
-  `--shm-size`) or reduce the working set with fewer rows per window
-  (`--window-rows`, or `y_start`/`y_stop`).
+  default of 64 MB may hold only one row of a large scan. The required capacity
+  also depends on the phase batch and selected detector extent. Raise the limit
+  (for Docker, `--shm-size`) or reduce the working set with `--window-rows`,
+  `--window-theta`, or the `y_start`/`y_stop` source selection.
 - **`Bus error`, `BrokenProcessPool`, or a worker dies with no traceback.** Usually
   the same shortage, in memory the check doesn't count. Vo stripe Stages
   (`stripe.vo_*`, used by `r254-canonical` and `recon-minimal-canonical`) allocate

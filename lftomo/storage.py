@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import ExitStack
 from pathlib import Path
+import shutil
+import tempfile
 from types import TracebackType
 from typing import Any, Self
 
@@ -138,13 +141,20 @@ class LocalArray(TypedBuffer):
 
 
 class FileBackedNPArray(ManagedBuffer):
-	"""Reopenable, read-only ``.npy`` mapping suitable for worker processes."""
+	"""Reopenable ``.npy`` mapping suitable for worker processes.
+
+	Existing files are read-only by default; ``create`` allocates a writable
+	file without replacing an existing file.
+	"""
 
 	def __init__(self, path: str | Path, shape: DataShape | None = None,
-			views: list[Any] | None = None):
+			views: list[Any] | None = None, mode: str = "r"):
+		if mode not in ("r", "r+"):
+			raise ValueError("FileBackedNPArray mode must be 'r' or 'r+'")
 		self.__path = Path(path)
 		self.__views = [] if views is None else views
 		self.__base_shape = shape
+		self.__mode = mode
 		self.__mapping = None
 		probe = np.load(self.__path, mmap_mode="r", allow_pickle=False)
 		try:
@@ -169,6 +179,25 @@ class FileBackedNPArray(ManagedBuffer):
 			if mmap is not None:
 				mmap.close()
 
+	@classmethod
+	def create(cls, path: str | Path, shape: DataShape, dtype: np.dtype) -> Self:
+		"""Create an exclusively owned writable NPY file with canonical shape."""
+
+		if not isinstance(shape, DataShape):
+			raise TypeError("FileBackedNPArray.create shape must be a DataShape")
+		path = Path(path)
+		# Reserve the name before NumPy's writable creation mode can truncate it.
+		with path.open("xb"):
+			pass
+		mapping = np.lib.format.open_memmap(
+			path, mode="w+", dtype=dtype, shape=shape.as_tuple(),
+		)
+		try:
+			mapping.flush()
+		finally:
+			mapping._mmap.close()
+		return cls(path, shape, mode="r+")
+
 	@property
 	def path(self) -> Path:
 		return self.__path
@@ -183,11 +212,10 @@ class FileBackedNPArray(ManagedBuffer):
 
 	def array(self) -> np.ndarray:
 		if self.__mapping is None:
-			self.__mapping = np.load(self.__path, mmap_mode="r", allow_pickle=False)
+			self.__mapping = np.load(self.__path, mmap_mode=self.__mode, allow_pickle=False)
 		view = self.__mapping
 		for index in self.__views:
 			view = view[index]
-		view.flags.writeable = False
 		return view
 
 	def __getitem__(self, view: Any) -> "FileBackedNPArray":
@@ -195,14 +223,25 @@ class FileBackedNPArray(ManagedBuffer):
 			raise IndexError(
 				"This would be an advanced index and create copies, so should not be used here."
 			)
-		return type(self)(self.__path, self.__base_shape, self.__views + [view])
+		return type(self)(
+			self.__path, self.__base_shape, self.__views + [view], self.__mode,
+		)
+
+	def flush(self) -> None:
+		"""Persist writes from this process's open mapping, if any."""
+
+		if self.__mapping is not None and self.__mode == "r+":
+			self.__mapping.flush()
 
 	def close(self) -> None:
 		if self.__mapping is not None:
-			mmap = getattr(self.__mapping, "_mmap", None)
-			if mmap is not None:
-				mmap.close()
-			self.__mapping = None
+			try:
+				self.flush()
+			finally:
+				mmap = getattr(self.__mapping, "_mmap", None)
+				if mmap is not None:
+					mmap.close()
+				self.__mapping = None
 
 	shutdown = close
 
@@ -213,7 +252,7 @@ class FileBackedNPArray(ManagedBuffer):
 		self.close()
 
 	def __reduce__(self):
-		return type(self), (self.__path, self.__base_shape, self.__views)
+		return type(self), (self.__path, self.__base_shape, self.__views, self.__mode)
 
 
 class StorageBackend(ABC):
@@ -256,13 +295,17 @@ class PipelineRunContext:
 	The context is intentionally separate from ``PipelineState``: state threads
 	the actual buffer handle and an allocator reference, while this object owns
 	manager startup and shutdown. Callers that provide an existing backend retain
-	responsibility for its lifetime.
+	responsibility for its lifetime. File intermediates always belong to the
+	context: each run gets a fresh directory, removed on exit unless explicitly
+	retained for inspection. Retention does not enable reuse on a later run.
 	"""
 
 	def __init__(self, storage: StorageBackend | None = None, *,
 			enable_aliasing: bool = True, enable_engine_aliasing: bool = True,
 			max_workers: int = 2, worker_timeout_seconds: float | None = None,
-			multiprocessing_context: str = "spawn"):
+			multiprocessing_context: str = "spawn",
+			intermediate_root: str | Path | None = None,
+			retain_intermediates: bool = False):
 		self.storage = storage
 		self._owns_storage = storage is None
 		self.enable_aliasing = enable_aliasing
@@ -270,9 +313,47 @@ class PipelineRunContext:
 		self.max_workers = max_workers
 		self.worker_timeout_seconds = worker_timeout_seconds
 		self.multiprocessing_context = multiprocessing_context
+		self.intermediate_root = None if intermediate_root is None else Path(intermediate_root)
+		self.retain_intermediates = retain_intermediates
+		self._intermediate_directory: Path | None = None
+		self._intermediates: list[FileBackedNPArray] = []
 		self.executor = None
 		self._entered = False
 		self._spent = False
+
+	@property
+	def intermediate_directory(self) -> Path | None:
+		"""The fresh directory allocated for this run, if a file was requested."""
+
+		return self._intermediate_directory
+
+	@property
+	def intermediate_paths(self) -> tuple[Path, ...]:
+		"""Paths of the run's intermediates, including after context shutdown."""
+
+		return tuple(buffer.path for buffer in self._intermediates)
+
+	def create_intermediate(
+		self, shape: DataShape, dtype: np.dtype, *, name: str | None = None,
+	) -> FileBackedNPArray:
+		"""Allocate a typed file whose attachment and cleanup belong to this run."""
+
+		if not self._entered:
+			raise RuntimeError("intermediates require an active PipelineRunContext")
+		filename = name or f"intermediate-{len(self._intermediates):04d}.npy"
+		if Path(filename).name != filename or filename in (".", ".."):
+			raise ValueError("intermediate name must be a filename without directories")
+		if not filename.endswith(".npy"):
+			filename += ".npy"
+		if self._intermediate_directory is None:
+			if self.intermediate_root is not None:
+				self.intermediate_root.mkdir(parents=True, exist_ok=True)
+			self._intermediate_directory = Path(tempfile.mkdtemp(
+				prefix="lftomo-intermediates-", dir=self.intermediate_root,
+			))
+		buffer = FileBackedNPArray.create(self._intermediate_directory / filename, shape, dtype)
+		self._intermediates.append(buffer)
+		return buffer
 
 	def __enter__(self) -> Self:
 		if self._entered:
@@ -309,12 +390,17 @@ class PipelineRunContext:
 		traceback: TracebackType | None,
 	) -> None:
 		try:
-			if self.executor is not None:
-				self.executor.close()
-			if self._owns_storage and self.storage is not None:
-				shutdown = getattr(self.storage, "shutdown", None)
-				if shutdown is not None:
-					shutdown()
+			with ExitStack() as cleanup:
+				if self._intermediate_directory is not None and not self.retain_intermediates:
+					cleanup.callback(shutil.rmtree, self._intermediate_directory)
+				for buffer in self._intermediates:
+					cleanup.callback(buffer.close)
+				if self._owns_storage and self.storage is not None:
+					shutdown = getattr(self.storage, "shutdown", None)
+					if shutdown is not None:
+						cleanup.callback(shutdown)
+				if self.executor is not None:
+					cleanup.callback(self.executor.close)
 		finally:
 			self.executor = None
 			self._entered = False

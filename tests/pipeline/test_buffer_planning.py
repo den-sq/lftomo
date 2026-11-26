@@ -1,5 +1,6 @@
 from importlib.metadata import version
 
+import h5py
 import numpy as np
 import pytest
 
@@ -9,6 +10,7 @@ from lftomo.pipeline import (
 	DataDomain,
 	PipelineRunContext,
 	PipelineState,
+	WindowConfig,
 	validate_pipeline,
 )
 from lftomo.pipeline.stages import (
@@ -27,7 +29,11 @@ from lftomo.pipeline.stages import (
 )
 from lftomo.pipeline.planning import _read_spec
 from lftomo.storage import ManagedBuffer
+from lftomo.runner import run_reconstruction
+from lftomo.util.mem import SharedNPManager
 from lftomo.util.shapes import ProjOrder, SinoOrder, X
+from tests.fixtures.tier1 import shepp_logan
+from tests.pipeline.test_streaming import _write_yaml
 from tests.sample_data import attach_source_geometry
 
 
@@ -389,3 +395,60 @@ def test_raw_staging_alias_matches_unaliased_full_numeric_pipeline():
 	assert aliased_name == raw_name
 	assert unaliased_name != unaliased_raw
 	np.testing.assert_allclose(aliased, unaliased, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("aliasing", [False, True])
+@pytest.mark.parametrize("center_prepass", [False, True])
+def test_streaming_capacity_accounts_for_reservations_shared_between_segments(
+	tmp_path, monkeypatch, aliasing, center_prepass,
+):
+	import tomopy
+
+	rows, columns, theta = 32, 8, 3
+	volume = np.repeat(shepp_logan(columns)[None, ...], rows, axis=0)
+	angles = np.linspace(0, np.pi, theta, endpoint=False, dtype=np.float32)
+	attenuation = tomopy.project(volume, angles, pad=False, ncore=1)
+	projections = np.rint(1000 * np.exp(-0.05 * attenuation)).astype(np.uint16)
+	data_path = tmp_path / "scan.h5"
+	with h5py.File(data_path, "w") as handle:
+		handle["exchange/data"] = projections
+		handle["exchange/data_white"] = np.full((2, rows, columns), 1000, dtype=np.uint16)
+		handle["exchange/data_dark"] = np.zeros((2, rows, columns), dtype=np.uint16)
+	scan_path = tmp_path / "scan.yaml"
+	_write_yaml(scan_path, {
+		"energy_keV": 20, "pixel_size_um": 1, "ssd_cm": 10,
+		"n_projections": theta, "degrees_per_fov": 180,
+		"detector": {"pixel_size_um": 1, "rows": rows, "columns": columns},
+		"acquisition": {"n_projections": theta, "rotation_end_deg": 180},
+		"projections": {
+			"format": "hdf5_dxchange", "path": str(data_path),
+			"data_path": "exchange/data", "white_path": "exchange/data_white",
+			"dark_path": "exchange/data_dark",
+		},
+	})
+	pipeline_path = tmp_path / "pipeline.yaml"
+	_write_yaml(pipeline_path, {"process_workers": 1, "buffer_aliasing": aliasing, "pipeline": [
+		{"kind": "read", "algorithm": "hdf5_dxchange"},
+		{"kind": "normalize", "algorithm": "weighted"},
+		{"kind": "phase", "algorithm": "paganin_filter", "params": {
+			"slope": 1e-10, "fft_pad": False,
+		}},
+		{"kind": "phase", "algorithm": "paganin", "params": {
+			"slope": 1e-10, "fft_pad": True,
+		}},
+		*([{"kind": "center", "algorithm": "pc"}] if center_prepass else []),
+		{"kind": "recon", "algorithm": "gridrec", "params": {"center": 4, "ncore": 1}},
+	]})
+	centers = []
+	def fixed_center(*args, **kwargs):
+		centers.append(4.0)
+		return 4.0
+	monkeypatch.setattr(tomopy, "find_center_pc", fixed_center)
+	capacity_checks = []
+	monkeypatch.setattr(SharedNPManager, "check_capacity", capacity_checks.append)
+	result, = run_reconstruction(
+		pipeline_path, scan_path, window_config=WindowConfig(rows=2, theta=1),
+	)
+	assert len(capacity_checks) == 1
+	assert bool(centers) is center_prepass
+	assert 0 < result.artifacts["measured_shared_memory_bytes"] <= capacity_checks[0]

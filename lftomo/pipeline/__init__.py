@@ -63,9 +63,11 @@ from lftomo.pipeline.sweep import (
 	parameter_domains,
 )
 from lftomo.pipeline.streaming import (
+	StreamingSegment,
 	WindowConfig,
 	WindowPlanError,
 	resolve_streaming_plan,
+	resolve_streaming_segments,
 )
 from lftomo.pipeline.telemetry import (
 	ExecutionSpan,
@@ -144,6 +146,7 @@ __all__ = [
 	"WorkerTimeoutError",
 	"WindowConfig",
 	"WindowPlanError",
+	"StreamingSegment",
 	"Y",
 	"CandidateLimitError",
 	"CandidateSpaceError",
@@ -157,6 +160,7 @@ __all__ = [
 	"has_continuous_domains",
 	"parameter_domains",
 	"resolve_streaming_plan",
+	"resolve_streaming_segments",
 	"run_sinogram_stage",
 	"validate_pipeline",
 ]

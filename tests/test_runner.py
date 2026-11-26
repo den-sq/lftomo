@@ -186,6 +186,17 @@ def test_all_bundled_canonical_templates_instantiate():
 		assert stages, path.name
 
 
+def test_empty_pipeline_reports_complete_pipeline_contract(tmp_path):
+	from lftomo.pipeline import CompletePipelineError
+
+	scan_path = tmp_path / "scan.yaml"
+	write_yaml(scan_path, scan_document("scan.h5"))
+	pipeline_path = tmp_path / "pipeline.yaml"
+	write_yaml(pipeline_path, {"pipeline": []})
+	with pytest.raises(CompletePipelineError, match="must begin"):
+		run_reconstruction(pipeline_path, scan_path)
+
+
 def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	tmp_path, monkeypatch,
 ):
@@ -257,9 +268,14 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	assert reservations == [(event.role, event.bytes) for event in plans[0].allocation_schedule]
 
 
-@pytest.mark.parametrize("window_rows, vo_chain", [(None, False), (1, False), (2, True)])
+@pytest.mark.parametrize("window_rows, vo_chain, available_mib, fits", [
+	(None, False, 64, False),
+	(1, False, 32, False),
+	(1, False, 64, True),
+	(2, True, 64, False),
+])
 def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
-	tmp_path, monkeypatch, window_rows, vo_chain,
+	tmp_path, monkeypatch, window_rows, vo_chain, available_mib, fits,
 ):
 	import lftomo.runner as runner_module
 	import lftomo.util.mem as mem_module
@@ -289,17 +305,24 @@ def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 	pipeline_path = tmp_path / "pipeline.yaml"
 	write_yaml(pipeline_path, recon.model_dump(mode="json"))
 
-	available = 64 * 1024**2
+	available = available_mib * 1024**2
 	monkeypatch.setattr(mem_module, "platform", "linux")
 	def space(path):
 		assert path == "/dev/shm"
 		return SimpleNamespace(f_bavail=available // 4096, f_frsize=4096)
 	monkeypatch.setattr(mem_module.os, "statvfs", space)
-	plans = []
+	checked_peaks = []
+	check_capacity = runner_module.SharedNPManager.check_capacity
+	def record_capacity(peak):
+		checked_peaks.append(peak)
+		check_capacity(peak)
+	monkeypatch.setattr(runner_module.SharedNPManager, "check_capacity", staticmethod(record_capacity))
+	plans, window_counts = [], []
 	validate = runner_module.validate_pipeline
 	def record_plan(*args, **kwargs):
 		plan = validate(*args, **kwargs)
 		plans.append(plan)
+		window_counts.append(len(kwargs["dataset"].frange))
 		return plan
 	monkeypatch.setattr(runner_module, "validate_pipeline", record_plan)
 
@@ -315,24 +338,31 @@ def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 	monkeypatch.setattr(runner_module.PipelineRunContext, "__enter__", stop_before_manager)
 
 	window_config = WindowConfig(rows=window_rows) if window_rows is not None else None
-	if window_rows is None or vo_chain:
+	if not fits:
 		with pytest.raises(MemoryError) as error:
 			run_reconstruction(pipeline_path, scan_path, window_config=window_config)
-		assert len(plans) == 1
-		peak = plans[0].shared_memory_peak_bytes
+		peak, = checked_peaks
 		assert peak > available
 		message = str(error.value)
 		assert f"planned peak {peak} bytes" in message
 		assert f"available /dev/shm space {available} bytes" in message
 		assert "shared memory" in message
 		assert "--window-rows" in message and "--shm-size" in message
-		if vo_chain:
-			assert peak == 88_979_360
 	else:
 		with pytest.raises(ReachedManager):
 			run_reconstruction(pipeline_path, scan_path, window_config=window_config)
+		peak, = checked_peaks
+		assert 0 < peak < available
+	if window_rows is None:
 		assert len(plans) == 1
-		assert 0 < plans[0].shared_memory_peak_bytes < available
+		assert peak == plans[0].shared_memory_peak_bytes
+	else:
+		# BAC now uses the full selected detector extent in a Theta sweep.
+		# Preflight covers all three sweep reservations, after complete validation.
+		assert len(plans) == 4
+		assert peak == runner_module.reserve_streaming_buffers(
+			plans[1:], window_counts=window_counts[1:],
+		)
 
 
 def test_shared_memory_preflight_does_not_assume_linux_mount_on_other_platforms(monkeypatch):

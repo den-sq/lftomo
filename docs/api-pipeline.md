@@ -205,8 +205,13 @@ still omitted from the shared-memory peak; [#360](https://github.com/den-sq/lfto
 tracks accounting for it once per segment, including standalone sinogram dispatch.
 
 Before starting a run's manager or reading projection pixels, the runner checks
-the largest padded window's planned shared-memory peak against available
-`/dev/shm` space on Linux. That same plan supplies the run's buffer reservations.
+the largest padded windows' planned shared-memory peak against available
+`/dev/shm` space on Linux. For directional sweeps it replays the allocation
+schedules across windows and segments, including intermediate reloads,
+per-role reservation maxima, and retirement between windows. Planning and the
+manager share the same alias-selection policy. Those same plans supply the
+run's buffer reservations. See [windowed streaming](windowed-streaming.md) for
+direction selection and intermediate storage lifecycle.
 Insufficient capacity raises an error naming both byte counts and suggesting
 smaller `--window-rows` or a larger `/dev/shm` (`--shm-size` in Docker). This is
 a capacity snapshot, not a reservation against concurrent allocations. Platforms

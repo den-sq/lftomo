@@ -280,12 +280,16 @@ class PaganinFilterStage(ProjectionStage):
 			if params.material_alpha != 0:
 				return replace(
 					cls.contract,
+					preferred_window_axis="Theta",
 					produces_artifacts=cls.contract.produces_artifacts + ("phase_envelope",),
 					managed_artifacts=cls.contract.managed_artifacts + (
 						("phase_envelope",) if isinstance(params.envelope_m, list) else ()
 					),
 				)
-			return cls.contract
+			return replace(
+				cls.contract,
+				preferred_window_axis="Theta" if params.slope is not None else None,
+			)
 		return replace(
 			cls.contract,
 			mutates_input=False,
@@ -326,7 +330,7 @@ class NegativeLogStage(ProjectionStage):
 		extent_sensitive_axes=(),
 		mutates_input=True,
 		cacheable_prefix=True,
-		window_axes=("Y", "Theta"),
+		window_axes=("Y", "Theta", "X"),
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
 	)
@@ -372,7 +376,7 @@ class BetaScaleStage(Stage):
 		extent_sensitive_axes=(),
 		mutates_input=True,
 		cacheable_prefix=True,
-		window_axes=("Y", "Theta"),
+		window_axes=("Y", "Theta", "X"),
 		required_metadata=("energy_keV",),
 		accepts_domain=(DataDomain.ATTENUATION,),
 		produces_domain=PRESERVE,
@@ -481,7 +485,7 @@ class BronnikovAidedCorrectionFilterStage(ProjectionStage):
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
 		if params.enabled:
-			return cls.contract
+			return replace(cls.contract, preferred_window_axis="Theta")
 		return replace(
 			cls.contract,
 			mutates_input=False,

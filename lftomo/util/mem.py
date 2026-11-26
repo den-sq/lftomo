@@ -8,7 +8,7 @@ import signal
 from sys import platform, stdout
 import threading
 from time import sleep
-from typing import TextIO
+from typing import Callable, TextIO
 
 import numpy as np
 
@@ -26,6 +26,27 @@ from .log import log, LOG
 from .process import watch_parent_exit
 
 MEM_INTERVAL_TIMER = 1.0
+
+
+def select_buffer_alias(
+	required: int, retired: dict[str, list[str]], reuse_from: tuple[str, ...], *,
+	capacity: Callable[[str], int], pinned: Callable[[str], bool],
+	alias_from: str | None = None, proof: str | None = None,
+) -> tuple[str | None, str | None]:
+	"""Select a physical alias using the manager's ordered capacity policy.
+
+	The owner supplies capacity and pin facts; planning can use the same policy
+	without constructing a second production allocator or storage backend.
+	"""
+
+	for role in reuse_from:
+		for candidate in retired.get(role, ()):
+			if not pinned(candidate) and capacity(candidate) >= required:
+				return candidate, f"retired:{role}"
+	if alias_from is not None and not pinned(alias_from) and capacity(alias_from) >= required:
+		return alias_from, proof
+	return None, None
+
 
 class SharedNPManager(SharedMemoryManager, StorageBackend):
 	""" Manages shared memory numpy arrays. """
@@ -45,8 +66,9 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 			raise MemoryError(
 				f"insufficient shared memory: planned peak {planned_peak_bytes} bytes "
 				f"({planned_peak_bytes / 1024**2:.1f} MiB), available /dev/shm space "
-				f"{available} bytes ({available / 1024**2:.1f} MiB); reduce "
-				"--window-rows or increase /dev/shm (Docker: --shm-size)"
+				f"{available} bytes ({available / 1024**2:.1f} MiB); reduce window sizes "
+				"(--window-rows/--window-theta/--window-columns) or increase /dev/shm "
+				"(Docker: --shm-size)"
 			)
 
 	@classmethod
@@ -153,21 +175,18 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		name = None
 		alias_kind = None
 		if self.enable_aliasing:
-			for retired_role in reuse_from:
-				for candidate_name in tuple(self._retired.get(retired_role, ())):
-					candidate = self._physical[candidate_name]
-					if not candidate["pins"] and candidate["capacity"] >= required:
-						name = candidate_name
-						alias_kind = f"retired:{retired_role}"
-						break
-				if name is not None:
-					break
-		if self.enable_aliasing and name is None and alias_from is not None:
-			candidate = self._physical.get(alias_from.name)
 			engine_ok = proof != "tomopy_input_materialization" or self.enable_engine_aliasing
-			if candidate is not None and engine_ok and not candidate["pins"] and candidate["capacity"] >= required:
-				name = alias_from.name
-				alias_kind = proof
+			candidate = None if alias_from is None else self._physical.get(alias_from.name)
+			current = (
+				alias_from.name
+				if candidate is not None and engine_ok else None
+			)
+			name, alias_kind = select_buffer_alias(
+				required, self._retired, reuse_from,
+				capacity=lambda key: self._physical[key]["capacity"],
+				pinned=lambda key: bool(self._physical[key]["pins"]),
+				alias_from=current, proof=proof,
+			)
 		if name is None:
 			reserved = max(required, self._minimum_capacities.get(role, 0))
 			if reserved > required:

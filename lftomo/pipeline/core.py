@@ -116,6 +116,8 @@ class StageContract:
 	# backend, PipelineState inputs, and declared artifacts before reuse.
 	cacheable_prefix: bool = False
 	window_axes: tuple[str, ...] = ()
+	required_window_axis: Literal["Theta", "Y", "X"] | None = None
+	preferred_window_axis: Literal["Theta", "Y", "X"] | None = None
 	required_metadata: tuple[str, ...] = ()
 	consumes_artifacts: tuple[str, ...] = ()
 	produces_artifacts: tuple[str, ...] = ()
@@ -144,6 +146,20 @@ class StageContract:
 	extent_sensitive_axes: tuple[str, ...] | None = None
 
 	def __post_init__(self):
+		for name in ("required_window_axis", "preferred_window_axis"):
+			axis = getattr(self, name)
+			if axis is None:
+				continue
+			if axis not in ("Theta", "Y", "X"):
+				raise ValueError(f"{name} must be Theta, Y, or X")
+			if axis not in self.window_axes:
+				raise ValueError(f"{name}={axis} must be declared in window_axes")
+			if axis in self.requires_full_axes:
+				raise ValueError(f"{name}={axis} conflicts with requires_full_axes")
+		if self.required_window_axis is not None and self.preferred_window_axis not in (
+			None, self.required_window_axis,
+		):
+			raise ValueError("required_window_axis and preferred_window_axis disagree")
 		undeclared = set(self.managed_artifacts) - set(self.produces_artifacts)
 		if undeclared:
 			raise ValueError(
