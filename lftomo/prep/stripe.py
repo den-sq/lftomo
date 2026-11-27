@@ -13,6 +13,7 @@ from scipy.ndimage import uniform_filter1d
 
 
 from lftomo.util.mem import SharedNPArray
+from lftomo.util.shapes import DataShape, Theta, YSlice
 from lftomo.util.window import TomoWindow
 
 DetailCoeff = namedtuple("DetailCoeff", ["cH", "cV", "cD"])
@@ -339,9 +340,42 @@ def _remove_stripe_fw(sino_mem, i, level, wname, sigma, zero_pad=False):
 		_remove_stripe_fw_array(sino, level=level, wname=wname, sigma=sigma, zero_pad=zero_pad)
 
 
+def _fw_theta_mirror_window(shape: DataShape) -> TomoWindow:
+	"""Describe the input followed by its Theta-reversed numerical extension."""
+	zero = shape.make_with(0)
+	return TomoWindow(
+		shape, zero, zero, shape.make_with(1),
+		pad_after=zero + Theta(shape.Theta),
+	)
+
+
 def _remove_stripe_fw_array(sino: np.ndarray, level: int, wname: str = "db5",
-							sigma: float = 2.0, zero_pad: bool = False) -> None:
-	"""Apply Fourier-wavelet stripe suppression to one ``(Theta, X)`` sinogram."""
+							sigma: float = 2.0, zero_pad: bool = False,
+							theta_mirror: bool = False, *, mirror_work: np.ndarray | None = None) -> None:
+	"""Apply Fourier-wavelet stripe suppression to one ``(Theta, X)`` sinogram.
+
+	Mirror extension makes drifting columns continuous at the FFT seam. Sigma
+	is measured in FFT bins, so it scales with the extended Theta length. The
+	caller may supply managed mirror work; direct array calls allocate locally.
+	PyWavelets coefficients/reconstruction and NumPy FFT results remain
+	unavoidable external-library temporaries in both modes.
+	"""
+	if theta_mirror:
+		window = _fw_theta_mirror_window(YSlice(*sino.shape))
+		canvas = window.with_pad()
+		if mirror_work is None:
+			mirror_work = np.empty(canvas.shape.as_tuple(), dtype=sino.dtype)
+		elif mirror_work.shape != canvas.shape.as_tuple() or mirror_work.dtype != sino.dtype:
+			raise ValueError("FW mirror work must match the extended sinogram shape and dtype")
+		mirror_work[window.internal.index] = sino
+		reflection = canvas.with_crop(Theta(window.shape.Theta), Theta(0))
+		mirror_work[reflection.index] = sino[::-1]
+		_remove_stripe_fw_array(
+			mirror_work, level, wname,
+			sigma * canvas.shape.Theta / window.shape.Theta, zero_pad,
+		)
+		sino[:, :] = mirror_work[window.internal.index]
+		return
 	extension_mode = "zero" if zero_pad else "symmetric"
 	sino_indexing = np.s_[0:sino.shape[0], 0:sino.shape[1]]
 	sli = sino[:, :]

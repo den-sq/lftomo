@@ -27,6 +27,7 @@ from lftomo.util.window import TomoWindow
 VO_FLOAT_WORK_ARTIFACT = "_vo_float_work"
 VO_INDEX_WORK_ARTIFACT = "_vo_index_work"
 VO_MEDIAN_PAD_WORK_ARTIFACT = "_vo_median_pad_work"
+FW_THETA_MIRROR_WORK_ARTIFACT = "_fw_theta_mirror_work"
 
 
 def _vo_work_requests(
@@ -246,6 +247,7 @@ class FourierWaveletStripeStage(SinogramStage):
 		wname: str = "db5"
 		sigma: float = Field(default=2.0, gt=0)
 		zero_pad: bool = False
+		theta_mirror: bool = False
 		ncore: int | None = None
 
 		@model_validator(mode="before")
@@ -258,13 +260,32 @@ class FourierWaveletStripeStage(SinogramStage):
 					values["wname"] = wavelet
 			return values
 
-	def run_sinogram(self, sinogram: np.ndarray, _state: PipelineState) -> None:
+	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+		if not self.params.theta_mirror:
+			return ()
+		from lftomo.prep.stripe import _fw_theta_mirror_window
+
+		window = _fw_theta_mirror_window(input_spec.shape.to(SinoOrder))
+		return (BoundedWorkRequest(
+			FW_THETA_MIRROR_WORK_ARTIFACT,
+			BufferSpec(window.with_pad().shape, input_spec.dtype), "fw_theta_mirror_work",
+		),)
+
+	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_stripe_fw_array
 
+		mirror_work = None
+		if self.params.theta_mirror and state is not None:
+			buffer = state.artifacts.get(FW_THETA_MIRROR_WORK_ARTIFACT)
+			if buffer is not None:
+				if state.assigned_range("Y").length.Y != 1 or buffer.shape.Y != 1:
+					raise ValueError("FW mirror work must be scoped to its assigned row")
+				mirror_work = buffer.array()[0]
 		level = self.params.level or int(np.ceil(np.log2(max(sinogram.shape))))
 		_remove_stripe_fw_array(
 			sinogram, level=level, wname=self.params.wname,
 			sigma=self.params.sigma, zero_pad=self.params.zero_pad,
+			theta_mirror=self.params.theta_mirror, mirror_work=mirror_work,
 		)
 
 
