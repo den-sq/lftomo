@@ -67,6 +67,7 @@ from .beam_basis import (
 	build_beam_basis, fit_projection_beam,
 )
 from .band_shift import build_beam_band_shift_schedule
+from .band_residual import BeamResidualBuild, build_beam_band_shift_residual
 
 __all__ = [
 	"ArrayPayload",
@@ -75,6 +76,7 @@ __all__ = [
 	"BeamOffsetRegistration",
 	"BeamSchedule",
 	"BeamBasisBuild",
+	"BeamResidualBuild",
 	"BeamFitQC",
 	"BundleValidationReport",
 	"BuildInspection",
@@ -114,6 +116,7 @@ __all__ = [
 	"build_flat_series_digest",
 	"build_beam_basis",
 	"build_beam_band_shift_schedule",
+	"build_beam_band_shift_residual",
 	"auto_air_mask",
 	"calibrate_motor_axis",
 	"calibrate_schedule",

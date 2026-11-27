@@ -90,7 +90,7 @@ temporaries. Static buffer planning includes declared projection work, while
 bundle-dependent preparation is visible in the actual storage allocation
 events; its size is not known from the input `BufferSpec` alone.
 
-### Building the measured schedule
+### Building measured schedules and residuals
 
 `build_beam_band_shift_schedule(build, source, dataset, ...)` measures the
 `(dy, m)` schedule from raw projections through the existing
@@ -121,9 +121,95 @@ angle provenance, window-fit residual RMS, frame-to-frame dy RMS, and
 registration confidence/ambiguity. Schedule time values are acquisition slots,
 including gaps. `y_chunk` controls input memory without changing the fit.
 
-The end-of-scan residual builder and centre-scan leak QC are not implemented.
 The schedule estimator uses the reference-row convention described above; it
 does not promise float-rounding reproduction of historical producer schedules.
+
+`build_beam_band_shift_residual()` measures the optional end-of-scan residual
+through the same build session and completed white/dark components:
+
+```python
+def build_beam_band_shift_residual(
+    build, source, dataset, *, model, center: ManualCenterStage.Params,
+    fit_rows, fit_columns, pairs,
+    pair_start=0, scan_center=(4.0, 0.5), highpass_sigma=30.0,
+    bands=8, y_chunk=64, storage: StorageBackend | None = None,
+    name="beam_residual",
+) -> BeamResidualBuild: ...
+```
+
+`center` is a `ManualCenterStage.Params`: its `value_px`, `tilt`, and
+`reference_y` define the detector-row-dependent mirror axis. `fit_rows` and
+`fit_columns` are half-open detector bounds for fitting and QC, not output
+crops. The `BeamResidualBuild` result contains the full-detector residual
+`component` and an updated `model`. Pass `result.model` to the schedule builder:
+it owns the fitted nonzero `dy_end` and the residual component reference. Do
+not retain separate copies of those model settings. A zero endpoint shift
+fails because the stage's `dy / dy_end` residual scale would be undefined.
+
+The estimator pairs recorded source positions `i` and `N - 1 - i`, starting at
+`pair_start`, and checks every pair's angles sum to pi within 0.001 degrees.
+It accumulates dark-subtracted, floored log projections in fixed groups of 16,
+with float32 logarithms and parity sums and float64 accumulation. Mirroring
+uses linear interpolation with nearest edges. Subtracting the corresponding
+mirror difference of the log white gain produces the endpoint change field.
+This estimator assumes the early beam is represented by the white field and
+the paired object projections cancel under the selected mirror geometry.
+
+`scan_center` supplies `(half_range, step)`. The centre scan samples
+`center.value_px +/- half_range` at that step,
+then samples one coarse step either side of the best centre at one-fifth that
+step. Scan keys are rounded to three decimals. The leak criterion is the RMS
+of the change field minus its X Gaussian smoothing with sigma 8 over the fit
+region. QC records the scan, selected centre, and a warning when that centre
+reaches the requested search boundary.
+
+The change and log white gain are smoothed along X with `model.sigma_x` and
+nearest edges. Their column-band profiles are high-passed along Y with
+`highpass_sigma`, also using nearest edges. Endpoint shift and stretch minimize
+profile residual RMS: the coarse grid spans dy -5 through 45 in steps of 1 and
+m 0.975 through 1.005 in steps of 0.0025; refinement spans +/-1.5 in dy at 0.25
+and +/-0.003 in m at 0.0005. The texture warp uses `model.yc`, cubic
+interpolation, and nearest edges. The saved float32 residual is the smoothed
+change minus the fitted texture change, retaining its full Y content rather
+than the high-passed fitting profiles. Metadata records the input settings,
+angles, acquisition slots, fitted dy/m, and band residual RMS.
+
+Source and calibration reads use bounded Y selections. Reusable work planes
+belong to `StorageBackend`: an optional caller-supplied backend is borrowed,
+and the builder retires its allocations on completion or failure. Otherwise a
+scoped `PipelineRunContext` owns storage. The builder does not dispatch CPU
+workers. SciPy's cubic prefilter still creates internal temporary arrays;
+managed work planes do not imply allocation-free interpolation. No
+reconstruction is needed to build the residual or its centre-scan QC.
+
+After writing the model's white/dark components, build the residual before the
+schedule. This example uses caller-selected geometry and fitting settings:
+
+```python
+from lftomo.calibration import (
+    BeamBandShiftModel,
+    build_beam_band_shift_residual,
+    build_beam_band_shift_schedule,
+)
+from lftomo.pipeline.stages import ManualCenterStage
+
+result = build_beam_band_shift_residual(
+    build, source, dataset,
+    model=BeamBandShiftModel(yc=texture_center_y, sigma_x=texture_sigma_x),
+    center=ManualCenterStage.Params(
+        value_px=mirror_center_px, tilt=mirror_tilt,
+        reference_y=mirror_reference_y,
+    ),
+    fit_rows=fit_rows, fit_columns=fit_columns, pairs=endpoint_pairs,
+    scan_center=centre_search, highpass_sigma=residual_highpass_sigma,
+)
+build_beam_band_shift_schedule(
+    build, source, dataset, model=result.model,
+    row_windows=schedule_windows, highpass_sigma=schedule_highpass_sigma,
+    search_shifts=search_shifts,
+)
+bundle_ref = build.finalize()
+```
 
 ## Coordinate and time bounds
 

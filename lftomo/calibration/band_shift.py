@@ -13,6 +13,26 @@ from .models import BeamBandShiftModel, CalibrationComponent, TimeAxis, Validati
 from .static_dynamic import _profile_shift
 
 
+def _validate_band_inputs(build, source, dataset, model):
+	"""Both measured builders consume the same full-detector raw calibration."""
+
+	physical = dataset.physical_shape
+	if (source.frame_count, source.rows, source.columns) != (physical.Theta, physical.Y, physical.X):
+		raise ValueError("frame source must match the dataset's full physical shape")
+	for component_name, kind in ((model.white_component, "detector_static"), (model.dark_component, "dark")):
+		component = build.components.get(component_name)
+		if component is None:
+			# Preserve the session's actionable incomplete/unknown-component error.
+			build.read_component(component_name)
+		if component.kind != kind or component.payload.axes != ("Y", "X"):
+			raise ValueError(f"{component_name!r} must be a static {kind} (Y, X) component")
+		if component.payload.shape != (physical.Y, physical.X):
+			raise ValueError("white and dark components must cover the full detector")
+		region = build.component_compatibility(component_name).region
+		if region is not None and (region.x_start != 0 or region.width != physical.X):
+			raise ValueError(f"{component_name!r} must cover detector columns [0, {physical.X})")
+
+
 def build_beam_band_shift_schedule(
 	build: CalibrationBuildSession,
 	source: Any,
@@ -43,8 +63,7 @@ def build_beam_band_shift_schedule(
 	"""
 
 	physical = dataset.physical_shape
-	if (source.frame_count, source.rows, source.columns) != (physical.Theta, physical.Y, physical.X):
-		raise ValueError("frame source must match the dataset's full physical shape")
+	_validate_band_inputs(build, source, dataset, model)
 	if source.frame_count < 2 or y_chunk < 1:
 		raise ValueError("schedule fitting requires at least two frames and a positive y_chunk")
 	if not np.isfinite(highpass_sigma) or highpass_sigma <= 0 or not np.isfinite(stretch_sigma) or stretch_sigma < 0:
@@ -64,19 +83,6 @@ def build_beam_band_shift_schedule(
 	design = np.column_stack((np.ones(len(rows)), centres - model.yc))
 	if np.linalg.matrix_rank(design) != 2:
 		raise ValueError("reference windows must have distinct row centres to fit stretch")
-
-	for component_name, kind in ((model.white_component, "detector_static"), (model.dark_component, "dark")):
-		component = build.components.get(component_name)
-		if component is None:
-			# Preserve the session's actionable incomplete/unknown-component error.
-			build.read_component(component_name)
-		if component.kind != kind or component.payload.axes != ("Y", "X"):
-			raise ValueError(f"{component_name!r} must be a static {kind} (Y, X) component")
-		if component.payload.shape != (physical.Y, physical.X):
-			raise ValueError("white and dark components must cover the full detector")
-		region = build.component_compatibility(component_name).region
-		if region is not None and (region.x_start != 0 or region.width != physical.X):
-			raise ValueError(f"{component_name!r} must cover detector columns [0, {physical.X})")
 
 	def profile(index: int | None) -> np.ndarray:
 		result = np.empty(physical.Y, dtype=np.float64)
