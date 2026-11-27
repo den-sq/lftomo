@@ -61,12 +61,15 @@ def _run_increment(buffer, scan, recon):
 	_IncrementStage().run(PipelineState(buffer, scan, recon))
 
 
-def _crashing_run(connection):
+def _crashing_run(connection, directory, retain):
 	if hasattr(os, "setsid"):
 		os.setsid()
-	with PipelineRunContext() as context:
+	with PipelineRunContext(intermediate_root=directory, retain_intermediates=retain) as context:
 		buffer = context.storage.allocate(ImgSlice(2, 3), np.float32)
-		connection.send(buffer.name)
+		intermediate = context.create_intermediate(ProjOrder(2, 3, 4), np.float32)
+		intermediate.array()[...] = 17
+		intermediate.flush()
+		connection.send((buffer.name, intermediate.path))
 		connection.close()
 		while True:
 			time.sleep(1)
@@ -335,23 +338,31 @@ def test_run_context_cleans_intermediates_when_executor_shutdown_fails(tmp_path,
 
 
 @pytest.mark.parametrize("stop_signal", [signal.SIGTERM, signal.SIGKILL])
-def test_killed_process_group_does_not_leak_manager_segments(stop_signal):
+@pytest.mark.parametrize("retain", [False, True])
+def test_killed_process_group_cleans_owned_storage_and_honors_retention(tmp_path, stop_signal, retain):
 	if not hasattr(os, "killpg"):
 		pytest.skip("process-group crash cleanup requires POSIX")
 	spawn = multiprocessing.get_context("spawn")
 	parent, child = spawn.Pipe(duplex=False)
-	process = spawn.Process(target=_crashing_run, args=(child,))
+	user_file = tmp_path / "unrelated.txt"
+	user_file.write_text("keep")
+	process = spawn.Process(target=_crashing_run, args=(child, tmp_path, retain))
 	process.start()
 	child.close()
-	name = parent.recv()
+	name, intermediate = parent.recv()
 	assert _segment_exists(name)
+	assert intermediate.exists()
 	os.killpg(process.pid, stop_signal)
 	process.join(timeout=10)
 	assert not process.is_alive()
 	deadline = time.monotonic() + 10
-	while _segment_exists(name) and time.monotonic() < deadline:
+	while (_segment_exists(name) or (not retain and intermediate.parent.exists())) and time.monotonic() < deadline:
 		time.sleep(0.1)
 	assert not _segment_exists(name)
+	assert intermediate.parent.exists() is retain
+	if retain:
+		np.testing.assert_array_equal(np.load(intermediate), np.full((2, 3, 4), 17))
+	assert user_file.read_text() == "keep"
 
 
 @pytest.mark.parametrize("start_method", ["default", "spawn"])

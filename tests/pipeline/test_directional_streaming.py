@@ -7,7 +7,7 @@ import tifffile as tf
 
 from lftomo.pipeline import WindowConfig, WindowPlanError
 from lftomo.runner import run_reconstruction
-from tests.fixtures.tier1 import flat_dark_frames, projection_stack
+from tests.fixtures.tier1 import flat_dark_frames, projection_stack, shepp_logan
 from tests.pipeline.test_streaming import _write_yaml
 
 
@@ -20,6 +20,13 @@ def directional_scan(tmp_path):
 	# The existing phantom varies in Y, X and angle, exposing misplaced chunks.
 	transmission = np.exp(-0.7 * projection_stack(size=size, n_projections=theta))
 	projections = darks[0] + transmission * (flats[0] - darks[0])
+	# TomoPy 1.15.3 gridrec reads past its correction table at power-of-two
+	# output widths. Keep the same phantom and physical center while excluding
+	# its last detector column, so these checks isolate streaming behavior.
+	columns = size - 1
+	projections, flats, darks = (
+		values[..., :columns] for values in (projections, flats, darks)
+	)
 	data_path = tmp_path / "scan.h5"
 	with h5py.File(data_path, "w") as handle:
 		handle.create_dataset("exchange/data", data=np.rint(projections).astype(np.uint16))
@@ -29,7 +36,7 @@ def directional_scan(tmp_path):
 	_write_yaml(scan_path, {
 		"energy_keV": 20, "pixel_size_um": 1, "ssd_cm": 10,
 		"n_projections": theta, "degrees_per_fov": 180,
-		"detector": {"pixel_size_um": 1, "rows": size, "columns": size},
+		"detector": {"pixel_size_um": 1, "rows": size, "columns": columns},
 		"acquisition": {"n_projections": theta, "rotation_end_deg": 180},
 		"projections": {
 			"format": "hdf5_dxchange", "path": str(data_path),
@@ -119,6 +126,78 @@ def test_direction_changes_preserve_strided_angles_and_selected_row_offsets(tmp_
 	)
 
 	_assert_same_reconstruction(windowed, whole, range(2, 11))
+
+
+@pytest.mark.parametrize("affine", [False, True])
+@pytest.mark.parametrize("rows, slope", [(48, 1e-9), (96, 1e-12)])
+def test_phase_row_roi_uses_detector_context_in_whole_and_theta_runs(
+	tmp_path, monkeypatch, affine, rows, slope,
+):
+	"""A requested row interval is an output ROI, not a new detector edge."""
+	tomopy = pytest.importorskip("tomopy")
+	columns, theta_count = 31, 7
+	y_start, y_stop = rows // 2 - 4, rows // 2 + 4
+	y = np.linspace(-1, 1, rows, dtype=np.float32)[:, None, None]
+	volume = (0.4 + 0.5 * np.exp(-((y - 0.35) / 0.2) ** 2)) * shepp_logan(columns)
+	angles = np.linspace(0, np.pi, theta_count, dtype=np.float32)
+	line_integrals = tomopy.project(volume, angles, pad=False, emission=True, ncore=1)
+	transmission = np.exp(-0.04 * line_integrals)
+	flat = 10000 * np.linspace(0.9, 1.1, rows, dtype=np.float32)[:, None] * np.ones((1, columns))
+	dark = np.full((rows, columns), 20, dtype=np.float32)
+	counts = np.rint(dark + transmission * (flat - dark)).astype(np.uint16)
+	data_path = tmp_path / "roi.h5"
+	with h5py.File(data_path, "w") as handle:
+		handle.create_dataset("exchange/data", data=counts)
+		handle.create_dataset("exchange/data_white", data=np.stack([flat, flat]))
+		handle.create_dataset("exchange/data_dark", data=np.stack([dark, dark]))
+	scan_path = tmp_path / "roi-scan.yaml"
+	_write_yaml(scan_path, {
+		"energy_keV": 20, "pixel_size_um": 1, "ssd_cm": 10,
+		"n_projections": theta_count, "degrees_per_fov": 180,
+		"detector": {"pixel_size_um": 1, "rows": rows, "columns": columns},
+		"acquisition": {"n_projections": theta_count, "rotation_end_deg": 180},
+		"projections": {"format": "hdf5_dxchange", "path": str(data_path)},
+	})
+	phase_params = {"slope": slope, "fft_pad": True}
+	if affine:
+		envelope = 40e-6 * (
+			1 + 0.15 * np.cos(np.linspace(-np.pi, np.pi, rows))[:, None]
+			+ 0.1 * np.sin(np.linspace(-np.pi, np.pi, columns))[None, :]
+		)
+		phase_params.update(material_alpha=5e-8, envelope_m=envelope.tolist())
+	captured = []
+	original_recon = tomopy.recon
+	def capture_phase_input(data, angles, **kwargs):
+		values = data if kwargs["sinogram_order"] else data.transpose(1, 0, 2)
+		captured.append(values.copy())
+		return original_recon(data, angles, **kwargs)
+	monkeypatch.setattr(tomopy, "recon", capture_phase_input)
+	results = []
+	for name, selection, config in (
+		("full", {}, WindowConfig()),
+		("roi-whole", {"y_start": y_start, "y_stop": y_stop}, WindowConfig()),
+		("roi-theta", {"y_start": y_start, "y_stop": y_stop}, WindowConfig(
+			rows=4, theta=3, intermediate_root=tmp_path / "intermediates",
+		)),
+	):
+		pipeline = tmp_path / f"{name}.yaml"
+		_write_yaml(pipeline, {"process_workers": 1, "pipeline": [
+			{"kind": "read", "algorithm": "hdf5_dxchange", "params": selection},
+			{"kind": "normalize", "algorithm": "weighted"},
+			{"kind": "phase", "algorithm": "paganin", "params": phase_params},
+			{"kind": "recon", "algorithm": "gridrec", "params": {"center": columns / 2, "ncore": 1}},
+			{"kind": "write", "algorithm": "tiff_slices", "params": {
+				"naming_template": "slice_{slice:03d}.tif",
+			}},
+		]})
+		captured.clear()
+		_run(pipeline, scan_path, tmp_path / name, config)
+		results.append(np.concatenate(captured, axis=0))
+	assert np.ptp(results[0][y_start:y_stop]) > 0.01
+	for result in results[1:]:
+		# The weak-slope case retains sampled-FFT tails beyond the continuum
+		# decay length. Both cases must share measured rows and detector edges.
+		np.testing.assert_allclose(result, results[0][y_start:y_stop], rtol=1e-6, atol=1e-6)
 
 
 def test_downstream_bilateral_reads_processed_neighbors_across_direction_changes(tmp_path, directional_scan):

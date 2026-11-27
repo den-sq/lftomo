@@ -119,7 +119,9 @@ def _window_samples(config: WindowConfig, axis: str, selected: TomoWindow) -> in
 	if limit is None and axis == "Theta" and any(
 		value is not None for value in (config.rows, config.theta, config.columns)
 	):
-		limit = 1
+		# Match the configured Y batch; with only an X limit the Y batch is
+		# the complete selected height. Explicit Theta limits take precedence.
+		limit = config.rows if config.rows is not None else selected.frange.length.Y
 	available = getattr(selected.frange.length, axis)
 	return available if limit is None else min(limit, available)
 
@@ -148,15 +150,11 @@ def _dataset_for_axis(
 		if multiple and stage.contract.window_axes and axis not in stage.contract.window_axes:
 			raise WindowPlanError(f"{stage.name} does not support {axis} windows")
 		requirement = stage.contract.required_pad
-		# Theta windows retain the complete detector image. The phase algorithm's
-		# own numerical FFT padding still applies, but no Y source halo is needed.
-		if requirement.phase_fft_y and (
-			axis == "Theta" or (
-				whole_direction_preferences and stage.contract.preferred_window_axis == "Theta"
-			)
-		):
-			requirement = replace(requirement, phase_fft_y=False)
-		stage_before, stage_after = requirement.resolve(scan, input_shape)
+		# A selected detector interval remains an ROI even when it is not split
+		# in Y. Its phase context must come from real neighboring detector rows.
+		stage_before, stage_after = requirement.resolve(
+			scan, input_shape, physical_shape=metadata.physical_shape,
+		)
 		pad_before = pad_before + stage_before
 		pad_after = pad_after + stage_after
 		if multiple and axis in stage.contract.requires_full_axes:

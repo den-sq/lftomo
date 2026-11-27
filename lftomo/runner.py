@@ -7,6 +7,8 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import shutil
+import sys
 from typing import Any, Callable
 
 import click
@@ -56,6 +58,7 @@ from lftomo.pipeline.streaming import StreamingSegment, WindowPlanError, resolve
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 from lftomo.util.converter import CONVERTER
 from lftomo.util.mem import SharedNPManager
+from lftomo.util.log import log, LOG
 from lftomo.util.shapes import Y
 from lftomo.util.window import TomoDataSet, TomoWindow
 
@@ -210,7 +213,7 @@ def calibration_target(scan: Scan, source_window: TomoWindow) -> CalibrationTarg
 	"""Build compatibility facts from the canonical source selection."""
 
 	columns = _detector_shape(scan)[1]
-	selection = source_window.interval("Y")
+	selection = source_window.with_pad(["Y"]).interval("Y")
 	metadata = scan.metadata
 	return CalibrationTarget(
 		detector_id=metadata.get("detector_id") or scan.detector.name,
@@ -294,7 +297,7 @@ def resolve_calibration(
 
 	pipeline_root = Path(pipeline_root).resolve()
 	scan_root = Path(scan_root).resolve()
-	selection = source_window.interval("Y")
+	selection = source_window.with_pad(["Y"]).interval("Y")
 	y_start, y_stop = selection.start.Y, selection.stop.Y
 	normalize = _normalization_stage(recon)
 	manifest_path, options = _manifest_selection(recon, pipeline_root)
@@ -718,6 +721,63 @@ def _run_directional_pipeline(
 	return artifacts
 
 
+def _plan_intermediate_storage(
+	segments: tuple[StreamingSegment, ...], buffer_plans: tuple[PipelinePlan, ...],
+	root: Path,
+) -> dict[str, Any]:
+	"""Report coexisting NPY bytes and advisory free space before execution."""
+
+	boundaries = []
+	for index, (segment, plan) in enumerate(zip(segments[:-1], buffer_plans[:-1], strict=True)):
+		output = plan.steps[-1].output_buffer
+		shape = segment.dataset.full_window().frange.length.to(output.layout)
+		boundaries.append({
+			"segment": index, "after_stage": segment.stop - 1,
+			"payload_bytes": shape.nbytes(output.dtype),
+			"estimated_file_bytes": FileBackedNPArray.estimated_file_bytes(shape, output.dtype),
+		})
+	# Completed boundaries remain present until the run context exits, even
+	# after their mappings close. Retention changes cleanup, not this peak.
+	peak_bytes = sum(boundary["estimated_file_bytes"] for boundary in boundaries)
+	result = {
+		"root": str(root), "boundaries": boundaries,
+		"estimated_peak_bytes": peak_bytes, "available_bytes": None,
+		"estimate_basis": "coexisting NPY files including headers; excludes filesystem overhead",
+	}
+	if not boundaries:
+		return result
+	log.write(
+		"Intermediate storage",
+		f"root={root}; boundary file bytes="
+		f"{[boundary['estimated_file_bytes'] for boundary in boundaries]}; "
+		f"peak coexisting bytes={peak_bytes} (including NPY headers)",
+		LOG.INFO, out=sys.stderr,
+	)
+	# A configured root may be created lazily at first publication. Its nearest
+	# existing ancestor identifies the filesystem without creating directories.
+	try:
+		capacity_root = root
+		while not capacity_root.exists() and capacity_root != capacity_root.parent:
+			capacity_root = capacity_root.parent
+		available = shutil.disk_usage(capacity_root).free
+	except OSError as error:
+		log.write(
+			"Intermediate storage", f"Cannot inspect free space for {root}: {error}; proceeding.",
+			LOG.WARN, out=sys.stderr,
+		)
+	else:
+		result["available_bytes"] = available
+		if available < peak_bytes:
+			log.write(
+				"Intermediate storage",
+				f"Estimated intermediate peak {peak_bytes} bytes exceeds available space "
+				f"{available} bytes at {root}; advisory only, proceeding. "
+				"Choose --intermediate-root on a larger filesystem if needed.",
+				LOG.WARN, out=sys.stderr,
+			)
+	return result
+
+
 def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | ResolvedScan,
 			output_path: str | Path | None = None, backend: Backend | None = None, *,
 			calibration_bundle: CalibrationBundleRef | None = None,
@@ -783,6 +843,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 			"or raise the configured limit explicitly"
 		)
 	prepared = []
+	intermediate_root = PipelineRunContext.resolve_intermediate_root(window_config.intermediate_root)
 	for run, concrete, resolved_document, run_scan, segments in planned:
 		resolution = resolve_calibration(
 			run_scan,
@@ -882,6 +943,11 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 		run, concrete, resolved_document, run_scan, initial_artifacts, stages,
 		segments, buffer_plans,
 	) in prepared:
+		# Check each candidate immediately before execution so retained files
+		# from earlier candidates are reflected in the filesystem's free space.
+		initial_artifacts["intermediate_storage"] = _plan_intermediate_storage(
+			segments, buffer_plans, intermediate_root,
+		)
 		dataset = segments[-1].dataset
 		resolved_metadata = resolved_document.setdefault("metadata", {})
 		resolved_metadata["streaming_dataset"] = CONVERTER.unstructure(dataset)
@@ -889,12 +955,13 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 			"start": segment.start, "stop": segment.stop, "axis": segment.axis,
 			"dataset": CONVERTER.unstructure(segment.dataset),
 		} for segment in segments]
+		resolved_metadata["intermediate_storage"] = initial_artifacts["intermediate_storage"]
 		with PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
 			max_workers=concrete.process_workers or min(4, os.cpu_count() or 1),
 			worker_timeout_seconds=concrete.worker_timeout_seconds,
-			intermediate_root=window_config.intermediate_root,
+			intermediate_root=intermediate_root,
 			retain_intermediates=window_config.retain_intermediates,
 		) as run_context:
 			if state_executor is not None:
@@ -966,6 +1033,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 					"streaming_dataset": CONVERTER.unstructure(dataset),
 					"streaming_segments": resolved_metadata["streaming_segments"],
 					"intermediates": artifacts.get("intermediates", []),
+					"intermediate_storage": initial_artifacts["intermediate_storage"],
 					"intermediates_retained": window_config.retain_intermediates,
 				}, stream, sort_keys=False)
 			artifacts["recon_run"] = manifest_path
@@ -1008,7 +1076,7 @@ def _json_result(result: RunResult) -> dict[str, Any]:
 @click.option("--gpu", is_flag=True, help="Declare that the selected runtime provides CUDA support.")
 @click.option("--json-output", is_flag=True, help="Emit machine-readable run summaries.")
 @click.option("--window-rows", type=click.IntRange(min=1), help="Machine-selected core rows per window.")
-@click.option("--window-theta", type=click.IntRange(min=1), help="Projections per Theta window (defaults to one in bounded runs).")
+@click.option("--window-theta", type=click.IntRange(min=1), help="Projections per Theta window (defaults to --window-rows in bounded runs).")
 @click.option("--window-columns", type=click.IntRange(min=1), help="Columns per X window.")
 @click.option("--window-axis", type=click.Choice(["Y", "Theta", "X"]), default="Y",
 	help="Default direction; Stage requirements and preferences take precedence.")

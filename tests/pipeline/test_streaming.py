@@ -245,13 +245,13 @@ def _selected_source(tmp_path, *, rows=12, theta=10, **selection):
 	BronnikovAidedCorrectionFilterStage(alpha=2),
 ])
 @pytest.mark.parametrize("config", [WindowConfig(), WindowConfig(rows=3, theta=2)])
-def test_directional_phase_uses_full_detector_images_without_y_halo(stage, config, caplog):
+def test_directional_phase_context_clips_at_detector_edges(stage, config, caplog):
 	segments = resolve_streaming_segments([stage], _scan(), config)
 	assert len(segments) == 1
 	assert segments[0].axis == ("Y" if config.rows is None else "Theta")
-	assert segments[0].dataset.pad_before == ProjOrder(0, 0, 0)
-	assert segments[0].dataset.pad_after == ProjOrder(0, 0, 0)
 	assert all(window.shape.Y == 12 for window in segments[0].dataset)
+	assert all(window.pad_before == window.pad_after == ProjOrder(0, 0, 0)
+		for window in segments[0].dataset)
 	assert "Extent-sensitive" not in caplog.text
 
 
@@ -266,7 +266,8 @@ def test_whole_plan_preserves_geometry_lifecycle_without_direction_boundaries(fi
 	assert [(segment.start, segment.stop) for segment in segments] == [(0, 2)]
 	assert len(segments[0].dataset.frange) == 1
 	assert segments[0].dataset.full_window().shape == ProjOrder(4, 12, 8)
-	assert segments[0].dataset.pad_before.Y == segments[0].dataset.pad_after.Y == 0
+	assert segments[0].dataset.full_window().pad_before.Y == 0
+	assert segments[0].dataset.full_window().pad_after.Y == 0
 
 
 def test_directional_segments_preserve_authored_order_and_stage_defaults(tmp_path):
@@ -280,8 +281,21 @@ def test_directional_segments_preserve_authored_order_and_stage_defaults(tmp_pat
 	assert [(segment.start, segment.stop, segment.axis) for segment in segments] == [
 		(0, 2, "Y"), (2, 3, "Theta"), (3, 4, "Y"),
 	]
-	assert segments[1].dataset.step == Theta(1)
+	assert segments[1].dataset.step == Theta(4)
 	assert segments[0].dataset.step == segments[2].dataset.step == Y(4)
+
+
+@pytest.mark.parametrize("config, expected", [
+	(WindowConfig(rows=4), [4, 4, 2]),
+	(WindowConfig(rows=4, theta=3), [3, 3, 3, 1]),
+	(WindowConfig(rows=20), [10]),
+	(WindowConfig(columns=3), [6, 4]),
+])
+def test_theta_default_matches_row_batch_and_explicit_theta_overrides(config, expected):
+	dataset = resolve_streaming_segments(
+		[BronnikovAidedCorrectionStage(alpha=2)], _scan(rows=6, theta=10), config,
+	)[0].dataset
+	assert [window.frange.length.Theta for window in dataset] == expected
 
 
 def test_theta_windows_preserve_selected_projection_stride(tmp_path):
@@ -330,8 +344,11 @@ def test_downstream_padding_expands_prior_materialized_coverage(tmp_path):
 	assert segments[-1].dataset.pad_before.Y == 1
 	assert segments[-1].dataset.pad_after.Y == 3
 	assert segments[1].dataset.interval("Y") == Y.interval(2, 12)
-	assert segments[0].dataset.interval("Y") == Y.interval(2, 12)
-	assert segments[1].dataset.pad_before.Y == segments[1].dataset.pad_after.Y == 0
+	# The phase sweep also needs real detector context for this slope; its
+	# input sweep must publish that context beyond the downstream filter halo.
+	assert segments[0].dataset.interval("Y") == Y.interval(0, 12)
+	assert segments[1].dataset.full_window().pad_before.Y == 2
+	assert segments[1].dataset.full_window().pad_after.Y == 0
 
 
 def test_explicit_direction_and_x_windows_use_canonical_geometry():

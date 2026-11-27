@@ -1,9 +1,11 @@
 from dataclasses import replace
+from contextlib import ExitStack
 from functools import cached_property
 from multiprocessing.shared_memory import SharedMemory, ShareableList
-from multiprocessing.managers import SharedMemoryManager, BaseManager
+from multiprocessing.managers import SharedMemoryManager, SharedMemoryServer, BaseManager, dispatch
 from multiprocessing import util as multiprocessing_util
 import os
+from pathlib import Path
 import signal
 from sys import platform, stdout
 import threading
@@ -29,8 +31,71 @@ from .process import watch_parent_exit
 MEM_INTERVAL_TIMER = 1.0
 
 
+class _RunStorageServer(SharedMemoryServer):
+	"""Extend the existing manager's owner-death cleanup to run directories."""
+
+	public = SharedMemoryServer.public + [
+		"create_intermediate_directory", "release_intermediate_directory",
+	]
+
+	def __init__(self, *args, **kwargs):
+		super().__init__(*args, **kwargs)
+		self._intermediate_directories: set[Path] = set()
+		self._directory_lock = threading.RLock()
+		self._directories_closed = False
+
+	def create_intermediate_directory(self, _connection, root, retain):
+		# Create and register under one lock in the surviving manager process:
+		# an owner killed before the RPC returns cannot strand a fresh directory.
+		with self._directory_lock:
+			if self._directories_closed:
+				raise RuntimeError("storage owner has already exited")
+			directory = StorageBackend.create_intermediate_directory(
+				self, Path(root), retain=retain,
+			)
+			if not retain:
+				self._intermediate_directories.add(directory)
+			return str(directory)
+
+	def release_intermediate_directory(self, _connection, directory):
+		with self._directory_lock:
+			directory = Path(directory)
+			if directory not in self._intermediate_directories:
+				raise ValueError("directory is not owned by this storage manager")
+			try:
+				StorageBackend.release_intermediate_directory(self, directory)
+			except FileNotFoundError:
+				pass
+			self._intermediate_directories.remove(directory)
+
+	def cleanup_intermediates(self):
+		with self._directory_lock:
+			self._directories_closed = True
+			with ExitStack() as cleanup:
+				for directory in tuple(self._intermediate_directories):
+					cleanup.callback(self.release_intermediate_directory, None, directory)
+
+	def shutdown(self, connection):
+		try:
+			self.cleanup_intermediates()
+		finally:
+			super().shutdown(connection)
+
+
 class SharedNPManager(SharedMemoryManager, StorageBackend):
 	""" Manages shared memory numpy arrays. """
+
+	_Server = _RunStorageServer
+
+	def create_intermediate_directory(self, root: Path, *, retain: bool) -> Path:
+		with self._Client(self._address, authkey=self._authkey) as connection:
+			return Path(dispatch(
+				connection, None, "create_intermediate_directory", (str(root), retain),
+			))
+
+	def release_intermediate_directory(self, directory: Path) -> None:
+		with self._Client(self._address, authkey=self._authkey) as connection:
+			dispatch(connection, None, "release_intermediate_directory", (str(directory),))
 
 	@staticmethod
 	def check_capacity(planned_peak_bytes: int) -> None:
@@ -58,8 +123,9 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		"""Run the manager outside the client process group with a death watch.
 
 		Experiment timeouts kill the isolated trial's complete process group. The
-		manager must live just long enough to unlink its tracked segments after the
-		owning client dies, including when that client receives ``SIGKILL``.
+		manager must live just long enough to unlink its tracked segments and
+		intermediate directories after the owning client dies, including when that
+		client receives ``SIGKILL``.
 
 		``SharedMemoryManager`` exposes no public owner-death hook.  This override
 		therefore deliberately mirrors CPython's ``BaseManager._run_server`` and
@@ -80,15 +146,18 @@ class SharedNPManager(SharedMemoryManager, StorageBackend):
 		cleanup_started = False
 
 		def unlink_once():
-			"""Unlink tracked segments before any abnormal manager exit."""
+			"""Remove tracked storage before any abnormal manager exit."""
 
 			nonlocal cleanup_started
 			with cleanup_lock:
 				if cleanup_started:
 					return
 				cleanup_started = True
-				# CPython-private counterpart to SharedMemoryManager.shutdown().
-				server.shared_memory_context.unlink()
+				try:
+					server.cleanup_intermediates()
+				finally:
+					# CPython-private counterpart to SharedMemoryManager.shutdown().
+					server.shared_memory_context.unlink()
 
 		def cleanup_after_sigterm(_signum, _frame):
 			# A process-tree reaper may target this detached server explicitly.

@@ -65,12 +65,15 @@ class PadRequirement:
 
 	``fixed`` remains the symmetric input. Supplying ``fixed_after`` makes
 	``fixed`` the before-side requirement and sets the after side explicitly.
+	``full_source_axes`` requests the complete physical source extent along those axes;
+	canonical windows clip the resulting padding at the source boundaries.
 	"""
 
 	fixed: DataShape = field(default_factory=lambda: ProjOrder(0, 0, 0))
 	fixed_after: DataShape | None = None
 	phase_fft_y: bool = False
 	phase_fft_passes: int = 1
+	full_source_axes: tuple[str, ...] = ()
 
 	def __post_init__(self):
 		_canonical_pad(self.fixed)
@@ -78,8 +81,12 @@ class PadRequirement:
 			_canonical_pad(self.fixed_after)
 		if self.phase_fft_passes < 1:
 			raise ValueError("phase FFT passes must be positive")
+		if set(self.full_source_axes) - {"Theta", "Y", "X"}:
+			raise ValueError("full source axes must use only Theta, Y, and X")
 
-	def resolve(self, scan: Any, input_shape: Any) -> tuple[ProjOrder, ProjOrder]:
+	def resolve(
+		self, scan: Any, input_shape: Any, *, physical_shape: DataShape | None = None,
+	) -> tuple[ProjOrder, ProjOrder]:
 		before = _canonical_pad(self.fixed)
 		after = before if self.fixed_after is None else _canonical_pad(self.fixed_after)
 		if self.phase_fft_y:
@@ -95,6 +102,14 @@ class PadRequirement:
 			phase = Y(max(0, phase_y) * self.phase_fft_passes)
 			before = before + phase
 			after = after + phase
+		if self.full_source_axes:
+			if physical_shape is None:
+				raise ValueError("full source context requires the physical source shape")
+			full = replace(ProjOrder(0, 0, 0), **{
+				axis: getattr(physical_shape, axis) for axis in self.full_source_axes
+			})
+			before = ProjOrder.param_max(before, full)
+			after = ProjOrder.param_max(after, full)
 		return before, after
 
 

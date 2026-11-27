@@ -134,13 +134,15 @@ section is the `Recon` that produced the slices, with every `Recon` field filled
 in, and `streaming_segments` records the directional window plans used. Saved on its
 own as a YAML file, `resolved_recon` reruns the same pipeline, but the window
 plan is not restored from it: pass the same window options again. BAC and slope
-Paganin use Theta batches with the complete selected detector extent. Legacy
+Paganin use Theta batches. Slope and affine Paganin read the complete physical
+detector height even when an output row selection is requested. Legacy
 alpha Paganin still follows its Y window and padding extent, which can change
 its numerical result. See [windowed streaming](windowed-streaming.md).
 
 Useful options: `--json-output` prints machine-readable run summaries;
 `--window-rows N` streams the volume through windows of N detector rows to bound
-memory; `--window-theta N` controls projection batches for phase retrieval;
+memory; `--window-theta N` controls projection batches for phase retrieval
+(defaults to `--window-rows`);
 `--intermediate-root PATH` selects temporary storage for direction changes;
 `--gpu` declares CUDA support for GPU Stages.
 

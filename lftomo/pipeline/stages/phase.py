@@ -277,9 +277,18 @@ class PaganinFilterStage(ProjectionStage):
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
 		if params.enabled:
+			# The sampled FFT inverse has global support, including small
+			# oscillatory tails beyond its continuum exponential decay length.
+			# Retain physical detector rows so an ROI shares the full run's
+			# Fourier canvas and detector-edge treatment, also for affine terms.
+			required_pad = (
+				PadRequirement(full_source_axes=("Y",))
+				if params.slope is not None else cls.contract.required_pad
+			)
 			if params.material_alpha != 0:
 				return replace(
 					cls.contract,
+					required_pad=required_pad,
 					preferred_window_axis="Theta",
 					produces_artifacts=cls.contract.produces_artifacts + ("phase_envelope",),
 					managed_artifacts=cls.contract.managed_artifacts + (
@@ -288,6 +297,7 @@ class PaganinFilterStage(ProjectionStage):
 				)
 			return replace(
 				cls.contract,
+				required_pad=required_pad,
 				preferred_window_axis="Theta" if params.slope is not None else None,
 			)
 		return replace(

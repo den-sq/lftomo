@@ -17,11 +17,28 @@ These directions describe source windows, independently of buffer layout.
 Enabled slope `phase.paganin` / `phase.paganin_filter` and BAC / BAC correction
 prefer `Theta`. Thus read → normalize → slope Paganin (or BAC) → stripe → recon
 runs as Y → Theta → Y sweeps. Theta windows contain the complete selected
-detector height and width, so phase retrieval needs no Y source halo and emits
-no Y extent-sensitivity warning. Its internal numerical FFT padding is
-unchanged. In a bounded run, the default Theta batch is one projection;
-`theta` / `--window-theta` selects another size. Window sizes count samples,
-including when the read selection strides through projection indices.
+detector height and width plus the phase filter's real source context. A row
+selection is an output region of interest: slope and affine Paganin read the
+complete physical detector height instead of edge-filling at the selection
+boundary. Their sampled FFT kernel has global support; a finite halo based on
+the continuum exponential decay does not reproduce the full-detector result.
+The canonical window model clips source context at physical detector edges;
+internal numerical FFT padding remains separate. BAC's source-context reach
+is deferred to #375.
+
+For slope and affine Paganin, narrowing the output row selection therefore
+does not reduce the phase input height. Theta batch size still bounds the
+number of complete detector images held at once, and the preceding normalized
+intermediate includes all physical rows. Whole-selection runs with an output
+ROI likewise retain the complete detector height through phase retrieval.
+
+In a bounded run, the default Theta batch equals `rows` / `--window-rows`;
+`theta` / `--window-theta` overrides it. When only columns are bounded, the
+default Theta batch equals the selected detector height. Every batch is capped
+by the available projection samples. Matching row and projection batch sizes
+gives similar input-buffer sizes when the selected Y and Theta extents are
+similar, and lets multiple projections share dispatch overhead. Window sizes
+count samples, including when the read selection strides through projection indices.
 
 For example:
 
@@ -32,15 +49,16 @@ lftomo-run pipeline.yaml scan.yaml --window-rows 64 --window-theta 4 \
 
 The pointwise negative-log and beta-scale Stages also support X windows.
 Whole-selection execution needs no direction transitions or intermediate files.
-It uses the same selected phase extent as the Theta plan without the legacy
-phase Y source halo. The lower-level `resolve_streaming_plan` remains an
-explicit single-direction API for existing callers; it does not segment a run.
+It uses the same real phase context as the Theta plan. The lower-level
+`resolve_streaming_plan` remains an explicit single-direction API for existing
+callers; it does not segment a run.
 
 Three quantities remain separate in the resolved plan:
 
 1. Each Stage declares an algorithm requirement with
-   `StageContract.required_pad`. Paganin uses the canonical `_phase_pad`
-   calculation, bilateral filtering uses its kernel radius, and movement uses
+   `StageContract.required_pad`. Slope and affine Paganin require all physical
+   Y source rows; legacy alpha Paganin uses the canonical `_phase_pad`
+   calculation. Bilateral filtering uses its kernel radius, and movement uses
    the ceiling of its maximum displacement. Requirements use semantic
    `DataShape` values; `fixed` is symmetric unless `fixed_after` is supplied.
 2. `WindowConfig.rows`, `theta`, and `columns` select core samples per window
@@ -99,9 +117,23 @@ segments share the same run-owned process executor.
 location (system temporary storage by default). Each run, candidate, and rerun
 creates a fresh unique subdirectory. Existing files are never overwritten or
 used as implicit restart inputs. By default the context removes its directory
-on success or failure. `retain_intermediates=True` / `--retain-intermediates`
-retains it in either case; files from a failed run may be incomplete and are
-not resumable. Successful `recon_run.yaml` manifests record segment geometry,
+on success or failure. The shared-memory manager also removes non-retained
+directories when the owner exits abruptly, including SIGKILL, through the same
+owner-exit watch that reclaims shared memory. `retain_intermediates=True` /
+`--retain-intermediates` keeps files after normal or abrupt exit; files from a
+failed run may be incomplete and are not resumable.
+
+Before each candidate starts, the run log reports the resolved root, each
+boundary's estimated file bytes, and their coexisting peak. All boundary files
+remain on disk until that candidate exits, so this peak is their sum, including
+NPY headers and excluding filesystem overhead. Free space is sampled at that
+point, including the effect of any retained earlier candidates. Insufficient
+space produces an advisory warning; it does not refuse the run. Select a root
+with enough capacity for the reported files. The `intermediate_storage` record
+in the resolved plan, result artifacts, and `recon_run.yaml` preserves these
+estimates and the sampled available bytes.
+
+Successful `recon_run.yaml` manifests also record segment geometry,
 intermediate paths, completion, layout, dtype, domain, and retention policy.
 
 Direction boundaries currently require unchanged source geometry and no

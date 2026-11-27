@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import ExitStack
+from io import BytesIO
 from pathlib import Path
 import shutil
 import tempfile
@@ -180,6 +181,17 @@ class FileBackedNPArray(ManagedBuffer):
 				mmap.close()
 
 	@classmethod
+	def estimated_file_bytes(cls, shape: DataShape, dtype: np.dtype) -> int:
+		"""Estimate NPY bytes including its header, excluding filesystem overhead."""
+
+		header = BytesIO()
+		np.lib.format.write_array_header_1_0(header, {
+			"descr": np.lib.format.dtype_to_descr(np.dtype(dtype)),
+			"fortran_order": False, "shape": shape.as_tuple(),
+		})
+		return header.tell() + shape.nbytes(dtype)
+
+	@classmethod
 	def create(cls, path: str | Path, shape: DataShape, dtype: np.dtype) -> Self:
 		"""Create an exclusively owned writable NPY file with canonical shape."""
 
@@ -278,6 +290,17 @@ def select_buffer_alias(
 class StorageBackend(ABC):
 	"""Allocator used by a pipeline run for owned working storage."""
 
+	def create_intermediate_directory(self, root: Path, *, retain: bool) -> Path:
+		"""Create a fresh directory; process-backed owners also track owner death."""
+
+		root.mkdir(parents=True, exist_ok=True)
+		return Path(tempfile.mkdtemp(prefix="lftomo-intermediates-", dir=root))
+
+	def release_intermediate_directory(self, directory: Path) -> None:
+		"""Remove one directory previously created for a non-retained run."""
+
+		shutil.rmtree(directory)
+
 	@abstractmethod
 	def allocate(
 		self,
@@ -317,7 +340,9 @@ class PipelineRunContext:
 	manager startup and shutdown. Callers that provide an existing backend retain
 	responsibility for its lifetime. File intermediates always belong to the
 	context: each run gets a fresh directory, removed on exit unless explicitly
-	retained for inspection. Retention does not enable reuse on a later run.
+	retained for inspection. The shared-memory backend performs creation and
+	cleanup in its surviving manager, so owner death removes non-retained files
+	too. Retention does not enable reuse on a later run.
 	"""
 
 	def __init__(self, storage: StorageBackend | None = None, *,
@@ -333,13 +358,19 @@ class PipelineRunContext:
 		self.max_workers = max_workers
 		self.worker_timeout_seconds = worker_timeout_seconds
 		self.multiprocessing_context = multiprocessing_context
-		self.intermediate_root = None if intermediate_root is None else Path(intermediate_root)
+		self.intermediate_root = self.resolve_intermediate_root(intermediate_root)
 		self.retain_intermediates = retain_intermediates
 		self._intermediate_directory: Path | None = None
 		self._intermediates: list[FileBackedNPArray] = []
 		self.executor = None
 		self._entered = False
 		self._spent = False
+
+	@staticmethod
+	def resolve_intermediate_root(root: str | Path | None = None) -> Path:
+		"""Resolve the shared preflight and runtime intermediate location."""
+
+		return Path(tempfile.gettempdir() if root is None else root).resolve()
 
 	@property
 	def intermediate_directory(self) -> Path | None:
@@ -366,11 +397,9 @@ class PipelineRunContext:
 		if not filename.endswith(".npy"):
 			filename += ".npy"
 		if self._intermediate_directory is None:
-			if self.intermediate_root is not None:
-				self.intermediate_root.mkdir(parents=True, exist_ok=True)
-			self._intermediate_directory = Path(tempfile.mkdtemp(
-				prefix="lftomo-intermediates-", dir=self.intermediate_root,
-			))
+			self._intermediate_directory = self.storage.create_intermediate_directory(
+				self.intermediate_root, retain=self.retain_intermediates,
+			)
 		buffer = FileBackedNPArray.create(self._intermediate_directory / filename, shape, dtype)
 		self._intermediates.append(buffer)
 		return buffer
@@ -411,14 +440,16 @@ class PipelineRunContext:
 	) -> None:
 		try:
 			with ExitStack() as cleanup:
-				if self._intermediate_directory is not None and not self.retain_intermediates:
-					cleanup.callback(shutil.rmtree, self._intermediate_directory)
-				for buffer in self._intermediates:
-					cleanup.callback(buffer.close)
 				if self._owns_storage and self.storage is not None:
 					shutdown = getattr(self.storage, "shutdown", None)
 					if shutdown is not None:
 						cleanup.callback(shutdown)
+				if self._intermediate_directory is not None and not self.retain_intermediates:
+					cleanup.callback(
+						self.storage.release_intermediate_directory, self._intermediate_directory,
+					)
+				for buffer in self._intermediates:
+					cleanup.callback(buffer.close)
 				if self.executor is not None:
 					cleanup.callback(self.executor.close)
 		finally:
