@@ -142,6 +142,24 @@ def test_table_writer_records_columns_and_uses_row_chunks(tmp_path):
 	)
 
 
+def test_build_reads_only_closed_components_with_detector_coordinates(tmp_path):
+	session = _session(tmp_path)
+	writer = session.create_array_component(
+		"white", shape=(3, 4), dtype="float32", axes=("Y", "X"),
+		kind="detector_static", coordinate_frame="detector",
+		compatibility={"region": {"y_start": 7, "height": 3, "width": 4}},
+	)
+	values = np.arange(12, dtype=np.float32).reshape(3, 4)
+	writer.append(values)
+	with pytest.raises(CalibrationBuildError, match="closed before reading"):
+		session.read_component("white", y_start=8, y_stop=9)
+	writer.close()
+	np.testing.assert_array_equal(session.read_component("white", y_start=8, y_stop=9), values[1:2])
+	assert not (session.staging_path / "calibration.yaml").exists()
+	session.finalize()
+	np.testing.assert_array_equal(session.read_component("white", y_start=8, y_stop=9), values[1:2])
+
+
 def test_context_exception_preserves_diagnosable_failed_build(tmp_path):
 	staging = None
 	with pytest.raises(RuntimeError, match="algorithm failed"):

@@ -201,6 +201,10 @@ class BeamBandShiftModel(ConfigModel):
 	dark_component: str = Field(default="pre_dark", min_length=1)
 	residual_component: str | None = Field(default=None, min_length=1)
 
+	def source_y(self, rows, dy, magnification):
+		"""Map shifted detector rows back to the reference beam coordinates."""
+		return self.yc + (rows - self.yc - dy) / magnification
+
 	@model_validator(mode="after")
 	def _residual_scale(self):
 		if self.residual_component is not None and self.dy_end in (None, 0):

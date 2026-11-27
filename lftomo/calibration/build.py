@@ -12,7 +12,7 @@ from typing import Any, Iterable, Literal, Sequence
 
 import numpy as np
 
-from .bundle import CalibrationBundleValidationError, stream_sha256, validate_bundle
+from .bundle import CalibrationBundle, CalibrationBundleValidationError, stream_sha256, validate_bundle
 from .models import (
 	ArrayPayload,
 	BeamBandShiftModel,
@@ -309,6 +309,35 @@ class CalibrationBuildSession:
 		self._writers[name] = writer
 		return writer
 
+	def read_component(self, name: str, **selection: Any) -> np.ndarray:
+		"""Read a completed input through the canonical bounded bundle reader.
+
+		This allows a derived builder to consume its calibration components before
+		publication without maintaining a second payload loader or writing an
+		intermediate manifest. Unfinished writers are never visible as inputs.
+		"""
+
+		return self._completed_component_reader(name).read_component(name, **selection)
+
+	def component_compatibility(self, name: str) -> CompatibilityMetadata:
+		"""Resolve completed-component coverage through the bundle's merge policy."""
+
+		return self._completed_component_reader(name).compatibility(name)
+
+	def _completed_component_reader(self, name: str) -> CalibrationBundle:
+		if self._failed:
+			raise CalibrationBuildError("cannot read components from a failed build", self.staging_path)
+		if name not in self.components:
+			if name in self._writers:
+				raise CalibrationBuildError(f"component {name!r} must be closed before reading", self.staging_path)
+			raise KeyError(f"unknown calibration component {name!r}")
+		root = self.target if self._finalized else self.staging_path
+		return CalibrationBundle(
+			self._manifest(), CalibrationBundleRef(
+				manifest_path=root / "calibration.yaml", calibration_id=self.calibration_id,
+			),
+		)
+
 	def write_array_component(
 		self, name: str, chunks: Iterable[Any], **kwargs: Any,
 	) -> CalibrationComponent:
@@ -365,6 +394,20 @@ class CalibrationBuildSession:
 			raise ValueError(f"duplicate calibration component {name!r}")
 		self.components[name] = component
 
+	def _manifest(self) -> CalibrationManifest:
+		"""Derive the descriptor at a read or publication boundary."""
+
+		return CalibrationManifest(
+			calibration_id=self.calibration_id,
+			created_at=self.created_at,
+			producer=self.producer,
+			sources=self.sources,
+			compatibility=self.compatibility,
+			components=self.components,
+			validation_results=self.validation_results,
+			metadata=self.metadata,
+		)
+
 	def abort(self, reason: str) -> None:
 		"""Mark a partial build as failed while preserving it for diagnosis."""
 
@@ -398,16 +441,7 @@ class CalibrationBuildSession:
 				writer.close()
 			if not self.components:
 				raise CalibrationBuildError("bundle has no completed components", self.staging_path)
-			manifest = CalibrationManifest(
-				calibration_id=self.calibration_id,
-				created_at=self.created_at,
-				producer=self.producer,
-				sources=self.sources,
-				compatibility=self.compatibility,
-				components=self.components,
-				validation_results=self.validation_results,
-				metadata=self.metadata,
-			)
+			manifest = self._manifest()
 			manifest_path = self.staging_path / "calibration.yaml"
 			_atomic_text(manifest_path, manifest.to_yaml())
 			validate_bundle(

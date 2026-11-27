@@ -92,6 +92,10 @@ class ManualCenterStage(Stage):
 		center_dump: bool = False
 		center_samples_per_job: int | None = Field(default=None, ge=1)
 
+		def values_at_rows(self, rows):
+			"""Return center positions at detector rows in source coordinates."""
+			return self.value_px + (rows - self.reference_y) * self.tilt
+
 		@model_validator(mode="wrap")
 		@classmethod
 		def normalize_tilt(cls, value, handler):
@@ -125,7 +129,7 @@ class ManualCenterStage(Stage):
 			state.source_window.source_index("Y", index)
 			for index in state.work_indices("Y")
 		], dtype=np.float32)
-		return _store_center(state, self.params.value_px + (rows - self.params.reference_y) * self.params.tilt)
+		return _store_center(state, self.params.values_at_rows(rows))
 
 
 class EntropyLocalCenterStage(Stage):

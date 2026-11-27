@@ -172,7 +172,7 @@ class BeamBandShiftNormalizeStage(Stage):
 				warped = work[index]
 				affine_transform(
 					coefficients, ((1 / magnification, 0), (0, 1)),
-					offset=(model.yc + (source.pos.Y - model.yc - dy) / magnification - prepared.spline_window.pos.Y,
+					offset=(model.source_y(source.pos.Y, dy, magnification) - prepared.spline_window.pos.Y,
 						source.pos.X - prepared.spline_window.pos.X),
 					output=warped, order=3, mode="nearest", prefilter=False,
 				)
