@@ -183,19 +183,31 @@ def _profile_shift(
 	refine: int,
 	min_confidence: float,
 	max_ambiguity: float,
+	*,
+	reference_rows: np.ndarray | None = None,
+	search_shifts: np.ndarray | None = None,
 ) -> AxisRegistration:
-	count = len(old)
-	maximum = int(min(max_shift, count // 2 - 8))
-	if maximum < 1:
-		raise ValueError("registration profile is too short for the requested search")
-	if expected is None:
-		lags = np.arange(-maximum, maximum + 1)
+	if search_shifts is not None:
+		# A fixed reference window tracks where those beam rows moved in the
+		# observed profile. Preserve that convention when fitting stretch.
+		lags = -search_shifts
+		observed_rows = np.arange(len(new))
 	else:
-		centre = -int(round(expected))
-		lags = np.arange(centre - refine, centre + refine + 1)
+		count = len(old)
+		maximum = int(min(max_shift, count // 2 - 8))
+		if maximum < 1:
+			raise ValueError("registration profile is too short for the requested search")
+		if expected is None:
+			lags = np.arange(-maximum, maximum + 1)
+		else:
+			centre = -int(round(expected))
+			lags = np.arange(centre - refine, centre + refine + 1)
 	correlation = np.full(len(lags), -1.0)
 	for index, lag in enumerate(lags):
-		if lag >= 0:
+		if search_shifts is not None:
+			x = old[reference_rows]
+			y = np.interp(reference_rows - lag, observed_rows, new)
+		elif lag >= 0:
 			x, y = old[lag:], new[:count - lag]
 		else:
 			x, y = old[:count + lag], new[-lag:]
@@ -209,7 +221,8 @@ def _profile_shift(
 		delta = float(np.clip(0.5 * numerator / (denominator + 1e-12), -1, 1))
 	else:
 		delta = 0.0
-	measured = float(-(lags[peak_index] + delta))
+	spacing = 1 if search_shifts is None else lags[1] - lags[0]
+	measured = float(-(lags[peak_index] + delta * spacing))
 	best = float(correlation[peak_index])
 	# Ambiguity compares distinct local maxima, not adjacent samples on one broad
 	# subpixel peak. Quasi-periodic stripe aliases remain separate candidates.
