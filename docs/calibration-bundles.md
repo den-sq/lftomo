@@ -73,9 +73,10 @@ For `g = max(W-D, 1)` and `b = gaussian_filter1d(log(g), sigma_x, axis=X)`,
 the stage samples `b(yc + (y-yc-dy)/m, x)` with cubic interpolation and nearest
 edge treatment, then divides `P-D` by
 `g * exp(shifted_b-b) * exp(clip(dy/dy_end, 0, s_max)*R)`. Gaussian filtering uses
-SciPy's reflect edge treatment along X. Without a residual the last exponent
-factor is absent. All numeric model settings and component references belong to
-the calibration component; they are not duplicated in Stage parameters.
+nearest edge treatment along X, matching the B10 harness. Without a residual
+the last exponent factor is absent. All numeric model settings and component
+references belong to the calibration component; they are not duplicated in
+Stage parameters.
 
 Calibration preparation reads complete detector planes so the cubic spline
 prefilter sees the same boundaries for a full run and a row selection.

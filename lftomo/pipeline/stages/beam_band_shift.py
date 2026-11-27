@@ -115,7 +115,7 @@ class BeamBandShiftNormalizeStage(Stage):
 			np.maximum(gain, 1, out=gain)
 			texture = allocate("texture")
 			np.log(gain, out=texture)
-			gaussian_filter1d(texture, model.sigma_x, axis=1, output=texture, mode="reflect")
+			gaussian_filter1d(texture, model.sigma_x, axis=1, output=texture, mode="nearest")
 			coefficients = allocate("spline", spline_window, np.float64)
 			# Generated padding belongs to spline_window; edge replication itself
 			# is only a numerical fill of that canonical allocation.

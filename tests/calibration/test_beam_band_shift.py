@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import numpy as np
 import pytest
-from scipy.ndimage import affine_transform, gaussian_filter1d
+from scipy.ndimage import affine_transform, gaussian_filter
 
 from lftomo.calibration import (
 	BeamBandShiftModel, CalibrationBuildSession, CalibrationBundle, CalibrationManifest, stream_sha256,
@@ -25,7 +25,8 @@ def _fixture(tmp_path, *, stretch=True, residual=True, acquisition_indices=None,
 	schedule = np.column_stack((np.linspace(-3, 9, count), np.linspace(1, 0.96, count) if stretch else np.ones(count)))
 	change = (0.025 * np.sin(y / 9) * np.cos(x / 31)).astype(np.float32)
 	model = BeamBandShiftModel(yc=32, dy_end=9, sigma_x=3, residual_component="residual" if residual else None)
-	base = gaussian_filter1d(np.log(np.maximum(white - dark, 1)), model.sigma_x, axis=1)
+	# The measured B10 harness smooths only X with nearest edge extension.
+	base = gaussian_filter(np.log(np.maximum(white - dark, 1)), (0, model.sigma_x), mode="nearest")
 	transmission = (0.7 + 0.08 * np.sin(y / 7) * np.cos(x / 4)).astype(np.float32)
 	projections = []
 	for dy, magnification in schedule:
