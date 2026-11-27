@@ -207,6 +207,9 @@ An optional `id` names a Stage occurrence. IDs are needed for
   `output_path=` in Python) overrides it.
 - When a `Recon` expands to several candidate runs, each is written to its own
   `candidate-<key>` subdirectory beneath `output_path`.
+- `write.npy_volume` writes a float32 `reconstruction.npy` in that directory,
+  or accepts a direct `.npy` path. It supports streamed row selection and the
+  [FULL/NOISY spectra workflow](hdf5-dxchange-read.md#added-noise-realisations-for-mosaic-spectra).
 - When an output path is set, every run writes `recon_run.yaml` next to its
   slices, containing the resolved `Recon` (`resolved_recon`) and the
   streaming window plan that was used (`streaming_dataset`). Rerunning

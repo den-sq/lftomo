@@ -21,12 +21,15 @@ from lftomo.config import (
 	HDF5AngleSource,
 	HDF5DxchangeProjections,
 	HardwareTimestampAngleSource,
+	NoiseRealisation,
 	TIFFStackProjections,
 	UniformAngleSource,
 )
-from lftomo.pipeline.core import PipelineState, Stage, StageContract, StageParams
+from lftomo.pipeline.core import (
+	BoundedWorkRequest, BufferSpec, PipelineState, Stage, StageContract, StageParams,
+)
 from lftomo.pipeline.domains import DataDomain
-from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
+from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder, X
 from lftomo.util.window import TomoWindow
 
 
@@ -215,15 +218,25 @@ def _read_window(state: PipelineState) -> TomoWindow:
 	return state.source_window.with_pad()
 
 
+def read_output_dtype(stage: Stage, window: TomoWindow) -> np.dtype:
+	"""Derive read precision from canonical source/work dtypes."""
+
+	return np.dtype(
+		window.internal.dtype if getattr(getattr(stage, "params", None), "noise", None) is not None
+		else window.dtype
+	)
+
+
 def _bind_source_state(
 	state: PipelineState,
 	working,
 	read_window: TomoWindow,
+	stage: Stage,
 ) -> PipelineState:
 	if state.dataset is None or state.source_window is None:
 		raise RuntimeError("read stages require the plan-time dataset and source window")
 	shape = read_window.frange.length.to(type(working.shape))
-	if working.shape != shape or np.dtype(working.dtype) != np.dtype(state.dataset.dtype):
+	if working.shape != shape or np.dtype(working.dtype) != read_output_dtype(stage, read_window):
 		raise ValueError("read allocation disagrees with the planned source window")
 	result = state.with_array(working, domain=DataDomain.RAW)
 	if result.dataset is not state.dataset or result.source_window is not state.source_window:
@@ -248,6 +261,7 @@ class HDF5DxchangeReadStage(Stage):
 		y_start: int = 0
 		y_stop: int | None = None
 		calibration_policy: Literal["ignore", "optional", "required"] = "optional"
+		noise: NoiseRealisation | None = None
 		theta_start_degrees: float | None = None
 		theta_stop_degrees: float | None = None
 
@@ -268,6 +282,48 @@ class HDF5DxchangeReadStage(Stage):
 			produces=ProjOrder if params.order == "projection" else SinoOrder,
 			produces_artifacts=artifacts, managed_artifacts=artifacts,
 		)
+
+	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+		if self.params.noise is None:
+			return ()
+		return tuple(BoundedWorkRequest(
+			f"_noise_{name}", BufferSpec(X(input_spec.shape.X), np.float64), f"noise_{name}",
+		) for name in ("dark", "sigma", "samples"))
+
+	def _add_noise(self, state: PipelineState) -> None:
+		from lftomo.pipeline.execution import _prepare_bounded_work, _release_bounded_work
+
+		noise = self.params.noise
+		window = _read_window(state)
+		requests = _prepare_bounded_work(state, (self,))
+		try:
+			dark = state.artifacts["_noise_dark"].array()
+			sigma = state.artifacts["_noise_sigma"].array()
+			samples = state.artifacts["_noise_samples"].array()
+			fields = state.artifacts["dark_fields"].array()
+			working = np.asarray(state.working_array)
+			for row in range(state.working_array.shape.Y):
+				# NumPy median owns an unavoidable dark-frame-by-X temporary;
+				# preserve the calibration input artifact for downstream consumers.
+				np.median(fields[:, row, :], axis=0, out=dark)
+				source_row = window.source_index("Y", row)
+				for projection in range(state.working_array.shape.Theta):
+					image = working[state.layout.point_index(Theta=projection, Y=row)]
+					source_projection = window.source_index("Theta", projection)
+					acquisition = int(state.dataset.acquisition_indices[source_projection])
+					rng = np.random.Generator(np.random.PCG64(
+						np.random.SeedSequence([noise.seed, acquisition, source_row]),
+					))
+					rng.standard_normal(out=samples)
+					np.subtract(image, dark, out=sigma)
+					np.maximum(sigma, 0, out=sigma)
+					np.multiply(sigma, noise.gain, out=sigma)
+					np.add(sigma, noise.read, out=sigma)
+					np.sqrt(sigma, out=sigma)
+					np.multiply(samples, sigma, out=samples)
+					np.add(image, samples, out=image)
+		finally:
+			_release_bounded_work(state, requests)
 
 	def run(self, state: PipelineState) -> PipelineState:
 		import h5py
@@ -297,7 +353,7 @@ class HDF5DxchangeReadStage(Stage):
 			if np.dtype(data.dtype) != np.dtype(dataset.dtype):
 				raise ValueError("HDF5 source dtype changed after the plan-time metadata probe")
 			memory = _storage(state).allocate(
-				shape, dataset.dtype, role="raw_staging",
+				shape, read_output_dtype(self, read_window), role="raw_staging",
 				reuse_from=("raw_staging", "reconstruction"),
 			)
 			target = memory.array()
@@ -329,6 +385,7 @@ class HDF5DxchangeReadStage(Stage):
 
 			artifacts = dict(state.artifacts)
 			artifacts["hdf5_read_strategy"] = read_strategy
+			calibration_inputs = []
 			if self.params.calibration_policy != "ignore":
 				missing = [
 					path for path in (source.white_path, source.dark_path) if path not in handle
@@ -338,24 +395,38 @@ class HDF5DxchangeReadStage(Stage):
 						"dxchange calibration dataset(s) missing: " + ", ".join(missing)
 					)
 				if not missing:
-					y_slice = read_window.axis_slice("Y")
-					for artifact_name, path in (
+					calibration_inputs.extend((
 						("white_fields", source.white_path), ("dark_fields", source.dark_path),
-					):
-						calibration = handle[path]
-						artifact_shape = GenericOrder(
-							calibration.shape[0], shape.Y, calibration.shape[2],
-						)
-						artifact = _storage(state).allocate(
-							artifact_shape, calibration.dtype, role=artifact_name,
-						)
-						calibration.read_direct(
-							artifact.array(),
-							source_sel=np.s_[:, y_slice, :],
-						)
-						artifacts[artifact_name] = artifact
-		result = _bind_source_state(state, memory, read_window)
+					))
+			noise_dark_only = self.params.noise is not None and not calibration_inputs
+			if noise_dark_only:
+				if source.dark_path not in handle:
+					raise ValueError(f"raw noise requires dark dataset {source.dark_path!r}")
+				calibration_inputs.append(("dark_fields", source.dark_path))
+			for artifact_name, path in calibration_inputs:
+				calibration = handle[path]
+				if self.params.noise is not None and artifact_name == "dark_fields" and (
+					calibration.ndim != 3 or calibration.shape[0] == 0
+					or calibration.shape[1:] != (dataset.physical_shape.Y, dataset.physical_shape.X)
+				):
+					raise ValueError("raw noise requires non-empty dark frames matching the detector")
+				artifact_shape = GenericOrder(calibration.shape[0], shape.Y, calibration.shape[2])
+				artifact = _storage(state).allocate(
+					artifact_shape, calibration.dtype, role=artifact_name,
+					reuse_from=(artifact_name,) if noise_dark_only else (),
+				)
+				calibration.read_direct(
+					artifact.array(), source_sel=np.s_[:, read_window.axis_slice("Y"), :],
+				)
+				artifacts[artifact_name] = artifact
+		result = _bind_source_state(state, memory, read_window, self)
 		result.artifacts = artifacts
+		if self.params.noise is not None:
+			try:
+				self._add_noise(result)
+			finally:
+				if noise_dark_only:
+					_storage(result).retire(result.artifacts.pop("dark_fields"), role="dark_fields")
 		return result
 
 
@@ -423,4 +494,4 @@ class TIFFStackReadStage(Stage):
 			distribute_tiff_read(files, memory, read_window, **kwargs)
 		else:
 			distribute_tiff_sinogram_read(files, memory, read_window, **kwargs)
-		return _bind_source_state(state, memory, read_window)
+		return _bind_source_state(state, memory, read_window, self)

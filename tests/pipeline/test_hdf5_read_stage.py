@@ -5,6 +5,7 @@ import pytest
 from lftomo.config import (
 	Acquisition,
 	Detector,
+	ExplicitAngleSource,
 	HDF5AngleSource,
 	HDF5DxchangeProjections,
 	Recon,
@@ -83,6 +84,108 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	assert result.source_window.pos == ProjOrder(Theta=1, Y=2, X=0)
 	assert result.source_window.shape == ProjOrder(Theta=2, Y=3, X=size)
 	assert result.layout is SinoOrder
+
+
+@pytest.mark.parametrize("order", ["projection", "sinogram"])
+@pytest.mark.parametrize("compressed", [False, True])
+def test_raw_noise_is_identical_across_padded_windows_and_theta_selection(tmp_path, order, compressed):
+	count, size = 7, 9
+	data = np.arange(count * size * size, dtype=np.uint16).reshape(count, size, size)
+	path = tmp_path / "scan.h5"
+	_write(path, data, **({"compression": "gzip"} if compressed else {}))
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={"noise": {"seed": 135}})
+	whole = _run(_state(path, count, size, config), create_stage(config))
+	baseline = np.asarray(whole.working_array)
+	selected = StageConfig(kind="read", algorithm="hdf5_dxchange", params={
+		"noise": {"seed": 135}, "order": order,
+		"theta_start": 1, "theta_stop": 7, "theta_stride": 2, "y_start": 1, "y_stop": 8,
+	})
+	stage = create_stage(selected)
+	state = _state(path, count, size, selected)
+	state.dataset = resolve_streaming_plan([stage], state.scan, WindowConfig(rows=3, extra_pad=Y(1)))
+	for window in state.dataset:
+		state.source_window = window
+		result = _run(state, stage)
+		expected = baseline[window.with_pad().index]
+		if order == "sinogram":
+			expected = expected.transpose(1, 0, 2)
+		np.testing.assert_array_equal(result.working_array, expected)
+		assert result.dataset is state.dataset
+		assert result.source_window is window
+	assert baseline.dtype == np.float32
+	assert whole.dataset.dtype == data.dtype
+	assert not np.array_equal(baseline, data)
+	changed = config.model_copy(update={"params": {"noise": {"seed": 136}}})
+	other = _run(_state(path, count, size, changed), create_stage(changed))
+	assert not np.array_equal(other.working_array, baseline)
+
+
+def test_raw_noise_uses_acquisition_slots_after_dropped_projections(tmp_path):
+	count, size = 6, 5
+	data = np.arange(count * size * size, dtype=np.uint16).reshape(count, size, size)
+	full_path, dropped_path = tmp_path / "full.h5", tmp_path / "dropped.h5"
+	indices = [0, 2, 3, 5]
+	_write(full_path, data)
+	_write(dropped_path, data[indices])
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={"noise": {"seed": 48}})
+	full = _run(_state(full_path, count, size, config), create_stage(config))
+	state = _state(dropped_path, len(indices), size, config)
+	state.scan.acquisition = Acquisition(
+		n_projections=count, rotation_end_deg=180,
+		angle_source=ExplicitAngleSource(acquisition_indices=indices),
+	)
+	dropped = _run(state, create_stage(config))
+	np.testing.assert_array_equal(dropped.working_array, np.asarray(full.working_array)[indices])
+
+
+def test_raw_noise_matches_gain_read_variance_and_median_dark(tmp_path):
+	count, size = 256, 32
+	data = np.full((count, size, size), 100, dtype=np.uint16)
+	data[:, :, :size // 2] = 3
+	path = tmp_path / "scan.h5"
+	_write(path, data)
+	with h5py.File(path, "a") as handle:
+		del handle["exchange/data_dark"]
+		handle.create_dataset("exchange/data_dark", data=np.stack([
+			np.full((size, size), value, dtype=np.uint16) for value in (0, 10, 1000)
+		]))
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={"noise": {"seed": 97}})
+	result = _run(_state(path, count, size, config), create_stage(config))
+	residual = np.asarray(result.working_array) - data
+	for region, variance in ((residual[:, :, :16], 66), (residual[:, :, 16:], 2.05 * 90 + 66)):
+		assert abs(region.mean()) < 0.03 * np.sqrt(variance)
+		assert region.var() == pytest.approx(variance, rel=0.02)
+		assert (region > 0).mean() == pytest.approx(0.5, abs=0.01)
+
+
+@pytest.mark.parametrize("policy", ["optional", "ignore"])
+def test_raw_noise_reads_dark_without_publishing_ignored_calibration(tmp_path, policy):
+	data = np.full((4, 5, 5), 30, dtype=np.uint16)
+	path = tmp_path / "scan.h5"
+	_write(path, data, calibration=False)
+	with h5py.File(path, "a") as handle:
+		handle.create_dataset("exchange/data_dark", data=np.ones((2, 5, 5), dtype=np.uint16))
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={
+		"noise": {}, "calibration_policy": policy,
+	})
+	result = _run(_state(path, 4, 5, config), create_stage(config))
+	assert "dark_fields" not in result.artifacts
+	assert "white_fields" not in result.artifacts
+	assert not np.array_equal(result.working_array, data)
+
+
+def test_raw_noise_requires_dark_frames(tmp_path):
+	path = tmp_path / "scan.h5"
+	_write(path, np.ones((2, 3, 3), dtype=np.uint16), calibration=False)
+	config = StageConfig(kind="read", algorithm="hdf5_dxchange", params={"noise": {}})
+	with pytest.raises(ValueError, match="raw noise requires dark dataset"):
+		_run(_state(path, 2, 3, config), create_stage(config))
+
+
+@pytest.mark.parametrize("noise", [{"gain": -1}, {"read": -1}, {"gain": float("inf")}, {"seed": -1}, {"seed": 0.5}])
+def test_raw_noise_rejects_invalid_variance_or_seed(noise):
+	with pytest.raises(ValueError):
+		create_stage(StageConfig(kind="read", algorithm="hdf5_dxchange", params={"noise": noise}))
 
 
 def test_read_state_retains_the_planned_canonical_window(tmp_path):

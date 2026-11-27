@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -16,7 +17,7 @@ from lftomo.pipeline.core import (
 	StageParams,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
-from lftomo.storage import ManagedBuffer
+from lftomo.storage import FileBackedNPArray, ManagedBuffer
 from lftomo.util.shapes import IntIter, ReconOrder, ReverseReconOrder, Y
 
 
@@ -50,6 +51,23 @@ def _record_outputs(state: PipelineState, paths: list[Path]) -> None:
 
 	existing = list(state.artifacts.get("output_files", ()))
 	state.artifacts["output_files"] = existing + [path for path in paths if path not in existing]
+
+
+def _volume_output_region(state: PipelineState) -> tuple[ReconOrder, slice]:
+	"""Derive packed volume rows at the output-format boundary."""
+
+	shape = state.working_array.shape
+	if state.dataset is None or state.source_window is None:
+		return shape, slice(0, shape.Y)
+	full = state.dataset.full_window()
+	# Projection/canvas axes may change during reconstruction; only Y places
+	# reconstructed slices within the selected output volume.
+	selected = full.rescope(
+		pos=state.source_window.pos.extract(Y), shape=state.source_window.shape.extract(Y),
+	)
+	selected = replace(selected, step=replace(full.step, Y=state.source_window.step.Y))
+	rows = full.packed_index(selected, Y)[0]
+	return replace(shape, Y=full.packed_index(full, Y)[0].stop), rows
 
 
 class TIFFSlicesWriteStage(Stage):
@@ -183,9 +201,8 @@ class HDF5VolumeWriteStage(Stage):
 					chunks=self.params.chunks,
 				)
 		else:
-			output_start = state.source_window.pos.Y - state.dataset.pos.Y
-			output_stop = output_start + state.source_window.shape.Y
-			first = output_start == 0
+			shape, rows = _volume_output_region(state)
+			first = rows.start == 0
 			if first and path.exists() and not self.params.overwrite:
 				raise FileExistsError(f"HDF5 output already exists: {path}")
 			mode = "w" if first else "r+"
@@ -193,13 +210,48 @@ class HDF5VolumeWriteStage(Stage):
 				if first:
 					handle.create_dataset(
 						self.params.dataset,
-						shape=(state.dataset.shape.Y, data.shape[1], data.shape[2]),
+						shape=shape.as_tuple(),
 						dtype=data.dtype,
 						compression=self.params.compression,
 						compression_opts=self.params.compression_opts if self.params.compression else None,
 						chunks=self.params.chunks,
 					)
-				handle[self.params.dataset][output_start:output_stop] = data
+				handle[self.params.dataset][rows] = data
+		_record_outputs(state, [path])
+		return state
+
+
+class NPYVolumeWriteStage(Stage):
+	"""Write a durable float32 NumPy volume, placing streamed rows in one file."""
+
+	name = "write.npy_volume"
+	contract = HDF5VolumeWriteStage.contract
+
+	class Params(StageParams):
+		path: Path | None = None
+		overwrite: bool = False
+
+	def run(self, state: PipelineState) -> PipelineState:
+		if state.backend.name != "numpy":
+			raise TypeError("NPYVolumeWriteStage currently requires the NumPy backend")
+		root = self.params.path or state.recon.output_path
+		if root is None:
+			raise ValueError("write.npy_volume requires a path or Recon.output_path")
+		path = Path(root)
+		if path.suffix.lower() != ".npy":
+			path = path / "reconstruction.npy"
+		path.parent.mkdir(parents=True, exist_ok=True)
+		shape, rows = _volume_output_region(state)
+		if rows.start == 0:
+			if path.exists() and self.params.overwrite:
+				path.unlink()
+			output = FileBackedNPArray.create(path, shape, np.float32)
+		else:
+			output = FileBackedNPArray(path, shape, mode="r+")
+		with output as values:
+			if output.dtype != np.dtype(np.float32):
+				raise ValueError("write.npy_volume requires a float32 output volume")
+			values[rows] = np.asarray(state.working_array)
 		_record_outputs(state, [path])
 		return state
 
@@ -242,7 +294,8 @@ class NeuroglancerWriteStage(Stage):
 		if root is None:
 			raise ValueError("write.neuroglancer requires a path or Recon.output_path")
 		layer = Path(root) / self.params.layer_name
-		output_start = 0 if state.dataset is None else state.source_window.pos.Y - state.dataset.pos.Y
+		shape, rows = _volume_output_region(state)
+		output_start = rows.start
 		first = output_start == 0
 		if first and layer.exists():
 			if not self.params.overwrite:
@@ -260,8 +313,7 @@ class NeuroglancerWriteStage(Stage):
 		resolution = self.params.resolution_nm_xyz or (int(state.scan.pixel_size_um * 1000),) * 3
 		cloudpath = f"precomputed://file://{layer.as_posix()}"
 		if first:
-			total_rows = data.shape[0] if state.dataset is None else state.dataset.shape.Y
-			volume_size = (data.shape[2], data.shape[1], total_rows)
+			volume_size = (shape.X, shape.Z, shape.Y)
 			info = CloudVolume.create_new_info(
 				num_channels=1,
 				layer_type="image",

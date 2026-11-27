@@ -72,7 +72,7 @@ _OUT_OF_PLACE_PROCESS = {
 }
 _COMPOSITE_PROCESS = {"phase.multimaterial"}
 _THREAD_IO = {
-	"read.hdf5_dxchange", "read.tiff_stack", "write.hdf5_volume", "write.neuroglancer",
+	"read.hdf5_dxchange", "read.tiff_stack", "write.hdf5_volume", "write.neuroglancer", "write.npy_volume",
 }
 _PROCESS_WRITERS = {"write.tiff_slices"}
 _ENGINE = {
