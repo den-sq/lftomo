@@ -431,8 +431,8 @@ def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 	original_planned_pipeline = runner_module._planned_pipeline
 	planned_scans = []
 
-	def record_bind(state, working, read_window):
-		result = original_bind(state, working, read_window)
+	def record_bind(state, working, read_window, stage):
+		result = original_bind(state, working, read_window, stage)
 		bound_datasets.append((state.dataset, result.dataset))
 		return result
 
