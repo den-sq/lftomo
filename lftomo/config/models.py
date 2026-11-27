@@ -205,6 +205,15 @@ class HDF5DxchangeProjections(ConfigModel):
 	dark_path: str = Field(default="exchange/data_dark", description="Dataset path for dark fields.")
 
 
+class NoiseRealisation(ConfigModel):
+	"""One reproducible additional raw-projection Gaussian noise realisation."""
+
+	gain: float = Field(default=2.05, ge=0, allow_inf_nan=False)
+	read: float = Field(default=66.0, ge=0, allow_inf_nan=False,
+		description="Additive read-noise variance in squared raw detector units.")
+	seed: int = Field(default=0, ge=0, strict=True)
+
+
 ProjectionSource = Annotated[TIFFStackProjections | HDF5DxchangeProjections, Field(discriminator="format")]
 
 

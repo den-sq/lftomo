@@ -7,7 +7,9 @@ import pytest
 
 from lftomo.config import Acquisition, ConeGeometry, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import LocalArray, Pipeline, PipelineState
-from lftomo.pipeline.stages import HDF5VolumeWriteStage, NeuroglancerWriteStage, STAGE_REGISTRY, create_stage
+from lftomo.pipeline.stages import (
+	HDF5VolumeWriteStage, NPYVolumeWriteStage, NeuroglancerWriteStage, STAGE_REGISTRY, create_stage,
+)
 from lftomo.util.shapes import ProjOrder, ReconOrder, Y
 from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
@@ -75,6 +77,47 @@ def test_hdf5_writer_places_streaming_interiors_at_global_output_rows(tmp_path):
 	with h5py.File(tmp_path / "reconstruction.h5") as handle:
 		np.testing.assert_array_equal(handle["recon"][:2], 1)
 		np.testing.assert_array_equal(handle["recon"][2:], 2)
+
+
+def test_npy_writer_produces_float32_volume_and_preserves_existing_output(tmp_path):
+	config = StageConfig(kind="write", algorithm="npy_volume")
+	working = np.arange(2 * 3 * 4, dtype=np.float64).reshape(2, 3, 4) / 7
+	stage = create_stage(config)
+	state = _state(working, config, tmp_path / "full.npy")
+	result = Pipeline([stage]).run(state)
+	assert STAGE_REGISTRY["write.npy_volume"] is NPYVolumeWriteStage
+	path = tmp_path / "full.npy"
+	with path.open("rb") as stream:
+		saved = np.load(stream, allow_pickle=False)
+	assert saved.dtype == np.float32
+	np.testing.assert_array_equal(saved, working.astype(np.float32))
+	assert result.artifacts["output_files"] == [path]
+	with pytest.raises(FileExistsError):
+		stage.run(state)
+	np.testing.assert_array_equal(np.load(path), saved)
+
+
+def test_npy_writer_streams_selected_rows_and_overwrites_only_when_requested(tmp_path):
+	config = StageConfig(kind="write", algorithm="npy_volume")
+	stage = create_stage(config)
+	physical = ProjOrder(Theta=1, Y=12, X=4)
+	dataset = TomoDataSet.from_range(
+		CTFov(1, 180, 1), physical, Y.drange(5, 10, 2), dtype=np.float32,
+		angles=np.array([0], dtype=np.float32),
+	)
+	expected = np.arange(5 * 3 * 4, dtype=np.float32).reshape(5, 3, 4)
+	for window in dataset:
+		rows = dataset.full_window().packed_index(window, Y)[0]
+		state = _state(expected[rows], config, tmp_path)
+		state.dataset, state.source_window = dataset, window
+		stage.run(state)
+	path = tmp_path / "reconstruction.npy"
+	np.testing.assert_array_equal(np.load(path), expected)
+	replacement = create_stage(StageConfig(
+		kind="write", algorithm="npy_volume", params={"overwrite": True},
+	))
+	replacement.run(_state(expected + 1, config, tmp_path))
+	np.testing.assert_array_equal(np.load(path), expected + 1)
 
 
 @pytest.mark.parametrize("cone,resolution_nm", [(False, 700), (True, 350)])

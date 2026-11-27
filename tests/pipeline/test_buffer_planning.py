@@ -17,6 +17,7 @@ from lftomo.pipeline.stages import (
 	AffineSkewMovementStage,
 	DRHTStage,
 	GridrecStage,
+	HDF5DxchangeReadStage,
 	HelicalIndexRemapStage,
 	LayoutConvertStage,
 	ManualCenterStage,
@@ -276,16 +277,23 @@ def test_separate_vo_dispatches_account_only_managed_work(order, aliasing):
 	assert plan.shared_memory_peak_bytes - baseline.shared_memory_peak_bytes == expected
 
 
-def test_read_planning_uses_canonical_strided_window_geometry():
+@pytest.mark.parametrize("stage_type, options, dtype", [
+	(TIFFStackReadStage, {}, np.uint16),
+	(HDF5DxchangeReadStage, {}, np.uint16),
+	(HDF5DxchangeReadStage, {"noise": {}}, np.float32),
+])
+def test_read_planning_uses_canonical_strided_window_geometry(stage_type, options, dtype):
 	spec = _read_spec(
-		TIFFStackReadStage(
+		stage_type(
 			order="sinogram", y_start=1, y_stop=5,
 			theta_start=1, theta_stop=10, theta_stride=3,
+			**options,
 		),
 		_scan(projections=10, rows=6, columns=4),
 	)
 
 	assert spec.shape == SinoOrder(Y=4, Theta=3, X=4)
+	assert spec.dtype == np.dtype(dtype)
 
 
 def test_reconstruction_crop_keeps_full_physical_allocation_in_plan():

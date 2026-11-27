@@ -1067,7 +1067,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 				)
 			manifest_root = (
 				concrete.output_path.parent
-				if concrete.output_path.suffix.lower() in {".h5", ".hdf5"}
+				if concrete.output_path.suffix.lower() in {".h5", ".hdf5", ".npy"}
 				else concrete.output_path
 			)
 			manifest_root.mkdir(parents=True, exist_ok=True)

@@ -49,7 +49,7 @@ from .stripe import (
 )
 from .super_resolve import DRHTStage, LDMStage
 from .multimaterial import MultimaterialStage
-from .write import HDF5VolumeWriteStage, NeuroglancerWriteStage, TIFFSlicesWriteStage
+from .write import HDF5VolumeWriteStage, NPYVolumeWriteStage, NeuroglancerWriteStage, TIFFSlicesWriteStage
 
 
 STAGE_REGISTRY = {
@@ -103,6 +103,7 @@ STAGE_REGISTRY = {
 	"super_resolve.drht": DRHTStage,
 	"super_resolve.ldm": LDMStage,
 	"write.hdf5_volume": HDF5VolumeWriteStage,
+	"write.npy_volume": NPYVolumeWriteStage,
 	"write.neuroglancer": NeuroglancerWriteStage,
 	"skew_correct.cv2_affine": SkewCorrectStage,
 	"write.tiff_slices": TIFFSlicesWriteStage,
@@ -170,6 +171,7 @@ __all__ = [
 	"GridrecStage",
 	"HelicalIndexRemapStage",
 	"HDF5VolumeWriteStage",
+	"NPYVolumeWriteStage",
 	"LDMStage",
 	"LayoutConvertStage",
 	"ManualCenterStage",

@@ -244,7 +244,9 @@ def _read_spec(
 		window = source_window.with_pad()
 	layout = stage.contract.output_layout(ProjOrder)
 	shape = window.frange.length.to(layout)
-	return BufferSpec(shape, dtype)
+	from lftomo.pipeline.stages.read import read_output_dtype
+
+	return BufferSpec(shape, read_output_dtype(stage, window))
 
 
 def stage_output_spec(
@@ -367,6 +369,34 @@ def build_allocation_schedule(
 			external_pins=external_pins,
 		))
 
+	def prepare_work(index, work_requests):
+		for request in work_requests:
+			role = request.role
+			size = _nbytes(request.buffer_spec)
+			selected, _alias = select_buffer_alias(
+				size, retired, (role,) if enable_aliasing else (),
+				capacity=physical.__getitem__, pinned=lambda key: key in external_pins,
+			)
+			if selected is None:
+				selected = role
+				suffix = 1
+				while selected in physical:
+					suffix += 1
+					selected = f"{role}:{suffix}"
+				physical[selected] = size
+				action = BufferAction.ALLOCATE
+			else:
+				action = BufferAction.ALIAS
+			live[role] = selected
+			publish(index, action, role, size, selected, "bounded_work_requests", reuse_from=(role,))
+
+	def retire_work(index, work_requests):
+		for request in work_requests:
+			role = request.role
+			selected = live.pop(role)
+			retired.setdefault(role, []).append(selected)
+			publish(index, BufferAction.RETIRE, role, physical[selected], selected)
+
 	if initial_buffer is not None:
 		physical["raw_staging"] = _nbytes(initial_buffer)
 		live["raw_staging"] = "raw_staging"
@@ -402,6 +432,7 @@ def build_allocation_schedule(
 		# sinogram dispatch retains its numerical fallback without managed work.
 		if (
 			step.input_buffer is not None
+			and not stage.name.startswith("read.")
 			and (
 				step.index in bounded_segments or (
 					step.index not in bounded_steps
@@ -412,32 +443,10 @@ def build_allocation_schedule(
 			segment = bounded_segments.get(step.index)
 			work_stop = segment.stop if segment is not None else step.index + 1
 			requests = collect_bounded_work(stages[step.index:work_stop], step.input_buffer)
-			for request in requests:
-				role = request.role
-				size = _nbytes(request.buffer_spec)
-				selected, _alias = select_buffer_alias(
-					size, retired, (role,) if enable_aliasing else (),
-					capacity=physical.__getitem__, pinned=lambda key: key in external_pins,
-				)
-				if selected is None:
-					selected = role
-					suffix = 1
-					while selected in physical:
-						suffix += 1
-						selected = f"{role}:{suffix}"
-					physical[selected] = size
-					action = BufferAction.ALLOCATE
-				else:
-					action = BufferAction.ALIAS
-				live[role] = selected
-				publish(step.index, action, role, size, selected, "bounded_work_requests", reuse_from=(role,))
+			prepare_work(step.index, requests)
 		# Scratch stays live until the complete bounded segment has finished.
 		if step.index + 1 == work_stop:
-			for request in requests:
-				role = request.role
-				selected = live.pop(role)
-				retired.setdefault(role, []).append(selected)
-				publish(step.index, BufferAction.RETIRE, role, physical[selected], selected)
+			retire_work(step.index, requests)
 		role = step.output_role
 		if role is None or step.output_buffer is None:
 			continue
@@ -483,5 +492,10 @@ def build_allocation_schedule(
 			publish(step.index, BufferAction.RETIRE, current_role,
 				physical[old_physical], old_physical)
 		current_role = role
+		if stage.name.startswith("read."):
+			# Source Stages prepare their work after the output buffer exists.
+			read_work = collect_bounded_work((stage,), step.output_buffer)
+			prepare_work(step.index, read_work)
+			retire_work(step.index, read_work)
 
 	return tuple(events)
