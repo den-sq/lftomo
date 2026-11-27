@@ -48,6 +48,7 @@ _PROJECTION_PROCESS = {
 	"movement_correct.linear_shift",
 	"normalize.phase_contrast",
 	"normalize.beam_basis_fit",
+	"normalize.beam_band_shift",
 	"normalize.beam_tracking",
 	"normalize.beam_keyframes",
 	"normalize.taper_blended",

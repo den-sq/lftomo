@@ -19,6 +19,7 @@ from .build import (
 )
 from .models import (
 	ArrayPayload,
+	BeamBandShiftModel,
 	BundleValidationReport,
 	CalibrationBundleRef,
 	CalibrationComponent,
@@ -68,6 +69,7 @@ from .beam_basis import (
 
 __all__ = [
 	"ArrayPayload",
+	"BeamBandShiftModel",
 	"AxisRegistration",
 	"BeamOffsetRegistration",
 	"BeamSchedule",

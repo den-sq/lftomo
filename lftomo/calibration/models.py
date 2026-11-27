@@ -22,6 +22,7 @@ ComponentKind = Literal[
 	"dynamic_beam",
 	"beam_keyframes",
 	"beam_schedule",
+	"beam_residual",
 	"beam_basis",
 	"camera_registration",
 ]
@@ -185,6 +186,28 @@ class BundleValidationReport(ConfigModel):
 	results: list[ValidationResult]
 
 
+class BeamBandShiftModel(ConfigModel):
+	"""Calibration-owned shift/stretch convention and its detector maps.
+
+	The associated schedule has columns ``dy, m`` in detector pixels and
+	magnification. These facts travel with that measurement, not Stage params.
+	"""
+
+	yc: float = Field(allow_inf_nan=False)
+	dy_end: float | None = Field(default=None, allow_inf_nan=False)
+	sigma_x: float = Field(default=60, gt=0, allow_inf_nan=False)
+	s_max: float = Field(default=1.2, ge=0, allow_inf_nan=False)
+	white_component: str = Field(default="pre_gain", min_length=1)
+	dark_component: str = Field(default="pre_dark", min_length=1)
+	residual_component: str | None = Field(default=None, min_length=1)
+
+	@model_validator(mode="after")
+	def _residual_scale(self):
+		if self.residual_component is not None and self.dy_end in (None, 0):
+			raise ValueError("a beam residual requires a nonzero dy_end")
+		return self
+
+
 class CalibrationComponent(ConfigModel):
 	"""Descriptor for one named component of a calibration bundle."""
 
@@ -196,9 +219,21 @@ class CalibrationComponent(ConfigModel):
 	interpolation: Interpolation = "nearest"
 	validation_results: list[ValidationResult] = Field(default_factory=list)
 	metadata: dict[str, Any] = Field(default_factory=dict)
+	band_shift: BeamBandShiftModel | None = None
 
 	@model_validator(mode="after")
 	def _dynamic_axes(self):
+		if self.band_shift is not None:
+			if (self.kind != "beam_schedule" or self.coordinate_frame != "beam"
+					or self.payload.axes != ("Theta", "Parameter")
+					or self.payload.shape[1] != 2 or self.time_axis is None
+					or self.time_axis.kind != "projection_index"
+					or self.interpolation != "nearest"):
+				raise ValueError("band-shift schedules require beam coordinates, (Theta, Parameter) dy/m columns, and nearest projection-index sampling")
+		if self.kind == "beam_residual" and (
+			self.coordinate_frame != "beam" or self.payload.axes != ("Y", "X")
+		):
+			raise ValueError("beam_residual requires a static (Y, X) field in beam coordinates")
 		temporal_axes = [axis for axis in ("Theta", "T") if axis in self.payload.axes]
 		if len(temporal_axes) > 1:
 			raise ValueError("components may have only one temporal axis")

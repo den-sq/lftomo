@@ -15,6 +15,7 @@ import numpy as np
 from .bundle import CalibrationBundleValidationError, stream_sha256, validate_bundle
 from .models import (
 	ArrayPayload,
+	BeamBandShiftModel,
 	CalibrationBundleRef,
 	CalibrationComponent,
 	CalibrationManifest,
@@ -114,6 +115,7 @@ class IncrementalArrayWriter:
 		interpolation: str = "nearest",
 		validation_results: Iterable[ValidationResult | dict[str, Any]] = (),
 		metadata: dict[str, Any] | None = None,
+		band_shift: BeamBandShiftModel | dict[str, Any] | None = None,
 	):
 		if not name or "/" in name or "\\" in name:
 			raise ValueError(f"invalid calibration component name {name!r}")
@@ -138,6 +140,7 @@ class IncrementalArrayWriter:
 			ValidationResult.model_validate(result) for result in validation_results
 		]
 		self.metadata = dict(metadata or {})
+		self.band_shift = None if band_shift is None else BeamBandShiftModel.model_validate(band_shift)
 		self.path = session.staging_path / "components" / f"{name}.npy"
 		self._array = np.lib.format.open_memmap(
 			self.path, mode="w+", dtype=self.dtype, shape=self.shape,
@@ -207,6 +210,7 @@ class IncrementalArrayWriter:
 			interpolation=self.interpolation,
 			validation_results=self.validation_results,
 			metadata=self.metadata,
+			band_shift=self.band_shift,
 		)
 		self.session._register_component(self.name, component)
 		self._closed = True
