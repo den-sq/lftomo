@@ -38,8 +38,8 @@ def build_beam_band_shift_schedule(
 	matching the normalization gain convention. Gaussian high-pass profiles are
 	registered by normalized correlation on the caller's uniform shift grid.
 	Only magnification is Gaussian-smoothed along recorded-frame order. Window
-	locations, high-pass width and search range are deliberately caller-owned:
-	the historical B10 producer settings have not been recovered.
+	locations, high-pass width and search range are explicit caller inputs for
+	each scan.
 	"""
 
 	physical = dataset.physical_shape

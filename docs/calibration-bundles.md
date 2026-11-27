@@ -101,9 +101,8 @@ Incomplete component writers cannot be read. Reads during a build do not create
 an intermediate manifest or publish the bundle.
 
 The caller supplies six detector-row windows, a positive high-pass Gaussian
-width, and an increasing uniform `search_shifts` grid in pixels. These settings
-are required because the historical B10 producer's exact command parameters
-have not been recovered. The source uses the existing `HDF5RandomFrameSource`
+width, and an increasing uniform `search_shifts` grid in pixels. The builder
+does not choose a B10 preset. The source uses the existing `HDF5RandomFrameSource`
 or `TIFFRandomFrameSource` interface; `dataset` provides canonical physical
 dimensions, angles and acquisition slots for its complete recorded sequence.
 
@@ -122,11 +121,9 @@ angle provenance, window-fit residual RMS, frame-to-frame dy RMS, and
 registration confidence/ambiguity. Schedule time values are acquisition slots,
 including gaps. `y_chunk` controls input memory without changing the fit.
 
-The end-of-scan residual builder is pending recovery of the original producer
-and centre-scan leak definition. Neither this schedule estimator nor synthetic
-recovery tests establish rounding-level agreement with the production B10
-files. That comparison requires the raw scans, producer reports and reference
-outputs.
+The end-of-scan residual builder and centre-scan leak QC are not implemented.
+The schedule estimator uses the reference-row convention described above; it
+does not promise float-rounding reproduction of historical producer schedules.
 
 ## Coordinate and time bounds
 
