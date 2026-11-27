@@ -54,6 +54,7 @@ from lftomo.pipeline import (
 from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.planning import PipelinePlan, reserve_streaming_buffers, stage_output_spec
+from lftomo.pipeline.runtime import collect_libtomo_identity
 from lftomo.pipeline.streaming import StreamingSegment, WindowPlanError, resolve_streaming_segments
 from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 from lftomo.util.converter import CONVERTER
@@ -938,6 +939,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
 			tuple(resolved_segments), tuple(buffer_plans),
 		))
+	libtomo = collect_libtomo_identity()
 	results = []
 	for (
 		run, concrete, resolved_document, run_scan, initial_artifacts, stages,
@@ -1035,6 +1037,9 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 					"intermediates": artifacts.get("intermediates", []),
 					"intermediate_storage": initial_artifacts["intermediate_storage"],
 					"intermediates_retained": window_config.retain_intermediates,
+					"runtime": {
+						"libtomo": None if libtomo is None else libtomo.model_dump(mode="json"),
+					},
 				}, stream, sort_keys=False)
 			artifacts["recon_run"] = manifest_path
 	return results

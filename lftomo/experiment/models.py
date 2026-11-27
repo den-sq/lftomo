@@ -15,6 +15,7 @@ from pydantic import Field, JsonValue, PlainSerializer, PlainValidator, model_va
 from lftomo.config import ConfigModel, Recon
 from lftomo.pipeline import candidate_key as resolved_candidate_key
 from lftomo.pipeline import has_continuous_domains
+from lftomo.pipeline.runtime import LibTomoIdentity
 from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import DataShape
 from lftomo.util.window import DataRef, TomoWindow
@@ -353,6 +354,7 @@ class EnvironmentIdentity(ConfigModel):
 	platform: str = Field(min_length=1)
 	backend: str = Field(min_length=1)
 	dependencies: dict[str, str] = Field(default_factory=dict)
+	libtomo: LibTomoIdentity | None = None
 	hardware: dict[str, JsonValue] = Field(default_factory=dict)
 
 
@@ -450,6 +452,10 @@ class TrialIdentity(ConfigModel):
 		"""Return only identity-bearing fields in canonical collection order."""
 
 		payload = self.model_dump(mode="json")
+		# Older records lack native-build provenance. Keep their existing hashes
+		# when it is unknown; a known build remains identity-bearing below.
+		if self.environment.libtomo is None:
+			payload["environment"].pop("libtomo")
 		# Sampler provenance explains how the candidate was discovered, but it
 		# does not change the candidate's numerical inputs or result reuse.
 		payload.pop("sampler")

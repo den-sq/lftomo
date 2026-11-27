@@ -202,6 +202,10 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	tmp_path, monkeypatch,
 ):
 	import lftomo.runner as runner_module
+	from lftomo.pipeline.runtime import LibTomoIdentity
+
+	native = LibTomoIdentity(version="1.15.3", build="cuda12.9h1234567_densq1_103")
+	monkeypatch.setattr(runner_module, "collect_libtomo_identity", lambda: native)
 
 	plans, checked_peaks, reservations, loaded_scans, planned_scans = [], [], [], [], []
 	validate = runner_module.validate_pipeline
@@ -262,6 +266,10 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	assert results[0].output_path == output
 	assert [path.name for path in results[0].artifacts["output_files"]] == ["slice_000.tif", "slice_001.tif"]
 	assert tf.imread(output / "slice_000.tif").shape == (4, 4)
+	manifest = yaml.safe_load((output / "recon_run.yaml").read_text())
+	assert manifest["runtime"]["libtomo"] == {
+		"version": "1.15.3", "build": "cuda12.9h1234567_densq1_103",
+	}
 	assert results[0].artifacts["calibration_resolution"]["source"] == "embedded_hdf5"
 	assert "white_fields" not in results[0].artifacts
 	assert "dark_fields" not in results[0].artifacts

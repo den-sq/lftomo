@@ -3,6 +3,7 @@ import json
 
 import h5py
 import numpy as np
+import pytest
 import tifffile as tf
 import yaml
 
@@ -30,6 +31,49 @@ from lftomo.runner import load_scan
 from lftomo.util.shapes import ProjOrder
 from lftomo.util.log import LOG, log
 from lftomo.util.window import TomoWindow
+
+
+@pytest.mark.parametrize("build", [None, "cuda12.9h1234567_densq1_103"])
+@pytest.mark.parametrize("entry", ["run_acceptance", "run_windowed_acceptance"])
+def test_legacy_gridrec_acceptance_rejects_other_builds_before_io(
+	tmp_path, monkeypatch, build, entry,
+):
+	import lftomo.acceptance as acceptance
+	from lftomo.pipeline.runtime import LibTomoIdentity
+
+	identity = None if build is None else LibTomoIdentity(version="1.15.3", build=build)
+	monkeypatch.setattr(acceptance, "collect_libtomo_identity", lambda: identity)
+	dataset, result = tmp_path / "missing-data", tmp_path / "result"
+	kwargs = {} if entry == "run_acceptance" else {
+		"scan_path": dataset / "scan.yaml", "source": dataset / "data.h5",
+		"flat_root": dataset / "flat", "workers": 1, "log": None,
+	}
+	with pytest.raises(RuntimeError, match="environment-legacy.yml"):
+		getattr(acceptance, entry)(dataset, result, **kwargs)
+	assert not result.exists()
+
+
+def test_stock_gridrec_satisfies_legacy_acceptance_gate(monkeypatch):
+	import lftomo.acceptance as acceptance
+	from lftomo.pipeline.runtime import LibTomoIdentity
+
+	monkeypatch.setattr(acceptance, "collect_libtomo_identity", lambda: LibTomoIdentity(
+		version="1.15.3", build="cuda12.9h1234567_102",
+	))
+	acceptance._require_stock_gridrec()
+
+
+def test_experiment_only_acceptance_does_not_require_legacy_gridrec(tmp_path, monkeypatch):
+	import lftomo.acceptance as acceptance
+	from lftomo.pipeline.runtime import LibTomoIdentity
+
+	monkeypatch.setattr(acceptance, "collect_libtomo_identity", lambda: LibTomoIdentity(
+		version="1.15.3", build="cuda12.9h1234567_densq1_103",
+	))
+	with pytest.raises(FileNotFoundError, match="missing canonical scan metadata"):
+		acceptance.run_acceptance(
+			tmp_path / "missing-data", tmp_path / "result", modes=("experiment",),
+		)
 
 
 class RecordingLogger:

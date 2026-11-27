@@ -1,5 +1,6 @@
 name: lftomo
 channels:
+  - https://raw.githubusercontent.com/den-sq/tomopy/716c0d2b2826e54b99e8041dc7bdf01fefdd9acd/conda/channel
   - conda-forge
   - bioconda
   - astra-toolbox
@@ -12,7 +13,8 @@ dependencies:
   - psutil
   - h5py
   - tifffile
-  - tomopy>=1.15.3
+  - tomopy=1.15.3=pyhd8ed1ab_2
+  - libtomo=1.15.3=cuda12.9h1234567_densq1_103
   - scipy
   - pywavelets
   - numexpr
@@ -25,4 +27,5 @@ dependencies:
   - packaging
   - pytest
   - hatchling
+  - hatch-vcs
   - pip

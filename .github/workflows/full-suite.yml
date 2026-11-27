@@ -10,7 +10,6 @@ on:
       - "tests/**"
       - "pyproject.toml"
       - "environment.yml"
-      - ".github/ci/full-suite-environment.yml"
       - ".github/workflows/full-suite.yml"
 
 permissions:
@@ -44,8 +43,13 @@ jobs:
       - name: Set up scientific environment
         id: micromamba
         uses: mamba-org/setup-micromamba@v3
+        env:
+          # Install the current CUDA-enabled package on this CPU-only runner;
+          # gridrec and the default suite use its CPU implementation.
+          CONDA_OVERRIDE_CUDA: "12.9"
         with:
-          environment-file: .github/ci/full-suite-environment.yml
+          environment-file: environment.yml
+          create-args: python=3.12
           cache-environment: true
           cache-downloads: true
           init-shell: bash
@@ -85,7 +89,7 @@ jobs:
         run: |
           started=$(date +%s)
           set +e
-          python -m pytest -q
+          python -m pytest -q tests
           test_status=$?
           # Do NOT re-enable errexit before the explicit exit (see the install
           # step): the micromamba login shell flips an errexit-active exit 0
