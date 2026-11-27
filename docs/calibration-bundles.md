@@ -90,6 +90,44 @@ temporaries. Static buffer planning includes declared projection work, while
 bundle-dependent preparation is visible in the actual storage allocation
 events; its size is not known from the input `BufferSpec` alone.
 
+### Building the measured schedule
+
+`build_beam_band_shift_schedule(build, source, dataset, ...)` measures the
+`(dy, m)` schedule from raw projections through the existing
+`CalibrationBuildSession`. First write the white and dark components named by
+the typed `BeamBandShiftModel`; the builder reads those completed components
+using `build.read_component()`, which delegates to the bounded bundle reader.
+Incomplete component writers cannot be read. Reads during a build do not create
+an intermediate manifest or publish the bundle.
+
+The caller supplies six detector-row windows, a positive high-pass Gaussian
+width, and an increasing uniform `search_shifts` grid in pixels. These settings
+are required because the historical B10 producer's exact command parameters
+have not been recovered. The source uses the existing `HDF5RandomFrameSource`
+or `TIFFRandomFrameSource` interface; `dataset` provides canonical physical
+dimensions, angles and acquisition slots for its complete recorded sequence.
+
+For each frame the builder reads bounded Y chunks, dark-subtracts, floors
+counts at one, and averages their logarithms across X. A Gaussian high-pass
+removes broad row variation. In each reference window, normalized correlation
+matches the white profile against the observed profile sampled at `y + shift`;
+parabolic peak refinement gives subpixel offsets. A least-squares fit of the
+six offsets to `dy(y) = dy_c + (m - 1)(y - yc)` produces each schedule row.
+Reaching a search boundary fails with an instruction to widen the search.
+
+Only `m` is Gaussian-smoothed along recorded-frame order (`stretch_sigma=25`,
+reflect boundaries); `dy_c` retains its measured frame-to-frame jitter.
+`stretch_sigma=0` disables smoothing. The bundle records the fitting settings,
+angle provenance, window-fit residual RMS, frame-to-frame dy RMS, and
+registration confidence/ambiguity. Schedule time values are acquisition slots,
+including gaps. `y_chunk` controls input memory without changing the fit.
+
+The end-of-scan residual builder is pending recovery of the original producer
+and centre-scan leak definition. Neither this schedule estimator nor synthetic
+recovery tests establish rounding-level agreement with the production B10
+files. That comparison requires the raw scans, producer reports and reference
+outputs.
+
 ## Coordinate and time bounds
 
 Static arrays are addressed in detector coordinates and read only for the

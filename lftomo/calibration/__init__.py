@@ -66,6 +66,7 @@ from .beam_basis import (
 	ProjectionBeamFit,
 	build_beam_basis, fit_projection_beam,
 )
+from .band_shift import build_beam_band_shift_schedule
 
 __all__ = [
 	"ArrayPayload",
@@ -112,6 +113,7 @@ __all__ = [
 	"build_static_dynamic_components",
 	"build_flat_series_digest",
 	"build_beam_basis",
+	"build_beam_band_shift_schedule",
 	"auto_air_mask",
 	"calibrate_motor_axis",
 	"calibrate_schedule",
