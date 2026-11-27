@@ -32,6 +32,7 @@ class MultimaterialStage(Stage):
 		accepts_domain=(DataDomain.TRANSMISSION,), produces_domain=DataDomain.ATTENUATION,
 		mutates_input=True, cacheable_prefix=True, window_axes=("Y", "Theta"),
 		extent_sensitive_axes=("Y", "X"), requires_row_identity=True,
+		requires_full_axes=("Theta",),
 		required_metadata=("energy_keV", "pixel_size_um", "ssd_cm"),
 		produces_artifacts=("phase_filter", "correction_norms", "label_change"),
 		managed_artifacts=("phase_filter",),

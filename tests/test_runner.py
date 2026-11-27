@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import json
 
 import h5py
 import numpy as np
@@ -186,6 +187,17 @@ def test_all_bundled_canonical_templates_instantiate():
 		assert stages, path.name
 
 
+def test_empty_pipeline_reports_complete_pipeline_contract(tmp_path):
+	from lftomo.pipeline import CompletePipelineError
+
+	scan_path = tmp_path / "scan.yaml"
+	write_yaml(scan_path, scan_document("scan.h5"))
+	pipeline_path = tmp_path / "pipeline.yaml"
+	write_yaml(pipeline_path, {"pipeline": []})
+	with pytest.raises(CompletePipelineError, match="must begin"):
+		run_reconstruction(pipeline_path, scan_path)
+
+
 def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	tmp_path, monkeypatch,
 ):
@@ -265,9 +277,95 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	assert reservations == [(event.role, event.bytes) for event in plans[0].allocation_schedule]
 
 
-@pytest.mark.parametrize("window_rows, vo_chain", [(None, False), (1, False), (2, True)])
+def test_intermediate_capacity_is_advisory_and_report_matches_coexisting_files(
+	tmp_path, monkeypatch,
+):
+	import lftomo.runner as runner_module
+	from tests.fixtures.tier1 import flat_dark_frames, projection_stack
+
+	pytest.importorskip("tomopy")
+	size, theta = 8, 7
+	flats, darks = flat_dark_frames(size=size, n_flats=2, gain=10000, dark_level=20)
+	transmission = np.exp(-0.7 * projection_stack(size=size, n_projections=theta))
+	counts = np.rint(darks[0] + transmission * (flats[0] - darks[0])).astype(np.uint16)
+	# Avoid the upstream gridrec correction-table overread at power-of-two widths.
+	columns = size - 1
+	counts, flats, darks = (values[..., :columns] for values in (counts, flats, darks))
+	data_path = tmp_path / "scan.h5"
+	with h5py.File(data_path, "w") as handle:
+		handle.create_dataset("exchange/data", data=counts)
+		handle.create_dataset("exchange/data_white", data=flats)
+		handle.create_dataset("exchange/data_dark", data=darks)
+	document = scan_document(str(data_path))
+	document["n_projections"] = document["acquisition"]["n_projections"] = theta
+	document["detector"].update(rows=size, columns=columns)
+	scan_path = tmp_path / "scan.yaml"
+	write_yaml(scan_path, document)
+	pipeline_path = tmp_path / "pipeline.yaml"
+	write_yaml(pipeline_path, {"process_workers": 1, "pipeline": [
+		{"kind": "read", "algorithm": "hdf5_dxchange"},
+		{"kind": "normalize", "algorithm": "weighted"},
+		{"kind": "phase", "algorithm": "paganin", "sweep": {
+			"kind": "list", "params": {"slope": [1e-10, 2e-10]},
+		}},
+		{"kind": "recon", "algorithm": "gridrec", "params": {"center": columns / 2, "ncore": 1}},
+		{"kind": "write", "algorithm": "tiff_slices"},
+	]})
+	checked = []
+	def low_space(path):
+		checked.append((path, tuple(root.rglob("*.npy")) if root.exists() else ()))
+		return SimpleNamespace(free=0)
+	monkeypatch.setattr(runner_module.shutil, "disk_usage", low_space)
+	read = h5py.Dataset.__getitem__
+	def check_before_read(dataset, *args, **kwargs):
+		if dataset.name == "/exchange/data":
+			assert checked, "intermediate storage was not reported before reading projections"
+		return read(dataset, *args, **kwargs)
+	monkeypatch.setattr(h5py.Dataset, "__getitem__", check_before_read)
+	root = tmp_path / "intermediates" / "nested"
+	output = tmp_path / "output"
+	cli_result = CliRunner().invoke(main, [
+		str(pipeline_path), str(scan_path), "--output", str(output),
+		"--window-rows", "4", "--window-theta", "3", "--intermediate-root", str(root),
+		"--retain-intermediates", "--json-output",
+	])
+	assert cli_result.exit_code == 0, cli_result.output
+	results = json.loads(cli_result.stdout)
+	assert len(results) == len(checked) == 2
+	assert checked[0] == (tmp_path, ())
+	assert checked[1][0] == root
+	assert set(checked[1][1]) == {
+		Path(item["path"]) for item in results[0]["artifacts"]["intermediates"]
+	}
+	for result in results:
+		report = result["artifacts"]["intermediate_storage"]
+		assert report["root"] == str(root.resolve())
+		assert report["available_bytes"] == 0
+		files = [Path(item["path"]) for item in result["artifacts"]["intermediates"]]
+		assert len(files) == len(report["boundaries"]) == 2
+		for boundary, path in zip(report["boundaries"], files, strict=True):
+			assert boundary["estimated_file_bytes"] == path.stat().st_size
+			assert boundary["payload_bytes"] == np.load(path, mmap_mode="r").nbytes
+		assert report["estimated_peak_bytes"] == sum(path.stat().st_size for path in files)
+		manifest = yaml.safe_load((Path(result["output_path"]) / "recon_run.yaml").read_text())
+		assert manifest["intermediate_storage"] == report
+		assert manifest["resolved_recon"]["metadata"]["intermediate_storage"] == report
+		assert len(result["artifacts"]["output_files"]) == size
+		assert np.isfinite(tf.memmap(result["artifacts"]["output_files"][0], mode="r")).all()
+	message = cli_result.stderr
+	assert "advisory only, proceeding" in message
+	assert str(root.resolve()) in message
+	assert f"peak coexisting bytes={report['estimated_peak_bytes']}" in message
+
+
+@pytest.mark.parametrize("window_rows, vo_chain, available_mib, fits", [
+	(None, False, 64, False),
+	(1, False, 32, False),
+	(1, False, 64, True),
+	(2, True, 64, False),
+])
 def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
-	tmp_path, monkeypatch, window_rows, vo_chain,
+	tmp_path, monkeypatch, window_rows, vo_chain, available_mib, fits,
 ):
 	import lftomo.runner as runner_module
 	import lftomo.util.mem as mem_module
@@ -297,17 +395,26 @@ def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 	pipeline_path = tmp_path / "pipeline.yaml"
 	write_yaml(pipeline_path, recon.model_dump(mode="json"))
 
-	available = 64 * 1024**2
+	available = available_mib * 1024**2
 	monkeypatch.setattr(mem_module, "platform", "linux")
+	statvfs = mem_module.os.statvfs
 	def space(path):
-		assert path == "/dev/shm"
+		if path != "/dev/shm":
+			return statvfs(path)
 		return SimpleNamespace(f_bavail=available // 4096, f_frsize=4096)
 	monkeypatch.setattr(mem_module.os, "statvfs", space)
-	plans = []
+	checked_peaks = []
+	check_capacity = runner_module.SharedNPManager.check_capacity
+	def record_capacity(peak):
+		checked_peaks.append(peak)
+		check_capacity(peak)
+	monkeypatch.setattr(runner_module.SharedNPManager, "check_capacity", staticmethod(record_capacity))
+	plans, window_counts = [], []
 	validate = runner_module.validate_pipeline
 	def record_plan(*args, **kwargs):
 		plan = validate(*args, **kwargs)
 		plans.append(plan)
+		window_counts.append(len(kwargs["dataset"].frange))
 		return plan
 	monkeypatch.setattr(runner_module, "validate_pipeline", record_plan)
 
@@ -323,24 +430,31 @@ def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 	monkeypatch.setattr(runner_module.PipelineRunContext, "__enter__", stop_before_manager)
 
 	window_config = WindowConfig(rows=window_rows) if window_rows is not None else None
-	if window_rows is None or vo_chain:
+	if not fits:
 		with pytest.raises(MemoryError) as error:
 			run_reconstruction(pipeline_path, scan_path, window_config=window_config)
-		assert len(plans) == 1
-		peak = plans[0].shared_memory_peak_bytes
+		peak, = checked_peaks
 		assert peak > available
 		message = str(error.value)
 		assert f"planned peak {peak} bytes" in message
 		assert f"available /dev/shm space {available} bytes" in message
 		assert "shared memory" in message
 		assert "--window-rows" in message and "--shm-size" in message
-		if vo_chain:
-			assert peak == 88_979_360
 	else:
 		with pytest.raises(ReachedManager):
 			run_reconstruction(pipeline_path, scan_path, window_config=window_config)
+		peak, = checked_peaks
+		assert 0 < peak < available
+	if window_rows is None:
 		assert len(plans) == 1
-		assert 0 < plans[0].shared_memory_peak_bytes < available
+		assert peak == plans[0].shared_memory_peak_bytes
+	else:
+		# BAC now uses the full selected detector extent in a Theta sweep.
+		# Preflight covers all three sweep reservations, after complete validation.
+		assert len(plans) == 4
+		assert peak == runner_module.reserve_streaming_buffers(
+			plans[1:], window_counts=window_counts[1:],
+		)
 
 
 def test_shared_memory_preflight_does_not_assume_linux_mount_on_other_platforms(monkeypatch):

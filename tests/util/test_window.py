@@ -13,6 +13,31 @@ def _uniform_angles(count):
 	return np.linspace(0, np.pi, count, endpoint=False)
 
 
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+def test_packed_window_index_preserves_strided_source_coordinates(layout):
+	physical = ProjOrder(13, 12, 8)
+	source = np.arange(np.prod(physical.as_tuple())).reshape(physical.as_tuple())
+	parent = TomoWindow.from_bounds(physical, theta=(1, 13, 2), y=(2, 11))
+	child = TomoWindow.from_bounds(physical, theta=(5, 12, 4), y=(5, 9), halo=Y(1))
+	packed = source[parent.index]
+	if layout is SinoOrder:
+		packed = packed.transpose(1, 0, 2)
+	actual = packed[parent.packed_index(child.with_pad(), layout)]
+	expected = source[child.with_pad().index]
+	if layout is SinoOrder:
+		expected = expected.transpose(1, 0, 2)
+	np.testing.assert_array_equal(actual, expected)
+
+
+def test_packed_window_index_rejects_missing_or_misaligned_samples():
+	physical = ProjOrder(13, 12, 8)
+	parent = TomoWindow.from_bounds(physical, theta=(1, 13, 2), y=(2, 11))
+	with pytest.raises(ValueError, match="outside materialized Y coverage"):
+		parent.packed_index(TomoWindow.from_bounds(physical, theta=(1, 13, 2), y=(1, 11)))
+	with pytest.raises(ValueError, match="align with materialized Theta samples"):
+		parent.packed_index(TomoWindow.from_bounds(physical, theta=(2, 12, 2), y=(2, 11)))
+
+
 @pytest.mark.integration
 def test_file_load():
 	tds = disk_dataset()

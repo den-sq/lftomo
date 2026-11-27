@@ -61,12 +61,15 @@ def _run_increment(buffer, scan, recon):
 	_IncrementStage().run(PipelineState(buffer, scan, recon))
 
 
-def _crashing_run(connection):
+def _crashing_run(connection, directory, retain):
 	if hasattr(os, "setsid"):
 		os.setsid()
-	with PipelineRunContext() as context:
+	with PipelineRunContext(intermediate_root=directory, retain_intermediates=retain) as context:
 		buffer = context.storage.allocate(ImgSlice(2, 3), np.float32)
-		connection.send(buffer.name)
+		intermediate = context.create_intermediate(ProjOrder(2, 3, 4), np.float32)
+		intermediate.array()[...] = 17
+		intermediate.flush()
+		connection.send((buffer.name, intermediate.path))
 		connection.close()
 		while True:
 			time.sleep(1)
@@ -161,6 +164,37 @@ def test_file_backed_buffer_preserves_typed_shape_through_views_and_pickle(tmp_p
 		clone.close()
 
 
+def test_writable_file_backed_views_reopen_in_workers_and_preserve_existing_files(tmp_path):
+	path = tmp_path / "working.npy"
+	expected = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+	buffer = FileBackedNPArray.create(path, ProjOrder(2, 3, 4), np.float32)
+	try:
+		buffer.array()[...] = expected
+		buffer.flush()
+		view = buffer[:, 1:2, :]
+		clone = pickle.loads(pickle.dumps(view))
+		try:
+			assert clone.shape == ProjOrder(2, 1, 4)
+			_assert_numpy_protocol(clone, expected[:, 1:2, :], writeable=True)
+			process = multiprocessing.get_context("spawn").Process(
+				target=_run_increment, args=(clone, _scan(), _recon()),
+			)
+			process.start()
+			process.join(timeout=10)
+			assert process.exitcode == 0
+		finally:
+			clone.close()
+			view.close()
+		buffer.close()
+		expected[:, 1:2, :] += 1
+		np.testing.assert_array_equal(buffer.array(), expected)
+		with pytest.raises(FileExistsError):
+			FileBackedNPArray.create(path, ProjOrder(2, 3, 4), np.float32)
+		np.testing.assert_array_equal(np.load(path), expected)
+	finally:
+		buffer.close()
+
+
 def test_file_backed_buffer_rejects_datashape_rank_mismatch(tmp_path):
 	path = tmp_path / "working.npy"
 	np.save(path, np.zeros((2, 3), dtype=np.float32))
@@ -245,24 +279,90 @@ def test_run_context_rejects_sequential_reentry_after_owned_shutdown():
 		context.__enter__()
 
 
+@pytest.mark.parametrize("retain", [False, True])
+@pytest.mark.parametrize("fail", [False, True])
+def test_run_context_intermediates_are_fresh_with_explicit_retention(tmp_path, retain, fail):
+	root = tmp_path / "intermediates"
+	previous_directory = None
+	for _ in range(2):
+		context = PipelineRunContext(intermediate_root=root, retain_intermediates=retain)
+		assert context.intermediate_directory is None
+		assert context.intermediate_paths == ()
+		try:
+			with context:
+				buffer = context.create_intermediate(ProjOrder(2, 3, 4), np.float32, name="working")
+				directory = context.intermediate_directory
+				assert directory.parent == root
+				assert directory != previous_directory
+				assert context.intermediate_paths == (buffer.path,)
+				buffer.array()[...] = 7
+				with pytest.raises(FileExistsError):
+					context.create_intermediate(ProjOrder(2, 3, 4), np.float32, name="working")
+				if fail:
+					raise RuntimeError("deliberate")
+		except RuntimeError as error:
+			assert fail and str(error) == "deliberate"
+		assert directory.exists() is retain
+		assert context.intermediate_paths == (buffer.path,)
+		if retain:
+			np.testing.assert_array_equal(np.load(buffer.path), np.full((2, 3, 4), 7))
+		previous_directory = directory
+	with pytest.raises(RuntimeError, match="active PipelineRunContext"):
+		context.create_intermediate(ProjOrder(2, 3, 4), np.float32)
+
+
+def test_run_context_intermediate_directory_is_lazy_and_names_stay_inside_it(tmp_path):
+	root = tmp_path / "unused"
+	with PipelineRunContext(intermediate_root=root) as context:
+		assert context.intermediate_directory is None
+		with pytest.raises(ValueError, match="filename without directories"):
+			context.create_intermediate(ProjOrder(2, 3, 4), np.float32, name="../escaped")
+	assert not root.exists()
+
+
+def test_run_context_cleans_intermediates_when_executor_shutdown_fails(tmp_path, monkeypatch):
+	context = PipelineRunContext(intermediate_root=tmp_path)
+	with pytest.raises(RuntimeError, match="executor shutdown failed"):
+		with context:
+			buffer = context.create_intermediate(ProjOrder(2, 3, 4), np.float32)
+			mapping = buffer.array()
+			shared = context.storage.allocate(ImgSlice(2, 3), np.float32)
+
+			def fail_shutdown():
+				raise RuntimeError("executor shutdown failed")
+
+			monkeypatch.setattr(context.executor, "close", fail_shutdown)
+	assert mapping._mmap.closed
+	assert not context.intermediate_directory.exists()
+	assert not _segment_exists(shared.name)
+
+
 @pytest.mark.parametrize("stop_signal", [signal.SIGTERM, signal.SIGKILL])
-def test_killed_process_group_does_not_leak_manager_segments(stop_signal):
+@pytest.mark.parametrize("retain", [False, True])
+def test_killed_process_group_cleans_owned_storage_and_honors_retention(tmp_path, stop_signal, retain):
 	if not hasattr(os, "killpg"):
 		pytest.skip("process-group crash cleanup requires POSIX")
 	spawn = multiprocessing.get_context("spawn")
 	parent, child = spawn.Pipe(duplex=False)
-	process = spawn.Process(target=_crashing_run, args=(child,))
+	user_file = tmp_path / "unrelated.txt"
+	user_file.write_text("keep")
+	process = spawn.Process(target=_crashing_run, args=(child, tmp_path, retain))
 	process.start()
 	child.close()
-	name = parent.recv()
+	name, intermediate = parent.recv()
 	assert _segment_exists(name)
+	assert intermediate.exists()
 	os.killpg(process.pid, stop_signal)
 	process.join(timeout=10)
 	assert not process.is_alive()
 	deadline = time.monotonic() + 10
-	while _segment_exists(name) and time.monotonic() < deadline:
+	while (_segment_exists(name) or (not retain and intermediate.parent.exists())) and time.monotonic() < deadline:
 		time.sleep(0.1)
 	assert not _segment_exists(name)
+	assert intermediate.parent.exists() is retain
+	if retain:
+		np.testing.assert_array_equal(np.load(intermediate), np.full((2, 3, 4), 17))
+	assert user_file.read_text() == "keep"
 
 
 @pytest.mark.parametrize("start_method", ["default", "spawn"])

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import shutil
+import sys
 from typing import Any, Callable
 
 import click
@@ -35,6 +37,7 @@ from lftomo.config import (
 )
 from lftomo.pipeline import (
 	Backend,
+	BufferSpec,
 	CandidateLimitError,
 	NumpyBackend,
 	Pipeline,
@@ -50,11 +53,13 @@ from lftomo.pipeline import (
 )
 from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
-from lftomo.pipeline.planning import PipelinePlan
+from lftomo.pipeline.planning import PipelinePlan, reserve_streaming_buffers, stage_output_spec
 from lftomo.pipeline.runtime import collect_libtomo_identity
-from lftomo.storage import ManagedBuffer, buffer_view
+from lftomo.pipeline.streaming import StreamingSegment, WindowPlanError, resolve_streaming_segments
+from lftomo.storage import FileBackedNPArray, ManagedBuffer, buffer_view
 from lftomo.util.converter import CONVERTER
 from lftomo.util.mem import SharedNPManager
+from lftomo.util.log import log, LOG
 from lftomo.util.shapes import Y
 from lftomo.util.window import TomoDataSet, TomoWindow
 
@@ -209,7 +214,7 @@ def calibration_target(scan: Scan, source_window: TomoWindow) -> CalibrationTarg
 	"""Build compatibility facts from the canonical source selection."""
 
 	columns = _detector_shape(scan)[1]
-	selection = source_window.interval("Y")
+	selection = source_window.with_pad(["Y"]).interval("Y")
 	metadata = scan.metadata
 	return CalibrationTarget(
 		detector_id=metadata.get("detector_id") or scan.detector.name,
@@ -293,7 +298,7 @@ def resolve_calibration(
 
 	pipeline_root = Path(pipeline_root).resolve()
 	scan_root = Path(scan_root).resolve()
-	selection = source_window.interval("Y")
+	selection = source_window.with_pad(["Y"]).interval("Y")
 	y_start, y_stop = selection.start.Y, selection.stop.Y
 	normalize = _normalization_stage(recon)
 	manifest_path, options = _manifest_selection(recon, pipeline_root)
@@ -427,6 +432,15 @@ class _ReplayCenterArtifactStage(Stage):
 		return state
 
 
+def _center_prepass_stop(stages: list[Stage]) -> int | None:
+	"""Exclusive end of the processed prefix replayed for automatic centers."""
+
+	return max((
+		index + 1 for index, stage in enumerate(stages)
+		if stage.name.startswith("center.") and stage.name != "center.manual"
+	), default=None)
+
+
 def _detached_artifact(value: Any) -> Any:
 	if isinstance(value, ManagedBuffer):
 		return buffer_view(value).copy()
@@ -459,12 +473,13 @@ def _planned_pipeline(
 	available_artifacts: dict[str, Any], observer: StageObserver | None, recon: Recon,
 	*, execution_observer: ExecutionSpanObserver | None = None,
 	stage_index_offset: int = 0, mode: str = "complete",
-	initial_layout=None, initial_domain=None,
+	initial_layout=None, initial_domain=None, initial_buffer=None,
 	dataset=None, source_window=None,
 ) -> Pipeline:
 	plan = validate_pipeline(
 		stages, scan, backend, available_artifacts=available_artifacts,
 		mode=mode, initial_layout=initial_layout, initial_domain=initial_domain,
+		initial_buffer=initial_buffer,
 		enable_aliasing=recon.buffer_aliasing,
 		enable_engine_aliasing=recon.tomopy_input_aliasing,
 		dataset=dataset, source_window=source_window,
@@ -493,6 +508,11 @@ def _run_streaming_pipeline(
 	dataset: TomoDataSet, buffer_plan: PipelinePlan,
 	stage_observer: StageObserver | None,
 	execution_observer: ExecutionSpanObserver | None,
+	incoming: FileBackedNPArray | None = None,
+	incoming_window: TomoWindow | None = None,
+	incoming_domain: DataDomain | None = None,
+	stage_index_offset: int = 0,
+	publish_window: Callable[[PipelineState], None] | None = None,
 ) -> dict[str, Any]:
 	"""Execute one whole-volume or multi-window run through the same driver."""
 
@@ -505,26 +525,48 @@ def _run_streaming_pipeline(
 		for event in buffer_plan.allocation_schedule:
 			reserve(event.role, event.bytes)
 	for window in dataset:
-		window_stages = list(stages)
-		window_initial = dict(initial_artifacts)
-		center_artifacts = {}
-		auto_centers = [
-			index for index, stage in enumerate(window_stages)
-			if stage.name.startswith("center.") and stage.name != "center.manual"
-		]
-		if auto_centers:
-			last_center = max(auto_centers)
-			prepass_stages = window_stages[:last_center + 1]
-			prepass_state = PipelineState(
+		def initial_state(artifacts):
+			state = PipelineState(
 				np.empty((0,), dtype=np.float32), run_scan, concrete,
-				artifacts=dict(window_initial), backend=backend,
+				artifacts=dict(artifacts), backend=backend,
 				storage=run_context.storage, executor=run_context.executor,
 				dataset=dataset, source_window=window,
 			)
+			if incoming is not None:
+				view = incoming[incoming_window.packed_index(window.with_pad(), type(incoming.shape))]
+				try:
+					working = run_context.storage.allocate(
+						view.shape, view.dtype, role="raw_staging",
+						reuse_from=("raw_staging", "normalized", "reconstruction"),
+					)
+					working.array()[...] = view.array()
+				finally:
+					view.close()
+				state = state.with_array(working, domain=incoming_domain)
+			return state
+
+		def input_options(state):
+			return dict(
+				mode="fragment",
+				initial_domain=state.domain,
+				initial_buffer=(
+					BufferSpec.from_buffer(state.working_array)
+					if isinstance(state.working_array, ManagedBuffer) else None
+				),
+			)
+
+		window_stages = list(stages)
+		window_initial = dict(initial_artifacts)
+		center_artifacts = {}
+		prepass_stop = _center_prepass_stop(window_stages)
+		if prepass_stop is not None:
+			prepass_stages = window_stages[:prepass_stop]
+			prepass_state = initial_state(window_initial)
 			prepass = _planned_pipeline(
 				prepass_stages, run_scan, backend, window_initial, stage_observer,
 				concrete, execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
+				stage_index_offset=stage_index_offset, **input_options(prepass_state),
 			)
 			prepass_state = prepass.run(prepass_state)
 			center_artifacts = _center_artifacts(prepass_state)
@@ -542,12 +584,7 @@ def _run_streaming_pipeline(
 		), len(window_stages))
 		compute_stages = window_stages[:writer_start]
 		writer_stages = window_stages[writer_start:]
-		state = PipelineState(
-			np.empty((0,), dtype=np.float32), run_scan, concrete,
-			artifacts=dict(window_initial), backend=backend,
-			storage=run_context.storage, executor=run_context.executor,
-			dataset=dataset, source_window=window,
-		)
+		state = initial_state(window_initial)
 		reconstruction_start = next((
 			stage_index for stage_index, stage in enumerate(compute_stages)
 			if stage.name.startswith("recon.")
@@ -557,6 +594,7 @@ def _run_streaming_pipeline(
 				compute_stages, run_scan, backend, window_initial, stage_observer,
 				concrete, execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
+				stage_index_offset=stage_index_offset, **input_options(state),
 			)
 			state = compute.run(state)
 		else:
@@ -565,14 +603,15 @@ def _run_streaming_pipeline(
 				window_initial, stage_observer, concrete,
 				execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
+				stage_index_offset=stage_index_offset, **input_options(state),
 			)
 			state = prefix.run(state)
 			reconstruction = _planned_pipeline(
 				compute_stages[reconstruction_start:], run_scan, backend,
 				state.artifacts, stage_observer, concrete,
 				execution_observer=execution_observer,
-				stage_index_offset=reconstruction_start,
-				mode="fragment", initial_layout=state.layout, initial_domain=state.domain,
+				stage_index_offset=stage_index_offset + reconstruction_start,
+				**input_options(state),
 				dataset=dataset, source_window=window,
 			)
 			state = reconstruction.run(state)
@@ -582,8 +621,13 @@ def _run_streaming_pipeline(
 			state = Pipeline(
 				writer_stages, backend=backend, validate=False, observer=stage_observer,
 				execution_observer=execution_observer,
-				stage_indices=tuple(range(writer_start, writer_start + len(writer_stages))),
+				stage_indices=tuple(range(
+					stage_index_offset + writer_start,
+					stage_index_offset + writer_start + len(writer_stages),
+				)),
 			).run(state)
+		if publish_window is not None:
+			publish_window(state)
 		window_artifacts = {
 			key: _detached_artifact(value) for key, value in state.artifacts.items()
 			if not isinstance(value, ManagedBuffer)
@@ -610,6 +654,131 @@ def _run_streaming_pipeline(
 	return aggregated
 
 
+def _run_directional_pipeline(
+	*, segments: tuple[StreamingSegment, ...], buffer_plans: tuple[PipelinePlan, ...],
+	stages: list[Stage], run_context, **kwargs,
+) -> dict[str, Any]:
+	"""Materialize each completed sweep before reading in the next direction."""
+
+	if len(buffer_plans) > 1:
+		reserve_streaming_buffers(
+			buffer_plans, run_context.storage,
+			window_counts=tuple(len(segment.dataset.frange) for segment in segments),
+			prepass_stops=tuple(
+				_center_prepass_stop(stages[segment.start:segment.stop]) for segment in segments
+			),
+		)
+	incoming = incoming_window = incoming_domain = None
+	records = []
+	intermediates = []
+	for index, (segment, plan) in enumerate(zip(segments, buffer_plans, strict=True)):
+		outgoing = None
+		coverage = segment.dataset.full_window()
+		output_domain = None
+
+		def publish(state):
+			nonlocal outgoing, output_domain, coverage
+			if outgoing is None:
+				outgoing = run_context.create_intermediate(
+					coverage.frange.length.to(state.layout), state.working_array.dtype,
+					name=f"segment-{index:03d}",
+				)
+				output_domain = state.domain
+				coverage = coverage.rescope(dtype=outgoing.dtype)
+			window = state.source_window
+			target_index = coverage.packed_index(window, state.layout)
+			source_index = window.with_pad().packed_index(window, state.layout)
+			outgoing.array()[target_index] = np.asarray(state.working_array)[source_index]
+
+		artifacts = _run_streaming_pipeline(
+			stages=stages[segment.start:segment.stop], run_context=run_context,
+			dataset=segment.dataset, buffer_plan=plan,
+			incoming=incoming, incoming_window=incoming_window,
+			incoming_domain=incoming_domain, stage_index_offset=segment.start,
+			publish_window=publish if index < len(segments) - 1 else None,
+			**kwargs,
+		)
+		records.append({
+			"start": segment.start, "stop": segment.stop, "axis": segment.axis,
+			"dataset": CONVERTER.unstructure(segment.dataset),
+			"window_results": artifacts["window_results"],
+		})
+		if incoming is not None:
+			incoming.close()
+		if outgoing is not None:
+			outgoing.flush()
+			outgoing.close()
+			intermediates.append({
+				"path": str(outgoing.path), "complete": True,
+				"window": CONVERTER.unstructure(coverage),
+				"layout": type(outgoing.shape).__name__, "dtype": str(outgoing.dtype),
+				"domain": output_domain.name.lower(),
+			})
+			incoming, incoming_window, incoming_domain = outgoing, coverage, output_domain
+	artifacts["streaming_segments"] = records
+	artifacts["intermediates"] = intermediates
+	artifacts["intermediate_directory"] = run_context.intermediate_directory
+	artifacts["intermediates_retained"] = run_context.retain_intermediates
+	return artifacts
+
+
+def _plan_intermediate_storage(
+	segments: tuple[StreamingSegment, ...], buffer_plans: tuple[PipelinePlan, ...],
+	root: Path,
+) -> dict[str, Any]:
+	"""Report coexisting NPY bytes and advisory free space before execution."""
+
+	boundaries = []
+	for index, (segment, plan) in enumerate(zip(segments[:-1], buffer_plans[:-1], strict=True)):
+		output = plan.steps[-1].output_buffer
+		shape = segment.dataset.full_window().frange.length.to(output.layout)
+		boundaries.append({
+			"segment": index, "after_stage": segment.stop - 1,
+			"payload_bytes": shape.nbytes(output.dtype),
+			"estimated_file_bytes": FileBackedNPArray.estimated_file_bytes(shape, output.dtype),
+		})
+	# Completed boundaries remain present until the run context exits, even
+	# after their mappings close. Retention changes cleanup, not this peak.
+	peak_bytes = sum(boundary["estimated_file_bytes"] for boundary in boundaries)
+	result = {
+		"root": str(root), "boundaries": boundaries,
+		"estimated_peak_bytes": peak_bytes, "available_bytes": None,
+		"estimate_basis": "coexisting NPY files including headers; excludes filesystem overhead",
+	}
+	if not boundaries:
+		return result
+	log.write(
+		"Intermediate storage",
+		f"root={root}; boundary file bytes="
+		f"{[boundary['estimated_file_bytes'] for boundary in boundaries]}; "
+		f"peak coexisting bytes={peak_bytes} (including NPY headers)",
+		LOG.INFO, out=sys.stderr,
+	)
+	# A configured root may be created lazily at first publication. Its nearest
+	# existing ancestor identifies the filesystem without creating directories.
+	try:
+		capacity_root = root
+		while not capacity_root.exists() and capacity_root != capacity_root.parent:
+			capacity_root = capacity_root.parent
+		available = shutil.disk_usage(capacity_root).free
+	except OSError as error:
+		log.write(
+			"Intermediate storage", f"Cannot inspect free space for {root}: {error}; proceeding.",
+			LOG.WARN, out=sys.stderr,
+		)
+	else:
+		result["available_bytes"] = available
+		if available < peak_bytes:
+			log.write(
+				"Intermediate storage",
+				f"Estimated intermediate peak {peak_bytes} bytes exceeds available space "
+				f"{available} bytes at {root}; advisory only, proceeding. "
+				"Choose --intermediate-root on a larger filesystem if needed.",
+				LOG.WARN, out=sys.stderr,
+			)
+	return result
+
+
 def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | ResolvedScan,
 			output_path: str | Path | None = None, backend: Backend | None = None, *,
 			calibration_bundle: CalibrationBundleRef | None = None,
@@ -627,6 +796,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 	elif recon.output_path is not None and not recon.output_path.is_absolute():
 		recon.output_path = (Path.cwd() / recon.output_path).resolve()
 	backend = backend or NumpyBackend()
+	window_config = window_config or WindowConfig()
 	runs = expand_recon_sweeps(recon)
 	# Construct every resolved Stage before touching calibration or projection
 	# payloads. This rejects invalid structures and algorithm-specific parameters
@@ -638,6 +808,8 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 		preflight_stages.append([create_stage(config) for config in preflight.pipeline])
 	planned = []
 	for run, planning_stages in zip(runs, preflight_stages, strict=True):
+		if not planning_stages:
+			validate_pipeline(planning_stages, scan, backend, mode="complete")
 		concrete = run.recon.model_copy(deep=True)
 		if len(runs) > 1 and concrete.output_path is not None:
 			concrete.output_path = concrete.output_path / run.output_key
@@ -648,13 +820,20 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 		# Candidates may add metadata keys but must treat shared detector-sized
 		# arrays as immutable. Copy only the mapping.
 		run_scan.metadata = dict(scan.metadata)
-		dataset = resolve_streaming_plan(planning_stages, run_scan, window_config)
+		if state_executor is None:
+			segments = resolve_streaming_segments(planning_stages, run_scan, window_config)
+		else:
+			# Custom executors own their complete, whole-selection pipeline lifecycle.
+			segments = (StreamingSegment(
+				0, len(planning_stages),
+				resolve_streaming_plan(planning_stages, run_scan, window_config),
+			),)
 		planned.append((
-			run, concrete, resolved_document, run_scan, dataset,
+			run, concrete, resolved_document, run_scan, segments,
 		))
 	estimates = [
-		_estimated_output_bytes(concrete, dataset)
-		for _run, concrete, _document, _scan, dataset in planned
+		_estimated_output_bytes(concrete, segments[-1].dataset)
+		for _run, concrete, _document, _scan, segments in planned
 	]
 	total_output = sum(estimates)
 	limit = recon.candidate_limits.max_estimated_output_bytes
@@ -665,11 +844,12 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 			"or raise the configured limit explicitly"
 		)
 	prepared = []
-	for run, concrete, resolved_document, run_scan, dataset in planned:
+	intermediate_root = PipelineRunContext.resolve_intermediate_root(window_config.intermediate_root)
+	for run, concrete, resolved_document, run_scan, segments in planned:
 		resolution = resolve_calibration(
 			run_scan,
 			concrete,
-			source_window=dataset.full_window(),
+			source_window=segments[0].dataset.full_window(),
 			pipeline_root=resolved_pipeline_path.parent,
 			scan_root=resolved_scan.path.parent,
 			seeded_bundle=calibration_bundle,
@@ -686,8 +866,9 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 		# Validate every selected complete structure before the first projection
 		# Stage runs. Candidate N cannot fail contract validation after candidate
 		# N-1 has already produced output.
-		largest = max(dataset, key=lambda item: item.with_pad(["Y"]).shape.Y)
-		buffer_plan = validate_pipeline(
+		dataset = segments[0].dataset
+		largest = max(dataset, key=lambda item: item.with_pad().frange.length.nbytes(dataset.dtype))
+		complete_plan = validate_pipeline(
 			stages,
 			run_scan,
 			backend,
@@ -698,24 +879,92 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 			dataset=dataset,
 			source_window=largest,
 		)
-		SharedNPManager.check_capacity(buffer_plan.shared_memory_peak_bytes)
+		buffer_plans = []
+		resolved_segments = []
+		previous = None
+		for segment in segments:
+			if len(segments) == 1:
+				buffer_plans.append(complete_plan)
+				resolved_segments.append(segment)
+				break
+			dataset = segment.dataset if previous is None else replace(
+				segment.dataset, dtype=previous.output_buffer.dtype,
+			)
+			largest = max(dataset, key=lambda item: item.with_pad().frange.length.nbytes(dataset.dtype))
+			input_buffer = None if previous is None else BufferSpec(
+				largest.with_pad().frange.length.to(previous.output_buffer.layout), dataset.dtype,
+			)
+			plan = validate_pipeline(
+				stages[segment.start:segment.stop], run_scan, backend,
+				available_artifacts=initial_artifacts, mode="fragment",
+				initial_buffer=input_buffer,
+				initial_domain=None if previous is None else previous.output_domain,
+				enable_aliasing=concrete.buffer_aliasing,
+				enable_engine_aliasing=concrete.tomopy_input_aliasing,
+				dataset=dataset, source_window=largest,
+			)
+			previous = plan.steps[-1]
+			if segment.stop < len(stages):
+				# Check complete published coverage, not only the largest chunk:
+				# e.g. helical cropping may be zero in the first Theta window.
+				full_window = dataset.full_window()
+				full_output = None if input_buffer is None else BufferSpec(
+					full_window.with_pad().frange.length.to(input_buffer.layout), input_buffer.dtype,
+				)
+				for stage in stages[segment.start:segment.stop]:
+					full_output = stage_output_spec(
+						stage, full_output, run_scan, dataset=dataset, source_window=full_window,
+					)
+					full_window = stage.output_window(full_window)
+				published = dataset.full_window().with_pad().frange.length.to(full_output.layout)
+				if full_output.shape != published:
+					raise WindowPlanError(
+						f"{stages[segment.stop - 1].name} changes the materialized shape "
+						"before a direction boundary; transformed intermediates are not supported",
+					)
+			buffer_plans.append(plan)
+			resolved_segments.append(replace(segment, dataset=dataset))
+		SharedNPManager.check_capacity(
+			buffer_plans[0].shared_memory_peak_bytes if len(buffer_plans) == 1
+			else reserve_streaming_buffers(
+				buffer_plans,
+				window_counts=tuple(len(segment.dataset.frange) for segment in resolved_segments),
+				prepass_stops=tuple(
+					_center_prepass_stop(stages[segment.start:segment.stop])
+					for segment in resolved_segments
+				),
+			),
+		)
 		prepared.append((
 			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
-			dataset, buffer_plan,
+			tuple(resolved_segments), tuple(buffer_plans),
 		))
 	libtomo = collect_libtomo_identity()
 	results = []
 	for (
 		run, concrete, resolved_document, run_scan, initial_artifacts, stages,
-		dataset, buffer_plan,
+		segments, buffer_plans,
 	) in prepared:
+		# Check each candidate immediately before execution so retained files
+		# from earlier candidates are reflected in the filesystem's free space.
+		initial_artifacts["intermediate_storage"] = _plan_intermediate_storage(
+			segments, buffer_plans, intermediate_root,
+		)
+		dataset = segments[-1].dataset
 		resolved_metadata = resolved_document.setdefault("metadata", {})
 		resolved_metadata["streaming_dataset"] = CONVERTER.unstructure(dataset)
+		resolved_metadata["streaming_segments"] = [{
+			"start": segment.start, "stop": segment.stop, "axis": segment.axis,
+			"dataset": CONVERTER.unstructure(segment.dataset),
+		} for segment in segments]
+		resolved_metadata["intermediate_storage"] = initial_artifacts["intermediate_storage"]
 		with PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
 			max_workers=concrete.process_workers or min(4, os.cpu_count() or 1),
 			worker_timeout_seconds=concrete.worker_timeout_seconds,
+			intermediate_root=intermediate_root,
+			retain_intermediates=window_config.retain_intermediates,
 		) as run_context:
 			if state_executor is not None:
 				if len(dataset.frange) != 1:
@@ -757,10 +1006,10 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 				}
 				artifacts["measured_shared_memory_bytes"] = sum(physical.values())
 			else:
-				artifacts = _run_streaming_pipeline(
+				artifacts = _run_directional_pipeline(
 					stages=stages, concrete=concrete, run_scan=run_scan,
 					initial_artifacts=initial_artifacts, backend=backend,
-					run_context=run_context, dataset=dataset, buffer_plan=buffer_plan,
+					run_context=run_context, segments=segments, buffer_plans=buffer_plans,
 					stage_observer=stage_observer,
 					execution_observer=execution_observer,
 				)
@@ -784,6 +1033,10 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 				yaml.safe_dump({
 					"resolved_recon": resolved_document,
 					"streaming_dataset": CONVERTER.unstructure(dataset),
+					"streaming_segments": resolved_metadata["streaming_segments"],
+					"intermediates": artifacts.get("intermediates", []),
+					"intermediate_storage": initial_artifacts["intermediate_storage"],
+					"intermediates_retained": window_config.retain_intermediates,
 					"runtime": {
 						"libtomo": None if libtomo is None else libtomo.model_dump(mode="json"),
 					},
@@ -828,16 +1081,28 @@ def _json_result(result: RunResult) -> dict[str, Any]:
 @click.option("--gpu", is_flag=True, help="Declare that the selected runtime provides CUDA support.")
 @click.option("--json-output", is_flag=True, help="Emit machine-readable run summaries.")
 @click.option("--window-rows", type=click.IntRange(min=1), help="Machine-selected core rows per window.")
+@click.option("--window-theta", type=click.IntRange(min=1), help="Projections per Theta window (defaults to --window-rows in bounded runs).")
+@click.option("--window-columns", type=click.IntRange(min=1), help="Columns per X window.")
+@click.option("--window-axis", type=click.Choice(["Y", "Theta", "X"]), default="Y",
+	help="Default direction; Stage requirements and preferences take precedence.")
+@click.option("--intermediate-root", type=click.Path(file_okay=False, path_type=Path),
+	help="Directory for fresh run-owned intermediate arrays (defaults to system temporary storage).")
+@click.option("--retain-intermediates", is_flag=True, help="Keep intermediate arrays after success or failure.")
 @click.option("--extra-pad-y", type=click.IntRange(min=0), default=0,
 	help="Optional runner-level detector-row padding.")
 def main(pipeline_path: Path, scan_path: Path, output_path: Path | None,
 			gpu: bool, json_output: bool, window_rows: int | None,
-			extra_pad_y: int) -> None:
+			window_theta: int | None, window_columns: int | None, window_axis: str,
+			intermediate_root: Path | None, retain_intermediates: bool, extra_pad_y: int) -> None:
 	"""Execute PIPELINE_PATH (or a bundled template name) for SCAN_PATH."""
 	backend = Backend(name="numpy", supports_gpu=True) if gpu else NumpyBackend()
 	results = run_reconstruction(
 		pipeline_path, scan_path, output_path, backend,
-		window_config=WindowConfig(rows=window_rows, extra_pad=Y(extra_pad_y)),
+		window_config=WindowConfig(
+			rows=window_rows, theta=window_theta, columns=window_columns, axis=window_axis,
+			extra_pad=Y(extra_pad_y), intermediate_root=intermediate_root,
+			retain_intermediates=retain_intermediates,
+		),
 	)
 	if json_output:
 		click.echo(json.dumps([_json_result(result) for result in results], indent=2))

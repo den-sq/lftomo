@@ -11,6 +11,7 @@ import numpy as np
 from lftomo.pipeline.core import BufferSpec, Stage, collect_bounded_work
 from lftomo.pipeline.dispatch import dispatch_for_stage
 from lftomo.pipeline.domains import DataDomain
+from lftomo.storage import select_buffer_alias
 from lftomo.util.shapes import ImgSlice, ProjOrder, ReconOrder, SinoOrder
 from lftomo.util.window import TomoDataSet, TomoWindow
 
@@ -87,6 +88,9 @@ class BufferScheduleEvent:
 	physical_role: str
 	proof: str | None = None
 	live_roles: tuple[str, ...] = ()
+	reuse_from: tuple[str, ...] = ()
+	alias_from: str | None = None
+	external_pins: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -110,6 +114,90 @@ class PipelinePlan:
 			event.bytes for event in self.allocation_schedule
 			if event.action is BufferAction.ALLOCATE
 		)
+
+
+def reserve_streaming_buffers(
+	plans: tuple[PipelinePlan, ...] | list[PipelinePlan], storage: Any = None,
+	*, window_counts: tuple[int, ...] | None = None,
+	prepass_stops: tuple[int | None, ...] | None = None,
+) -> int:
+	"""Reserve shared roles and replay their schedules across directional sweeps.
+
+	The run reserves each role at its largest scheduled size before executing
+	any segment. Replay the canonical allocation policies with those capacities
+	and the manager's alias selector, retiring the published window between
+	executions just as the runner does. Optional exclusive prefix stops describe
+	center prepasses. Counts matter when reuse is disabled.
+	"""
+
+	if window_counts is None:
+		window_counts = (1,) * len(plans)
+	if len(window_counts) != len(plans) or any(count < 1 for count in window_counts):
+		raise ValueError("window_counts must contain one positive count per plan")
+	if prepass_stops is None:
+		prepass_stops = (None,) * len(plans)
+	if len(prepass_stops) != len(plans):
+		raise ValueError("prepass_stops must contain one optional stop per plan")
+	capacities: dict[str, int] = {}
+	for plan in plans:
+		for event in plan.allocation_schedule:
+			capacities[event.role] = max(capacities.get(event.role, 0), event.bytes)
+	reserve = getattr(storage, "reserve", None)
+	if reserve is not None:
+		for role, capacity in capacities.items():
+			reserve(role, capacity)
+	physical: dict[str, int] = {}
+	retired: dict[str, list[str]] = {}
+	live: dict[str, str] = {}
+
+	def retire(role: str) -> None:
+		selected = live.pop(role, None)
+		if selected is not None and selected not in live.values():
+			candidates = retired.setdefault(role, [])
+			if selected not in candidates:
+				candidates.append(selected)
+
+	def replay(events: tuple[BufferScheduleEvent, ...]) -> None:
+		for event in events:
+			if event.action is BufferAction.RETIRE:
+				retire(event.role)
+				continue
+			if event.action not in (BufferAction.ALLOCATE, BufferAction.ALIAS):
+				continue
+			selected, _proof = select_buffer_alias(
+				event.bytes, retired, event.reuse_from,
+				capacity=physical.__getitem__,
+				pinned=lambda key: key in event.external_pins,
+				alias_from=live.get(event.alias_from), proof=event.proof,
+			)
+			if selected is None:
+				selected = event.role
+				suffix = 1
+				while selected in physical:
+					suffix += 1
+					selected = f"{event.role}:{suffix}"
+				physical[selected] = max(event.bytes, capacities[event.role])
+			else:
+				for candidates in retired.values():
+					while selected in candidates:
+						candidates.remove(selected)
+			# Producer artifacts replace their previous handle only after the
+			# new allocation succeeds, so both must fit during the handoff.
+			retire(event.role)
+			live[event.role] = selected
+		for role in tuple(live):
+			retire(role)
+
+	for plan, count, stop in zip(plans, window_counts, prepass_stops, strict=True):
+		prepass = tuple(
+			event for event in plan.allocation_schedule
+			if stop is not None and event.stage_index < stop
+		)
+		for _ in range(count):
+			if prepass:
+				replay(prepass)
+			replay(plan.allocation_schedule)
+	return sum(physical.values())
 
 
 def _nbytes(spec: BufferSpec | None) -> int:
@@ -153,7 +241,7 @@ def _read_spec(
 
 		window = _read_source_window(stage, physical_shape, dtype=dtype)
 	else:
-		window = source_window.with_pad(["Y"])
+		window = source_window.with_pad()
 	layout = stage.contract.output_layout(ProjOrder)
 	shape = window.frange.length.to(layout)
 	return BufferSpec(shape, dtype)
@@ -247,6 +335,7 @@ def build_allocation_schedule(
 	enable_aliasing: bool = True, enable_engine_aliasing: bool = True,
 	external_pins: tuple[str, ...] = (),
 	segments: tuple[PlanSegment, ...] = (),
+	initial_buffer: BufferSpec | None = None,
 ) -> tuple[BufferScheduleEvent, ...]:
 	"""Build the named physical-buffer schedule required for execution."""
 
@@ -267,12 +356,25 @@ def build_allocation_schedule(
 	work_stop = 0
 
 	def publish(index: int, action: BufferAction, role: str, size: int,
-			physical_role: str, proof: str | None = None):
+			physical_role: str, proof: str | None = None, *,
+			reuse_from: tuple[str, ...] = (), alias_from: str | None = None):
 		events.append(BufferScheduleEvent(
 			stage_index=index, action=action, role=role, bytes=size,
 			physical_role=physical_role, proof=proof,
 			live_roles=tuple(sorted(live)),
+			reuse_from=reuse_from if enable_aliasing else (),
+			alias_from=alias_from if enable_aliasing else None,
+			external_pins=external_pins,
 		))
+
+	if initial_buffer is not None:
+		physical["raw_staging"] = _nbytes(initial_buffer)
+		live["raw_staging"] = "raw_staging"
+		current_role = "raw_staging"
+		publish(
+			-1, BufferAction.ALLOCATE, "raw_staging", _nbytes(initial_buffer), "raw_staging",
+			reuse_from=("raw_staging", "normalized", "reconstruction"),
+		)
 
 	for step, stage in zip(steps, stages):
 		artifact_specs: list[tuple[str, int]] = []
@@ -295,7 +397,7 @@ def build_allocation_schedule(
 			physical[physical_role] = artifact_bytes
 			live[artifact_role] = physical_role
 			publish(step.index, BufferAction.ALLOCATE, artifact_role,
-				artifact_bytes, physical_role, "producer_contract")
+				artifact_bytes, physical_role, "producer_contract", reuse_from=(artifact_role,))
 		# Bounded members share the collector's maximum capacities. Sequential
 		# sinogram dispatch retains its numerical fallback without managed work.
 		if (
@@ -313,10 +415,10 @@ def build_allocation_schedule(
 			for request in requests:
 				role = request.role
 				size = _nbytes(request.buffer_spec)
-				selected = next((
-					candidate for candidate in retired.get(role, ())
-					if candidate not in external_pins and physical[candidate] >= size
-				), None) if enable_aliasing else None
+				selected, _alias = select_buffer_alias(
+					size, retired, (role,) if enable_aliasing else (),
+					capacity=physical.__getitem__, pinned=lambda key: key in external_pins,
+				)
 				if selected is None:
 					selected = role
 					suffix = 1
@@ -328,7 +430,7 @@ def build_allocation_schedule(
 				else:
 					action = BufferAction.ALIAS
 				live[role] = selected
-				publish(step.index, action, role, size, selected, "bounded_work_requests")
+				publish(step.index, action, role, size, selected, "bounded_work_requests", reuse_from=(role,))
 		# Scratch stays live until the complete bounded segment has finished.
 		if step.index + 1 == work_stop:
 			for request in requests:
@@ -342,20 +444,21 @@ def build_allocation_schedule(
 		size = _nbytes(step.allocation_buffer or step.output_buffer)
 		selected = None
 		proof = None
+		alias_from = None
 		if enable_aliasing and role == "reconstruction":
-			for candidate in retired.get("raw_staging", ()):
-				if candidate not in external_pins and physical[candidate] >= size:
-					selected = candidate
-					proof = "internal_liveness"
-					break
 			if (
-				selected is None and enable_engine_aliasing
+				enable_engine_aliasing
 				and current_role == "normalized" and step.input_layout is ProjOrder
 				and current_role not in external_pins
-				and physical[live[current_role]] >= size
 			):
-				selected = live[current_role]
-				proof = "tomopy_input_materialization"
+				alias_from = current_role
+			selected, alias = select_buffer_alias(
+				size, retired, ("raw_staging",),
+				capacity=physical.__getitem__, pinned=lambda key: key in external_pins,
+				alias_from=live.get(alias_from), proof="tomopy_input_materialization",
+			)
+			if selected is not None:
+				proof = "internal_liveness" if alias.startswith("retired:") else alias
 		if selected is None:
 			selected = role
 			suffix = 1
@@ -367,7 +470,13 @@ def build_allocation_schedule(
 		else:
 			action = BufferAction.ALIAS
 		live[role] = selected
-		publish(step.index, action, role, size, selected, proof)
+		reuse_from = {
+			"raw_staging": ("raw_staging", "reconstruction"),
+			"normalized": ("normalized", "reconstruction"),
+			"reconstruction": ("raw_staging", "reconstruction"),
+		}.get(role, ())
+		publish(step.index, action, role, size, selected, proof,
+			reuse_from=reuse_from, alias_from=alias_from)
 		if current_role is not None and step.retires_role is not None:
 			old_physical = live.pop(current_role)
 			retired.setdefault(current_role, []).append(old_physical)

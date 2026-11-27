@@ -85,10 +85,10 @@ def test_current_b10_driver_runs_a_global_row_selection(tmp_path):
 	assert [float(tf.imread(path)[0, 0]) for path in written] == [1.0, 1.5, 2.0, 2.5]
 
 
-def test_streaming_bac_matches_current_driver_at_fixed_window_extent(
+def test_streaming_bac_matches_current_driver_at_full_selected_extent(
 		tmp_path, monkeypatch, caplog,
 ):
-	"""The FFT oracle is the legacy driver at the same window and zero pad."""
+	"""Theta windows preserve the legacy driver's full selected FFT extent."""
 
 	size = 8
 	theta = 6
@@ -136,7 +136,7 @@ def test_streaming_bac_matches_current_driver_at_fixed_window_extent(
 
 	run(B10ReconConfig(
 		source=source, flats=flats, output=legacy_output, center=size / 2,
-		window_size=window_rows, alpha=1.6, gamma=1.2, apply_bac=True,
+		window_size=size, alpha=1.6, gamma=1.2, apply_bac=True,
 	), reconstructor=reconstruct)
 
 	scan_path = tmp_path / "scan.yaml"
@@ -178,13 +178,13 @@ def test_streaming_bac_matches_current_driver_at_fixed_window_extent(
 	monkeypatch.setattr(tomopy, "recon", tomopy_reconstruct)
 	result = run_reconstruction(
 		pipeline_path, scan_path, streaming_output,
-		window_config=WindowConfig(rows=window_rows),
+		window_config=WindowConfig(rows=window_rows, theta=2),
 	)[0]
 
-	assert "phase.bac_correction" in caplog.text
+	assert "Extent-sensitive" not in caplog.text
 	for row in range(size):
 		np.testing.assert_allclose(
-			tf.imread(streaming_output / f"{row:05d}.tif"),
-			tf.imread(legacy_output / f"{row:05d}.tif"),
+			tf.memmap(streaming_output / f"{row:05d}.tif", mode="r"),
+			tf.memmap(legacy_output / f"{row:05d}.tif", mode="r"),
 			rtol=2e-6, atol=2e-7,
 		)

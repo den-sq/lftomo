@@ -277,15 +277,29 @@ class PaganinFilterStage(ProjectionStage):
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
 		if params.enabled:
+			# The sampled FFT inverse has global support, including small
+			# oscillatory tails beyond its continuum exponential decay length.
+			# Retain physical detector rows so an ROI shares the full run's
+			# Fourier canvas and detector-edge treatment, also for affine terms.
+			required_pad = (
+				PadRequirement(full_source_axes=("Y",))
+				if params.slope is not None else cls.contract.required_pad
+			)
 			if params.material_alpha != 0:
 				return replace(
 					cls.contract,
+					required_pad=required_pad,
+					preferred_window_axis="Theta",
 					produces_artifacts=cls.contract.produces_artifacts + ("phase_envelope",),
 					managed_artifacts=cls.contract.managed_artifacts + (
 						("phase_envelope",) if isinstance(params.envelope_m, list) else ()
 					),
 				)
-			return cls.contract
+			return replace(
+				cls.contract,
+				required_pad=required_pad,
+				preferred_window_axis="Theta" if params.slope is not None else None,
+			)
 		return replace(
 			cls.contract,
 			mutates_input=False,
@@ -326,7 +340,7 @@ class NegativeLogStage(ProjectionStage):
 		extent_sensitive_axes=(),
 		mutates_input=True,
 		cacheable_prefix=True,
-		window_axes=("Y", "Theta"),
+		window_axes=("Y", "Theta", "X"),
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=DataDomain.ATTENUATION,
 	)
@@ -372,7 +386,7 @@ class BetaScaleStage(Stage):
 		extent_sensitive_axes=(),
 		mutates_input=True,
 		cacheable_prefix=True,
-		window_axes=("Y", "Theta"),
+		window_axes=("Y", "Theta", "X"),
 		required_metadata=("energy_keV",),
 		accepts_domain=(DataDomain.ATTENUATION,),
 		produces_domain=PRESERVE,
@@ -481,7 +495,7 @@ class BronnikovAidedCorrectionFilterStage(ProjectionStage):
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
 		if params.enabled:
-			return cls.contract
+			return replace(cls.contract, preferred_window_axis="Theta")
 		return replace(
 			cls.contract,
 			mutates_input=False,
