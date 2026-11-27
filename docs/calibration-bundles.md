@@ -81,7 +81,9 @@ Calibration preparation reads complete detector planes so the cubic spline
 prefilter sees the same boundaries for a full run and a row selection.
 Projection reads need no extra halo. The derived gain, dark, texture, spline
 coefficients and optional residual use run-managed temporary storage and are
-retired after dispatch, including failures. Per-projection warp and line work
+retired after dispatch, including failures. The bundle reader fills these
+planes in at most 64-row selections, bounding HDF5 materialization as well as
+the finite-value check. Per-projection warp and line work
 use the generic declared-work lifecycle. SciPy retains its internal line
 temporaries. Static buffer planning includes declared projection work, while
 bundle-dependent preparation is visible in the actual storage allocation

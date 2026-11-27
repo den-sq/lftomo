@@ -86,22 +86,31 @@ class BeamBandShiftNormalizeStage(Stage):
 				prepared.buffers[key] = buffer
 				return values
 
-			def read_map(name, kind):
+			def read_map(name, kind, target):
 				component = bundle.component(name)
 				if component.kind != kind or component.payload.axes != ("Y", "X"):
 					raise ValueError(f"{name!r} must be a {kind} (Y, X) component")
 				region = bundle.compatibility(name).region
 				if region is not None and (region.x_start != 0 or region.width != plane.X):
 					raise ValueError("band-shift calibration must cover the detector columns")
-				values = bundle.read_component(name, y_start=window.pos.Y, y_stop=window.interval("Y").stop.Y)
-				if values.shape != plane.as_tuple() or not all(np.isfinite(row).all() for row in values):
+				if component.payload.shape != plane.as_tuple():
 					raise ValueError(f"{name!r} must be a finite full-detector field")
-				return values
+				# The bundle's HDF5 adapter materializes each selection. Read at
+				# most 64 rows so loading never creates another full detector plane.
+				stop = window.interval("Y").stop.Y
+				for start in range(window.pos.Y, stop, 64):
+					chunk = window.rescope(pos=Proj(start, window.pos.X),
+						shape=Proj(min(64, stop - start), plane.X))
+					values = bundle.read_component(name,
+						y_start=chunk.pos.Y, y_stop=chunk.interval("Y").stop.Y)
+					if not np.isfinite(values).all():
+						raise ValueError(f"{name!r} must be a finite full-detector field")
+					target[chunk.index] = values
 
 			dark = allocate("dark")
-			dark[...] = read_map(model.dark_component, "dark")
+			read_map(model.dark_component, "dark", dark)
 			gain = allocate("gain")
-			gain[...] = read_map(model.white_component, "detector_static")
+			read_map(model.white_component, "detector_static", gain)
 			np.subtract(gain, dark, out=gain)
 			np.maximum(gain, 1, out=gain)
 			texture = allocate("texture")
@@ -119,7 +128,7 @@ class BeamBandShiftNormalizeStage(Stage):
 			coefficients[:, x_slice.stop:] = coefficients[:, x_slice.stop - 1:x_slice.stop]
 			spline_filter(coefficients, order=3, output=coefficients, mode="nearest")
 			if model.residual_component is not None:
-				allocate("residual")[...] = read_map(model.residual_component, "beam_residual")
+				read_map(model.residual_component, "beam_residual", allocate("residual"))
 		except BaseException:
 			self.finish(state)
 			raise

@@ -6,7 +6,9 @@ import numpy as np
 import pytest
 from scipy.ndimage import affine_transform, gaussian_filter1d
 
-from lftomo.calibration import BeamBandShiftModel, CalibrationBuildSession, CalibrationBundle
+from lftomo.calibration import (
+	BeamBandShiftModel, CalibrationBuildSession, CalibrationBundle, CalibrationManifest, stream_sha256,
+)
 from lftomo.config import Recon, Scan, StageConfig
 from lftomo.pipeline import LocalArray, PipelineRunContext, PipelineState
 from lftomo.pipeline.domains import DataDomain
@@ -15,8 +17,8 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 from tests.sample_data import attach_source_geometry
 
 
-def _fixture(tmp_path, *, stretch=True, residual=True, acquisition_indices=None):
-	count, height, width = 7, 64, 48
+def _fixture(tmp_path, *, stretch=True, residual=True, acquisition_indices=None, height=64):
+	count, width = 7, 48
 	y, x = np.indices((height, width))
 	dark = (8 + 0.02 * x).astype(np.float32)
 	white = (dark + 1000 * (1 + 0.15 * np.sin(y / 3) + 0.025 * np.cos(x / 5))).astype(np.float32)
@@ -81,6 +83,38 @@ def test_row_roi_and_strided_theta_use_full_calibration_context(tmp_path):
 	selected = BeamBandShiftNormalizeStage().run(_state(data[1:7:2, 19:27], scan, ref,
 		theta_start=1, theta_stride=2, y_start=19))
 	np.testing.assert_array_equal(np.asarray(selected.working_array), np.asarray(full.working_array)[1:7:2, 19:27])
+
+
+def test_hdf5_maps_are_loaded_in_bounded_rows_and_preserve_normalization(tmp_path, monkeypatch):
+	import h5py
+
+	data, transmission, scan, ref = _fixture(tmp_path, height=145)
+	bundle = CalibrationBundle.open(ref.manifest_path)
+	path = ref.root / "maps.h5"
+	names = ("pre_gain", "pre_dark", "residual")
+	with h5py.File(path, "w") as handle:
+		for name in names:
+			handle.create_dataset(name, data=bundle.read_component(name))
+	document = bundle.manifest.model_dump(mode="json")
+	for name in names:
+		document["components"][name]["payload"].update(
+			path=path.name, format="hdf5", dataset=name, sha256=stream_sha256(path),
+		)
+	ref.manifest_path.write_text(CalibrationManifest.model_validate(document).to_yaml())
+	reads = []
+	read = h5py.Dataset.__getitem__
+
+	def bounded_read(dataset, selection, *args, **kwargs):
+		if dataset.name.removeprefix("/") in names:
+			rows = selection[0]
+			reads.append(rows.stop - rows.start)
+		return read(dataset, selection, *args, **kwargs)
+
+	monkeypatch.setattr(h5py.Dataset, "__getitem__", bounded_read)
+	result = BeamBandShiftNormalizeStage().run(_state(data, scan, ref))
+	np.testing.assert_allclose(np.asarray(result.working_array),
+		np.broadcast_to(transmission, data.shape), rtol=5e-7, atol=1e-7)
+	assert reads == [64, 64, 17] * len(names)
 
 
 def test_band_shift_model_roundtrips_as_component_authority(tmp_path):
