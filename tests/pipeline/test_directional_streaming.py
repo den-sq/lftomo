@@ -1,6 +1,7 @@
 """Numerical and lifecycle contracts for changes of streaming direction."""
 
 import h5py
+import json
 import numpy as np
 import pytest
 import tifffile as tf
@@ -47,7 +48,7 @@ def directional_scan(tmp_path):
 	return scan_path
 
 
-def _pipeline(tmp_path, phase="slope", *, read_params=None, after_phase=()):
+def _pipeline(tmp_path, phase="slope", *, read_params=None, before_phase=(), after_phase=(), process_workers=1):
 	if phase == "slope":
 		phase_stage = {
 			"kind": "phase", "algorithm": "paganin",
@@ -61,11 +62,12 @@ def _pipeline(tmp_path, phase="slope", *, read_params=None, after_phase=()):
 	else:
 		phase_stage = {"kind": "phase", "algorithm": "negative_log"}
 	path = tmp_path / "pipeline.yaml"
-	_write_yaml(path, {"process_workers": 1, "pipeline": [
+	_write_yaml(path, {"process_workers": process_workers, "pipeline": [
 		{"kind": "read", "algorithm": "hdf5_dxchange", "params": {
 			"order": "projection", "calibration_policy": "required", **(read_params or {}),
 		}},
 		{"kind": "normalize", "algorithm": "weighted"},
+		*before_phase,
 		phase_stage,
 		*after_phase,
 		{"kind": "stripe", "algorithm": "vo_sort", "params": {"size": 3}},
@@ -103,6 +105,140 @@ def test_phase_direction_changes_match_whole_reconstruction(tmp_path, directiona
 	)
 
 	_assert_same_reconstruction(windowed, whole, range(16))
+
+
+def test_bac_row_roi_matches_full_detector_and_persists_window_qc(tmp_path, directional_scan):
+	pytest.importorskip("hotopy.holo")
+	pipeline = _pipeline(tmp_path, "bac")
+	full = _run(pipeline, directional_scan, tmp_path / "full", WindowConfig())
+	pipeline = _pipeline(tmp_path, "bac", read_params={"y_start": 5, "y_stop": 11})
+	for label, config in [("whole", WindowConfig()), ("theta", WindowConfig(rows=3, theta=4))]:
+		output = tmp_path / label
+		roi = _run(pipeline, directional_scan, output, config)
+		assert roi[0] == full[0][5:11]
+		np.testing.assert_allclose(roi[1], full[1][5:11], rtol=1e-6, atol=1e-6)
+		qc = json.loads((output / "bac_qc.json").read_text())
+		assert qc["complete"] is True
+		counts = [item for window in qc["windows"] for item in window["projections"]]
+		assert [item["projection_index"] for item in counts] == list(range(13))
+		assert all(item["nonfinite_count"] == 0 for item in counts)
+
+
+def test_zinger_then_actual_bac_matches_whole_theta_and_row_roi(tmp_path, directional_scan):
+	pytest.importorskip("hotopy.holo")
+	import yaml
+
+	scan = yaml.safe_load(directional_scan.read_text())
+	with h5py.File(scan["projections"]["path"], "r+") as handle:
+		# Include physical detector corners, both ROI boundary rows, and
+		# projections on each side of a Theta-chunk boundary.
+		for index in [(3, 5, 0), (4, 10, 14), (8, 7, 6), (12, 0, 0), (0, 15, 14)]:
+			handle["exchange/data"][index] = 65000
+	zinger = [{"kind": "filter", "algorithm": "zinger"}]
+	pipeline = _pipeline(tmp_path, "bac", before_phase=zinger)
+	full = _run(pipeline, directional_scan, tmp_path / "full", WindowConfig())
+	assert np.isfinite(full[1]).all()
+	for label, selection, config, rows in (
+		("theta", {}, WindowConfig(rows=4, theta=4), range(16)),
+		("roi-whole", {"y_start": 5, "y_stop": 11}, WindowConfig(), range(5, 11)),
+		("roi-theta", {"y_start": 5, "y_stop": 11}, WindowConfig(rows=3, theta=4), range(5, 11)),
+	):
+		pipeline = _pipeline(
+			tmp_path, "bac", before_phase=zinger, read_params=selection, process_workers=2,
+		)
+		output = tmp_path / label
+		actual = _run(pipeline, directional_scan, output, config)
+		expected = (full[0][rows.start:rows.stop], full[1][rows.start:rows.stop])
+		_assert_same_reconstruction(actual, expected, rows)
+		qc = json.loads((output / "bac_qc.json").read_text())
+		assert qc["complete"] is True
+		counts = [item for window in qc["windows"] for item in window["projections"]]
+		assert [item["projection_index"] for item in counts] == list(range(13))
+		assert all(item["nonfinite_count"] == 0 for item in counts)
+
+
+def test_zinger_reads_real_neighbors_at_y_chunk_and_roi_boundaries(tmp_path, directional_scan, monkeypatch):
+	import yaml
+
+	tomopy = pytest.importorskip("tomopy")
+	captured = []
+	original_recon = tomopy.recon
+	def capture_filter_output(data, angles, **kwargs):
+		values = data if kwargs["sinogram_order"] else data.transpose(1, 0, 2)
+		captured.append(values.copy())
+		return original_recon(data, angles, **kwargs)
+	monkeypatch.setattr(tomopy, "recon", capture_filter_output)
+	scan = yaml.safe_load(directional_scan.read_text())
+	with h5py.File(scan["projections"]["path"], "r+") as handle:
+		white = handle["exchange/data_white"][0]
+		dark = handle["exchange/data_dark"][0]
+		transmission = np.array([
+			[0.2, 0.2, 0.2], [0.2, 3.0, 0.2], [1.0, 1.0, 1.0],
+		], dtype=np.float32)
+		patch = np.rint(dark[4:7, 6:9] + transmission * (white[4:7, 6:9] - dark[4:7, 6:9]))
+		handle["exchange/data"][:, 4:7, 6:9] = patch[None]
+	# At detector row 5, the central zinger's true median is 0.2. Treating
+	# that ROI boundary as a detector edge would repeat row 5 and yield 1.0.
+	results = []
+	projection_inputs = []
+	for label, selection, config in (
+		("full", {}, WindowConfig()),
+		("y-chunks", {}, WindowConfig(rows=5)),
+		("roi-y-chunks", {"y_start": 5, "y_stop": 11}, WindowConfig(rows=3)),
+	):
+		pipeline = _pipeline(
+			tmp_path, "negative_log", read_params=selection,
+			before_phase=[{"kind": "filter", "algorithm": "zinger"}],
+		)
+		document = yaml.safe_load(pipeline.read_text())
+		# Observe the local-filter result without a later stripe filter that
+		# could suppress this deliberately angle-persistent boundary feature.
+		document["pipeline"] = [stage for stage in document["pipeline"] if stage["kind"] != "stripe"]
+		_write_yaml(pipeline, document)
+		captured.clear()
+		results.append(_run(pipeline, directional_scan, tmp_path / label, config))
+		projection_inputs.append(np.concatenate(captured, axis=0))
+	# Compare the local-filter result exactly at the reconstruction boundary.
+	# Legacy gridrec results can differ slightly across batch boundaries
+	# even when those projection inputs are identical.
+	assert np.ptp(projection_inputs[0]) > 0
+	assert np.isfinite(results[0][1]).all()
+	for index, rows in ((1, range(16)), (2, range(5, 11))):
+		assert results[index][0] == results[0][0][rows.start:rows.stop] == [
+			f"slice_{row:03d}.tif" for row in rows
+		]
+		assert np.isfinite(results[index][1]).all()
+		np.testing.assert_array_equal(
+			projection_inputs[index], projection_inputs[0][rows.start:rows.stop],
+		)
+
+
+def test_bac_nonfinite_runner_failure_persists_qc_before_reconstruction(tmp_path, directional_scan):
+	import yaml
+	from lftomo.pipeline.stages.phase import BACNonFiniteError
+
+	scan = yaml.safe_load(directional_scan.read_text())
+	with h5py.File(scan["projections"]["path"], "r+") as handle:
+		values = handle["exchange/data"][...].astype(np.float32)
+		values[2, 4, 5] = np.nan
+		del handle["exchange/data"]
+		handle.create_dataset("exchange/data", data=values)
+	pipeline = _pipeline(tmp_path, "bac")
+	document = yaml.safe_load(pipeline.read_text())
+	document["pipeline"][2] = {
+		"kind": "phase", "algorithm": "bac_correction", "params": {"alpha": 1.6, "gamma": 1.2},
+	}
+	document["pipeline"].insert(3, {"kind": "phase", "algorithm": "negative_log"})
+	_write_yaml(pipeline, document)
+	output = tmp_path / "failed"
+	with pytest.raises(BACNonFiniteError, match="projection 2"):
+		_run(pipeline, directional_scan, output, WindowConfig(rows=3, theta=4))
+	qc = json.loads((output / "bac_qc.json").read_text())
+	assert qc["complete"] is False
+	counts = qc["windows"][0]["projections"]
+	assert [item["projection_index"] for item in counts] == [0, 1, 2, 3]
+	assert [item["nonfinite_count"] for item in counts] == [0, 0, 16 * 15, 0]
+	assert list(output.glob("slice_*.tif")) == []
 
 
 def test_x_windows_match_whole_pointwise_phase_reconstruction(tmp_path, directional_scan):

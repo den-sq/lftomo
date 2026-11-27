@@ -231,8 +231,12 @@ def _bac_corrected_transmission(
 	kernel = _bac_filter_kernel(image.shape, alpha)
 	correction = -np.real(np.fft.ifft2(np.fft.fft2(image - 1) * kernel))
 	denominator = 1 - gamma * correction
-	corrected = image / denominator
-	if not np.isfinite(corrected).all() or np.any(corrected <= 0):
+	# Finiteness is checked for the completed held window by the Stage, which
+	# can report every projection's count. Preserve the existing positive-
+	# transmission requirement before the split negative-log consumer.
+	with np.errstate(divide="ignore", invalid="ignore"):
+		corrected = image / denominator
+	if np.any(np.isfinite(corrected) & (corrected <= 0)):
 		raise ValueError(
 			"phase.bac_correction produced non-positive or non-finite transmission; "
 			"adjust alpha/gamma or the input-clipping policy"
@@ -311,10 +315,9 @@ class PaganinFilterStage(ProjectionStage):
 			required_pad=PadRequirement(),
 		)
 
-	def run(self, state: PipelineState) -> PipelineState:
-		if self.params.enabled and self.params.slope is not None:
+	def prepare_projections(self, state: PipelineState) -> None:
+		if self.params.enabled:
 			prepare_phase_filter(self, state)
-		return super().run(state)
 
 	def phase_filter_shape(self, shape) -> ImgSlice:
 		return (
@@ -456,6 +459,9 @@ class PaganinPhaseAbsorptionStage(ProjectionStage):
 		alpha: float = Field(default=0.06, gt=0)
 		epsilon: float | None = 1e-8
 
+	def prepare_projections(self, state: PipelineState) -> None:
+		prepare_phase_filter(self, state)
+
 	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray:
 		wavelength = _wavelength_cm(state.scan.energy_keV)
 		beta_scale = 4 * np.pi / wavelength
@@ -466,6 +472,26 @@ class PaganinPhaseAbsorptionStage(ProjectionStage):
 			transmission, epsilon=self.params.epsilon, maximum=0.99999999,
 		)
 		return absorption / beta_scale
+
+
+class BACNonFiniteError(ValueError):
+	"""BAC failed without replacing output; ``qc`` retains the window's counts."""
+
+	def __init__(self, stage_name: str, qc: dict):
+		self.stage_name = stage_name
+		self.qc = qc
+		failed = [item for item in qc["projections"] if item["nonfinite_count"]]
+		super().__init__(
+			f"{stage_name} produced non-finite output: "
+			+ ", ".join(
+				f"projection {item['projection_index']} "
+				f"(acquisition {item['acquisition_index']}): {item['nonfinite_count']} pixels"
+				for item in failed
+			)
+		)
+
+	def __reduce__(self):
+		return type(self), (self.stage_name, self.qc)
 
 
 class BronnikovAidedCorrectionFilterStage(ProjectionStage):
@@ -480,6 +506,7 @@ class BronnikovAidedCorrectionFilterStage(ProjectionStage):
 		accepts_domain=(DataDomain.TRANSMISSION,),
 		produces_domain=PRESERVE,
 		window_axes=("Y", "Theta"),
+		produces_artifacts=("bac_qc",),
 	)
 
 	class Params(StageParams):
@@ -495,13 +522,51 @@ class BronnikovAidedCorrectionFilterStage(ProjectionStage):
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
 		if params.enabled:
-			return replace(cls.contract, preferred_window_axis="Theta")
+			return replace(
+				cls.contract, preferred_window_axis="Theta",
+				# The two-dimensional Fourier operator has global support. Keep
+				# real detector rows so a selected ROI shares the full-run canvas.
+				required_pad=PadRequirement(full_source_axes=("Y",)),
+			)
 		return replace(
 			cls.contract,
 			mutates_input=False,
 			accepts_domain=(DataDomain.TRANSMISSION, DataDomain.ATTENUATION),
 			produces_domain=PRESERVE,
+			produces_artifacts=(),
 		)
+
+	def finish_projections(self, state: PipelineState) -> PipelineState:
+		if not self.params.enabled:
+			return state
+		data = np.asarray(state.working_array)
+		projections = []
+		for local_index in state.work_indices("Theta"):
+			# Borrowed-array callers may omit acquisition geometry. Report their
+			# assigned buffer ordinals explicitly, never invent detector indices.
+			source_index = (
+				state.source_window.source_index("Theta", local_index)
+				if state.source_window is not None else local_index
+			)
+			image = data[state.layout.point_index(Theta=local_index)]
+			# Count row by row: QC needs no additional detector-sized mask.
+			finite = sum(int(np.count_nonzero(np.isfinite(row))) for row in image)
+			projections.append({
+				"projection_index": source_index,
+				"acquisition_index": (
+					int(state.dataset.acquisition_indices[source_index])
+					if state.dataset is not None and state.source_window is not None else None
+				),
+				"nonfinite_count": int(image.size - finite),
+			})
+		qc = {
+			"stage": self.name, "projections": projections,
+			"index_space": "source" if state.source_window is not None else "buffer",
+		}
+		state.artifacts["bac_qc"] = qc
+		if any(item["nonfinite_count"] for item in projections):
+			raise BACNonFiniteError(self.name, qc)
+		return state
 
 	def _correct(self, image: np.ndarray) -> np.ndarray:
 		if self.params.clip_input:

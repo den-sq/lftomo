@@ -8,8 +8,8 @@ import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import LocalArray, DataDomain, Pipeline, PipelineRunContext, PipelineState
-from lftomo.pipeline.core import Stage, StageContract
-from lftomo.pipeline.dispatch import DispatchKind
+from lftomo.pipeline.core import ProjectionStage, Stage, StageContract
+from lftomo.pipeline.dispatch import DispatchKind, DispatchSpec
 from lftomo.pipeline.execution import (
 	PipelineExecutor, WorkerTimeoutError, run_bounded_sinogram_segment,
 )
@@ -96,6 +96,40 @@ class _ObservedBACStage(BronnikovAidedCorrectionStage):
 			os.getpid(), torch.get_num_threads(),
 		)
 		return super().run_projection(image, state)
+
+
+class _PreparedProjectionStage(ProjectionStage):
+	dispatch = DispatchSpec(DispatchKind.PROCESS, "run_projection_kernel", per_projection=True)
+
+	def prepare_projections(self, state):
+		state.artifacts["prepared_by"] = os.getpid()
+		state.artifacts["preparations"] = state.artifacts.get("preparations", 0) + 1
+		state.artifacts["offset"] = float(np.asarray(state.working_array).mean())
+
+	def run_projection(self, image, state):
+		image += state.artifacts["offset"]
+
+	def finish_projections(self, state):
+		state.artifacts["completed_by"] = os.getpid()
+		state.artifacts["completed_sum"] = float(np.asarray(state.working_array).sum())
+		return state
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_projection_lifecycle_prepares_and_summarizes_the_whole_assignment(managed):
+	values = np.arange(48, dtype=np.float32).reshape(3, 2, 8)
+	with PipelineRunContext(max_workers=2) if managed else nullcontext() as context:
+		buffer = LocalArray(values.copy(), ProjOrder(*values.shape))
+		if managed:
+			buffer = context.storage.allocate(ProjOrder(*values.shape), np.float32)
+			buffer.array()[...] = values
+		state = PipelineState(buffer, _scan(theta=3), _recon())
+		stage = _PreparedProjectionStage()
+		result = context.executor.run_stage(state, stage) if managed else stage.run(state)
+		np.testing.assert_array_equal(np.asarray(result.working_array), values + values.mean())
+		assert result.artifacts["preparations"] == 1
+		assert result.artifacts["prepared_by"] == result.artifacts["completed_by"] == os.getpid()
+		assert result.artifacts["completed_sum"] == float((values + values.mean()).sum())
 
 
 class _AddSinogramStage(Stage):

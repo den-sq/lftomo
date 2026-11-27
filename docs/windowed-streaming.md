@@ -18,19 +18,33 @@ Enabled slope `phase.paganin` / `phase.paganin_filter` and BAC / BAC correction
 prefer `Theta`. Thus read → normalize → slope Paganin (or BAC) → stripe → recon
 runs as Y → Theta → Y sweeps. Theta windows contain the complete selected
 detector height and width plus the phase filter's real source context. A row
-selection is an output region of interest: slope and affine Paganin read the
+selection is an output region of interest: slope/affine Paganin and BAC read the
 complete physical detector height instead of edge-filling at the selection
 boundary. Their sampled FFT kernel has global support; a finite halo based on
 the continuum exponential decay does not reproduce the full-detector result.
 The canonical window model clips source context at physical detector edges;
-internal numerical FFT padding remains separate. BAC's source-context reach
-is deferred to #375.
+internal numerical FFT padding remains separate.
 
-For slope and affine Paganin, narrowing the output row selection therefore
+For slope/affine Paganin and BAC, narrowing the output row selection therefore
 does not reduce the phase input height. Theta batch size still bounds the
 number of complete detector images held at once, and the preceding normalized
 intermediate includes all physical rows. Whole-selection runs with an output
 ROI likewise retain the complete detector height through phase retrieval.
+
+BAC checks the completed held window before downstream processing. A
+non-finite result raises `BACNonFiniteError` with the affected source projection
+and acquisition indices; no output pixels are replaced. The `bac_qc` artifact
+contains counts for every projection in that window. The runner writes
+`bac_qc.json` under the explicit output directory (beside volume-file outputs).
+On failure it marks the report incomplete and includes the failing window's
+counts; later windows have not run. Without an output destination the same QC
+is available as `error.qc`. Borrowed-array callers that omit source geometry
+receive explicitly labelled buffer ordinals, not inferred source coordinates.
+The standalone [`filter.zinger` Stage](filtering-conventions.md#projection-zinger-replacement)
+applies the chosen B10 3×3 median-ratio rule after normalization and before
+BAC. It needs one real source pixel on each side of Y and X, resolved by the
+canonical window model, and no neighbouring projections. BAC's existing
+`clip_input` option retains its AAA523 behavior.
 
 In a bounded run, the default Theta batch equals `rows` / `--window-rows`;
 `theta` / `--window-theta` overrides it. When only columns are bounded, the
@@ -40,10 +54,13 @@ gives similar input-buffer sizes when the selected Y and Theta extents are
 similar, and lets multiple projections share dispatch overhead. Window sizes
 count samples, including when the read selection strides through projection indices.
 
-For example:
+For B10 slab and full runs, select Theta-first windows so reading and
+normalization can share BAC's Theta segment. This avoids a separate full-height
+normalized intermediate produced by Y-first execution. For example:
 
 ```sh
-lftomo-run pipeline.yaml scan.yaml --window-rows 64 --window-theta 4 \
+lftomo-run pipeline.yaml scan.yaml --output recon/ \
+  --window-axis Theta --window-rows 16 \
   --intermediate-root /scratch/lftomo
 ```
 

@@ -565,7 +565,16 @@ class ProjectionStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		from lftomo.pipeline.execution import run_projection_stage
 
-		return run_projection_stage(self, state)
+		self.prepare_projections(state)
+		return self.finish_projections(run_projection_stage(self, state))
+
+	def prepare_projections(self, state: PipelineState) -> None:
+		"""Prepare shared inputs once before serial or process projection work."""
+
+	def finish_projections(self, state: PipelineState) -> PipelineState:
+		"""Validate or summarize the completed held window in the coordinator."""
+
+		return state
 
 	@abstractmethod
 	def run_projection(self, image: np.ndarray, state: PipelineState) -> Any:

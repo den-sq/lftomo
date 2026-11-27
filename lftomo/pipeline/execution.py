@@ -19,6 +19,7 @@ from lftomo.pipeline.core import (
 	BoundedWorkRequest,
 	BufferSpec,
 	PipelineState,
+	ProjectionStage,
 	Stage,
 	allocate_output,
 	commit_output,
@@ -169,6 +170,16 @@ def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
 
 
 def run_projection_stage(stage: Stage, state: PipelineState) -> PipelineState:
+	"""Own declared work for direct serial projection execution."""
+
+	requests = _prepare_bounded_work(state, (stage,), "Theta")
+	try:
+		return _run_projection_views(stage, state)
+	finally:
+		_release_bounded_work(state, requests)
+
+
+def _run_projection_views(stage: Stage, state: PipelineState) -> PipelineState:
 	"""Run a projection kernel on views derived from the assigned range."""
 
 	if state.backend.name != "numpy":
@@ -316,7 +327,12 @@ def run_projection_kernel(
 	state = _worker_state(handle, payload, work_range)
 	before = set(state.artifacts)
 	_limit_worker_cpu_threads(stage)
-	result = stage.run(state)
+	# ProjectionStage preparation and completion belong to the coordinator;
+	# workers only apply their assigned numerical kernels to the held buffer.
+	result = (
+		_run_projection_views(stage, state)
+		if isinstance(stage, ProjectionStage) else stage.run(state)
+	)
 	return {
 		key: value for key, value in result.artifacts.items()
 		if key not in before and not isinstance(value, ManagedBuffer)
@@ -646,24 +662,24 @@ class PipelineExecutor:
 			prepare_normalization_dispatch(stage, working_state)
 		else:
 			output = state.working_array
-		if stage.name in {
-			"phase.paganin", "phase.paganin_filter", "phase.paganin_phase_absorption",
-		}:
-			from lftomo.pipeline.stages.phase import prepare_phase_filter
-
-			prepare_phase_filter(stage, working_state)
 		if working_state.layout not in (ProjOrder, SinoOrder):
 			return stage.run(state)
+		if isinstance(stage, ProjectionStage):
+			stage.prepare_projections(working_state)
 		worker_stage = stage
 		if "phase_envelope" in working_state.artifacts and hasattr(stage.params, "envelope_m"):
 			worker_stage = copy(stage)
 			worker_stage.params = stage.params.model_copy(update={"envelope_m": None})
-		results = self.submit_all(run_projection_kernel, (
-			(
-				working_state.working_array, worker_stage, _payload(working_state), work_range,
-			)
-			for work_range in _work_ranges(working_state, "Theta")
-		))
+		requests = _prepare_bounded_work(working_state, (stage,), "Theta")
+		try:
+			results = self.submit_all(run_projection_kernel, (
+				(
+					working_state.working_array, worker_stage, _payload(working_state), work_range,
+				)
+				for work_range in _work_ranges(working_state, "Theta")
+			))
+		finally:
+			_release_bounded_work(working_state, requests)
 		if stage.name.startswith("normalize."):
 			from lftomo.pipeline.stages.normalize import merge_normalization_dispatch
 
@@ -675,6 +691,8 @@ class PipelineExecutor:
 			return result
 		for artifacts in results:
 			working_state.artifacts.update(artifacts)
+		if isinstance(stage, ProjectionStage):
+			return stage.finish_projections(working_state)
 		return working_state
 
 	def run_out_of_place_stage(self, state: PipelineState, stage: Stage) -> PipelineState:
