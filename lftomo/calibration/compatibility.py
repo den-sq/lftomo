@@ -38,6 +38,10 @@ _FIELDS_BY_KIND: dict[str, tuple[str, ...]] = {
 		"camera_segment", "beam_state",
 	),
 	"beam_schedule": ("beamline", "energy_keV", "camera_segment", "beam_state"),
+	"beam_residual": (
+		"detector_id", "beamline", "optics_id", "energy_keV", "region",
+		"camera_segment", "beam_state",
+	),
 	"beam_basis": (
 		"detector_id", "beamline", "optics_id", "energy_keV", "region",
 	),
@@ -134,4 +138,3 @@ def check_compatibility(
 	if diagnostics and policy == "error":
 		raise CalibrationCompatibilityError(report)
 	return report
-

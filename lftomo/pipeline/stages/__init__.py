@@ -6,6 +6,7 @@ from lftomo.pipeline.dispatch import STAGE_DISPATCH, dispatch_for_stage
 
 from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
 from .filter import BilateralFilterStage, ZingerFilterStage
+from .beam_band_shift import BeamBandShiftNormalizeStage
 from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrectStage
 from .helical import HelicalIndexRemapStage
 from .layout import LayoutConvertStage
@@ -68,6 +69,7 @@ STAGE_REGISTRY = {
 	"movement_correct.linear_shift": MovementCorrectStage,
 	"normalize.phase_contrast": TaperBlendedNormalizeStage,
 	"normalize.beam_basis_fit": BeamBasisFitNormalizeStage,
+	"normalize.beam_band_shift": BeamBandShiftNormalizeStage,
 	"normalize.beam_tracking": BeamTrackingNormalizeStage,
 	"normalize.beam_keyframes": BeamKeyframesNormalizeStage,
 	"normalize.taper_blended": TaperBlendedNormalizeStage,
@@ -150,6 +152,7 @@ __all__ = [
 	"BPCudaStage",
 	"BeamBasisFitNormalizeStage",
 	"BeamTrackingNormalizeStage",
+	"BeamBandShiftNormalizeStage",
 	"BeamKeyframesNormalizeStage",
 	"BilateralFilterStage",
 	"BetaScaleStage",

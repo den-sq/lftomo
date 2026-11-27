@@ -670,8 +670,9 @@ class PipelineExecutor:
 		if "phase_envelope" in working_state.artifacts and hasattr(stage.params, "envelope_m"):
 			worker_stage = copy(stage)
 			worker_stage.params = stage.params.model_copy(update={"envelope_m": None})
-		requests = _prepare_bounded_work(working_state, (stage,), "Theta")
+		requests = ()
 		try:
+			requests = _prepare_bounded_work(working_state, (stage,), "Theta")
 			results = self.submit_all(run_projection_kernel, (
 				(
 					working_state.working_array, worker_stage, _payload(working_state), work_range,
@@ -680,6 +681,10 @@ class PipelineExecutor:
 			))
 		finally:
 			_release_bounded_work(working_state, requests)
+			if stage.name.startswith("normalize."):
+				from lftomo.pipeline.stages.normalize import finish_normalization_dispatch
+
+				finish_normalization_dispatch(stage, working_state)
 		if stage.name.startswith("normalize."):
 			from lftomo.pipeline.stages.normalize import merge_normalization_dispatch
 

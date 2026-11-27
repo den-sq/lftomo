@@ -24,6 +24,8 @@ Compatibility is evaluated per component rather than through one global
 | `dark` | detector, ROI, exposure, temperature/time validity when recorded |
 | `dynamic_beam` / `beam_keyframes` | detector, beamline/optics, energy, camera segment, physical time axis |
 | `beam_basis` | compatible detector/beamline/optics plus a training library covering the target beam state |
+| `beam_schedule` | beamline, energy, camera segment and beam state |
+| `beam_residual` | detector, beamline/optics, energy, detector region, camera segment and beam state |
 | `camera_registration` | detector/optics, motor axes, units, signs, and detector coordinates |
 
 Missing target facts are mismatches when a component declares that fact. The
@@ -31,6 +33,57 @@ default policy raises `CalibrationCompatibilityError`. An override requires a
 non-empty reason and returns a serializable `CompatibilityReport` containing all
 diagnostics; later runner integration stores that report in run provenance.
 There is no nearest-calibration selection in this API.
+
+## Shift and stretch of beam bands
+
+`normalize.beam_band_shift` is a RAW-to-TRANSMISSION stage for vertically
+drifting beam texture. Its only parameter is `schedule_component` (default
+`beam_schedule`). Select the bundle through the runner's existing
+`calibration_manifest` option. It supports projection and sinogram layout and
+both Y and Theta windows.
+
+The schedule is a `beam_schedule` component in beam coordinates with axes
+`[Theta, Parameter]` and two columns, `(dy, m)`: detector-row shift and positive
+magnification. Its time axis is `projection_index`, and sampling is `nearest`.
+Each processed source projection must have an exact schedule entry; the stage
+does not interpolate away measured frame-to-frame jitter. Its typed
+`band_shift` field carries the model:
+
+```yaml
+band_shift:
+  yc: 1080
+  dy_end: 30.75
+  sigma_x: 60
+  s_max: 1.2
+  white_component: pre_gain
+  dark_component: pre_dark
+  residual_component: beam_residual
+```
+
+The white (`detector_static`) and dark (`dark`) are measured, unsubtracted
+full-detector `(Y, X)` fields. The optional residual is a `beam_residual`
+component in beam coordinates, also `(Y, X)`, containing the measured
+X-smoothed log-texture change left after the shift/stretch fit. `dy_end` must
+be nonzero when using that residual. Omit `residual_component` for no residual;
+setting all `m` entries to one then gives shift-only normalization.
+
+For `g = max(W-D, 1)` and `b = gaussian_filter1d(log(g), sigma_x, axis=X)`,
+the stage samples `b(yc + (y-yc-dy)/m, x)` with cubic interpolation and nearest
+edge treatment, then divides `P-D` by
+`g * exp(shifted_b-b + clip(dy/dy_end, 0, s_max)*R)`. Gaussian filtering uses
+SciPy's reflect edge treatment along X. Without a residual the last exponent
+term is absent. All numeric model settings and component references belong to
+the calibration component; they are not duplicated in Stage parameters.
+
+Calibration preparation reads complete detector planes so the cubic spline
+prefilter sees the same boundaries for a full run and a row selection.
+Projection reads need no extra halo. The derived gain, dark, texture, spline
+coefficients and optional residual use run-managed temporary storage and are
+retired after dispatch, including failures. Per-projection warp and line work
+use the generic declared-work lifecycle. SciPy retains its internal line
+temporaries. Static buffer planning includes declared projection work, while
+bundle-dependent preparation is visible in the actual storage allocation
+events; its size is not known from the input `BufferSpec` alone.
 
 ## Coordinate and time bounds
 

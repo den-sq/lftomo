@@ -623,6 +623,11 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 	"""Perform normalization work that requires the complete projection window."""
 
+	from .beam_band_shift import BeamBandShiftNormalizeStage
+
+	if isinstance(stage, BeamBandShiftNormalizeStage):
+		stage.prepare(state)
+		return
 	if not isinstance(stage, BeamTrackingNormalizeStage) or not stage.params.fit_schedule:
 		return
 	data = np.asarray(state.working_array)
@@ -645,6 +650,15 @@ def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 		np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
 		fractions, pre_gain, post_gain,
 	)
+
+
+def finish_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
+	"""Retire temporary calibration preparation after success or failure."""
+
+	from .beam_band_shift import BeamBandShiftNormalizeStage
+
+	if isinstance(stage, BeamBandShiftNormalizeStage):
+		stage.finish(state)
 
 
 def merge_normalization_dispatch(
