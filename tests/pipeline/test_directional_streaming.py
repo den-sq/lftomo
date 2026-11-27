@@ -1,6 +1,7 @@
 """Numerical and lifecycle contracts for changes of streaming direction."""
 
 import h5py
+import json
 import numpy as np
 import pytest
 import tifffile as tf
@@ -103,6 +104,51 @@ def test_phase_direction_changes_match_whole_reconstruction(tmp_path, directiona
 	)
 
 	_assert_same_reconstruction(windowed, whole, range(16))
+
+
+def test_bac_row_roi_matches_full_detector_and_persists_window_qc(tmp_path, directional_scan):
+	pytest.importorskip("hotopy.holo")
+	pipeline = _pipeline(tmp_path, "bac")
+	full = _run(pipeline, directional_scan, tmp_path / "full", WindowConfig())
+	pipeline = _pipeline(tmp_path, "bac", read_params={"y_start": 5, "y_stop": 11})
+	for label, config in [("whole", WindowConfig()), ("theta", WindowConfig(rows=3, theta=4))]:
+		output = tmp_path / label
+		roi = _run(pipeline, directional_scan, output, config)
+		assert roi[0] == full[0][5:11]
+		np.testing.assert_allclose(roi[1], full[1][5:11], rtol=1e-6, atol=1e-6)
+		qc = json.loads((output / "bac_qc.json").read_text())
+		assert qc["complete"] is True
+		counts = [item for window in qc["windows"] for item in window["projections"]]
+		assert [item["projection_index"] for item in counts] == list(range(13))
+		assert all(item["nonfinite_count"] == 0 for item in counts)
+
+
+def test_bac_nonfinite_runner_failure_persists_qc_before_reconstruction(tmp_path, directional_scan):
+	import yaml
+	from lftomo.pipeline.stages.phase import BACNonFiniteError
+
+	scan = yaml.safe_load(directional_scan.read_text())
+	with h5py.File(scan["projections"]["path"], "r+") as handle:
+		values = handle["exchange/data"][...].astype(np.float32)
+		values[2, 4, 5] = np.nan
+		del handle["exchange/data"]
+		handle.create_dataset("exchange/data", data=values)
+	pipeline = _pipeline(tmp_path, "bac")
+	document = yaml.safe_load(pipeline.read_text())
+	document["pipeline"][2] = {
+		"kind": "phase", "algorithm": "bac_correction", "params": {"alpha": 1.6, "gamma": 1.2},
+	}
+	document["pipeline"].insert(3, {"kind": "phase", "algorithm": "negative_log"})
+	_write_yaml(pipeline, document)
+	output = tmp_path / "failed"
+	with pytest.raises(BACNonFiniteError, match="projection 2"):
+		_run(pipeline, directional_scan, output, WindowConfig(rows=3, theta=4))
+	qc = json.loads((output / "bac_qc.json").read_text())
+	assert qc["complete"] is False
+	counts = qc["windows"][0]["projections"]
+	assert [item["projection_index"] for item in counts] == [0, 1, 2, 3]
+	assert [item["nonfinite_count"] for item in counts] == [0, 0, 16 * 15, 0]
+	assert list(output.glob("slice_*.tif")) == []
 
 
 def test_x_windows_match_whole_pointwise_phase_reconstruction(tmp_path, directional_scan):

@@ -11,6 +11,8 @@ from lftomo.pipeline.stages import (
 	STAGE_REGISTRY, create_stage,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.pipeline.stages.phase import BACNonFiniteError
+from lftomo.storage import PipelineRunContext
 from tests.sample_data import attach_source_geometry
 
 
@@ -151,3 +153,54 @@ def test_bac_reports_missing_optional_dependency(monkeypatch):
 	monkeypatch.setattr(builtins, "__import__", without_hotopy)
 	with pytest.raises(RuntimeError, match="'bac' extra"):
 		stage.run(_state(np.ones((1, 1, 2), dtype=np.float32), config))
+
+
+class _NonFiniteBAC(BronnikovAidedCorrectionFilterStage):
+	def _correct(self, image):
+		result = image.copy()
+		if image[0, 0] == 2:
+			result[0, :2] = [np.nan, np.inf]
+		return result
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_bac_failure_keeps_all_window_counts_and_source_indices(managed):
+	config = StageConfig(kind="phase", algorithm="bac_correction", params={"alpha": 2})
+	values = np.repeat(np.arange(1, 4, dtype=np.float32)[:, None, None], 4, axis=2)
+	stage = _NonFiniteBAC(alpha=2)
+	with PipelineRunContext(max_workers=2) as context:
+		state = _state(values.copy(), config, ProjOrder)
+		if managed:
+			buffer = context.storage.allocate(ProjOrder(*values.shape), np.float32)
+			buffer.array()[...] = values
+			state = state.with_array(buffer)
+			state.storage = context.storage
+		state = attach_source_geometry(state, theta_start=1, theta_stride=2, physical_theta=7)
+		with pytest.raises(BACNonFiniteError, match="projection 3 .*2 pixels") as caught:
+			if managed:
+				context.executor.run_stage(state, stage)
+			else:
+				stage.run(state)
+		qc = caught.value.qc
+		assert qc is state.artifacts["bac_qc"]
+		assert qc["projections"] == [
+			{"projection_index": index, "acquisition_index": index, "nonfinite_count": count}
+			for index, count in [(1, 0), (3, 2), (5, 0)]
+		]
+		assert np.isnan(np.asarray(state.working_array)[1, 0, 0])
+		assert np.isinf(np.asarray(state.working_array)[1, 0, 1])
+
+
+def test_bac_success_records_finite_projection_counts(hotopy_holo):
+	class FiniteBAC:
+		def __init__(self, *args, **kwargs):
+			pass
+
+		def __call__(self, image):
+			return image + 0.1
+
+	hotopy_holo.BronnikovAidedCorrection = FiniteBAC
+	config = StageConfig(kind="phase", algorithm="bac", params={"alpha": 1.6, "gamma": 1.2})
+	state = _state(np.ones((3, 2, 4), dtype=np.float32), config, ProjOrder)
+	create_stage(config).run(state)
+	assert [item["nonfinite_count"] for item in state.artifacts["bac_qc"]["projections"]] == [0, 0, 0]

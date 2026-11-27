@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from contextlib import contextmanager
 from copy import deepcopy
 import json
 import os
@@ -100,6 +101,43 @@ class CalibrationResolution:
 			),
 			"legacy_paths": [str(path) for path in self.legacy_paths],
 		}
+
+
+def _write_bac_qc(output_path: Path, records: list[dict], *, complete: bool) -> Path:
+	"""Persist Stage-produced QC at the explicit run destination."""
+
+	root = output_path.parent if output_path.suffix.lower() in {".h5", ".hdf5"} else output_path
+	root.mkdir(parents=True, exist_ok=True)
+	path = root / "bac_qc.json"
+	path.write_text(json.dumps({"complete": complete, "windows": records}, indent=2) + "\n")
+	return path
+
+
+@contextmanager
+def _record_bac_failure(output_path: Path | None):
+	from lftomo.pipeline.stages.phase import BACNonFiniteError
+
+	try:
+		yield
+	except BACNonFiniteError as error:
+		if output_path is not None:
+			# The error owns the failing held window's complete per-projection QC.
+			# No later window or downstream Stage has run, so label it incomplete.
+			_write_bac_qc(output_path, [error.qc], complete=False)
+		raise
+
+
+def _bac_qc_records(artifacts: dict) -> list[dict]:
+	"""Select QC from the runner's existing per-segment/window result tree."""
+
+	if "streaming_segments" in artifacts:
+		return [
+			window["artifacts"]["bac_qc"]
+			for segment in artifacts["streaming_segments"]
+			for window in segment["window_results"]
+			if "bac_qc" in window["artifacts"]
+		]
+	return [artifacts["bac_qc"]] if "bac_qc" in artifacts else []
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -958,7 +996,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 			"dataset": CONVERTER.unstructure(segment.dataset),
 		} for segment in segments]
 		resolved_metadata["intermediate_storage"] = initial_artifacts["intermediate_storage"]
-		with PipelineRunContext(
+		with _record_bac_failure(concrete.output_path), PipelineRunContext(
 			enable_aliasing=concrete.buffer_aliasing,
 			enable_engine_aliasing=concrete.tomopy_input_aliasing,
 			max_workers=concrete.process_workers or min(4, os.cpu_count() or 1),
@@ -1022,6 +1060,11 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 				resolved_recon=resolved_document,
 			))
 		if concrete.output_path is not None:
+			bac_qc = _bac_qc_records(artifacts)
+			if bac_qc:
+				artifacts["bac_qc_path"] = _write_bac_qc(
+					concrete.output_path, bac_qc, complete=True,
+				)
 			manifest_root = (
 				concrete.output_path.parent
 				if concrete.output_path.suffix.lower() in {".h5", ".hdf5"}

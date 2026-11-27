@@ -52,6 +52,12 @@ handoffs, and external engines. There is no separate locality enum: bounded
 planning uses the row-kernel capability and contract, while `STAGE_DISPATCH`
 selects the executor.
 
+`ProjectionStage.prepare_projections(state)` prepares shared inputs once in the
+coordinator. Its `finish_projections(state)` hook checks or summarizes the held
+window after every assigned projection has completed. The same hooks bracket
+serial execution; process workers only execute `run_projection`. Keep shared
+preparation and window-wide checks in these hooks, rather than overriding `run`.
+
 `PipelineState.work_range` is a `DataRange` in packed buffer sample ordinals,
 independent of source coordinates and storage layout. `None` assigns the full
 buffer. Use `state.work_indices("Theta")` or `state.work_indices("Y")` for work
