@@ -361,7 +361,9 @@ def test_intermediate_capacity_is_advisory_and_report_matches_coexisting_files(
 @pytest.mark.parametrize("window_rows, vo_chain, available_mib, fits", [
 	(None, False, 64, False),
 	(1, False, 32, False),
-	(1, False, 64, True),
+	# Full physical Y context for BAC now exceeds the 64 MiB reservation.
+	(1, False, 64, False),
+	(1, False, 128, True),
 	(2, True, 64, False),
 ])
 def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
@@ -449,7 +451,7 @@ def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 		assert len(plans) == 1
 		assert peak == plans[0].shared_memory_peak_bytes
 	else:
-		# BAC now uses the full selected detector extent in a Theta sweep.
+		# BAC uses the full physical detector extent in a Theta sweep.
 		# Preflight covers all three sweep reservations, after complete validation.
 		assert len(plans) == 4
 		assert peak == runner_module.reserve_streaming_buffers(
