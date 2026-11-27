@@ -222,7 +222,7 @@ def read_output_dtype(stage: Stage, window: TomoWindow) -> np.dtype:
 	"""Derive read precision from canonical source/work dtypes."""
 
 	return np.dtype(
-		window.internal.dtype if getattr(stage.params, "noise", None) is not None
+		window.internal.dtype if getattr(getattr(stage, "params", None), "noise", None) is not None
 		else window.dtype
 	)
 
