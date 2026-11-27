@@ -22,9 +22,12 @@ jobs:
           python -c
           "import hotopy, numpy as np, tomopy;
           from packaging.version import Version;
-          from lftomo.pipeline.runtime import tomopy_numpy_incompatible;
+          from lftomo.pipeline.runtime import collect_libtomo_identity, tomopy_numpy_incompatible;
+          libtomo = collect_libtomo_identity();
+          assert libtomo is not None and not libtomo.gridrec_fixed,
+          f'Tier-2 references require stock libtomo from environment-legacy.yml, found {libtomo}';
           assert Version(tomopy.__version__) >= Version('1.15.3'),
-          f'environment.yml requires TomoPy >=1.15.3, found {tomopy.__version__}';
+          f'environment-legacy.yml requires TomoPy >=1.15.3, found {tomopy.__version__}';
           assert not tomopy_numpy_incompatible(np.__version__, tomopy.__version__),
           f'Incompatible NumPy {np.__version__} / TomoPy {tomopy.__version__} runtime';
           print(f'NumPy {np.__version__}, TomoPy {tomopy.__version__}, Hotopy available')"

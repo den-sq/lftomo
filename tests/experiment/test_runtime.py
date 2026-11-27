@@ -113,6 +113,37 @@ def test_compatible_tomopy_runtime_runs_bounded_import_and_api_smoke_check():
 	assert report.smoke_checks[0].status == "passed"
 	assert report.smoke_checks[0].checked_attributes == ("circ_mask", "recon")
 	assert report.environment.dependencies["tomopy"] == "1.14.0"
+	assert report.environment.libtomo is None
+
+
+def test_active_environment_retains_native_identity(monkeypatch):
+	from lftomo.experiment.runtime import collect_environment_identity
+	from lftomo.pipeline.runtime import LibTomoIdentity
+
+	native = LibTomoIdentity(version="1.15.3", build="cuda12.9h1234567_densq1_103")
+	monkeypatch.setattr("lftomo.experiment.runtime.collect_libtomo_identity", lambda: native)
+	assert collect_environment_identity().libtomo is native
+	assert check_runtime_compatibility(config()).environment.libtomo is native
+
+
+@pytest.mark.parametrize("supplied", ["package_versions", "module_loader"])
+def test_prospective_environment_does_not_inherit_host_native_build(monkeypatch, supplied):
+	from lftomo.experiment.runtime import collect_environment_identity
+	from lftomo.pipeline.runtime import LibTomoIdentity
+
+	def unexpected_host_read():
+		pytest.fail("prospective environment must not inherit the host native build")
+
+	monkeypatch.setattr(
+		"lftomo.experiment.runtime.collect_libtomo_identity", unexpected_host_read,
+	)
+	kwargs = {supplied: {} if supplied == "package_versions" else loader({})}
+	assert check_runtime_compatibility(config(), **kwargs).environment.libtomo is None
+	assert collect_environment_identity(package_versions={}).libtomo is None
+
+	native = LibTomoIdentity(version="1.15.3", build="cuda12.9h1234567_densq1_103")
+	report = check_runtime_compatibility(config(), libtomo=native, **kwargs)
+	assert report.environment.libtomo is native
 
 
 @pytest.mark.parametrize("tomopy_version", ["1.15.3", "1.15.4", "2.0.0"])

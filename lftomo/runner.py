@@ -51,6 +51,7 @@ from lftomo.pipeline import (
 from lftomo.pipeline.stages import create_stage
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.planning import PipelinePlan
+from lftomo.pipeline.runtime import collect_libtomo_identity
 from lftomo.storage import ManagedBuffer, buffer_view
 from lftomo.util.converter import CONVERTER
 from lftomo.util.mem import SharedNPManager
@@ -702,6 +703,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 			run, concrete, resolved_document, run_scan, initial_artifacts, stages,
 			dataset, buffer_plan,
 		))
+	libtomo = collect_libtomo_identity()
 	results = []
 	for (
 		run, concrete, resolved_document, run_scan, initial_artifacts, stages,
@@ -782,6 +784,9 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 				yaml.safe_dump({
 					"resolved_recon": resolved_document,
 					"streaming_dataset": CONVERTER.unstructure(dataset),
+					"runtime": {
+						"libtomo": None if libtomo is None else libtomo.model_dump(mode="json"),
+					},
 				}, stream, sort_keys=False)
 			artifacts["recon_run"] = manifest_path
 	return results

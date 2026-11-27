@@ -38,9 +38,18 @@ def pytest_configure(config):
 		"markers",
 		"tier2: requires lab-internal Tier-2 reference data; skipped unless --run-tier2 is set",
 	)
+	config.addinivalue_line(
+		"markers", "legacy_gridrec: compares stored gridrec output from stock libtomo",
+	)
+	config.addinivalue_line(
+		"markers", "gridrec_fixed: requires the corrected densq1 native gridrec build",
+	)
 
 
 def pytest_collection_modifyitems(config, items):
+	from lftomo.pipeline.runtime import collect_libtomo_identity
+
+	libtomo = collect_libtomo_identity()
 	run_integration = config.getoption("--run-integration")
 	integration_enabled = run_integration and _integration_host_enabled()
 	if run_integration:
@@ -54,6 +63,10 @@ def pytest_collection_modifyitems(config, items):
 			item.add_marker(skip_integration)
 		if "tier2" in item.keywords and not config.getoption("--run-tier2"):
 			item.add_marker(skip_tier2)
+		if "legacy_gridrec" in item.keywords and (libtomo is None or libtomo.gridrec_fixed):
+			item.add_marker(pytest.mark.skip(reason="legacy gridrec values require stock libtomo"))
+		if "gridrec_fixed" in item.keywords and (libtomo is None or not libtomo.gridrec_fixed):
+			item.add_marker(pytest.mark.skip(reason="gridrec regressions require patched densq1 libtomo"))
 
 
 def _dataset_fixture(dataset_name):

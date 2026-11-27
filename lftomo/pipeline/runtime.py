@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from packaging.version import InvalidVersion, Version
+import json
+from pathlib import Path
+import sys
 
+from packaging.version import InvalidVersion, Version
+from pydantic import Field
+
+from lftomo.config import ConfigModel
 from lftomo.pipeline.core import RuntimeRequirement
 
 
@@ -11,6 +17,33 @@ _TOMOPY_CORRECTIVE_ACTION = (
 	"install the lftomo tomopy extra with TomoPy 1.15.3 or newer in this interpreter "
 	"(for example: python -m pip install 'lftomo[tomopy]')"
 )
+
+
+class LibTomoIdentity(ConfigModel):
+	"""Installed native TomoPy identity; the build determines gridrec semantics."""
+
+	version: str = Field(min_length=1)
+	build: str = Field(min_length=1)
+
+	@property
+	def gridrec_fixed(self) -> bool:
+		return "densq1" in self.build
+
+
+def collect_libtomo_identity(prefix: Path | None = None) -> LibTomoIdentity | None:
+	"""Read the active interpreter's conda record without importing native code.
+
+	No record means the native build is unknown, including non-conda installs.
+	CONDA_PREFIX is deliberately not used: it can describe another interpreter.
+	"""
+
+	metadata = (Path(sys.prefix) if prefix is None else prefix) / "conda-meta"
+	for path in metadata.glob("libtomo-*.json"):
+		with path.open(encoding="utf-8") as stream:
+			record = json.load(stream)
+		if record["name"] == "libtomo":
+			return LibTomoIdentity(version=record["version"], build=record["build"])
+	return None
 
 
 def tomopy_numpy_incompatible(
@@ -51,6 +84,8 @@ ASTRA_RUNTIME_REQUIREMENT = RuntimeRequirement(
 
 __all__ = [
 	"ASTRA_RUNTIME_REQUIREMENT",
+	"LibTomoIdentity",
+	"collect_libtomo_identity",
 	"tomopy_numpy_incompatible",
 	"tomopy_requirement",
 ]

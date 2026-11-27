@@ -3,8 +3,26 @@
 Tier-2 numerical tests execute the bundled canonical producer pipeline against
 the canonical `scan.yaml`, reconstruct the selected detector-row window, and
 compare it with the immutable TIFF archive. They do not refresh references.
-The runner must use the pinned `environment.yml` contract, particularly
-TomoPy 1.15.3 or newer, which supports the environment's NumPy 2 runtime.
+The runner keeps the stock TomoPy runtime described by
+`environment-legacy.yml`. The current `environment.yml` selects the corrected
+gridrec fork and changes reconstruction values, so it is not the runtime for
+these frozen producer comparisons. Both environments use a TomoPy version
+compatible with NumPy 2.
+
+The `legacy_gridrec` pytest marker gates the six stored producer comparisons
+on the native build recorded in the active interpreter's `conda-meta`. The
+`gridrec_fixed` marker gates the edge and spatial-gain regressions on the
+`densq1` build. Both groups skip if that native record is unavailable; ordinary
+tests still run. The actual B10 `b10_recon_current` oracle and frozen-output
+acceptance mode also require the legacy environment. Its unit tests use injected
+reconstructors and remain available in both environments.
+
+Each reconstruction's `recon_run.yaml` records `runtime.libtomo.version`
+and `runtime.libtomo.build` (or `libtomo: null` when unknown). Experiment
+environment identities retain that same native identity, so corrected and stock
+builds cannot share a numerical comparison identity merely because both report
+TomoPy 1.15.3. Test gates, acceptance checks, and provenance all use
+`lftomo.pipeline.runtime.collect_libtomo_identity`.
 
 The harness bounds memory in three ways:
 

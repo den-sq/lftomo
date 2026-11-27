@@ -44,6 +44,7 @@ from lftomo.pipeline import (
 	WindowConfig,
 	Y,
 )
+from lftomo.pipeline.runtime import collect_libtomo_identity
 from lftomo.prep.flat import FLAT
 from lftomo.reference import NumericalTolerance, checksum_manifest, compare_slice, sha256_file
 from lftomo.runner import load_recon, load_scan, run_reconstruction
@@ -680,6 +681,18 @@ def _run_interrupted_cleanup(
 	}
 
 
+def _require_stock_gridrec() -> None:
+	"""Keep the B10 oracle/frozen-output comparison on its native semantics."""
+
+	libtomo = collect_libtomo_identity()
+	if libtomo is None or libtomo.gridrec_fixed:
+		build = "unknown" if libtomo is None else libtomo.build
+		raise RuntimeError(
+			"B10 legacy gridrec acceptance requires stock libtomo from "
+			f"environment-legacy.yml; active build is {build}"
+		)
+
+
 def run_windowed_acceptance(
 		dataset_root: Path, result_root: Path, *, scan_path: Path, source: Path,
 		flat_root: Path, workers: int, log: AcceptanceProgressRecorder,
@@ -688,6 +701,7 @@ def run_windowed_acceptance(
 ) -> dict[str, Any]:
 	"""Execute and record #185 mode 1."""
 
+	_require_stock_gridrec()
 	started = _utcnow()
 	root = result_root / "windowed"
 	configs = root / "configs"
@@ -1198,6 +1212,8 @@ def run_acceptance(
 	unknown_modes = sorted(set(modes) - {"windowed", "experiment"})
 	if not modes or unknown_modes:
 		raise ValueError(f"acceptance modes must be windowed and/or experiment: {unknown_modes}")
+	if "windowed" in modes:
+		_require_stock_gridrec()
 	if not (dataset_root / "scan.yaml").is_file():
 		raise FileNotFoundError(f"missing canonical scan metadata: {dataset_root / 'scan.yaml'}")
 	if (
