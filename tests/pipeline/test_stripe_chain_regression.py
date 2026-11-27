@@ -296,6 +296,28 @@ def test_managed_vo_allocation_is_independent_of_worker_count():
 	np.testing.assert_allclose(one, two, rtol=1e-6, atol=1e-6)
 
 
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+def test_managed_theta_mirror_chain_matches_direct_arrays(layout):
+	projection = _fixture(rows=4)
+	data = projection if layout is ProjOrder else projection.transpose(1, 0, 2).copy()
+	stages = [
+		FourierWaveletStripeStage(level=2, wname="db2", sigma=2, theta_mirror=True),
+		FourierWaveletStripeStage(level=3, wname="db2", sigma=1, theta_mirror=True),
+	]
+	expected = data.copy()
+	_pipeline(stages, layout).run(_state(expected, layout))
+	with PipelineRunContext(max_workers=2) as context:
+		working = context.storage.allocate(layout(*data.shape), data.dtype, role="normalized")
+		working.array()[...] = data
+		source = _state(data, layout)
+		state = attach_source_geometry(PipelineState(
+			working, source.scan, source.recon, storage=context.storage,
+			executor=context.executor, domain=DataDomain.ATTENUATION,
+		), y_start=7, physical_y=11)
+		result = _pipeline(stages, layout, workers=2).run(state)
+		np.testing.assert_array_equal(np.asarray(result.working_array), expected)
+
+
 @pytest.mark.parametrize("stage", [
 	FourierWaveletStripeStage(level=2),
 	VoDeadStripeStage(size=5),
