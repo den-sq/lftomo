@@ -13,7 +13,9 @@ from pydantic import Field
 
 from lftomo.config import ConfigModel
 from lftomo.pipeline.core import RuntimeRequirement
-from lftomo.pipeline.runtime import tomopy_numpy_incompatible
+from lftomo.pipeline.runtime import (
+	LibTomoIdentity, collect_libtomo_identity, tomopy_numpy_incompatible,
+)
 
 from .models import EnvironmentIdentity, ExperimentConfig
 
@@ -170,9 +172,12 @@ def collect_environment_identity(
 	package_versions: Mapping[str, str | None] | None = None,
 	package_names: set[str] | None = None,
 	backend: str = "numpy",
+	libtomo: LibTomoIdentity | None = None,
 ) -> EnvironmentIdentity:
-	"""Collect active interpreter/package identity without assuming an env file."""
+	"""Collect identity; supplied package versions require supplied native provenance."""
 
+	if libtomo is None and package_versions is None:
+		libtomo = collect_libtomo_identity()
 	versions = _normalized_versions(
 		package_names or {"numpy", "scipy", "pydantic"}, package_versions,
 	)
@@ -181,6 +186,7 @@ def collect_environment_identity(
 		platform=platform.platform(),
 		backend=backend,
 		dependencies={name: value for name, value in versions.items() if value is not None},
+		libtomo=libtomo,
 		hardware={"cpu_count": os.cpu_count() or 1},
 	)
 
@@ -191,15 +197,19 @@ def check_runtime_compatibility(
 	package_versions: Mapping[str, str | None] | None = None,
 	module_loader: ModuleLoader = import_module,
 	backend: str = "numpy",
+	libtomo: LibTomoIdentity | None = None,
 ) -> RuntimeCompatibilityReport:
 	"""Validate active packages and bounded APIs required by ``config``.
 
 	``package_versions`` and ``module_loader`` are injectable so callers can
 	qualify a prospective environment without mutating or importing from it.
+	Supply its ``libtomo`` identity too, or native provenance remains unknown.
 	The default probes the active interpreter, including source/PYTHONPATH
 	imports that may not have installed distribution metadata.
 	"""
 
+	if libtomo is None and package_versions is None and module_loader is import_module:
+		libtomo = collect_libtomo_identity()
 	stage_keys = _possible_stage_keys(config)
 	enabled = _enabled_runtime_requirements(stage_keys)
 	package_names = {"numpy", "scipy", "pydantic"}
@@ -312,6 +322,7 @@ def check_runtime_compatibility(
 		package_versions=versions,
 		package_names=package_names,
 		backend=backend,
+		libtomo=libtomo,
 	)
 	return RuntimeCompatibilityReport(
 		compatible=not any(item.severity == "error" for item in diagnostics),

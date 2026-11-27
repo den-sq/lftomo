@@ -274,6 +274,50 @@ def test_trial_identity_sensitivity_and_field_specific_compatibility(
 	assert expected.trial_id != actual.trial_id
 
 
+def test_native_build_changes_numerical_identity_at_the_same_package_version():
+	expected = trial_identity()
+	environment = expected.environment.model_dump(mode="python")
+	environment["libtomo"] = {"version": "1.15.3", "build": "cuda12.9h1234567_102"}
+	stock = replace(expected, environment=environment)
+	environment["libtomo"] = {"version": "1.15.3", "build": "cuda12.9h1234567_densq1_103"}
+	patched = replace(expected, environment=environment)
+
+	report = compare_trial_identities(stock, patched)
+
+	assert not report.compatible
+	assert [item.field for item in report.diagnostics] == ["environment.libtomo.build"]
+	assert stock.trial_id != patched.trial_id
+	for known in (stock, patched):
+		assert known.trial_id != expected.trial_id
+		assert not compare_trial_identities(expected, known).compatible
+
+
+def test_persisted_attempt_without_native_identity_keeps_legacy_trial_hash():
+	# Frozen using the pre-libtomo TrialIdentity at 15dd32283e84. Recomputing
+	# this expectation with the current serializer would hide migration bugs.
+	legacy_hash = "829bfd722bf0c7efd4e4eae2a8385f9d06aa2f77184200699c8ad7c1724e9589"
+	legacy_identity = trial_identity().model_dump(mode="json")
+	legacy_identity["environment"].pop("libtomo")
+	serialized = canonical_json({
+		"schema_version": 1,
+		"attempt_id": "legacy-attempt",
+		"sequence": 0,
+		"trial_id": {"algorithm": "sha256", "value": legacy_hash},
+		"identity": legacy_identity,
+		"created_at": NOW.isoformat(),
+	})
+
+	restored = TrialAttemptRecord.model_validate_json(serialized)
+
+	assert restored.identity.environment.libtomo is None
+	assert "libtomo" not in restored.identity.identity_payload()["environment"]
+	assert restored.identity.trial_id.value == legacy_hash
+	assert restored.trial_id.value == legacy_hash
+	roundtrip = TrialAttemptRecord.model_validate_json(restored.model_dump_json())
+	assert roundtrip.model_dump(mode="json") == restored.model_dump(mode="json")
+	assert roundtrip.trial_id.value == legacy_hash
+
+
 def test_descriptive_metadata_does_not_participate_in_compatibility():
 	identity = trial_identity()
 	a = TrialDescription(label="first", dataset_path="/mnt/a", notes="old")

@@ -14,7 +14,12 @@ def test_runtime_test_environment_has_bounded_dependency_ownership():
 
 	assert project["project"]["requires-python"] == ">=3.11,<3.15"
 	assert "python>=3.11,<3.15" in dependencies
-	assert "tomopy>=1.15.3" in dependencies
+	assert "tomopy=1.15.3=pyhd8ed1ab_2" in dependencies
+	assert "libtomo=1.15.3=cuda12.9h1234567_densq1_103" in dependencies
+	assert environment["channels"][0] == (
+		"https://raw.githubusercontent.com/den-sq/tomopy/"
+		"716c0d2b2826e54b99e8041dc7bdf01fefdd9acd/conda/channel"
+	)
 	assert "numpy" in dependencies
 	assert "packaging" in dependencies
 	assert "nodefaults" in environment["channels"]
@@ -22,6 +27,10 @@ def test_runtime_test_environment_has_bounded_dependency_ownership():
 		dependency.startswith(("mkdocs", "mkdocstrings", "pymdown"))
 		for dependency in dependencies
 	)
+	legacy = yaml.safe_load(ROOT.joinpath("environment-legacy.yml").read_text())
+	assert legacy["name"] != environment["name"]
+	assert "tomopy>=1.15.3" in legacy["dependencies"]
+	assert legacy["channels"][0] == "conda-forge"
 
 
 def test_documentation_and_optional_algorithms_remain_explicit_extras():

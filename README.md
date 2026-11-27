@@ -3,15 +3,24 @@ Large Format Tomography Package
 
 ## Installation
 
-Use the conda environment as the compiled runtime and default-test contract for
-reconstruction deployments. TomoPy and other compiled scientific packages
-should come from conda-forge / bioconda rather than a standalone PyPI-only
-environment. Supported Python versions are 3.11 through 3.14.
+Use `environment.yml` as the compiled runtime and default-test contract for
+current reconstruction deployments. It pins the corrected native `libtomo`
+build from the [TomoPy fork's published channel](https://github.com/den-sq/tomopy/tree/716c0d2b2826e54b99e8041dc7bdf01fefdd9acd/conda),
+with the unchanged conda-forge TomoPy 1.15.3 Python package. Other compiled
+scientific packages come from conda-forge / bioconda. Supported Python versions
+are 3.11 through 3.14.
 
 ```shell
 CONDA_CHANNEL_PRIORITY=strict conda env create --solver libmamba -f environment.yml
 conda activate lftomo
 ```
+
+The current native package supports Linux x86-64, requires glibc 2.28 or newer,
+and retains CUDA 12.9 support. Gridrec itself runs on the CPU. For a CPU-only
+host, prefix the environment creation command with `CONDA_OVERRIDE_CUDA=12.9`
+to install the same package; GPU algorithms still require a compatible NVIDIA
+driver and device. Keep the channel URL and exact `libtomo` build pin in the
+environment file so later solves retain the gridrec corrections.
 
 Then install the local checkout into the activated environment. `uv pip` is the
 fast editable-install path when it is available; plain `pip` is also fine.
@@ -27,6 +36,18 @@ To qualify the environment from scratch, remove the named environment first
 and repeat those commands. The environment file intentionally excludes docs
 and optional algorithms so its dependency solution is not affected by tools a
 reconstruction or default unit test does not use.
+
+Legacy producer references, including the `b10_recon_current` oracle, use a
+separate stock environment. Create it and repeat the editable installation above:
+
+```shell
+CONDA_CHANNEL_PRIORITY=strict conda env create --solver libmamba -f environment-legacy.yml
+conda activate lftomo-legacy
+```
+
+Use the current environment for other work. The gridrec correction changes
+reconstruction values, so compare frozen producer references in the legacy
+environment. The self-hosted `recon-data` runner keeps that stock runtime.
 
 Bronnikov-aided correction is optional because it executes through hotopy.
 Install it only on deployments that use `phase.bac`:
@@ -103,8 +124,9 @@ checks skipped so a clean checkout can run without lab-local files.
 The separate [full scientific suite](.github/workflows/full-suite.yml) is an
 informational workflow, not a required pull-request check. It runs the default
 non-integration suite after relevant pushes to `master`, and can also be
-dispatched manually. Its job summary records environment setup, source install,
-test duration, and installed size; the micromamba setup log records cache and
+dispatched manually. It consumes the current `environment.yml` and selects
+Python 3.12 from its supported range. Its job summary records environment setup,
+source install, test duration, and installed size; the micromamba setup log records cache and
 cold-download behavior, while an artifact retains the resolved package list.
 Pull requests continue to use the lightweight checks in
 [CI](.github/workflows/ci.yml). Lab-data integration and Tier-2 reference checks
