@@ -103,10 +103,16 @@ class CalibrationResolution:
 		}
 
 
+def _output_metadata_root(output_path: Path) -> Path:
+	"""Place run metadata beside volume files or inside output directories."""
+
+	return output_path.parent if output_path.suffix.lower() in {".h5", ".hdf5", ".npy"} else output_path
+
+
 def _write_bac_qc(output_path: Path, records: list[dict], *, complete: bool) -> Path:
 	"""Persist Stage-produced QC at the explicit run destination."""
 
-	root = output_path.parent if output_path.suffix.lower() in {".h5", ".hdf5"} else output_path
+	root = _output_metadata_root(output_path)
 	root.mkdir(parents=True, exist_ok=True)
 	path = root / "bac_qc.json"
 	path.write_text(json.dumps({"complete": complete, "windows": records}, indent=2) + "\n")
@@ -1065,11 +1071,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 				artifacts["bac_qc_path"] = _write_bac_qc(
 					concrete.output_path, bac_qc, complete=True,
 				)
-			manifest_root = (
-				concrete.output_path.parent
-				if concrete.output_path.suffix.lower() in {".h5", ".hdf5", ".npy"}
-				else concrete.output_path
-			)
+			manifest_root = _output_metadata_root(concrete.output_path)
 			manifest_root.mkdir(parents=True, exist_ok=True)
 			manifest_path = manifest_root / "recon_run.yaml"
 			with manifest_path.open("w", encoding="utf-8") as stream:
