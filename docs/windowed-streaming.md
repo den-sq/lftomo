@@ -40,8 +40,11 @@ On failure it marks the report incomplete and includes the failing window's
 counts; later windows have not run. Without an output destination the same QC
 is available as `error.qc`. Borrowed-array callers that omit source geometry
 receive explicitly labelled buffer ordinals, not inferred source coordinates.
-The existing `clip_input` rule remains unchanged; it is not a new B10 zinger
-rule.
+The standalone [`filter.zinger` Stage](filtering-conventions.md#projection-zinger-replacement)
+applies the chosen B10 3×3 median-ratio rule after normalization and before
+BAC. It needs one real source pixel on each side of Y and X, resolved by the
+canonical window model, and no neighbouring projections. BAC's existing
+`clip_input` option retains its AAA523 behavior.
 
 In a bounded run, the default Theta batch equals `rows` / `--window-rows`;
 `theta` / `--window-theta` overrides it. When only columns are bounded, the
@@ -51,10 +54,13 @@ gives similar input-buffer sizes when the selected Y and Theta extents are
 similar, and lets multiple projections share dispatch overhead. Window sizes
 count samples, including when the read selection strides through projection indices.
 
-For example:
+For B10 slab and full runs, select Theta-first windows so reading and
+normalization can share BAC's Theta segment. This avoids a separate full-height
+normalized intermediate produced by Y-first execution. For example:
 
 ```sh
-lftomo-run pipeline.yaml scan.yaml --window-rows 64 --window-theta 4 \
+lftomo-run pipeline.yaml scan.yaml --output recon/ \
+  --window-axis Theta --window-rows 16 \
   --intermediate-root /scratch/lftomo
 ```
 

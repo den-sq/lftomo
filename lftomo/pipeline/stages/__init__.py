@@ -5,7 +5,7 @@ from lftomo.evaluation.stage import EvaluationStage
 from lftomo.pipeline.dispatch import STAGE_DISPATCH, dispatch_for_stage
 
 from .center import EntropyLocalCenterStage, ManualCenterStage, PhaseCorrelationCenterStage, VoCenterStage
-from .filter import BilateralFilterStage
+from .filter import BilateralFilterStage, ZingerFilterStage
 from .geometry import AffineSkewMovementStage, MovementCorrectStage, SkewCorrectStage
 from .helical import HelicalIndexRemapStage
 from .layout import LayoutConvertStage
@@ -58,6 +58,7 @@ STAGE_REGISTRY = {
 	"center.vo": VoCenterStage,
 	"evaluate.metrics": EvaluationStage,
 	"filter.bilateral": BilateralFilterStage,
+	"filter.zinger": ZingerFilterStage,
 	"geometry.affine_skew": SkewCorrectStage,
 	"geometry.affine_skew_movement": AffineSkewMovementStage,
 	"geometry.movement": MovementCorrectStage,
@@ -190,5 +191,6 @@ __all__ = [
 	"VoSortStripeStage",
 	"VoCenterStage",
 	"WeightedNormalizeStage",
+	"ZingerFilterStage",
 	"create_stage",
 ]

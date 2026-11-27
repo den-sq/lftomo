@@ -42,6 +42,7 @@ def _dispatch(
 
 _PROJECTION_PROCESS = {
 	"filter.bilateral",
+	"filter.zinger",
 	"geometry.affine_skew",
 	"geometry.movement",
 	"movement_correct.linear_shift",

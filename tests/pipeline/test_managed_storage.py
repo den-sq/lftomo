@@ -1,4 +1,5 @@
 import ast
+from contextlib import nullcontext
 import inspect
 import json
 import multiprocessing
@@ -15,10 +16,12 @@ import psutil
 import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import PipelineState, Stage, StageContract
-from lftomo.storage import ManagedBuffer, PipelineRunContext, StorageBackend
+from lftomo.pipeline import DataDomain, PipelineState, Stage, StageContract
+from lftomo.pipeline.core import BoundedWorkRequest, BufferSpec, ProjectionStage, StageParams
+from lftomo.pipeline.dispatch import DispatchKind, DispatchSpec
+from lftomo.storage import LocalArray, ManagedBuffer, PipelineRunContext, StorageBackend
 from lftomo.util.mem import FileBackedNPArray, SharedNPArray, SharedNPManager
-from lftomo.util.shapes import ImgSlice, ProjOrder
+from lftomo.util.shapes import ImgSlice, ProjOrder, SinoOrder
 
 
 def _scan() -> Scan:
@@ -44,6 +47,108 @@ class _IncrementStage(Stage):
 	def run(self, state):
 		np.asarray(state.working_array)[...] += 1
 		return state
+
+
+class _ProjectionScratchStage(ProjectionStage):
+	name = "test.projection_scratch"
+	dispatch = DispatchSpec(DispatchKind.PROCESS, kernel="run_projection_kernel", per_projection=True)
+	contract = StageContract(mutates_input=True)
+
+	class Params(StageParams):
+		fail: bool = False
+
+	def bounded_work_requests(self, input_spec):
+		return (BoundedWorkRequest(
+			"_test_work", BufferSpec(input_spec.shape, np.float32), "test_projection_work",
+			required_for_fallback=True,
+		),)
+
+	def run_projection(self, image, state):
+		handle = state.artifacts["_test_work"]
+		assigned = handle[state.work_index(handle.shape)]
+		work = assigned.array()[0]
+		np.multiply(image, 2, out=work)
+		if self.params.fail:
+			raise RuntimeError("projection kernel failed")
+		image[...] = work
+
+
+@pytest.mark.parametrize("execution", ["local", "managed_serial", "process"])
+@pytest.mark.parametrize("fail", [False, True])
+def test_projection_declared_work_is_retired_after_dispatch_even_on_failure(execution, fail):
+	managed = execution != "local"
+	with PipelineRunContext(max_workers=2) if managed else nullcontext() as context:
+		shape = ProjOrder(2, 3, 4)
+		buffer = context.storage.allocate(shape, np.float32) if managed else LocalArray(
+			np.empty(shape.as_tuple(), dtype=np.float32), shape,
+		)
+		buffer.array().fill(7)
+		state = PipelineState(
+			buffer, _scan(), _recon(), storage=context.storage if managed else None,
+			executor=context.executor if managed else None,
+		)
+		stage = _ProjectionScratchStage(fail=fail)
+		run = (lambda: context.executor.run_stage(state, stage)) if execution == "process" else (
+			lambda: stage.run(state)
+		)
+		if fail:
+			with pytest.raises(RuntimeError, match="projection kernel failed"):
+				run()
+		else:
+			result = run()
+			np.testing.assert_array_equal(np.asarray(result.working_array), 14)
+		assert "_test_work" not in state.artifacts
+		if managed:
+			work_events = [event for event in context.storage.allocation_events
+				if event["role"] == "test_projection_work"]
+			assert [event["action"] for event in work_events] == ["allocate", "retire"]
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+def test_zinger_work_capacity_and_results_do_not_depend_on_process_count(layout):
+	from lftomo.pipeline.stages.filter import ZingerFilterStage
+
+	theta, rows, columns = np.indices((3, 7, 11), dtype=np.float32)
+	values = np.exp(-0.4 * np.exp(-((columns - 5) ** 2 + (rows - 3) ** 2) / 20)
+		* (1 + 0.1 * np.sin(theta))).astype(np.float32)
+	for index in ((0, 0, 0), (1, 3, 5), (2, 6, 10)):
+		values[index] *= 4
+	if layout is SinoOrder:
+		values = values.transpose(1, 0, 2).copy()
+	shape = layout(*values.shape)
+	serial = PipelineState(
+		LocalArray(values.copy(), shape), _scan(), _recon(), domain=DataDomain.TRANSMISSION,
+	)
+	ZingerFilterStage().run(serial)
+	expected = np.asarray(serial.working_array).copy()
+	assert np.count_nonzero(expected != values) == 3
+	assert not any(isinstance(value, (LocalArray, ManagedBuffer)) for value in serial.artifacts.values())
+	reports = []
+	for workers in (1, 2):
+		with PipelineRunContext(max_workers=workers) as context:
+			buffer = context.storage.allocate(shape, values.dtype)
+			buffer.array()[...] = values
+			state = PipelineState(
+				buffer, _scan(), _recon(), storage=context.storage, executor=context.executor,
+				domain=DataDomain.TRANSMISSION,
+			)
+			result = context.executor.run_stage(state, ZingerFilterStage())
+			np.testing.assert_array_equal(np.asarray(result.working_array), expected)
+			assert not any(isinstance(value, (LocalArray, ManagedBuffer))
+				for value in result.artifacts.values())
+			report, = result.artifacts["bounded_work_allocations"]
+			reports.append(report)
+			assert report["unit_axis"] == "Theta"
+			assert report["units"] == 3
+			assert {work["role"]: work["bytes"] for work in report["buffers"]} == {
+				"zinger_median": 3 * 7 * 11 * 4,
+				"zinger_threshold": 3 * 11 * 4,
+				"zinger_mask": 3 * 11,
+			}
+			for role in ("zinger_median", "zinger_threshold", "zinger_mask"):
+				events = [event for event in context.storage.allocation_events if event["role"] == role]
+				assert [event["action"] for event in events] == ["allocate", "retire"]
+	assert reports[0] == reports[1]
 
 
 class _UntypedBuffer(ManagedBuffer):

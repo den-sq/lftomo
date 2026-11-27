@@ -170,6 +170,16 @@ def run_sinogram_stage(stage: Stage, state: PipelineState) -> PipelineState:
 
 
 def run_projection_stage(stage: Stage, state: PipelineState) -> PipelineState:
+	"""Own declared work for direct serial projection execution."""
+
+	requests = _prepare_bounded_work(state, (stage,), "Theta")
+	try:
+		return _run_projection_views(stage, state)
+	finally:
+		_release_bounded_work(state, requests)
+
+
+def _run_projection_views(stage: Stage, state: PipelineState) -> PipelineState:
 	"""Run a projection kernel on views derived from the assigned range."""
 
 	if state.backend.name != "numpy":
@@ -320,7 +330,7 @@ def run_projection_kernel(
 	# ProjectionStage preparation and completion belong to the coordinator;
 	# workers only apply their assigned numerical kernels to the held buffer.
 	result = (
-		run_projection_stage(stage, state)
+		_run_projection_views(stage, state)
 		if isinstance(stage, ProjectionStage) else stage.run(state)
 	)
 	return {
@@ -660,12 +670,16 @@ class PipelineExecutor:
 		if "phase_envelope" in working_state.artifacts and hasattr(stage.params, "envelope_m"):
 			worker_stage = copy(stage)
 			worker_stage.params = stage.params.model_copy(update={"envelope_m": None})
-		results = self.submit_all(run_projection_kernel, (
-			(
-				working_state.working_array, worker_stage, _payload(working_state), work_range,
-			)
-			for work_range in _work_ranges(working_state, "Theta")
-		))
+		requests = _prepare_bounded_work(working_state, (stage,), "Theta")
+		try:
+			results = self.submit_all(run_projection_kernel, (
+				(
+					working_state.working_array, worker_stage, _payload(working_state), work_range,
+				)
+				for work_range in _work_ranges(working_state, "Theta")
+			))
+		finally:
+			_release_bounded_work(working_state, requests)
 		if stage.name.startswith("normalize."):
 			from lftomo.pipeline.stages.normalize import merge_normalization_dispatch
 

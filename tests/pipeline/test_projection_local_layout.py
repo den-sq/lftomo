@@ -16,6 +16,7 @@ from lftomo.pipeline.stages import (
 	TaperBlendedNormalizeStage,
 	ThetaSwitchNormalizeStage,
 	WeightedNormalizeStage,
+	ZingerFilterStage,
 )
 from lftomo.util.shapes import ProjOrder, SinoOrder, Theta
 from tests.sample_data import attach_source_geometry
@@ -57,6 +58,7 @@ def state(array, layout, config=None):
 	PaganinPhaseAbsorptionStage(),
 	BronnikovAidedCorrectionStage(alpha=2),
 	BilateralFilterStage(),
+	ZingerFilterStage(),
 	SkewCorrectStage(),
 	MovementCorrectStage(),
 	HelicalIndexRemapStage(enabled=False),
@@ -107,6 +109,64 @@ def test_serial_phase_processes_only_assigned_projections_once():
 	expected[1:4:2] = -np.log(expected[1:4:2])
 	assert NegativeLogStage().run(current) is current
 	np.testing.assert_allclose(working, expected)
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+def test_zinger_strict_threshold_preserves_bright_edges_and_dark_pixels(layout):
+	projection = np.ones((1, 7, 9), dtype=np.float32)
+	projection[:, :, 5:] = 3
+	projection[0, 2, 2] = 1.5
+	projection[0, 4, 2] = np.nextafter(np.float32(1.5), np.float32(np.inf))
+	projection[0, 0, 0] = 4
+	projection[0, 6, 8] = 9
+	projection[0, 2, 7] = 0.2
+	expected = projection.copy()
+	expected[0, 4, 2] = 1
+	expected[0, 0, 0] = 1
+	expected[0, 6, 8] = 3
+	working = projection if layout is ProjOrder else projection.transpose(1, 0, 2).copy()
+	current = state(working, layout)
+
+	assert ZingerFilterStage().run(current) is current
+
+	actual = working if layout is ProjOrder else working.transpose(1, 0, 2)
+	np.testing.assert_array_equal(actual, expected)
+	assert current.domain is DataDomain.TRANSMISSION
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+def test_zinger_uses_original_plane_medians_before_replacing_neighbors(layout):
+	projection = np.array([[[1, 1, 1], [1, 4, 8], [1, 1, 4]]], dtype=np.float32)
+	# The middle-right pixel has original median 4. Recomputing after the
+	# centre replacement would instead give it median 1.
+	expected = np.array([[[1, 1, 1], [1, 1, 4], [1, 1, 4]]], dtype=np.float32)
+	working = projection if layout is ProjOrder else projection.transpose(1, 0, 2).copy()
+
+	ZingerFilterStage().run(state(working, layout))
+
+	actual = working if layout is ProjOrder else working.transpose(1, 0, 2)
+	np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_zinger_respects_strided_assigned_projections_and_disabled_state(layout, enabled):
+	projection = np.broadcast_to(
+		(np.arange(4, dtype=np.float32) / 10 + 1)[:, None, None], (4, 5, 7),
+	).copy()
+	projection[:, 2, 3] *= 4
+	expected = projection.copy()
+	if enabled:
+		expected[1:4:2, 2, 3] = expected[1:4:2, 2, 2]
+	working = projection if layout is ProjOrder else projection.transpose(1, 0, 2).copy()
+	current = state(working, layout)
+	attach_source_geometry(current, theta_start=1, theta_stride=2, physical_theta=8)
+	current.work_range = Theta.drange(1, 4, 2)
+
+	assert ZingerFilterStage(enabled=enabled).run(current) is current
+
+	actual = working if layout is ProjOrder else working.transpose(1, 0, 2)
+	np.testing.assert_array_equal(actual, expected)
 
 
 def test_pipeline_preserves_projection_layout_through_manual_center():
