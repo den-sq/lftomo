@@ -45,7 +45,9 @@ both Y and Theta windows.
 The schedule is a `beam_schedule` component in beam coordinates with axes
 `[Theta, Parameter]` and two columns, `(dy, m)`: detector-row shift and positive
 magnification. Its time axis is `projection_index`, and sampling is `nearest`.
-Each processed source projection must have an exact schedule entry; the stage
+Time-axis values name acquisition slots: the stage maps the source ordinal
+through `TomoDataSet.acquisition_indices`, preserving dropped-frame provenance.
+Each processed acquisition slot must have an exact schedule entry; the stage
 does not interpolate away measured frame-to-frame jitter. Its typed
 `band_shift` field carries the model:
 
@@ -70,9 +72,9 @@ setting all `m` entries to one then gives shift-only normalization.
 For `g = max(W-D, 1)` and `b = gaussian_filter1d(log(g), sigma_x, axis=X)`,
 the stage samples `b(yc + (y-yc-dy)/m, x)` with cubic interpolation and nearest
 edge treatment, then divides `P-D` by
-`g * exp(shifted_b-b + clip(dy/dy_end, 0, s_max)*R)`. Gaussian filtering uses
+`g * exp(shifted_b-b) * exp(clip(dy/dy_end, 0, s_max)*R)`. Gaussian filtering uses
 SciPy's reflect edge treatment along X. Without a residual the last exponent
-term is absent. All numeric model settings and component references belong to
+factor is absent. All numeric model settings and component references belong to
 the calibration component; they are not duplicated in Stage parameters.
 
 Calibration preparation reads complete detector planes so the cubic spline

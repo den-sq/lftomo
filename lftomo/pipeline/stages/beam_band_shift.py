@@ -152,7 +152,8 @@ class BeamBandShiftNormalizeStage(Stage):
 			work = buffer_view(state.artifacts[_WARP])
 			lines = buffer_view(state.artifacts[_LINE])
 			for index in state.work_indices("Theta"):
-				projection = state.source_window.source_index("Theta", index)
+				source_index = state.source_window.source_index("Theta", index)
+				projection = int(state.dataset.acquisition_indices[source_index])
 				bracket = prepared.bundle.read_time_bracket(self.params.schedule_component, projection)
 				if bracket.before_time != projection and bracket.after_time != projection:
 					raise ValueError(f"beam schedule has no measurement for projection {projection}")
@@ -167,12 +168,13 @@ class BeamBandShiftNormalizeStage(Stage):
 					output=warped, order=3, mode="nearest", prefilter=False,
 				)
 				np.subtract(warped, texture, out=warped)
+				np.exp(warped, out=warped)
 				if residual is not None:
 					scale = float(np.clip(dy / model.dy_end, 0, model.s_max))
 					for row in range(warped.shape[0]):
 						np.multiply(residual[row], scale, out=lines[index])
-						np.add(warped[row], lines[index], out=warped[row])
-				np.exp(warped, out=warped)
+						np.exp(lines[index], out=lines[index])
+						np.multiply(warped[row], lines[index], out=warped[row])
 				np.multiply(warped, gain, out=warped)
 				image = data[state.layout.point_index(Theta=index)]
 				np.subtract(image, dark, out=image)

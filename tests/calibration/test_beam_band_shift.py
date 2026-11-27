@@ -1,5 +1,7 @@
 """Scientific model and source-coordinate tests for the band-shift normalizer."""
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 from scipy.ndimage import affine_transform, gaussian_filter1d
@@ -13,7 +15,7 @@ from lftomo.util.shapes import ProjOrder, SinoOrder
 from tests.sample_data import attach_source_geometry
 
 
-def _fixture(tmp_path, *, stretch=True, residual=True):
+def _fixture(tmp_path, *, stretch=True, residual=True, acquisition_indices=None):
 	count, height, width = 7, 64, 48
 	y, x = np.indices((height, width))
 	dark = (8 + 0.02 * x).astype(np.float32)
@@ -39,7 +41,8 @@ def _fixture(tmp_path, *, stretch=True, residual=True):
 		build.write_array_component(name, [values], shape=values.shape, dtype="float32", axes=("Y", "X"),
 			kind=kind, coordinate_frame="beam" if kind == "beam_residual" else "detector")
 	build.write_array_component("beam_schedule", [schedule], shape=schedule.shape, dtype="float64", axes=("Theta", "Parameter"),
-		kind="beam_schedule", coordinate_frame="beam", time_axis={"kind": "projection_index"}, band_shift=model)
+		kind="beam_schedule", coordinate_frame="beam",
+		time_axis={"kind": "projection_index", "values": acquisition_indices}, band_shift=model)
 	ref = build.finalize()
 	scan = Scan.model_validate({
 		"energy_keV": 20, "pixel_size_um": 1, "ssd_cm": 10,
@@ -92,6 +95,16 @@ def test_band_shift_model_roundtrips_as_component_authority(tmp_path):
 	assert stage.contract.produces_domain is DataDomain.TRANSMISSION
 	with pytest.raises(ValueError, match="nonzero dy_end"):
 		BeamBandShiftModel(yc=32, residual_component="residual")
+
+
+def test_schedule_queries_acquisition_slots_after_dropped_and_selected_frames(tmp_path):
+	acquisition_indices = [0, 2, 3, 6, 7, 9, 12]
+	data, transmission, scan, ref = _fixture(tmp_path, acquisition_indices=acquisition_indices)
+	state = _state(data[1:7:2, 19:27], scan, ref, theta_start=1, theta_stride=2, y_start=19)
+	state.dataset = replace(state.dataset, acquisition_indices=np.asarray(acquisition_indices))
+	result = BeamBandShiftNormalizeStage().run(state)
+	np.testing.assert_allclose(np.asarray(result.working_array),
+		np.broadcast_to(transmission[19:27], data[1:7:2, 19:27].shape), rtol=5e-7, atol=1e-7)
 
 
 def test_process_dispatch_matches_serial(tmp_path):
