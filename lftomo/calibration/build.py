@@ -317,6 +317,14 @@ class CalibrationBuildSession:
 		intermediate manifest. Unfinished writers are never visible as inputs.
 		"""
 
+		return self._completed_component_reader(name).read_component(name, **selection)
+
+	def component_compatibility(self, name: str) -> CompatibilityMetadata:
+		"""Resolve completed-component coverage through the bundle's merge policy."""
+
+		return self._completed_component_reader(name).compatibility(name)
+
+	def _completed_component_reader(self, name: str) -> CalibrationBundle:
 		if self._failed:
 			raise CalibrationBuildError("cannot read components from a failed build", self.staging_path)
 		if name not in self.components:
@@ -324,12 +332,11 @@ class CalibrationBuildSession:
 				raise CalibrationBuildError(f"component {name!r} must be closed before reading", self.staging_path)
 			raise KeyError(f"unknown calibration component {name!r}")
 		root = self.target if self._finalized else self.staging_path
-		reader = CalibrationBundle(
+		return CalibrationBundle(
 			self._manifest(), CalibrationBundleRef(
 				manifest_path=root / "calibration.yaml", calibration_id=self.calibration_id,
 			),
 		)
-		return reader.read_component(name, **selection)
 
 	def write_array_component(
 		self, name: str, chunks: Iterable[Any], **kwargs: Any,

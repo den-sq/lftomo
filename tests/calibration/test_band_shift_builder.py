@@ -103,3 +103,23 @@ def test_inadequate_shift_search_does_not_publish_a_saturated_schedule(measured_
 	with pytest.raises(ValueError, match="shift-search boundary"):
 		build_beam_band_shift_schedule(build, source, dataset, **params)
 	assert "beam_schedule" not in build.components
+
+
+@pytest.mark.parametrize("bundle_x,component_x", [(17, None), (0, 17), (17, 0)])
+def test_schedule_requires_effective_full_detector_column_coverage(measured_scan, bundle_x, component_x):
+	build, source, dataset, params, _dy, _stretch = measured_scan
+	build.compatibility.region.x_start = bundle_x
+	if component_x is not None:
+		for name in ("pre_gain", "pre_dark"):
+			build.components[name].compatibility.region = build.compatibility.region.model_copy(
+				update={"x_start": component_x},
+			)
+	if component_x == 0:
+		# An explicit full-detector component overrides the bundle's default ROI.
+		component = build_beam_band_shift_schedule(build, source, dataset, **params)
+		assert component.payload.shape == (source.frame_count, 2)
+		build.finalize()
+	else:
+		with pytest.raises(ValueError, match="must cover detector columns"):
+			build_beam_band_shift_schedule(build, source, dataset, **params)
+		assert "beam_schedule" not in build.components

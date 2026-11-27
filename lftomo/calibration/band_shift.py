@@ -74,6 +74,9 @@ def build_beam_band_shift_schedule(
 			raise ValueError(f"{component_name!r} must be a static {kind} (Y, X) component")
 		if component.payload.shape != (physical.Y, physical.X):
 			raise ValueError("white and dark components must cover the full detector")
+		region = build.component_compatibility(component_name).region
+		if region is not None and (region.x_start != 0 or region.width != physical.X):
+			raise ValueError(f"{component_name!r} must cover detector columns [0, {physical.X})")
 
 	def profile(index: int | None) -> np.ndarray:
 		result = np.empty(physical.Y, dtype=np.float64)
