@@ -237,6 +237,7 @@ def test_blinded_previews_share_scale_crop_and_have_reversible_private_mapping(t
 	assert not any((tmp_path / "guarded").rglob("*.png"))
 
 
+@pytest.mark.system
 def test_full_fidelity_workflow_promotes_only_winners_and_resumes_boundary(tmp_path):
 	config = experiment()
 	writer = ProgressEventWriter(tmp_path, config.experiment_id)

@@ -13,6 +13,7 @@ from lftomo.review import CandidateResolutionError, ExperimentCandidateResolver
 from .conftest import BLINDING_KEY
 
 
+@pytest.mark.system
 def test_candidate_resolution_joins_preview_trial_pipeline_and_result(experiment_root):
 	resolver = ExperimentCandidateResolver(experiment_root)
 	inventory = resolver.inventory()

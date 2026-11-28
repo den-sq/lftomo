@@ -5,6 +5,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import pytest
 
 from lftomo.config import Recon, Scan
 from lftomo.pipeline import WindowConfig
@@ -13,6 +14,7 @@ from lftomo.util.shapes import Y
 from tests.fixtures.phase_multimaterial import compact_multimaterial_case
 
 
+@pytest.mark.system
 def test_runner_retains_reference_diagnostics_for_every_window_and_json(tmp_path, caplog):
 	case = compact_multimaterial_case(n_rows=4, row_varying=True, noncollinear=True)
 	projections = case["projections"]

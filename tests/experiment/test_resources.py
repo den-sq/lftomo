@@ -198,6 +198,7 @@ def test_runner_rejects_unsafe_roots_before_store_claim_or_execution(tmp_path):
 	assert not result.exists()
 
 
+@pytest.mark.system
 def test_manifest_records_accepted_report_and_compatible_scratch_relocation(tmp_path):
 	result = tmp_path / "result"
 	call_root = tmp_path / "calls"

@@ -189,6 +189,7 @@ def test_stage_owned_requirements_are_discovered_without_a_runtime_key_table(mon
 	assert report.diagnostics[0].corrective_action == "install the external Stage dependency"
 
 
+@pytest.mark.system
 def test_stage_registry_can_be_inspected_without_importing_optional_tomopy():
 	script = """
 import importlib.abc
@@ -349,6 +350,7 @@ def test_runner_rejects_runtime_before_validation_cache_store_claim_or_executor(
 	assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.system
 def test_accepted_runtime_report_is_in_preflight_and_manifest(tmp_path):
 	report = check_runtime_compatibility(
 		config(),

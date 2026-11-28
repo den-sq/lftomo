@@ -22,6 +22,12 @@ def pytest_addoption(parser):
 		help="run integration tests that require local lab data or hardware",
 	)
 	parser.addoption(
+		"--run-system",
+		action="store_true",
+		default=False,
+		help="run system tests: end-to-end runs, reference parity, and real optional engines",
+	)
+	parser.addoption(
 		"--run-tier2",
 		action="store_true",
 		default=False,
@@ -33,6 +39,11 @@ def pytest_configure(config):
 	config.addinivalue_line(
 		"markers",
 		"integration: requires local lab data or hardware; skipped unless --run-integration is set",
+	)
+	config.addinivalue_line(
+		"markers",
+		"system: end-to-end, reference-parity, or real-engine test outside the unit suite; "
+		"skipped unless --run-system is set",
 	)
 	config.addinivalue_line(
 		"markers",
@@ -57,10 +68,13 @@ def pytest_collection_modifyitems(config, items):
 	else:
 		reason = "need --run-integration to run"
 	skip_integration = pytest.mark.skip(reason=reason)
+	skip_system = pytest.mark.skip(reason="need --run-system to run")
 	skip_tier2 = pytest.mark.skip(reason="need --run-tier2 to run")
 	for item in items:
 		if "integration" in item.keywords and not integration_enabled:
 			item.add_marker(skip_integration)
+		if "system" in item.keywords and not config.getoption("--run-system"):
+			item.add_marker(skip_system)
 		if "tier2" in item.keywords and not config.getoption("--run-tier2"):
 			item.add_marker(skip_tier2)
 		if "legacy_gridrec" in item.keywords and (libtomo is None or libtomo.gridrec_fixed):

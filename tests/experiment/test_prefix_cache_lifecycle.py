@@ -217,6 +217,7 @@ def _lifecycle(
 	return ExperimentLifecycle(runner), executor
 
 
+@pytest.mark.system
 def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failures(
 	tmp_path, monkeypatch,
 ):
@@ -303,6 +304,7 @@ def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failure
 	)
 
 
+@pytest.mark.system
 def test_cache_progress_programming_error_aborts_experiment_not_candidate(
 	tmp_path, monkeypatch,
 ):
@@ -319,6 +321,7 @@ def test_cache_progress_programming_error_aborts_experiment_not_candidate(
 	assert read_progress_events(api.root / "progress.jsonl")[-1].kind == "experiment.failed"
 
 
+@pytest.mark.system
 def test_cache_progress_infrastructure_abort_stops_other_worker_without_false_failure(
 	tmp_path, monkeypatch,
 ):

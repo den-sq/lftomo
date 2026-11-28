@@ -73,6 +73,7 @@ class _ProjectionScratchStage(ProjectionStage):
 		image[...] = work
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("execution", ["local", "managed_serial", "process"])
 @pytest.mark.parametrize("fail", [False, True])
 def test_projection_declared_work_is_retired_after_dispatch_even_on_failure(execution, fail):
@@ -104,6 +105,7 @@ def test_projection_declared_work_is_retired_after_dispatch_even_on_failure(exec
 			assert [event["action"] for event in work_events] == ["allocate", "retire"]
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 def test_zinger_work_capacity_and_results_do_not_depend_on_process_count(layout):
 	from lftomo.pipeline.stages.filter import ZingerFilterStage
@@ -384,6 +386,7 @@ def test_run_context_rejects_sequential_reentry_after_owned_shutdown():
 		context.__enter__()
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("retain", [False, True])
 @pytest.mark.parametrize("fail", [False, True])
 def test_run_context_intermediates_are_fresh_with_explicit_retention(tmp_path, retain, fail):
@@ -442,6 +445,7 @@ def test_run_context_cleans_intermediates_when_executor_shutdown_fails(tmp_path,
 	assert not _segment_exists(shared.name)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("stop_signal", [signal.SIGTERM, signal.SIGKILL])
 @pytest.mark.parametrize("retain", [False, True])
 def test_killed_process_group_cleans_owned_storage_and_honors_retention(tmp_path, stop_signal, retain):
@@ -470,6 +474,7 @@ def test_killed_process_group_cleans_owned_storage_and_honors_retention(tmp_path
 	assert user_file.read_text() == "keep"
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("start_method", ["default", "spawn"])
 def test_fatal_owner_exit_releases_manager_workers_and_pipes(tmp_path, start_method):
 	if sys.platform != "linux":

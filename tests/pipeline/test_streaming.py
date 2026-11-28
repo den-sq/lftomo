@@ -418,6 +418,7 @@ def _write_yaml(path: Path, value):
 	path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
 
+@pytest.mark.system
 def test_windowed_runner_matches_whole_non_fft_and_replays_center_prefix(
 	tmp_path, monkeypatch,
 ):

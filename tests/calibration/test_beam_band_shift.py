@@ -142,6 +142,7 @@ def test_schedule_queries_acquisition_slots_after_dropped_and_selected_frames(tm
 		np.broadcast_to(transmission[19:27], data[1:7:2, 19:27].shape), rtol=5e-7, atol=1e-7)
 
 
+@pytest.mark.system
 def test_process_dispatch_matches_serial(tmp_path):
 	data, _transmission, scan, ref = _fixture(tmp_path)
 	expected = np.asarray(BeamBandShiftNormalizeStage().run(_state(data, scan, ref)).working_array)

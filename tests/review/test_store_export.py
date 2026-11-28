@@ -27,6 +27,7 @@ def _source_hashes(root):
 	}
 
 
+@pytest.mark.system
 def test_review_fragments_resume_with_one_global_monotonic_sequence(
 	experiment_root, tmp_path,
 ):

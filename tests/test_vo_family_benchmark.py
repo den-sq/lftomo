@@ -1,3 +1,5 @@
+import pytest
+
 import benchmarks.vo_family as vo_family
 
 
@@ -15,6 +17,7 @@ def test_b10_shaped_plans_report_rows_proportional_exact_bytes():
 	assert whole.managed_scratch_bytes == 180 * window.managed_scratch_bytes
 
 
+@pytest.mark.system
 def test_scipy_and_bottleneck_dispatcher_arms_are_numerically_equivalent():
 	scipy = vo_family.run("scipy", "chain", (16, 2, 24), workers=1)
 	bottleneck = vo_family.run("bottleneck", "chain", (16, 2, 24), workers=1)

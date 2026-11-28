@@ -189,6 +189,7 @@ class HermeticWorkflowExecutor:
 		)
 
 
+@pytest.mark.system
 def test_hermetic_known_winner_full_workflow_is_deterministic_and_auditable(tmp_path, monkeypatch):
 	config = experiment_config()
 	experiment_inputs = inputs()

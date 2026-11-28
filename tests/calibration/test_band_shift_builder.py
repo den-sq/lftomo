@@ -83,6 +83,7 @@ def test_schedule_recovers_jitter_and_smoothed_stretch_from_raw_scan(measured_sc
 	assert bundle.component("beam_schedule").metadata["angles_radians"] == dataset.angles.tolist()
 
 
+@pytest.mark.system
 def test_schedule_is_independent_of_source_read_chunking(measured_scan):
 	build, source, dataset, params, _dy, _stretch = measured_scan
 	first = build_beam_band_shift_schedule(build, source, dataset, **params)

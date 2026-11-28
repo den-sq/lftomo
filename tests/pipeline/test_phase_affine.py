@@ -120,6 +120,7 @@ class _ObservedAffineStage(PaganinStage):
 		return super().run_projection(image, state)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 @pytest.mark.parametrize("pad", [False, True])
 def test_projection_dispatch_uses_source_envelope_and_managed_filter(reference, layout, pad):

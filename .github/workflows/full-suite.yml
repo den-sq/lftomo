@@ -89,7 +89,7 @@ jobs:
         run: |
           started=$(date +%s)
           set +e
-          python -m pytest -q tests
+          python -m pytest -q tests --run-system
           test_status=$?
           # Do NOT re-enable errexit before the explicit exit (see the install
           # step): the micromamba login shell flips an errexit-active exit 0

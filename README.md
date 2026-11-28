@@ -109,12 +109,20 @@ using DRHT/LDM must follow
 Unit tests should be hermetic: generate any required files under `tmp_path` or
 load static fixtures from `tests/`. Tests that require local beamline data,
 machine-mounted paths, or hardware are integration tests and must be marked with
-`@pytest.mark.integration`.
+`@pytest.mark.integration`. Hermetic tests that run the reconstruction runner or
+an experiment end to end, compare against a stored reference reconstruction, or
+need a real optional engine (hotopy, ASTRA, Torch) are system tests, marked
+`@pytest.mark.system`. A test whose cases take 0.5 s or more together belongs
+there too.
 
 ```shell
 pytest -q
+pytest -q --run-system
 pytest -q --run-integration
 ```
+
+The default run is the unit suite. `--run-system` adds the system tests; the
+full scientific suite below runs them.
 
 `--run-integration` runs lab-local tests on a host with the `recon-data`
 capability. On other hosts those tests remain skipped unless
@@ -122,8 +130,8 @@ capability. On other hosts those tests remain skipped unless
 checks skipped so a clean checkout can run without lab-local files.
 
 The separate [full scientific suite](.github/workflows/full-suite.yml) is an
-informational workflow, not a required pull-request check. It runs the default
-non-integration suite after relevant pushes to `master`, and can also be
+informational workflow, not a required pull-request check. It runs the unit and
+system suites (`--run-system`) after relevant pushes to `master`, and can also be
 dispatched manually. It consumes the current `environment.yml` and selects
 Python 3.12 from its supported range. Its job summary records environment setup,
 source install, test duration, and installed size; the micromamba setup log records cache and

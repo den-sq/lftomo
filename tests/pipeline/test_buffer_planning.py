@@ -405,6 +405,7 @@ def test_raw_staging_alias_matches_unaliased_full_numeric_pipeline():
 	np.testing.assert_allclose(aliased, unaliased, rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("aliasing", [False, True])
 @pytest.mark.parametrize("center_prepass", [False, True])
 def test_streaming_capacity_accounts_for_reservations_shared_between_segments(

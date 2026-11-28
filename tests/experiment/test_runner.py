@@ -146,6 +146,7 @@ def test_exhaustive_budget_is_a_guard_not_silent_truncation():
 		select_candidates(config)
 
 
+@pytest.mark.system
 def test_independent_concurrent_execution_has_deterministic_identity_and_leaderboard(tmp_path):
 	config = experiment_config()
 	runner = IndependentExperimentRunner(
@@ -178,6 +179,7 @@ def test_independent_concurrent_execution_has_deterministic_identity_and_leaderb
 	]
 
 
+@pytest.mark.system
 def test_failure_isolation_and_interruption_never_publish_success(tmp_path):
 	summary = IndependentExperimentRunner(
 		experiment_config(), inputs(), tmp_path, AlphaExecutor(fail_on=0.01),
@@ -202,6 +204,7 @@ def test_failure_isolation_and_interruption_never_publish_success(tmp_path):
 	assert interrupted.result is None
 
 
+@pytest.mark.system
 def test_attempt_finish_is_clamped_when_wall_clock_moves_backwards(monkeypatch, tmp_path):
 	base = datetime(2026, 8, 5, tzinfo=timezone.utc)
 	timestamps = iter((
@@ -290,6 +293,7 @@ def test_gpu_and_memory_capabilities_bound_concurrency(tmp_path):
 	assert runner.prepare()[0].max_concurrency == 1
 
 
+@pytest.mark.system
 def test_native_process_crash_is_isolated_to_its_candidate(tmp_path):
 	summary = IndependentExperimentRunner(
 		experiment_config(), inputs(), tmp_path, CrashOneExecutor(),
@@ -330,6 +334,7 @@ def test_timeout_is_recorded_execution_policy_not_trial_identity(tmp_path):
 	assert short_config.experiment_id != long_config.experiment_id
 
 
+@pytest.mark.system
 def test_timeout_is_attempt_local_structured_and_quarantines_partial_output(tmp_path):
 	# Include spawned-interpreter startup in the contract while leaving enough
 	# room for the fixture to publish its last-known execution context first.
@@ -391,6 +396,7 @@ def test_timeout_is_attempt_local_structured_and_quarantines_partial_output(tmp_
 	assert timeout_event.failure_type == "TrialTimeoutError"
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("detached_descendant", [False, True])
 def test_cancellation_terminates_noncooperative_trial_process_tree(
 		tmp_path, detached_descendant,
@@ -429,6 +435,7 @@ def _segment_exists(name: str) -> bool:
 	return shared_memory_path.exists()
 
 
+@pytest.mark.system
 def test_cancellation_allows_managed_trial_to_unlink_shared_segments(tmp_path):
 	token = runner_module.CancellationToken()
 	runner = IndependentExperimentRunner(
