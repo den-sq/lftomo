@@ -10,7 +10,7 @@ from cattrs.strategies import configure_tagged_union, include_subclasses
 import numpy as np
 
 from .shapes import (
-	DataShape, GenericOrder, ImageStack, ImgSlice, Proj, ProjOrder, ReconOrder,
+	DataShape, FlatFieldOrder, GenericOrder, ImageStack, ImgSlice, Proj, ProjOrder, ReconOrder,
 	ReverseReconOrder, ReverseSinoOrder, SinoOrder, Theta, X, XSlice, Y, YSlice, Z,
 )
 from .window import CTFov, DataRef, TomoDataSet, TomoWindow
@@ -44,7 +44,7 @@ _SHAPE_TYPES = {
 	target.__name__: target for target in (
 		ProjOrder, SinoOrder, ReverseSinoOrder, ImageStack, ReconOrder,
 		ReverseReconOrder, ImgSlice, Proj, YSlice, XSlice, Y, X, Theta, Z,
-		GenericOrder,
+		GenericOrder, FlatFieldOrder,
 	)
 }
 

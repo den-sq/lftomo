@@ -32,7 +32,7 @@ from lftomo.pipeline.planning import _read_spec
 from lftomo.storage import ManagedBuffer
 from lftomo.runner import run_reconstruction
 from lftomo.util.mem import SharedNPManager
-from lftomo.util.shapes import ProjOrder, SinoOrder, X
+from lftomo.util.shapes import FlatFieldOrder, ProjOrder, SinoOrder, X
 from tests.fixtures.tier1 import shepp_logan
 from tests.pipeline.test_streaming import _write_yaml
 from tests.sample_data import attach_source_geometry
@@ -80,6 +80,7 @@ def test_retirement_occurs_only_after_normalization_handoff():
 
 		assert isinstance(result.working_array, ManagedBuffer)
 		assert isinstance(result.artifacts["flat_fields"], ManagedBuffer)
+		assert result.artifacts["flat_fields"].shape == FlatFieldOrder(Flat=4, Y=2, X=4)
 		assert result.working_array.name != raw.name
 		retire = [event for event in context.storage.allocation_events if event["action"] == "retire"]
 		assert retire[-1]["name"] == raw.name

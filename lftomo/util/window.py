@@ -1,5 +1,5 @@
 from collections import namedtuple
-from dataclasses import InitVar, asdict, dataclass, field, fields, replace
+from dataclasses import InitVar, dataclass, field, fields, replace
 from functools import partial
 from os import PathLike
 from pathlib import Path
@@ -81,7 +81,7 @@ class DataRef(object):
 
 	@property
 	def step_shape(self) -> DataShape:
-		ss = replace(self.shape, **asdict(self.step))
+		ss = replace(self.shape, **self.step.as_dict())
 		return ss
 
 	@property
@@ -110,25 +110,25 @@ class DataRef(object):
 
 	def rescope(self, pos: DataShape = None, pad: DataShape = None, dtype: type = None,
 					shape: DataShape = None, *, pad_after: DataShape = None) -> Self:
-		new_shape = replace(self.shape, **asdict(shape)) if shape is not None else self.shape
+		new_shape = replace(self.shape, **shape.as_dict()) if shape is not None else self.shape
 		new_pos = (
 			pos if pos is not None and set(self.pos.names) < set(pos.names)
-			else replace(self.pos, **asdict(pos)) if pos is not None else self.pos
+			else replace(self.pos, **pos.as_dict()) if pos is not None else self.pos
 		)
 		new_dtype = dtype if dtype is not None else self.dtype
 
 		if pad is not None:
-			new_pad_before = replace(self.pad_before, **asdict(pad))
-			new_pad_after = replace(self.pad_after, **asdict(pad if pad_after is None else pad_after))
+			new_pad_before = replace(self.pad_before, **pad.as_dict())
+			new_pad_after = replace(self.pad_after, **(pad if pad_after is None else pad_after).as_dict())
 		else:
 			new_pad_before = self.pad_before
-			new_pad_after = self.pad_after if pad_after is None else replace(self.pad_after, **asdict(pad_after))
+			new_pad_after = self.pad_after if pad_after is None else replace(self.pad_after, **pad_after.as_dict())
 
 		pad_shift_before = new_pad_before - self.pad_before
 		pad_shift_after = new_pad_after - self.pad_after
 		position_fields = {field.name for field in fields(new_pos)}
 		new_pos += replace(new_pos.make_with(0), **{
-			key: value for key, value in asdict(pad_shift_before).items()
+			key: value for key, value in pad_shift_before.as_dict().items()
 			if key in position_fields
 		})
 		new_shape -= (pad_shift_before + pad_shift_after)
@@ -141,9 +141,9 @@ class DataRef(object):
 	def with_output_padding(self, padding: DataShape) -> Self:
 		"""Expand published output coordinates; unlike source padding, do not clip."""
 
-		if any(value < 0 for value in asdict(padding).values()):
+		if any(value < 0 for value in padding.as_dict().values()):
 			raise ValueError("output padding cannot be negative")
-		expansion = replace(self.shape.make_with(0), **asdict(padding))
+		expansion = replace(self.shape.make_with(0), **padding.as_dict())
 		return self.rescope(
 			pos=self.pos - expansion.extract(self.pos),
 			shape=self.shape + expansion + expansion,
@@ -153,8 +153,8 @@ class DataRef(object):
 		"""Return the positive interval left after an asymmetric axis crop."""
 
 		zero = self.shape.make_with(0)
-		before = replace(zero, **asdict(before))
-		after = replace(zero, **asdict(after))
+		before = replace(zero, **before.as_dict())
+		after = replace(zero, **after.as_dict())
 		if any(value < 0 for value in (*before.as_tuple(), *after.as_tuple())):
 			raise ValueError("crop extents cannot be negative")
 		shape = self.shape - before - after
@@ -311,15 +311,15 @@ def _resolved_padding(pos: DataShape, shape: DataShape, pad_before: DataShape, p
 	if physical_shape is None:
 		return pad_before, pad_after
 
-	physical_pos = replace(physical_shape.make_with(0), **asdict(pos))
-	physical_core_shape = replace(physical_shape, **asdict(shape))
+	physical_pos = replace(physical_shape.make_with(0), **pos.as_dict())
+	physical_core_shape = replace(physical_shape, **shape.as_dict())
 	physical_stop = physical_pos + physical_core_shape
 	zero = physical_shape.make_with(0)
 	if not physical_pos >= zero or not physical_stop <= physical_shape:
 		raise ValueError("window output must remain within the physical source shape")
 
-	requested_before = replace(zero, **asdict(pad_before))
-	requested_after = replace(zero, **asdict(pad_after))
+	requested_before = replace(zero, **pad_before.as_dict())
+	requested_after = replace(zero, **pad_after.as_dict())
 	available_before = physical_pos
 	available_after = physical_shape - physical_stop
 	realized_before = type(physical_shape).param_min(requested_before, available_before)
@@ -333,7 +333,7 @@ class TomoWindowIter(TFIter):
 					pad_after: DataShape = None, physical_shape: DataShape = None):
 		self.shape = shape
 		self.pad_before = pad
-		self.pad_after = pad if pad_after is None else type(pad)(**asdict(pad_after))
+		self.pad_after = pad if pad_after is None else type(pad)(**pad_after.as_dict())
 		self.dtype = dtype
 		self.work_dtype = work_dtype
 		self.start = dr.start
@@ -345,15 +345,15 @@ class TomoWindowIter(TFIter):
 	def __call__(self, pos) -> tuple:
 		# DataRange iteration supplies only the scheduled axes.  Retain the
 		# selected coordinates on every other axis in each emitted window.
-		pos = replace(self.start, **asdict(self.__step_class(*pos)))
+		pos = replace(self.start, **self.__step_class(*pos).as_dict())
 		step_end = (self.shape + pos).extract(pos)
 
 		if step_end < self.stop:
 			winshape = self.shape
 		else:
 			# Standard shape would extend beyond the range, so cut it down.
-			winshape = replace(self.shape, **{k: v for k, v in asdict(self.stop - pos).items()
-											if v < asdict(self.shape)[k]})
+			winshape = replace(self.shape, **{k: v for k, v in (self.stop - pos).as_dict().items()
+											if v < self.shape.as_dict()[k]})
 
 		pad_before, pad_after = _resolved_padding(
 			pos, winshape, self.pad_before, self.pad_after, self.physical_shape,
@@ -436,7 +436,7 @@ class TomoDataSet(DataRef):
 		unit_step = shape.make_with(1)
 		sample_step = (
 			unit_step if sample_step is None
-			else replace(unit_step, **asdict(sample_step))
+			else replace(unit_step, **sample_step.as_dict())
 		)
 
 		if isinstance(over, DataShape):
@@ -444,22 +444,22 @@ class TomoDataSet(DataRef):
 			selected_shape = shape
 			step = over
 		elif isinstance(over, DataRange):
-			for axis, start in asdict(over.start).items():
+			for axis, start in over.start.as_dict().items():
 				if start < 0 or not hasattr(physical_shape, axis):
 					raise ValueError(f"output range starts outside physical axis {axis}")
-			for axis, stop in asdict(over.stop).items():
+			for axis, stop in over.stop.as_dict().items():
 				if not hasattr(physical_shape, axis) or stop > getattr(physical_shape, axis):
 					raise ValueError(f"output range stops outside physical axis {axis}")
 			pos = over.start
-			selected_shape = replace(shape, **asdict(over.stop - over.start))
+			selected_shape = replace(shape, **(over.stop - over.start).as_dict())
 			step = over.step
 		else:
 			raise TypeError(f"Invalid over {over}:{type(over)} - must be step size (DataShape) or a full range (DataRange)")
 
 		zero = selected_shape.make_with(0)
-		pad_before = zero if pad is None else replace(zero, **asdict(pad))
+		pad_before = zero if pad is None else replace(zero, **pad.as_dict())
 		resolved_pad_after = (
-			pad_before if pad_after is None else replace(zero, **asdict(pad_after))
+			pad_before if pad_after is None else replace(zero, **pad_after.as_dict())
 		)
 
 		return cls(
@@ -489,16 +489,16 @@ class TomoDataSet(DataRef):
 		"""Iterate output windows with padding realized against ``physical_shape``."""
 		window = self.step_shape
 		if wsize is not None:
-			window = replace(window, **asdict(wsize))
+			window = replace(window, **wsize.as_dict())
 			frange = replace(self.frange, step=wsize)
 		else:
 			frange = self.frange
 
-		pad_before = self.pad_before if pad is None else replace(self.pad_before, **asdict(pad))
+		pad_before = self.pad_before if pad is None else replace(self.pad_before, **pad.as_dict())
 		if pad_after is None:
-			resolved_pad_after = self.pad_after if pad is None else replace(self.pad_after, **asdict(pad))
+			resolved_pad_after = self.pad_after if pad is None else replace(self.pad_after, **pad.as_dict())
 		else:
-			resolved_pad_after = replace(self.pad_after, **asdict(pad_after))
+			resolved_pad_after = replace(self.pad_after, **pad_after.as_dict())
 
 		return frange.get_iter(partial(TomoWindowIter, shape=window, pad=pad_before,
 											pad_after=resolved_pad_after, physical_shape=self.physical_shape,

@@ -74,14 +74,14 @@ def _dense_inputs(state: PipelineState) -> tuple[np.ndarray, np.ndarray, np.ndar
 		angles = np.linspace(
 			state.scan.acquisition.rotation_start_deg,
 			state.scan.acquisition.rotation_end_deg,
-			volume.shape[0],
+			state.working_array.shape.Theta,
 			endpoint=False,
 			dtype=np.float32,
 		)
 	else:
 		angles = np.rad2deg(angles) if np.max(np.abs(angles)) <= 2 * np.pi + 0.1 else angles
 	angles = np.asarray(angles, dtype=np.float32)
-	if angles.shape != (volume.shape[0],):
+	if angles.shape != (state.working_array.shape.Theta,):
 		raise ValueError("super-resolution angles must match the projection count")
 	return volume, mask, angles
 
@@ -107,9 +107,9 @@ def interpolate_missing_angles(volume: np.ndarray, mask: np.ndarray, theta: np.n
 
 def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> PipelineState:
 	values = np.asarray(volume, dtype=np.float32)
-	shape = SinoOrder(Y=values.shape[1], Theta=values.shape[0], X=values.shape[2])
-	output, target = allocate_output(state, shape, np.float32, role="super_resolution")
-	target[...] = ProjOrder(*values.shape).transposed_view(values, SinoOrder)
+	shape = ProjOrder(*values.shape)
+	output, target = allocate_output(state, shape.to(SinoOrder), np.float32, role="super_resolution")
+	target[...] = shape.transposed_view(values, SinoOrder)
 	result = commit_output(
 		state, output, retire_as=None,
 	)
@@ -235,7 +235,7 @@ class DRHTStage(Stage):
 		model = self._load_model(torch, device)
 		restored = np.empty_like(seed)
 		attention_volumes = {name: np.empty_like(seed) for name in ("l1", "kl_row", "kl_col")}
-		scratch_shape = YSlice(Theta=seed.shape[0], X=seed.shape[2])
+		scratch_shape = state.working_array.shape.extract(YSlice)
 		scratch_handles = []
 		scratch = {}
 		try:
@@ -248,7 +248,7 @@ class DRHTStage(Stage):
 					)
 					scratch_handles.append(handle)
 					scratch[name] = handle.array()
-			for index in range(seed.shape[1]):
+			for index in range(state.working_array.shape.Y):
 				restored[:, index], maps = self._infer(
 					model, seed[:, index], torch, device, scratch,
 				)

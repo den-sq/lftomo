@@ -224,6 +224,8 @@ def test_shape_func():
 	assert CONVERTER.structure(CONVERTER.unstructure(Y(3)), Y) == Y(3)
 	assert type(CONVERTER.structure(CONVERTER.unstructure(ImgSlice(2, 3)), shape_module.DataShape)) is ImgSlice
 	assert type(CONVERTER.structure(CONVERTER.unstructure(Proj(2, 3)), shape_module.DataShape)) is Proj
+	flat_shape = shape_module.FlatFieldOrder(Flat=4, Y=2, X=3)
+	assert CONVERTER.structure(CONVERTER.unstructure(flat_shape), shape_module.DataShape) == flat_shape
 
 
 def test_chunk_grid_overlap_tail_halo_and_inverse_lookup():

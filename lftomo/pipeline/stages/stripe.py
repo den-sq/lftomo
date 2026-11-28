@@ -84,8 +84,8 @@ def _vo_work_planes(
 			raise ValueError("Vo median-pad work must be scoped to its assigned row")
 		median_pad_work = median_pad_buffer.array()[0]
 		if (
-			median_pad_work.shape[0] != sinogram.shape[0]
-			or median_pad_work.shape[1] < sinogram.shape[1]
+			median_pad_buffer.shape.Theta != float_buffer.shape.Theta
+			or median_pad_buffer.shape.X < float_buffer.shape.X
 			or median_pad_work.dtype != sinogram.dtype
 		):
 			raise ValueError("Vo median-pad work does not match the dispatched sinogram")
