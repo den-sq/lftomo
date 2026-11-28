@@ -5,6 +5,17 @@ Windowing is runner/machine configuration, not candidate configuration. Use
 the runner CLI, or pass `WindowConfig` to `run_reconstruction()`. Omitting all
 three size limits produces one full-selection window through the same driver.
 
+Programmatic callers may pass an already resolved `source_window=TomoWindow`
+to `run_reconstruction` or either streaming planner. That window supplies the
+selection, sampling, and realized padding instead of the read Stage's scalar
+bounds; the planner combines its padding with the Stage and operator context
+requirements. Experiment execution passes each fidelity window's
+`with_pad(["Y"])` extent, preserving the historical reconstructed halo rows
+and the evaluator's interior slice offsets. Fidelity identities and records
+retain the original canonical window document.
+`validate_pipeline` can plan from that window without an acquisition dataset,
+so experiment dry-runs keep their existing metadata-only preflight behavior.
+
 `resolve_streaming_segments` groups adjacent Stages by iteration direction.
 `StageContract.window_axes` declares allowed directions;
 `required_window_axis` fixes the direction and `preferred_window_axis` supplies

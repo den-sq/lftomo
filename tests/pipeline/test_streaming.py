@@ -105,6 +105,27 @@ def test_asymmetric_stage_and_operator_requirements_compose_by_side():
 	assert CONVERTER.unstructure(CONVERTER.structure(record, DataRef)) == record
 
 
+@pytest.mark.parametrize("segmented", [False, True])
+def test_supplied_selection_preserves_sampling_and_realized_padding(segmented):
+	scan = _scan(theta=8)
+	window = TomoWindow.from_bounds(
+		scan.projection_shape(), y=(3, 7), theta=(1, 8, 3),
+		halo=(Y(2), Y(4)), dtype=np.uint16,
+	)
+	arguments = ([_AsymmetricStage()], scan, WindowConfig(rows=2))
+	dataset = (
+		resolve_streaming_segments(*arguments, source_window=window)[0].dataset
+		if segmented else resolve_streaming_plan(*arguments, source_window=window)
+	)
+	windows = tuple(dataset)
+	assert [item.interval("Y") for item in windows] == [Y.interval(3, 5), Y.interval(5, 7)]
+	assert [item.with_pad().interval("Y") for item in windows] == [
+		Y.interval(1, 9), Y.interval(3, 11),
+	]
+	assert all(list(item.int_iter("Theta")) == [1, 4, 7] for item in windows)
+	assert all(item.pad_before.Y == 2 and item.pad_after.Y == 4 for item in windows)
+
+
 def test_phase_pad_uses_the_canonical_phase_rule_and_warns_about_extent(caplog):
 	scan = _scan(rows=32)
 	dataset = resolve_streaming_plan(

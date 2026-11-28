@@ -143,3 +143,18 @@ def test_positional_shape_and_scalar_y_bounds_reads_do_not_increase():
 		if count > ceilings.get(module, 0)
 	]
 	assert failures == []
+
+
+def test_runtime_source_bounds_are_not_written_back_to_stage_configuration():
+	selection_fields = {"y_start", "y_stop", "theta_start", "theta_stop", "theta_stride"}
+	found = []
+	for path, tree in _production_trees():
+		for node in ast.walk(tree):
+			if (
+				isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+				and isinstance(node.value, ast.Attribute) and node.value.attr == "params"
+				and isinstance(node.slice, ast.Constant) and node.slice.value in selection_fields
+			):
+				found.append(f"{path.relative_to(_ROOT)}:{node.lineno} {node.slice.value}")
+
+	assert found == []
