@@ -245,6 +245,7 @@ def test_acceptance_scan_materializes_the_named_oracles_presubtracted_flats(tmp_
 	assert [float(field[0, 0]) for field in fields] == [10, 15, 2, 5]
 
 
+@pytest.mark.system
 def test_interrupted_owner_process_group_leaves_no_shared_segment(tmp_path):
 	data_path = tmp_path / "scan.h5"
 	with h5py.File(data_path, "w") as handle:
@@ -293,6 +294,7 @@ def test_interrupted_owner_process_group_leaves_no_shared_segment(tmp_path):
 	assert proof["child_returncode"] == -9
 
 
+@pytest.mark.system
 def test_whole_volume_acceptance_proves_cache_isolation_end_to_end(tmp_path, monkeypatch):
 	log.set_logdir(tmp_path / "logs")
 	data_path = tmp_path / "scan.h5"

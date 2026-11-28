@@ -79,6 +79,7 @@ def runner(
 	)
 
 
+@pytest.mark.system
 def test_clean_resume_reuses_successes_and_force_rerun_appends_history(tmp_path):
 	call_root = tmp_path / "calls"
 	execute = AlphaExecutor(call_root=call_root)
@@ -103,6 +104,7 @@ def test_clean_resume_reuses_successes_and_force_rerun_appends_history(tmp_path)
 	assert len(manifest["attempt_ids"]) == 4
 
 
+@pytest.mark.system
 def test_failed_and_interrupted_attempts_require_explicit_retry(tmp_path):
 	execute = AlphaExecutor(fail_on=0.01)
 
@@ -141,6 +143,7 @@ def test_failed_and_interrupted_attempts_require_explicit_retry(tmp_path):
 	assert resumed.status == "succeeded"
 
 
+@pytest.mark.system
 def test_timeout_failure_requires_retry_and_tighter_policy_rechecks_success(tmp_path):
 	timed_out = PersistedExperimentRunner(runner(
 		tmp_path, TimeoutOneExecutor(), values=(0.01,), timeout=2.0,
@@ -192,6 +195,7 @@ def test_timeout_failure_requires_retry_and_tighter_policy_rechecks_success(tmp_
 	assert "exceeded the current timeout policy" in decision.reason
 
 
+@pytest.mark.system
 def test_identity_mismatch_has_fail_skip_and_rerun_policies(tmp_path):
 	execute = AlphaExecutor()
 	PersistedExperimentRunner(runner(

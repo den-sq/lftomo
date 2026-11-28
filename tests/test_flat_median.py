@@ -194,6 +194,7 @@ def test_nonfinite_values_are_counted_and_ignored_but_empty_pixels_fail(tmp_path
 	assert not (tmp_path / "invalid-maps").exists()
 
 
+@pytest.mark.system
 def test_generated_maps_run_through_legacy_weighted_pipeline(tmp_path, monkeypatch):
 	pytest.importorskip("tomopy")
 	from lftomo.runner import run_reconstruction

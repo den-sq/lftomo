@@ -239,6 +239,7 @@ def _managed_vo_chain(workers: int, *, source_geometry: bool = True):
 		)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("source_geometry", [True, False])
 def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray(source_geometry):
 	expected = _fixture(rows=4)
@@ -288,6 +289,7 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray(so
 	assert "_sinogram_row_index" not in artifacts
 
 
+@pytest.mark.system
 def test_managed_vo_allocation_is_independent_of_worker_count():
 	one, one_report, _events, _artifacts = _managed_vo_chain(1)
 	two, two_report, _events, _artifacts = _managed_vo_chain(2)
@@ -296,6 +298,7 @@ def test_managed_vo_allocation_is_independent_of_worker_count():
 	np.testing.assert_allclose(one, two, rtol=1e-6, atol=1e-6)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 def test_managed_theta_mirror_chain_matches_direct_arrays(layout):
 	projection = _fixture(rows=4)

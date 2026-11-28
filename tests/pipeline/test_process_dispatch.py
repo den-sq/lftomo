@@ -115,6 +115,7 @@ class _PreparedProjectionStage(ProjectionStage):
 		return state
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("managed", [False, True])
 def test_projection_lifecycle_prepares_and_summarizes_the_whole_assignment(managed):
 	values = np.arange(48, dtype=np.float32).reshape(3, 2, 8)
@@ -156,6 +157,7 @@ def test_registry_dispatch_is_mechanically_complete():
 		_build_stage_dispatch({**STAGE_REGISTRY, "test.unclassified": _AddSinogramStage})
 
 
+@pytest.mark.system
 def test_pool_is_persistent_across_stage_submissions():
 	executor = PipelineExecutor(1, context="spawn")
 	try:
@@ -166,6 +168,7 @@ def test_pool_is_persistent_across_stage_submissions():
 		executor.close()
 
 
+@pytest.mark.system
 def test_completed_kernel_error_does_not_discard_healthy_pool():
 	executor = PipelineExecutor(1, context="spawn")
 	try:
@@ -215,6 +218,7 @@ def test_engine_internal_core_budget_is_scoped_to_the_call(monkeypatch):
 	assert stage.params.ncore == 7
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("assignment", [None, Theta.drange(1, 5, 2)])
 def test_process_normalization_receives_only_handles_and_matches_serial(monkeypatch, assignment):
 	scan = _scan()
@@ -253,6 +257,7 @@ def test_process_normalization_receives_only_handles_and_matches_serial(monkeypa
 		np.testing.assert_allclose(np.asarray(result.working_array), expected)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 @pytest.mark.parametrize("managed", [False, True])
 def test_beta_scale_processes_only_assigned_projections_once(layout, managed):
@@ -289,6 +294,7 @@ def test_beta_scale_processes_only_assigned_projections_once(layout, managed):
 		np.testing.assert_array_equal(np.asarray(result.working_array), expected)
 
 
+@pytest.mark.system
 def test_process_phase_chain_matches_intentionally_coupled_stage():
 	values = np.full((4, 2, 8), 0.8, dtype=np.float32)
 	values[:, :, 3:5] = 0.4
@@ -312,6 +318,7 @@ def test_process_phase_chain_matches_intentionally_coupled_stage():
 		np.testing.assert_allclose(np.asarray(state.working_array), expected, rtol=1e-5, atol=1e-6)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("worker_threads", [4, 1])
 def test_real_bac_process_threads_follow_worker_budget_without_raising_user_limit(
 	monkeypatch, worker_threads,
@@ -360,6 +367,7 @@ def test_real_bac_process_threads_follow_worker_budget_without_raising_user_limi
 	assert torch.get_num_threads() == parent_threads
 
 
+@pytest.mark.system
 def test_process_bac_filter_then_negative_log_matches_coupled_stage(
 	tmp_path, monkeypatch,
 ):
@@ -410,6 +418,7 @@ class BronnikovAidedCorrection:
 		np.testing.assert_allclose(np.asarray(state.working_array), expected, rtol=2e-6, atol=2e-7)
 
 
+@pytest.mark.system
 def test_process_beam_tracking_matches_serial_and_merges_qc():
 	scan = _scan(theta=6, rows=64, columns=64)
 	gradient = np.linspace(0, 1, 64, dtype=np.float32)[None, :]
@@ -447,6 +456,7 @@ def test_process_beam_tracking_matches_serial_and_merges_qc():
 		pitch_px_per_projection=0.25, crop_valid=True,
 	),
 ])
+@pytest.mark.system
 def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypatch):
 	values = np.arange(4 * 6 * 8, dtype=np.float32).reshape(4, 6, 8)
 	scan = _scan(theta=4, rows=6, columns=8)
@@ -486,6 +496,7 @@ def test_out_of_place_process_fills_match_serial_and_use_handles(stage, monkeypa
 		assert result.source_window.shape == expected.source_window.shape
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("assignment", [None, Y.drange(1, 3, 2)])
 def test_bounded_process_child_mutation_is_visible_in_parent(assignment):
 	with PipelineRunContext(max_workers=2) as context:
@@ -532,6 +543,7 @@ def test_tiff_process_dispatch_passes_handles_not_slices(tmp_path, monkeypatch):
 		assert not any(isinstance(item, np.ndarray) for task in captured for item in task)
 
 
+@pytest.mark.system
 def test_timeout_kills_writer_and_recreates_pool():
 	with PipelineRunContext(max_workers=1) as context:
 		working = context.storage.allocate(X(1), np.int64, role="test")

@@ -94,6 +94,7 @@ def _assert_same_reconstruction(actual, expected, rows):
 	np.testing.assert_allclose(actual[1], expected[1], rtol=1e-6, atol=1e-6)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("phase", ["slope", "bac"])
 def test_phase_direction_changes_match_whole_reconstruction(tmp_path, directional_scan, phase):
 	if phase == "bac":
@@ -107,6 +108,7 @@ def test_phase_direction_changes_match_whole_reconstruction(tmp_path, directiona
 	_assert_same_reconstruction(windowed, whole, range(16))
 
 
+@pytest.mark.system
 def test_bac_row_roi_matches_full_detector_and_persists_window_qc(tmp_path, directional_scan):
 	pytest.importorskip("hotopy.holo")
 	pipeline = _pipeline(tmp_path, "bac")
@@ -124,6 +126,7 @@ def test_bac_row_roi_matches_full_detector_and_persists_window_qc(tmp_path, dire
 		assert all(item["nonfinite_count"] == 0 for item in counts)
 
 
+@pytest.mark.system
 def test_zinger_then_actual_bac_matches_whole_theta_and_row_roi(tmp_path, directional_scan):
 	pytest.importorskip("hotopy.holo")
 	import yaml
@@ -157,6 +160,7 @@ def test_zinger_then_actual_bac_matches_whole_theta_and_row_roi(tmp_path, direct
 		assert all(item["nonfinite_count"] == 0 for item in counts)
 
 
+@pytest.mark.system
 def test_zinger_reads_real_neighbors_at_y_chunk_and_roi_boundaries(tmp_path, directional_scan, monkeypatch):
 	import yaml
 
@@ -213,6 +217,7 @@ def test_zinger_reads_real_neighbors_at_y_chunk_and_roi_boundaries(tmp_path, dir
 		)
 
 
+@pytest.mark.system
 def test_bac_nonfinite_runner_failure_persists_qc_before_reconstruction(tmp_path, directional_scan):
 	import yaml
 	from lftomo.pipeline.stages.phase import BACNonFiniteError
@@ -241,6 +246,7 @@ def test_bac_nonfinite_runner_failure_persists_qc_before_reconstruction(tmp_path
 	assert list(output.glob("slice_*.tif")) == []
 
 
+@pytest.mark.system
 def test_x_windows_match_whole_pointwise_phase_reconstruction(tmp_path, directional_scan):
 	pipeline = _pipeline(tmp_path, "negative_log")
 	whole = _run(pipeline, directional_scan, tmp_path / "whole", WindowConfig())
@@ -252,6 +258,7 @@ def test_x_windows_match_whole_pointwise_phase_reconstruction(tmp_path, directio
 	_assert_same_reconstruction(windowed, whole, range(16))
 
 
+@pytest.mark.system
 def test_direction_changes_preserve_strided_angles_and_selected_row_offsets(tmp_path, directional_scan):
 	pipeline = _pipeline(tmp_path, read_params={
 		"y_start": 2, "y_stop": 11, "theta_start": 1, "theta_stop": 12, "theta_stride": 2,
@@ -264,6 +271,7 @@ def test_direction_changes_preserve_strided_angles_and_selected_row_offsets(tmp_
 	_assert_same_reconstruction(windowed, whole, range(2, 11))
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("affine", [False, True])
 @pytest.mark.parametrize("rows, slope", [(48, 1e-9), (96, 1e-12)])
 def test_phase_row_roi_uses_detector_context_in_whole_and_theta_runs(
@@ -336,6 +344,7 @@ def test_phase_row_roi_uses_detector_context_in_whole_and_theta_runs(
 		np.testing.assert_allclose(result, results[0][y_start:y_stop], rtol=1e-6, atol=1e-6)
 
 
+@pytest.mark.system
 def test_downstream_bilateral_reads_processed_neighbors_across_direction_changes(tmp_path, directional_scan):
 	pipeline = _pipeline(
 		tmp_path,
@@ -349,6 +358,7 @@ def test_downstream_bilateral_reads_processed_neighbors_across_direction_changes
 	_assert_same_reconstruction(windowed, whole, range(16))
 
 
+@pytest.mark.system
 def test_automatic_center_replay_reloads_processed_phase_input(tmp_path, directional_scan, monkeypatch):
 	monkeypatch.setattr("tomopy.find_center_pc", lambda *_args, **_kwargs: 8.0)
 	pipeline = _pipeline(
@@ -380,6 +390,7 @@ def test_direction_boundary_rejects_geometry_that_changes_after_first_theta_wind
 		)
 
 
+@pytest.mark.system
 def test_intermediates_clean_up_by_default_and_retained_runs_start_fresh(tmp_path, directional_scan):
 	pipeline = _pipeline(tmp_path)
 	intermediate_root = tmp_path / "intermediates"

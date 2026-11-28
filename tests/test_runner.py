@@ -198,6 +198,7 @@ def test_empty_pipeline_reports_complete_pipeline_contract(tmp_path):
 		run_reconstruction(pipeline_path, scan_path)
 
 
+@pytest.mark.system
 def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	tmp_path, monkeypatch,
 ):
@@ -277,6 +278,7 @@ def test_runner_executes_hdf5_to_tiff_and_resolves_relative_scan_path(
 	assert reservations == [(event.role, event.bytes) for event in plans[0].allocation_schedule]
 
 
+@pytest.mark.system
 def test_intermediate_capacity_is_advisory_and_report_matches_coexisting_files(
 	tmp_path, monkeypatch,
 ):
@@ -366,6 +368,7 @@ def test_intermediate_capacity_is_advisory_and_report_matches_coexisting_files(
 	(1, False, 128, True),
 	(2, True, 64, False),
 ])
+@pytest.mark.system
 def test_shared_memory_preflight_uses_window_plan_before_read_or_manager(
 	tmp_path, monkeypatch, window_rows, vo_chain, available_mib, fits,
 ):

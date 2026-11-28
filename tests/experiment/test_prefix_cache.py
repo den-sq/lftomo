@@ -624,6 +624,7 @@ def test_cache_pin_blocks_alias_while_prefix_operation_retains_source(tmp_path):
 		assert [event["action"] for event in pin_events] == ["pin", "unpin"]
 
 
+@pytest.mark.system
 def test_killed_cached_trial_leaves_no_manager_segments(tmp_path):
 	if not hasattr(os, "killpg"):
 		pytest.skip("process-group crash cleanup requires POSIX")
@@ -958,6 +959,7 @@ class FullRunnerIndependentExecutor:
 		)
 
 
+@pytest.mark.system
 def test_full_runner_metrics_outputs_leaderboard_and_identity_are_equivalent(tmp_path):
 	rng = np.random.default_rng(11)
 	source = rng.random((8, 3, 16), dtype=np.float32) * 0.4 + 0.6

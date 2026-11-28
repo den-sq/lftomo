@@ -221,6 +221,7 @@ class MustNotExecute:
 		raise AssertionError("must reuse success")
 
 
+@pytest.mark.system
 def test_progress_reports_aggregate_counts_human_context_and_resume_dispositions(tmp_path):
 	executor = VariantProgressExecutor()
 	runner = IndependentExperimentRunner(
@@ -307,6 +308,7 @@ def test_progress_schema_one_remains_backward_compatible_with_absent_display_fie
 	assert event.remaining_candidates is None
 
 
+@pytest.mark.system
 def test_public_lifecycle_persists_ordered_events_and_store_only_status(tmp_path):
 	api = lifecycle(tmp_path, ReplayableExecutor())
 	summary = api.run()
@@ -356,6 +358,7 @@ def test_concurrent_event_producers_are_serialized_without_corruption(tmp_path):
 	assert events[-1].sequence == 101
 
 
+@pytest.mark.system
 def test_cancellation_stops_new_claims_and_finalizes_inflight_attempts(tmp_path):
 	started = threading.Event()
 	token = CancellationToken()
@@ -392,6 +395,7 @@ def test_cancellation_stops_new_claims_and_finalizes_inflight_attempts(tmp_path)
 	assert status.cancellation.reason == "operator stop"
 
 
+@pytest.mark.system
 def test_cancellation_preserves_compatible_success_for_later_resume(tmp_path):
 	call_root = tmp_path / "calls"
 	executor = MixedCancellationExecutor(call_root)
@@ -423,6 +427,7 @@ def test_cancellation_preserves_compatible_success_for_later_resume(tmp_path):
 	assert ExperimentLifecycle.status_root(api.root).cancellation is None
 
 
+@pytest.mark.system
 def test_failure_traceback_context_is_redacted_in_store_events_and_bundle(
 	tmp_path, monkeypatch,
 ):
@@ -465,6 +470,7 @@ def test_secret_bearing_scientific_config_is_rejected_before_store_creation(tmp_
 	assert not runner.root.exists()
 
 
+@pytest.mark.system
 def test_replay_bundle_rebuilds_controller_without_original_config_files(tmp_path):
 	api = lifecycle(tmp_path, ReplayableExecutor())
 	api.run()
@@ -483,6 +489,7 @@ def test_replay_bundle_rebuilds_controller_without_original_config_files(tmp_pat
 	assert all(item.status == "succeeded" for item in resumed.attempts)
 
 
+@pytest.mark.system
 def test_click_run_consumes_same_lifecycle_controller(monkeypatch, tmp_path):
 	executor = ReplayableExecutor()
 	runner = IndependentExperimentRunner(

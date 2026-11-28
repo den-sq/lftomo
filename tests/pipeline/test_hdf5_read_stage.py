@@ -86,6 +86,7 @@ def test_registered_hdf5_stage_reads_bounded_sinogram_and_calibration(tmp_path):
 	assert result.layout is SinoOrder
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("order", ["projection", "sinogram"])
 @pytest.mark.parametrize("compressed", [False, True])
 def test_raw_noise_is_identical_across_padded_windows_and_theta_selection(tmp_path, order, compressed):

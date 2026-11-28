@@ -90,6 +90,7 @@ def test_compact_fresnel_case_matches_unchanged_reference(reference, n_iter, non
 	assert state.domain is DataDomain.ATTENUATION
 
 
+@pytest.mark.system
 def test_original_three_material_fixture_same_rows_and_context_match_reference(reference):
 	arrays, _ = reference
 	case = original_multimaterial_case()
@@ -140,6 +141,7 @@ def test_full_context_windows_and_strided_angles_match_whole_array(layout):
 		assert state.source_window is window
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatch, layout):
 	case = compact_multimaterial_case(n_rows=4, row_varying=True, noncollinear=True)
@@ -210,6 +212,7 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 			and event["role"] == "phase_filter"]) == 1
 
 
+@pytest.mark.system
 def test_missing_material_core_retires_scratch_without_publishing_diagnostics():
 	case = compact_multimaterial_case()
 	with PipelineRunContext(max_workers=1) as context:

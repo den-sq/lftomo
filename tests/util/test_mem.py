@@ -27,6 +27,7 @@ def test_alt_creation():
 			assert pj[0, 0, 0] != si[0, 0, 0]
 
 
+@pytest.mark.system
 def test_direct_create():
 	po = ProjOrder(Y=12, Theta=1501, X=2048)
 

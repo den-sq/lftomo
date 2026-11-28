@@ -154,6 +154,7 @@ def test_bac_correction_then_negative_log_matches_legacy_fused_stage(monkeypatch
 	np.testing.assert_allclose(split, legacy, rtol=2e-6, atol=2e-7)
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
 def test_bac_correction_then_negative_log_matches_installed_hotopy(layout):
 	pytest.importorskip("hotopy.holo")

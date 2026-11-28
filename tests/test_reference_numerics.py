@@ -69,6 +69,7 @@ def test_reference_report_serializes_canonical_intervals():
 	assert CONVERTER.structure(document["core_window"], Interval) == report.core_window
 
 
+@pytest.mark.system
 def test_reference_with_post_run_unversioned_producer_is_not_reproducible(tmp_path):
 	archive = tmp_path / "reference" / "r254"
 	archive.mkdir(parents=True)

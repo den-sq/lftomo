@@ -163,6 +163,7 @@ class _NonFiniteBAC(BronnikovAidedCorrectionFilterStage):
 		return result
 
 
+@pytest.mark.system
 @pytest.mark.parametrize("managed", [False, True])
 def test_bac_failure_keeps_all_window_counts_and_source_indices(managed):
 	config = StageConfig(kind="phase", algorithm="bac_correction", params={"alpha": 2})

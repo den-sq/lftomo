@@ -4,6 +4,7 @@ from types import ModuleType
 
 import h5py
 import numpy as np
+import pytest
 import tifffile as tf
 import yaml
 
@@ -85,6 +86,7 @@ def test_current_b10_driver_runs_a_global_row_selection(tmp_path):
 	assert [float(tf.imread(path)[0, 0]) for path in written] == [1.0, 1.5, 2.0, 2.5]
 
 
+@pytest.mark.system
 def test_streaming_bac_matches_current_driver_at_full_selected_extent(
 		tmp_path, monkeypatch, caplog,
 ):

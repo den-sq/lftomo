@@ -20,6 +20,7 @@ CASES = [
 ]
 
 
+@pytest.mark.system
 @pytest.mark.legacy_gridrec
 @pytest.mark.parametrize("dataset,producer", CASES, ids=lambda value: getattr(value, "name", value))
 def test_tier2_numerical_reference(request, dataset, producer):
