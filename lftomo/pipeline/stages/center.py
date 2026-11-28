@@ -19,7 +19,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.pipeline.runtime import tomopy_requirement
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
 
 
 LOGGER = logging.getLogger(__name__)
@@ -44,13 +44,13 @@ def _sinograms(state: PipelineState) -> tuple[np.ndarray, type]:
 	data = np.asarray(state.working_array)
 	if data.ndim != 3:
 		raise ValueError("center Stages expect a (Y, Theta, X) sinogram array")
-	return data, state.layout
+	return data[state.work_index()], state.layout
 
 
 def _angles(state: PipelineState, theta_count: int) -> np.ndarray:
 	angles = None
-	if state.dataset is not None and state.source_window is not None:
-		angles = state.dataset.angles[state.source_window.axis_slice("Theta")]
+	if state.dataset is not None and state.produced_window is not None:
+		angles = state.dataset.angles[state.produced_window.axis_slice("Theta")]
 	if angles is None:
 		acquisition = state.scan.acquisition
 		angles = np.linspace(
@@ -68,6 +68,10 @@ def _angles(state: PipelineState, theta_count: int) -> np.ndarray:
 
 def _store_center(state: PipelineState, center: float | np.ndarray) -> PipelineState:
 	values = np.asarray(center, dtype=np.float32)
+	if values.ndim == 1 and state.produced_window is not None:
+		# Center consumers reconstruct the published core even when this Stage
+		# still carries context needed by an intervening numerical Stage.
+		values = values[state.produced_window.packed_index(state.source_window, Y)]
 	state.artifacts["center"] = float(values) if values.ndim == 0 else values
 	return state
 
@@ -204,8 +208,8 @@ class EntropyLocalCenterStage(Stage):
 			raise RuntimeError("center.entropy_local requires PipelineState.source_window")
 		current_start = data.shape[layout.axis_of("X")] / 2 if self.params.start is None else self.params.start
 		angles = _angles(state, data.shape[layout.axis_of("Theta")])
-		window = state.source_window.with_pad()
-		source_slice = int(window.pos.Y + index * window.step.Y)
+		window = state.produced_window
+		source_slice = window.source_index("Y", index, include_padding=False)
 		sinogram = data[layout.point_index(Y=index)]
 		diagnostic_root = self._diagnostic_root(state) if self.params.diagnostic_images else None
 
@@ -403,8 +407,11 @@ class VoCenterStage(Stage):
 			raise ValueError("center.vo needs more sampled rows than the polynomial degree")
 		if state.source_window is None:
 			raise RuntimeError("center.vo tilt fit requires PipelineState.source_window")
-		window = state.source_window.with_pad()
-		source_rows = window.pos.Y + local_rows * window.step.Y
+		window = state.produced_window
+		source_rows = np.asarray([
+			window.source_index("Y", int(local), include_padding=False)
+			for local in local_rows
+		])
 		centers = np.asarray([
 			self._find(data[layout.point_index(Y=local)])
 			for local in local_rows
@@ -412,7 +419,10 @@ class VoCenterStage(Stage):
 		coefficients, residuals, inliers, iterations, clipping_limited = self._robust_fit(
 			source_rows.astype(np.float64), centers,
 		)
-		evaluation_rows = window.pos.Y + np.arange(row_count) * window.step.Y
+		evaluation_rows = np.asarray([
+			window.source_index("Y", index, include_padding=False)
+			for index in range(row_count)
+		])
 		unquantized = np.polyval(coefficients, evaluation_rows)
 		center = unquantized
 		if self.params.tilt_quantization_px is not None:

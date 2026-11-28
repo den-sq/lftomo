@@ -110,9 +110,9 @@ def _scan(shape: tuple[int, int, int]) -> Scan:
 class _ScipyVoSortStage(VoSortStripeStage):
 	"""Pre-#209 reusable-work stage retaining the SciPy line median."""
 
-	def bounded_work_requests(self, input_spec):
+	def bounded_work_requests(self, input_spec, window=None):
 		return tuple(
-			request for request in super().bounded_work_requests(input_spec)
+			request for request in super().bounded_work_requests(input_spec, window)
 			if request.artifact_key != VO_MEDIAN_PAD_WORK_ARTIFACT
 		)
 
@@ -127,9 +127,9 @@ class _ScipyVoSortStage(VoSortStripeStage):
 class _ScipyVoLargeStage(VoLargeStripeStage):
 	"""Pre-#209 reusable-work stage retaining the SciPy line median."""
 
-	def bounded_work_requests(self, input_spec):
+	def bounded_work_requests(self, input_spec, window=None):
 		return tuple(
-			request for request in super().bounded_work_requests(input_spec)
+			request for request in super().bounded_work_requests(input_spec, window)
 			if request.artifact_key != VO_MEDIAN_PAD_WORK_ARTIFACT
 		)
 

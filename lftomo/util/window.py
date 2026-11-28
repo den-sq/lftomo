@@ -262,6 +262,24 @@ class TomoWindow(DataRef):
 	def internal(self):
 		return self.rescope(pos=self.pad_before.extract(self.pos), dtype=self.work_dtype)
 
+	def for_stage(self, before: DataShape, after: DataShape,
+			read_before: DataShape, read_after: DataShape) -> Self:
+		"""Resolve produced coverage and its read context inside this allocation.
+
+		Requirements are relative to the published core. Clamp each cumulative
+		reach independently: subtracting a consumed reach from a clipped halo
+		would incorrectly discard a later consumer's available detector context.
+		"""
+		before = type(self.pad_before).param_min(self.pad_before, before)
+		after = type(self.pad_after).param_min(self.pad_after, after)
+		read_before = type(self.pad_before).param_min(self.pad_before, read_before)
+		read_after = type(self.pad_after).param_min(self.pad_after, read_after)
+		produced = replace(self, pad_before=before, pad_after=after).with_pad()
+		produced = produced.rescope(pos=produced.shape.make_with(0) + produced.pos)
+		return replace(
+			produced, pad_before=read_before - before, pad_after=read_after - after,
+		)
+
 	def source_index(self, axis: str, buffer_index: int, *, include_padding: bool = True) -> int:
 		"""Map a packed buffer ordinal to its source coordinate on ``axis``.
 

@@ -1,11 +1,17 @@
+from contextlib import nullcontext
+
 import numpy as np
+import pytest
 
 from lftomo.config import Acquisition, Detector, Helical, Recon, Scan, StageConfig, TIFFStackProjections
-from lftomo.pipeline import BufferSpec, Pipeline, PipelineState
+from lftomo.pipeline import BufferSpec, Pipeline, PipelineRunContext, PipelineState
 from lftomo.storage import LocalArray
 from lftomo.pipeline.planning import stage_output_spec
-from lftomo.pipeline.stages import HelicalIndexRemapStage, STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import SinoOrder
+from lftomo.pipeline.stages import (
+	HelicalIndexRemapStage, ManualCenterStage, STAGE_REGISTRY, VoSortStripeStage, create_stage,
+)
+from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.window import TomoWindow
 from tests.sample_data import attach_source_geometry
 
 
@@ -138,3 +144,44 @@ def test_berkeley_source_bottom_row_equation_is_preserved():
 	for projection in range(3):
 		expected_row = working.shape[0] - round(projection) - 1
 		assert np.asarray(result.working_array)[-1, projection, 0] == working[expected_row, projection, 0]
+
+
+@pytest.mark.parametrize("managed", [False, True])
+@pytest.mark.parametrize("going_up", [False, True])
+@pytest.mark.parametrize("bounds,halo", [((0, 6), 0), ((2, 4), 2), ((5, 9), 3)])
+def test_cropped_helical_output_continues_through_stripe_and_preserves_row_numbering(managed, going_up, bounds, halo):
+	config = StageConfig(kind="helical_correct", algorithm="index_remap")
+	physical = ProjOrder(3, bounds[1] + halo, 8)
+	held = TomoWindow.from_bounds(physical, y=bounds, halo=halo, dtype=np.float32)
+	rows = held.with_pad().frange.length.Y
+	working = np.random.default_rng(42).uniform(1, 3, (rows, 3, 8)).astype(np.float32)
+	shifts = (-1 if going_up else 1) * np.arange(3)
+	start, stop = max(0, -int(shifts.min())), min(rows, rows - int(shifts.max()))
+	expected = np.stack([
+		working[start + shift:stop + shift, projection]
+		for projection, shift in enumerate(shifts)
+	], axis=1)
+	expected = expected[held.internal.axis_slice("Y")].copy()
+	VoSortStripeStage(size=3).run(_state(expected, config))
+
+	with PipelineRunContext(max_workers=1) if managed else nullcontext() as context:
+		state = _state(working.copy(), config)
+		attach_source_geometry(state, y_start=held.with_pad().pos.Y, physical_y=physical.Y)
+		state.source_window = held
+		if managed:
+			buffer = context.storage.allocate(state.working_array.shape, np.float32)
+			buffer.array()[...] = working
+			state = state.with_array(buffer)
+			state.storage, state.executor = context.storage, context.executor
+		result = Pipeline([
+			HelicalIndexRemapStage(pitch_px_per_projection=1, going_up=going_up),
+			VoSortStripeStage(size=3),
+			ManualCenterStage(value_px=4, tilt=0.1),
+		]).run(state)
+		actual = np.asarray(result.working_array)[result.work_index()].copy()
+		center = result.artifacts["center"]
+
+	np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+	# The remapped output canvas keeps the pre-existing row labels even when
+	# going_up selects numerical inputs starting later in the source buffer.
+	np.testing.assert_allclose(center, 4 + (np.arange(expected.shape[0]) + bounds[0]) * 0.1)

@@ -156,8 +156,10 @@ class StageContract:
 	runtime_requirements: tuple[RuntimeRequirement, ...] = ()
 	# Axes whose extent affects this algorithm's numerical result. An empty
 	# tuple explicitly declares no sensitivity; None means undeclared so
-	# registry tests can catch missing declarations. This describes the
-	# algorithm, including when a configured instance is disabled.
+	# registry tests can catch missing declarations. Stage windows preserve
+	# the held read extent on these axes and propagate that demand upstream;
+	# only the produced extent is published. Disabled instances may explicitly
+	# clear these axes when their numerical path is inactive.
 	extent_sensitive_axes: tuple[str, ...] | None = None
 
 	def __post_init__(self):
@@ -326,12 +328,13 @@ class BoundedWorkRequest:
 
 def collect_bounded_work(
 	stages: Sequence[Stage], input_spec: BufferSpec,
+	windows: Sequence[TomoWindow | None] | None = None,
 ) -> tuple[BoundedWorkRequest, ...]:
 	"""Resolve shared capacities from Stage-owned requirements without allocating."""
 
 	requests: dict[str, BoundedWorkRequest] = {}
-	for stage in stages:
-		for request in stage.bounded_work_requests(input_spec):
+	for stage, window in zip(stages, windows or (None,) * len(stages), strict=True):
+		for request in stage.bounded_work_requests(input_spec, window):
 			previous = requests.get(request.artifact_key)
 			if previous is None:
 				requests[request.artifact_key] = request
@@ -369,6 +372,9 @@ class PipelineState:
 	executor: PipelineExecutor | None = None
 	dataset: TomoDataSet | None = None
 	source_window: TomoWindow | None = None
+	# The held source window locates the allocation; this window independently
+	# owns the current Stage's produced extent and its still-live read context.
+	stage_window: TomoWindow | None = None
 	domain: DataDomain | None = None
 	work_range: DataRange | None = None
 
@@ -398,34 +404,90 @@ class PipelineState:
 		return type(self.working_array.shape) if isinstance(self.working_array, TypedBuffer) else None
 
 	def assigned_range(self, axis: str) -> DataRange:
-		"""Return assigned packed positions, or the full unassigned buffer axis."""
+		"""Return assigned packed positions within the Stage's produced extent."""
 
 		if not isinstance(self.working_array, TypedBuffer):
 			raise ValueError("assigned work requires a bound TypedBuffer")
 		self.working_array.shape.axis_of(axis)
-		if self.work_range is not None and axis in self.work_range.step.names:
-			return self.work_range
 		axis_type = next(
 			shape_type for shape_type in DataShape.__subclasses__()
 			if shape_type.names == (axis,)
 		)
-		return axis_type.drange(0, getattr(self.working_array.shape, axis), 1)
+		selection = self.work_index()[self.working_array.shape.axis_of(axis)]
+		return axis_type.drange(
+			0 if selection.start is None else selection.start,
+			getattr(self.working_array.shape, axis) if selection.stop is None else selection.stop,
+			1 if selection.step is None else selection.step,
+		)
 
 	def work_indices(self, axis: str) -> Iterator[int]:
 		"""Iterate the packed buffer positions assigned on a semantic axis."""
 
 		return self.assigned_range(axis).get_iter(IntIter)
 
-	def work_index(self, shape: type[DataShape] | DataShape | None = None) -> tuple[slice, ...]:
+	@property
+	def produced_window(self) -> TomoWindow | None:
+		if self.stage_window is not None:
+			return self.stage_window
+		window = self.source_window
+		return None if window is None else window.rescope(pos=window.shape.make_with(0) + window.pos)
+
+	@property
+	def read_window(self) -> TomoWindow | None:
+		window = self.produced_window
+		return None if window is None else window.with_pad()
+
+	def work_index(self, shape: type[DataShape] | DataShape | None = None,
+			*, context: bool = False) -> tuple[slice, ...]:
 		"""Express the assignment for the working buffer or another layout."""
 
 		if shape is None:
 			if not isinstance(self.working_array, TypedBuffer):
 				raise ValueError("assigned work requires a bound TypedBuffer")
 			shape = self.working_array.shape
-		if self.work_range is None:
-			return DataShape._shape_type(shape).point_index()
-		return self.work_range.slice_index(shape)
+		layout = DataShape._shape_type(shape)
+		selection = self.read_window if context else self.produced_window
+		if selection is not None and set(layout.names).issubset(self.source_window.shape.names):
+			indices = dict(zip(self.source_window.shape.names,
+				self.source_window.with_pad().packed_index(selection)))
+		else:
+			indices = {axis: slice(None) for axis in layout.names}
+		if self.work_range is not None:
+			axis = self.work_range.step.names[0]
+			assigned = self.work_range.slice_index(type(self.work_range.step))[0]
+			covered = indices.get(axis, slice(None))
+			start = assigned.start
+			if covered.start is not None and start < covered.start:
+				start += -((start - covered.start) // assigned.step) * assigned.step
+			stop = assigned.stop if covered.stop is None else min(assigned.stop, covered.stop)
+			indices[axis] = slice(start, max(start, stop), assigned.step)
+		return tuple(indices[axis] for axis in layout.names)
+
+	def projection_index(self, index: int, *, context: bool = False) -> tuple:
+		"""Select an image without expanding its Stage-owned detector extent."""
+		selection = list(self.work_index(context=context))
+		selection[self.working_array.shape.axis_of("Theta")] = index
+		return tuple(selection)
+
+	def scratch_index(self, shape: DataShape, *, context: bool = False) -> tuple[slice, ...]:
+		"""Translate assigned buffer ordinals into compact Stage workspace."""
+		indices = {axis: slice(None) for axis in shape.names}
+		if self.work_range is not None:
+			axis = self.work_range.step.names[0]
+			if axis in indices:
+				assigned = self.assigned_range(axis)
+				origin = 0
+				window = self.read_window if context else self.produced_window
+				if window is not None:
+					origin = self.source_window.with_pad().packed_index(window)[
+						self.source_window.shape.axis_of(axis)
+					].start
+				indices[axis] = slice(
+					getattr(assigned.start, axis) - origin,
+					getattr(assigned.stop, axis) - origin,
+					getattr(assigned.step, axis),
+				)
+		return tuple(indices[axis] for axis in shape.names)
 
 	def with_array(
 		self,
@@ -447,6 +509,7 @@ class PipelineState:
 			executor=self.executor,
 			dataset=self.dataset,
 			source_window=self.source_window,
+			stage_window=self.stage_window,
 			domain=self.domain if domain is None else domain,
 			work_range=self.work_range,
 		)
@@ -525,13 +588,14 @@ class Stage(ABC):
 	def run(self, state: PipelineState) -> PipelineState:
 		"""Execute the Stage and return the next PipelineState."""
 
-	def output_window(self, source: TomoWindow) -> TomoWindow:
+	def output_window(self, source: TomoWindow, scan: Scan | None = None) -> TomoWindow:
 		"""Return the source-coordinate window published after this Stage."""
 
 		return source
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
-		"""Declare reusable segment work from the current window's buffer geometry."""
+	def bounded_work_requests(self, input_spec: BufferSpec,
+			window: TomoWindow | None = None) -> tuple[BoundedWorkRequest, ...]:
+		"""Declare segment work from the Stage's produced window and read context."""
 
 		return ()
 
@@ -624,10 +688,12 @@ class Pipeline:
 			bounded_workers: int = 1, observer: StageObserver | None = None,
 			execution_observer: ExecutionSpanObserver | None = None,
 			stage_indices: tuple[int, ...] | None = None,
-			checkpoint: Callable[[], None] | None = None):
+			checkpoint: Callable[[], None] | None = None,
+			continuation_stages: Sequence[Stage] = ()):
 		if bounded_workers < 1:
 			raise ValueError("bounded_workers must be positive")
 		self.stages = tuple(stages)
+		self.continuation_stages = tuple(continuation_stages)
 		self.stage_indices = (
 			tuple(range(len(self.stages))) if stage_indices is None else tuple(stage_indices)
 		)
@@ -657,6 +723,7 @@ class Pipeline:
 				self.stages, scan, self.backend, mode=self.validation_mode,
 				initial_layout=self.initial_layout,
 				initial_domain=self.initial_domain,
+				continuation_stages=self.continuation_stages,
 			)
 			self._validated = True
 
@@ -679,6 +746,7 @@ class Pipeline:
 				enable_engine_aliasing=state.recon.tomopy_input_aliasing,
 				dataset=state.dataset,
 				source_window=state.source_window,
+				continuation_stages=self.continuation_stages,
 			)
 			self._validated = True
 		segments = () if self.plan is None else self.plan.segments
@@ -690,6 +758,11 @@ class Pipeline:
 				index, index + 1, ExecutionKind.SEQUENTIAL, (stage.name,),
 			) for index, stage in enumerate(self.stages))
 		from lftomo.pipeline.planning import ExecutionKind
+		from lftomo.pipeline.streaming import resolve_stage_windows
+		stage_windows = resolve_stage_windows(
+			self.stages + self.continuation_stages,
+			state.scan, state.source_window, state.dataset,
+		)[:len(self.stages)]
 		if self.execution_observer is not None:
 			from lftomo.pipeline.dispatch import dispatch_for_stage
 			from lftomo.pipeline.telemetry import (
@@ -703,6 +776,12 @@ class Pipeline:
 			run_id = uuid.uuid4().hex
 		for ordinal, segment in enumerate(segments):
 			segment_stages = self.stages[segment.start:segment.stop]
+			if stage_windows[segment.start] is None and state.source_window is not None:
+				stage_windows = (*stage_windows[:segment.start], *resolve_stage_windows(
+					self.stages[segment.start:] + self.continuation_stages,
+					state.scan, state.source_window, state.dataset,
+				)[:len(self.stages) - segment.start])
+			state.stage_window = stage_windows[segment.start]
 			if self.execution_observer is not None:
 				members = tuple(LogicalStageMember(
 					index=self.stage_indices[index],
@@ -769,7 +848,9 @@ class Pipeline:
 						),
 						checkpoint=self.checkpoint,
 						executor=executor,
+						stage_windows=stage_windows[segment.start:segment.stop],
 					)
+					state.stage_window = stage_windows[segment.stop - 1]
 					wall_seconds = time.perf_counter() - span_started
 				except BaseException as error:
 					if self.execution_observer is not None:
@@ -824,6 +905,7 @@ class Pipeline:
 					))
 				continue
 			for index, stage in enumerate(segment_stages, start=segment.start):
+				state.stage_window = stage_windows[index]
 				input_layout = state.layout
 				input_domain = state.domain
 				if self.observer is not None:

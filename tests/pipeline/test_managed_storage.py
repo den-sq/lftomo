@@ -57,15 +57,16 @@ class _ProjectionScratchStage(ProjectionStage):
 	class Params(StageParams):
 		fail: bool = False
 
-	def bounded_work_requests(self, input_spec):
+	def bounded_work_requests(self, input_spec, window=None):
+		shape = input_spec.shape if window is None else window.frange.length.to(input_spec.layout)
 		return (BoundedWorkRequest(
-			"_test_work", BufferSpec(input_spec.shape, np.float32), "test_projection_work",
+			"_test_work", BufferSpec(shape, np.float32), "test_projection_work",
 			required_for_fallback=True,
 		),)
 
 	def run_projection(self, image, state):
 		handle = state.artifacts["_test_work"]
-		assigned = handle[state.work_index(handle.shape)]
+		assigned = handle[state.scratch_index(handle.shape)]
 		work = assigned.array()[0]
 		np.multiply(image, 2, out=work)
 		if self.params.fail:

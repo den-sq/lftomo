@@ -130,10 +130,13 @@ def test_full_context_windows_and_strided_angles_match_whole_array(layout):
 			physical, y=(start, start + 2), theta=(0, physical.Theta, 2), halo=Y(physical.Y),
 		)
 		state = _state(case, layout=layout, window=window)
+		before = np.asarray(state.working_array).copy()
 		Pipeline([_stage(case, n_iter=2)]).run(state)
 		index = layout.point_index(Y=window.internal.axis_slice("Y"))
 		expected = layout.point_index(Y=slice(start, start + 2))
 		np.testing.assert_array_equal(np.asarray(state.working_array)[index], np.asarray(whole.working_array)[expected])
+		context = layout.point_index(Y=slice(2, 4) if start == 0 else slice(0, 2))
+		np.testing.assert_array_equal(np.asarray(state.working_array)[context], before[context])
 		for key in ("correction_norms", "label_change"):
 			assert state.artifacts[key] == whole.artifacts[key]
 		np.testing.assert_array_equal(state.artifacts["phase_filter"], whole.artifacts["phase_filter"])
@@ -144,7 +147,9 @@ def test_full_context_windows_and_strided_angles_match_whole_array(layout):
 def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatch, layout):
 	case = compact_multimaterial_case(n_rows=4, row_varying=True, noncollinear=True)
 	stage = _stage(case, n_iter=2)
-	serial = _state(case, layout=layout)
+	physical = ProjOrder(*case["projections"].shape)
+	window = TomoWindow.from_bounds(physical, y=(1, 3), halo=Y(physical.Y))
+	serial = _state(case, layout=layout, window=window)
 	Pipeline([stage]).run(serial)
 	denominator_calls = []
 	build_denominator = phase_stages.slope_denominator
@@ -154,7 +159,8 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 		return build_denominator(*args)
 	monkeypatch.setattr(phase_stages, "slope_denominator", record_denominator)
 	with PipelineRunContext(max_workers=2) as context:
-		state = _state(case, layout=layout, storage=context.storage, executor=context.executor)
+		state = _state(case, layout=layout, window=window, storage=context.storage, executor=context.executor)
+		before = np.asarray(state.working_array).copy()
 		requests = stage.bounded_work_requests(BufferSpec.from_buffer(state.working_array))
 		flats = np.ones((4, state.working_array.shape.Y, state.working_array.shape.X), dtype=np.float32)
 		state.scan.metadata["flat_fields"] = flats
@@ -179,6 +185,9 @@ def test_managed_process_dispatch_owns_scratch_and_retires_on_success(monkeypatc
 		pipeline = Pipeline([stage])
 		result = pipeline.run(state)
 		np.testing.assert_array_equal(np.asarray(result.working_array), serial.working_array)
+		for row in (0, 3):
+			index = layout.point_index(Y=row)
+			np.testing.assert_array_equal(np.asarray(result.working_array)[index], before[index])
 		for key in ("correction_norms", "label_change"):
 			assert result.artifacts[key] == serial.artifacts[key]
 		np.testing.assert_array_equal(np.asarray(result.artifacts["phase_filter"]), serial.artifacts["phase_filter"])

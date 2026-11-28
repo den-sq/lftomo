@@ -76,17 +76,21 @@ projection. `run` must therefore process only the assigned projections: loop ove
 operation, and take source positions from
 `state.source_window.source_index("Theta", index)`. A loop over the whole array
 (`range(data.shape[...])`, or `data *= ...` without the index) still passes
-serial tests, where the assignment is the whole buffer, but under process dispatch
+serial tests without padding, but under process dispatch
 it repeats the whole buffer in every worker.
 
 For reusable work in a bounded segment or composite Stage, override
-`Stage.bounded_work_requests(input_spec)` and return `BoundedWorkRequest`
+`Stage.bounded_work_requests(input_spec, window=None)` and return `BoundedWorkRequest`
 values. Each request names its temporary artifact key and allocation role,
 and owns a `BufferSpec` plus an optional scalar `fill_value`. Set
 `required_for_fallback=True` for composite work required even without managed
 dispatch; optional canvases retain their serial numerical fallback instead.
-Express numerical
-padding through `TomoWindow` before deriving the allocation shape. The generic
+The supplied `window` owns the produced extent; its padding is the context this
+Stage reads. Size ordinary work from `window.frange.length`, using `input_spec`
+for dtype and layout. A direct caller without run geometry may omit the window.
+Express numerical padding through `TomoWindow` before deriving the allocation
+shape. Context-sized work required by a numerical library must be explicit.
+The generic
 executor allocates once for the segment through the run's `StorageBackend`,
 passes full reopenable handles and assignments to workers, derives the current
 kernel's scratch views from its assignment, and retires the storage after all
@@ -98,14 +102,23 @@ Stages sharing a key share one allocation: dtype, layout, initialization and
 non-growing extents must agree. A request can explicitly permit larger capacity
 along `grow_axes`; Vo median padding uses `("X",)` so a chain shares its largest
 requested line canvas. Kernels must accept that capacity. Work must preserve
-the extent of the dispatched axis. The hook takes only the current window's
-allocation `BufferSpec`, so `collect_bounded_work(stages, input_spec)` can inspect exact
+the Stage's computed extent of the dispatched axis. The hook receives the
+allocation descriptor and the Stage window, so
+`collect_bounded_work(stages, input_spec, windows)` can inspect exact
 requirements before execution without reading pixels or allocating storage.
 At runtime, collection derives this temporary descriptor from the typed working
 buffer; it is not stored on `PipelineState` or sent as worker geometry.
 This work is temporary segment scratch, not a `managed_artifacts` producer or
 prefix-cache output. Allocation reports are derived from the allocated buffers
 in `state.artifacts["bounded_work_allocations"]`.
+
+The held `source_window` continues to locate the full allocation. The current
+`stage_window` owns the produced extent and its read context; `produced_window`
+and `read_window` expose those selections. `work_indices` and `work_index`
+select produced samples by default. Projection loops use `projection_index`
+to restrict the detector extent as well as the projection assignment. Scratch
+is compact: use `scratch_index` to translate assigned buffer ordinals into its
+Stage window, rather than indexing scratch with allocation offsets.
 
 Declare layouts and numerical domains separately: `ProjOrder` and `SinoOrder`
 describe memory axes; `RAW`, `TRANSMISSION`, `ATTENUATION`, and `RECON` describe
@@ -127,6 +140,15 @@ phase-name list to update. This property describes numerical sensitivity:
 `required_pad` declares needed source context, while `requires_full_axes`
 prohibits splitting an axis. Extent sensitivity allows splitting with the
 warning that fixed-window parity does not imply whole-volume equivalence.
+Within each held window, these declarations also preserve the read extent on
+the affected axes. The resolver propagates that input demand to earlier Stages,
+while the numerical adapter publishes only the produced selection. A full-axis
+requirement likewise preserves the held read extent. Use measured behavior or
+the numerical API's established input contract to justify these declarations.
+
+Geometry-changing Stages publish their canonical output through
+`output_window(source, scan=None)`. Planning and execution use that same
+transformation; the optional scan supplies acquisition-dependent geometry.
 
 Declare supported iteration directions in `window_axes`. A Stage can specify
 `required_window_axis` or `preferred_window_axis`; both must belong to its

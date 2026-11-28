@@ -98,7 +98,8 @@ def test_combined_r254_alias_runs_movement_then_skew(monkeypatch):
 	Pipeline([stage]).run(_state(working, config))
 
 	assert isinstance(stage, AffineSkewMovementStage)
-	assert order == ["movement", "movement", "skew", "skew"]
+	# Each projection must be shifted before rotation, including its read halo.
+	assert order == ["movement", "skew"] * 2
 
 
 def test_zero_skew_fused_transition_transposes_and_pads_without_interpolation(monkeypatch):

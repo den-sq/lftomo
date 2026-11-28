@@ -13,6 +13,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.util.shapes import Proj, ProjOrder, YSlice
+from lftomo.util.window import TomoWindow
 
 
 class ZingerFilterStage(ProjectionStage):
@@ -43,16 +44,23 @@ class ZingerFilterStage(ProjectionStage):
 			required_pad=cls.contract.required_pad if params.enabled else PadRequirement(),
 		)
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+	def bounded_work_requests(
+		self, input_spec: BufferSpec, window: TomoWindow | None = None,
+	) -> tuple[BoundedWorkRequest, ...]:
 		if not self.params.enabled:
 			return ()
+		produced = input_spec.shape if window is None else window.frange.length
+		# SciPy's median_filter output must match its context-bearing input.
+		# This unavoidable library plane is read-sized; threshold work and
+		# replacements cover only the Stage's produced extent.
+		read = input_spec.shape if window is None else window.with_pad().frange.length
 		return tuple(BoundedWorkRequest(
 			f"_zinger_{name}", BufferSpec(shape, dtype), f"zinger_{name}",
 			required_for_fallback=True,
 		) for name, shape, dtype in (
-			("median", input_spec.shape.to(ProjOrder), input_spec.dtype),
-			("threshold", input_spec.shape.extract(YSlice), input_spec.dtype),
-			("mask", input_spec.shape.extract(YSlice), np.dtype(bool)),
+			("median", read.to(ProjOrder), input_spec.dtype),
+			("threshold", produced.extract(YSlice), input_spec.dtype),
+			("mask", produced.extract(YSlice), np.dtype(bool)),
 		))
 
 	def run_projection(self, image: np.ndarray, state: PipelineState) -> None:
@@ -61,16 +69,20 @@ class ZingerFilterStage(ProjectionStage):
 		from scipy.ndimage import median_filter
 
 		work = tuple(
-			handle[state.work_index(handle.shape)]
-			for handle in (state.artifacts[f"_zinger_{name}"]
-				for name in ("median", "threshold", "mask"))
+			state.artifacts[f"_zinger_{name}"][state.scratch_index(
+				state.artifacts[f"_zinger_{name}"].shape, context=name == "median",
+			)] for name in ("median", "threshold", "mask")
 		)
 		# Retain sliced handles while NumPy views use their shared mappings.
 		median, threshold, mask = (handle.array()[0] for handle in work)
 		# Compute from the unchanged projection so replacements cannot influence
 		# their neighbors. SciPy writes directly into the declared median plane.
 		median_filter(image, size=3, mode="nearest", output=median)
-		for row, local_median in zip(image, median):
+		selection = (
+			(slice(None), slice(None)) if state.produced_window is None else
+			state.read_window.packed_index(state.produced_window, Proj)
+		)
+		for row, local_median in zip(image[selection], median[selection]):
 			np.multiply(local_median, 1.5, out=threshold)
 			np.greater(row, threshold, out=mask)
 			np.copyto(row, local_median, where=mask)

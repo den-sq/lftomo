@@ -842,6 +842,83 @@ def test_real_stripe_and_phase_mutation_chains_match_independent_execution(tmp_p
 		np.testing.assert_allclose(cached.working_array, fresh.working_array, rtol=1e-6)
 
 
+def test_same_held_window_separates_prefixes_with_different_downstream_context(tmp_path):
+	from lftomo.pipeline.stages import create_stage
+	from tests.fixtures.phase_multimaterial import compact_multimaterial_case
+
+	phantom = compact_multimaterial_case(n_rows=8, row_varying=True)
+	# Simulate a constant white field of two with no dark current, leaving the
+	# existing Fresnel phantom unchanged after real weighted normalization.
+	values = phantom["projections"] * np.float32(2)
+	shape = ProjOrder(*values.shape)
+	fields = np.zeros((4, shape.Y, shape.X), np.float32)
+	fields[:2] = 2
+	scan_model = Scan(
+		energy_keV=phantom["energy_kev"], pixel_size_um=phantom["pixel_m"] * 1e6,
+		ssd_cm=phantom["distance_m"] * 100,
+		n_projections=shape.Theta, degrees_per_fov=180,
+		detector=Detector(rows=shape.Y, columns=shape.X, pixel_size_um=phantom["pixel_m"] * 1e6),
+		acquisition=Acquisition(n_projections=shape.Theta, rotation_end_deg=180),
+		projections=TIFFStackProjections(format="tiff_stack", path="projections"),
+		metadata={"flat_fields": fields},
+	)
+	dataset = TomoDataSet.from_range(
+		CTFov(shape.Theta, 180, 1), shape, Y(shape.Y), dtype=np.float32,
+		angles=np.deg2rad(phantom["angles_deg"]),
+	)
+	held = TomoWindow.from_bounds(shape, y=(2, 6), halo=2, dtype=np.float32)
+	published = held.with_pad().packed_index(held)
+	normalize = StageConfig(id="normalize", kind="normalize", algorithm="weighted")
+	negative_log = StageConfig(id="negative-log", kind="phase", algorithm="negative_log")
+	correction = StageConfig(
+		id="correction", kind="phase", algorithm="bac_correction",
+		params={"alpha": 0.01, "gamma": 1},
+	)
+	policy = enabled_policy(tmp_path, verify_fraction=1, on_error="fail")
+	candidates = tuple(PrefixPlanningCandidate(
+		candidate_id=name, configs=configs,
+		stages=tuple(create_stage(item) for item in configs),
+		share_identity={"dataset": "compact-fresnel"},
+		estimated_snapshot_bytes=values.nbytes + fields.nbytes,
+	) for name, configs in (
+		("core", (normalize, negative_log)),
+		("context", (normalize, correction, negative_log)),
+	))
+	decisions = {item.candidate_id: item for item in plan_common_prefixes(candidates, policy).decisions}
+	cache = PrefixCachingPipelineExecutor(policy)
+	keys = {}
+
+	def fresh_state(configs, context):
+		return PipelineState(
+			LocalArray(values.copy(), shape), scan_model.model_copy(deep=True),
+			Recon(pipeline=list(configs)), domain=DataDomain.RAW,
+			dataset=dataset, source_window=held,
+			storage=context.storage, executor=context.executor,
+		)
+
+	for repeat in range(2):
+		for candidate in candidates:
+			with PipelineRunContext(max_workers=1) as context:
+				cached, event = cache.execute(
+					decisions[candidate.candidate_id], fresh_state(candidate.configs, context),
+					candidate.stages, candidate.configs, runtime_identity=candidate.share_identity,
+				)
+				independent = Pipeline([
+					create_stage(item) for item in candidate.configs
+				]).run(fresh_state(candidate.configs, context))
+				np.testing.assert_array_equal(
+					np.asarray(cached.working_array)[published],
+					np.asarray(independent.working_array)[published],
+				)
+				assert event.status == ("hit" if repeat else "miss"), event.reason
+				if repeat:
+					assert event.verified
+					assert event.cache_key == keys[candidate.candidate_id]
+				else:
+					keys[candidate.candidate_id] = event.cache_key
+	assert keys["core"] != keys["context"]
+
+
 def test_bounds_bypass_before_cache_creation(tmp_path):
 	values = np.ones((2, 3, 4), dtype=np.float32)
 	policy = PrefixCachePolicy(

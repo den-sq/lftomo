@@ -16,7 +16,8 @@ from lftomo.pipeline.stages import (
 	STAGE_REGISTRY,
 	create_stage,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.window import TomoWindow
 from tests.sample_data import attach_source_geometry
 
 
@@ -149,6 +150,19 @@ def test_stage_preserves_both_layouts_and_reports_coefficients_and_qc(tmp_path):
 		assert np.quantile(np.abs(corrected - 1), 0.6) < 0.01
 		assert len(state.artifacts["beam_basis_qc"]["coefficient_std"]) == 2
 		assert state.artifacts["beam_basis_qc"]["violating_projection_count"] == 0
+		window_values = projections.copy() if layout is ProjOrder else projections.transpose(1, 0, 2).copy()
+		window_state = attach_source_geometry(PipelineState(
+			LocalArray(window_values, layout(*window_values.shape)), _scan(40, 52, 3), Recon(pipeline=[]),
+			artifacts={"calibration_bundle": ref}, domain=DataDomain.RAW,
+		))
+		window_state.source_window = TomoWindow.from_bounds(ProjOrder(*projections.shape), y=(10, 30), halo=Y(10))
+		BeamBasisFitNormalizeStage(maximum_out_of_basis=1.1).run(window_state)
+		core = layout.point_index(Y=slice(10, 30))
+		np.testing.assert_array_equal(window_values[core], values[core])
+		original = projections if layout is ProjOrder else projections.transpose(1, 0, 2)
+		for rows in (slice(0, 10), slice(30, 40)):
+			index = layout.point_index(Y=rows)
+			np.testing.assert_array_equal(window_values[index], original[index])
 
 	assert STAGE_REGISTRY["normalize.beam_basis_fit"] is BeamBasisFitNormalizeStage
 	assert BeamBasisFitNormalizeStage.contract.accepts_domain == (DataDomain.RAW,)

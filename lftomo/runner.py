@@ -518,7 +518,7 @@ def _planned_pipeline(
 	*, execution_observer: ExecutionSpanObserver | None = None,
 	stage_index_offset: int = 0, mode: str = "complete",
 	initial_layout=None, initial_domain=None, initial_buffer=None,
-	dataset=None, source_window=None,
+	dataset=None, source_window=None, continuation_stages=(),
 ) -> Pipeline:
 	plan = validate_pipeline(
 		stages, scan, backend, available_artifacts=available_artifacts,
@@ -527,11 +527,13 @@ def _planned_pipeline(
 		enable_aliasing=recon.buffer_aliasing,
 		enable_engine_aliasing=recon.tomopy_input_aliasing,
 		dataset=dataset, source_window=source_window,
+		continuation_stages=continuation_stages,
 	)
 	pipeline = Pipeline(
 		stages, backend=backend, validate=False, observer=observer,
 		execution_observer=execution_observer,
 		stage_indices=tuple(range(stage_index_offset, stage_index_offset + len(stages))),
+		continuation_stages=continuation_stages,
 	)
 	pipeline.plan = plan
 	pipeline._validated = True
@@ -610,6 +612,7 @@ def _run_streaming_pipeline(
 				prepass_stages, run_scan, backend, window_initial, stage_observer,
 				concrete, execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
+				continuation_stages=window_stages[prepass_stop:],
 				stage_index_offset=stage_index_offset, **input_options(prepass_state),
 			)
 			prepass_state = prepass.run(prepass_state)
@@ -638,6 +641,7 @@ def _run_streaming_pipeline(
 				compute_stages, run_scan, backend, window_initial, stage_observer,
 				concrete, execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
+				continuation_stages=writer_stages,
 				stage_index_offset=stage_index_offset, **input_options(state),
 			)
 			state = compute.run(state)
@@ -647,6 +651,7 @@ def _run_streaming_pipeline(
 				window_initial, stage_observer, concrete,
 				execution_observer=execution_observer,
 				dataset=dataset, source_window=window,
+				continuation_stages=window_stages[reconstruction_start:],
 				stage_index_offset=stage_index_offset, **input_options(state),
 			)
 			state = prefix.run(state)
@@ -657,6 +662,7 @@ def _run_streaming_pipeline(
 				stage_index_offset=stage_index_offset + reconstruction_start,
 				**input_options(state),
 				dataset=dataset, source_window=window,
+				continuation_stages=writer_stages,
 			)
 			state = reconstruction.run(state)
 		if writer_stages and state.domain is not DataDomain.RECON:
@@ -964,7 +970,7 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 					full_output = stage_output_spec(
 						stage, full_output, run_scan, dataset=dataset, source_window=full_window,
 					)
-					full_window = stage.output_window(full_window)
+					full_window = stage.output_window(full_window, run_scan)
 				published = dataset.full_window().with_pad().frange.length.to(full_output.layout)
 				if full_output.shape != published:
 					raise WindowPlanError(

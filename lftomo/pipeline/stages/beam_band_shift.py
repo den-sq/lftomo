@@ -50,8 +50,10 @@ class BeamBandShiftNormalizeStage(Stage):
 	class Params(StageParams):
 		schedule_component: str = "beam_schedule"
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
-		shape = input_spec.shape.to(ProjOrder)
+	def bounded_work_requests(
+		self, input_spec: BufferSpec, window: TomoWindow | None = None,
+	) -> tuple[BoundedWorkRequest, ...]:
+		shape = (input_spec.shape if window is None else window.frange.length).to(ProjOrder)
 		return (
 			BoundedWorkRequest(_WARP, BufferSpec(shape, np.float32), "beam_band_shift_warp", required_for_fallback=True),
 			BoundedWorkRequest(_LINE, BufferSpec(shape.extract(YSlice), np.float32), "beam_band_shift_line", required_for_fallback=True),
@@ -141,7 +143,7 @@ class BeamBandShiftNormalizeStage(Stage):
 					state.storage.retire(buffer, role=f"beam_band_shift_{key}")
 
 	def run(self, state: PipelineState) -> PipelineState:
-		from lftomo.pipeline.execution import _prepare_bounded_work, _release_bounded_work
+		from lftomo.pipeline.execution import _prepare_bounded_work, _release_bounded_work, _work_states
 
 		owned_preparation = _PREPARED not in state.artifacts
 		if owned_preparation:
@@ -150,17 +152,16 @@ class BeamBandShiftNormalizeStage(Stage):
 		try:
 			if _WARP not in state.artifacts:
 				requests = _prepare_bounded_work(state, (self,), "Theta")
-			output, data = _normalization_output(state)
+			output, _data = _normalization_output(state)
 			prepared = state.artifacts[_PREPARED]
 			model = prepared.bundle.component(self.params.schedule_component).band_shift
-			source = state.source_window.with_pad(["Y"])
+			source = state.produced_window
 			selection = source.index[source.shape.axis_of("Y")], source.index[source.shape.axis_of("X")]
 			gain, dark, texture = (buffer_view(prepared.buffers[key])[selection] for key in ("gain", "dark", "texture"))
 			coefficients = buffer_view(prepared.buffers["spline"])
 			residual = None if "residual" not in prepared.buffers else buffer_view(prepared.buffers["residual"])[selection]
-			work = buffer_view(state.artifacts[_WARP])
-			lines = buffer_view(state.artifacts[_LINE])
-			for index in state.work_indices("Theta"):
+			for image, assigned in _work_states(state.with_array(output), "Theta"):
+				index = next(assigned.work_indices("Theta"))
 				source_index = state.source_window.source_index("Theta", index)
 				projection = int(state.dataset.acquisition_indices[source_index])
 				bracket = prepared.bundle.read_time_bracket(self.params.schedule_component, projection)
@@ -169,7 +170,12 @@ class BeamBandShiftNormalizeStage(Stage):
 				dy, magnification = bracket.before if bracket.before_time == projection else bracket.after
 				if not np.isfinite((dy, magnification)).all() or magnification <= 0:
 					raise ValueError(f"invalid beam shift/stretch for projection {projection}")
-				warped = work[index]
+				# Work is compact in Stage coordinates while assignments retain
+				# the held buffer's packed projection ordinals.
+				warp_handle = state.artifacts[_WARP][assigned.scratch_index(state.artifacts[_WARP].shape)]
+				line_handle = state.artifacts[_LINE][assigned.scratch_index(state.artifacts[_LINE].shape)]
+				warped = buffer_view(warp_handle)[0]
+				line = buffer_view(line_handle)[0]
 				affine_transform(
 					coefficients, ((1 / magnification, 0), (0, 1)),
 					offset=(model.source_y(source.pos.Y, dy, magnification) - prepared.spline_window.pos.Y,
@@ -180,12 +186,11 @@ class BeamBandShiftNormalizeStage(Stage):
 				np.exp(warped, out=warped)
 				if residual is not None:
 					scale = float(np.clip(dy / model.dy_end, 0, model.s_max))
-					for row in range(source.shape.Y):
-						np.multiply(residual[row], scale, out=lines[index])
-						np.exp(lines[index], out=lines[index])
-						np.multiply(warped[row], lines[index], out=warped[row])
+					for row in range(source.frange.length.Y):
+						np.multiply(residual[row], scale, out=line)
+						np.exp(line, out=line)
+						np.multiply(warped[row], line, out=warped[row])
 				np.multiply(warped, gain, out=warped)
-				image = data[state.layout.point_index(Theta=index)]
 				np.subtract(image, dark, out=image)
 				np.divide(image, warped, out=image)
 		finally:

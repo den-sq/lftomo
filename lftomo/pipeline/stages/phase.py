@@ -8,6 +8,8 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from lftomo.pipeline.core import (
+	BoundedWorkRequest,
+	BufferSpec,
 	PadRequirement,
 	PipelineState,
 	ProjectionStage,
@@ -27,6 +29,7 @@ from lftomo.prep.phase import (
 )
 from lftomo.storage import buffer_view
 from lftomo.util.shapes import ImgSlice, ProjOrder
+from lftomo.util.window import TomoWindow
 
 
 def _managed_phase_filter(
@@ -75,11 +78,11 @@ def prepare_phase_filter(stage: Stage, state: PipelineState) -> None:
 
 	if getattr(stage.params, "slope", None) is not None and not stage.params.enabled:
 		return
-	data = np.asarray(state.working_array)
-	layout = state.layout
 	shape = (
-		data.shape[layout.axis_of("Y")], data.shape[layout.axis_of("X")],
+		state.working_array.shape if state.read_window is None
+		else state.read_window.frange.length
 	)
+	shape = (shape.Y, shape.X)
 	if getattr(stage.params, "slope", None) is None:
 		_resolved_phase_filter(state, shape, stage.params.alpha)
 	else:
@@ -126,19 +129,20 @@ def _prepare_material_envelope(stage: Stage, state: PipelineState) -> None:
 		if state.storage is not None and hasattr(previous, "name"):
 			state.storage.retire(previous, role="phase_envelope")
 		return
-	window = state.source_window
+	window = state.read_window
 	if window is None:
 		selected = np.broadcast_to(value, state.working_array.shape.to(ProjOrder).as_tuple())
 	else:
 		physical = state.dataset.physical_shape if state.dataset is not None else state.scan.projection_shape()
 		full = np.broadcast_to(value, physical.as_tuple())
-		selected = full[tuple(window.with_pad().axis_slice(axis) for axis in ("Theta", "Y", "X"))]
+		selected = full[tuple(window.axis_slice(axis) for axis in ("Theta", "Y", "X"))]
 	selected = selected.transpose(tuple(ProjOrder.axis_of(axis) for axis in state.working_array.shape.names))
 	if state.storage is None:
 		state.artifacts["phase_envelope"] = np.asarray(selected, dtype=np.float32)
 		return
 	envelope = state.storage.allocate(
-		state.working_array.shape, np.float32, role="phase_envelope", reuse_from=("phase_envelope",),
+		state.working_array.shape if window is None else window.frange.length.to(state.layout),
+		np.float32, role="phase_envelope", reuse_from=("phase_envelope",),
 	)
 	envelope.array()[...] = selected
 	state.artifacts["phase_envelope"] = envelope
@@ -548,7 +552,7 @@ class BronnikovAidedCorrectionFilterStage(ProjectionStage):
 				state.source_window.source_index("Theta", local_index)
 				if state.source_window is not None else local_index
 			)
-			image = data[state.layout.point_index(Theta=local_index)]
+			image = data[state.projection_index(local_index)]
 			# Count row by row: QC needs no additional detector-sized mask.
 			finite = sum(int(np.count_nonzero(np.isfinite(row))) for row in image)
 			projections.append({
@@ -568,6 +572,17 @@ class BronnikovAidedCorrectionFilterStage(ProjectionStage):
 			raise BACNonFiniteError(self.name, qc)
 		return state
 
+	def bounded_work_requests(
+		self, input_spec: BufferSpec, window: TomoWindow | None = None,
+	) -> tuple[BoundedWorkRequest, ...]:
+		if not self.params.enabled or not self.params.clip_input:
+			return ()
+		shape = input_spec.shape if window is None else window.with_pad().frange.length
+		return (BoundedWorkRequest(
+			"_bac_clip_work", BufferSpec(shape.to(ProjOrder), input_spec.dtype),
+			"bac_clip_work", required_for_fallback=True,
+		),)
+
 	def _correct(self, image: np.ndarray) -> np.ndarray:
 		if self.params.clip_input:
 			image[~np.isfinite(image)] = self.params.clip_minimum
@@ -580,6 +595,12 @@ class BronnikovAidedCorrectionFilterStage(ProjectionStage):
 	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:
 		if not self.params.enabled:
 			return None
+		if self.params.clip_input:
+			buffer = state.artifacts["_bac_clip_work"]
+			assigned = buffer[state.scratch_index(buffer.shape, context=True)]
+			clipped = buffer_view(assigned)[0]
+			clipped[...] = image
+			image = clipped
 		return self._correct(image)
 
 

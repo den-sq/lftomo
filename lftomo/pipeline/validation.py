@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Sequence
 
 from lftomo.pipeline.core import Backend, BufferSpec, NumpyBackend, Stage
 from lftomo.pipeline.domains import DataDomain
@@ -128,6 +128,7 @@ def validate_pipeline(
 	external_pins: tuple[str, ...] = (),
 	dataset: TomoDataSet | None = None,
 	source_window: TomoWindow | None = None,
+	continuation_stages: Sequence[Stage] = (),
 ) -> PipelinePlan:
 	"""Validate a Stage sequence and return its resolved execution plan."""
 
@@ -155,6 +156,10 @@ def validate_pipeline(
 	warnings: list[str] = []
 	current_buffer = initial_buffer
 	current_window = source_window
+	from lftomo.pipeline.streaming import resolve_stage_windows
+	stage_windows = resolve_stage_windows(
+		tuple(stages) + tuple(continuation_stages), scan, source_window, dataset,
+	)[:len(stages)]
 
 	for index, stage in enumerate(stages):
 		occurrence = getattr(stage, "occurrence_id", None)
@@ -293,6 +298,7 @@ def validate_pipeline(
 			input_buffer=input_buffer, output_buffer=output_buffer,
 			allocation_buffer=allocation_buffer,
 			output_role=output_role, retires_role=retires_role,
+			stage_window=stage_windows[index],
 		))
 		upstream_mutated = upstream_mutated or contract.mutates_input
 		row_identity_available = row_identity_available and not contract.resamples_detector
@@ -301,7 +307,7 @@ def validate_pipeline(
 		current_domain = output_domain
 		current_buffer = output_buffer
 		if current_window is not None and output_layout in (ProjOrder, SinoOrder):
-			current_window = stage.output_window(current_window)
+			current_window = stage.output_window(current_window, scan)
 
 	if mode is ValidationMode.COMPLETE:
 		if normalize_transitions != 1:

@@ -7,6 +7,7 @@ import yaml
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import (
+	BilateralFilterStage,
 	EntropyLocalCenterStage,
 	GridrecStage,
 	ManualCenterStage,
@@ -81,7 +82,8 @@ def test_manual_center_stores_scalar_or_tilt_profile():
 
 
 @pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
-def test_manual_tilt_uses_source_rows_when_gridrec_crops_halo(monkeypatch, layout):
+@pytest.mark.parametrize("following_context", [False, True])
+def test_manual_tilt_uses_source_rows_when_gridrec_crops_halo(monkeypatch, layout, following_context):
 	physical = ProjOrder(Theta=6, Y=40, X=8)
 	window = TomoWindow.from_bounds(physical, y=(10, 14), halo=Y(2), dtype=np.float32)
 	shape = window.with_pad().shape.to(layout)
@@ -108,12 +110,13 @@ def test_manual_tilt_uses_source_rows_when_gridrec_crops_halo(monkeypatch, layou
 	monkeypatch.setattr("tomopy.recon", recon)
 	result = Pipeline([
 		ManualCenterStage(value_px=4, tilt=0.25, reference_y=10),
+		*([BilateralFilterStage(diameter=3)] if following_context else []),
 		GridrecStage(circle_mask=False),
 	]).run(state)
 
 	assert calls["data_shape"] == layout(Theta=6, Y=4, X=8).as_tuple()
 	np.testing.assert_array_equal(calls["center"], [4, 4.25, 4.5, 4.75])
-	np.testing.assert_array_equal(result.artifacts["center"], [3.5, 3.75, 4, 4.25, 4.5, 4.75, 5, 5.25])
+	np.testing.assert_array_equal(result.artifacts["center"], [4, 4.25, 4.5, 4.75])
 
 
 def test_vo_center_transposes_data_and_fits_tilt(monkeypatch):
@@ -165,11 +168,11 @@ def test_vo_tilt_fit_uses_source_y_coordinates_and_row_span(monkeypatch):
 		algorithm="vo",
 		params={"tilt_fit": "polynomial", "tilt_samples": 3},
 	)
-	state = _state(working, [config])
+	state = attach_source_geometry(_state(working, [config]), y_start=99, physical_y=120)
 	state.source_window = TomoWindow(
-		ProjOrder(Theta=3, Y=5, X=8),
-		ProjOrder(Theta=0, Y=1, X=0),
-		ProjOrder(Theta=0, Y=100, X=0),
+		ProjOrder(Theta=3, Y=10, X=8),
+		ProjOrder(Theta=0, Y=2, X=0),
+		ProjOrder(Theta=0, Y=101, X=0),
 		ProjOrder(Theta=1, Y=2, X=1),
 		np.float32,
 		np.float32,
@@ -180,11 +183,11 @@ def test_vo_tilt_fit_uses_source_y_coordinates_and_row_span(monkeypatch):
 	result = Pipeline([create_stage(config)]).run(state)
 
 	np.testing.assert_allclose(
-		result.artifacts["center"], [13.9, 14.1, 14.3, 14.5, 14.7, 14.9, 15.1],
+		result.artifacts["center"], [13.9, 14.2, 14.5, 14.8, 15.1],
 	)
 	metadata = result.artifacts["center_fit"]
-	np.testing.assert_array_equal(metadata["sampled_source_rows"], [99, 105, 111])
-	assert metadata["row_span"] == 12
+	np.testing.assert_array_equal(metadata["sampled_source_rows"], [101, 105, 109])
+	assert metadata["row_span"] == 8
 
 
 def test_vo_tilt_fit_rejects_or_forces_failed_residual_qc(monkeypatch):

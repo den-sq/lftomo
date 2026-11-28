@@ -15,6 +15,46 @@ from lftomo.util.window import CTFov, TomoDataSet, TomoWindow
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def resolve_stage_windows(stages, scan, source_window, dataset=None):
+	"""Resolve each Stage's produced extent and read context in source space."""
+	if source_window is None:
+		return (None,) * len(stages)
+	# Use the same nominal window as the streaming planner, including for a
+	# shorter final window; only realized coverage is clipped per invocation.
+	basis = source_window if dataset is None else dataset.full_window().rescope(
+		shape=dataset.step_shape,
+	)
+	basis = basis.rescope(pos=basis.shape.make_with(0) + basis.pos)
+	reaches = [stage.contract.required_pad.resolve(
+		scan, basis.frange.length,
+		physical_shape=(dataset.physical_shape if dataset is not None else
+			scan.projection_shape() if stage.contract.required_pad.full_source_axes else None),
+	) for stage in stages]
+	held_windows = []
+	for stage in stages:
+		held_windows.append(source_window)
+		source_window = stage.output_window(source_window, scan)
+	before = after = ProjOrder(0, 0, 0)
+	remaining = []
+	for stage, held, (own_before, own_after) in reversed(list(zip(stages, held_windows, reaches))):
+		read_before, read_after = before + own_before, after + own_after
+		# FFT grids and nonlocal interpolation depend on the held input extent,
+		# not just a finite stencil. Preserve that input and require preceding
+		# Stages to populate it, while publishing only the downstream demand.
+		axes = set(stage.contract.extent_sensitive_axes or ()) | set(stage.contract.requires_full_axes)
+		read_before = replace(read_before, **{
+			axis: max(getattr(read_before, axis), getattr(held.pad_before, axis, 0))
+			for axis in axes
+		})
+		read_after = replace(read_after, **{
+			axis: max(getattr(read_after, axis), getattr(held.pad_after, axis, 0))
+			for axis in axes
+		})
+		remaining.append((before, after, read_before, read_after))
+		before, after = read_before, read_after
+	return tuple(held.for_stage(*reach) for held, reach in zip(held_windows, reversed(remaining)))
 _AXES = {"Theta": Theta, "Y": Y, "X": X}
 
 
@@ -230,19 +270,20 @@ def _stage_axis(stage: Stage, config: WindowConfig) -> str:
 	raise WindowPlanError(f"{stage.name} has no admissible streaming axis")
 
 
-def _validate_boundary(stages: Sequence[Stage], stop: int, selected: TomoWindow) -> None:
+def _validate_boundary(stages: Sequence[Stage], stop: int, selected: TomoWindow, scan: Any) -> None:
 	"""Reject boundaries whose geometry or published artifacts cannot be replayed."""
 
 	produced = set()
 	for stage in stages[:stop]:
-		output = stage.output_window(selected)
+		output = stage.output_window(selected, scan)
 		if any(
 			getattr(output, name) != getattr(selected, name)
 			for name in ("shape", "pos", "step", "pad_before", "pad_after")
 		):
 			raise WindowPlanError(
 				f"{stage.name} changes output geometry before a streaming direction "
-				"boundary; transformed intermediate geometry is not supported",
+				"boundary: it changes the materialized shape or coordinate frame; "
+				"transformed intermediate geometry is not supported",
 			)
 		produced.update(stage.contract.produces_artifacts)
 	for stage in stages[stop:]:
@@ -286,7 +327,7 @@ def resolve_streaming_segments(
 		else:
 			groups.append((index, index + 1, axis))
 	for _start, stop, _axis in groups[:-1]:
-		_validate_boundary(stages, stop, selected)
+		_validate_boundary(stages, stop, selected, scan)
 	segments = []
 	for start, stop, axis in reversed(groups):
 		dataset = _dataset_for_axis(

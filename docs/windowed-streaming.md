@@ -192,3 +192,18 @@ when that producer used the same extent. Windowed-vs-whole FFT equivalence is
 not claimed for that plan. Reference `metadata.yaml` should record window sizes, composed
 and requested padding, and the global source/core interval that produced each
 comparison.
+
+Within a held window, each Stage has a canonical produced window and read
+context. A finite stencil consumes its own reach while preserving context that
+later Stages still need. `extent_sensitive_axes` preserves the held read extent
+on axes where changing the input size changes the numerical calculation. Those
+inputs must be populated by preceding Stages; only the produced selection is
+published afterward. This also preserves multimaterial's padded context through
+all internal iterations.
+
+For example, a 32-row core with one row of zinger context and 20 rows of legacy
+Paganin context on each side occupies 74 rows away from detector edges. Zinger
+populates all 74 because Paganin's FFT depends on that input extent. Paganin
+reads 74 and publishes 32; subsequent stripe work, center sampling, and
+reconstruction operate on 32. The held allocation stays available, while
+downstream workspaces derive their row extent from the produced window.

@@ -22,9 +22,10 @@ class _RequestedWorkStage(SinogramStage):
 	class Params(StageParams):
 		fail: bool = False
 
-	def bounded_work_requests(self, input_spec):
+	def bounded_work_requests(self, input_spec, window=None):
+		shape = input_spec.shape if window is None else window.frange.length
 		return (BoundedWorkRequest(
-			"_requested_work", BufferSpec(input_spec.shape.to(SinoOrder), input_spec.dtype),
+			"_requested_work", BufferSpec(shape.to(SinoOrder), input_spec.dtype),
 			"requested_work", fill_value=7,
 		),)
 
@@ -44,7 +45,7 @@ def test_segment_failure_removes_and_retires_every_allocated_request(monkeypatch
 		stage = _RequestedWorkStage(fail=not fail_allocation)
 		if fail_allocation:
 			request, = stage.bounded_work_requests(BufferSpec.from_buffer(state.working_array))
-			monkeypatch.setattr(stage, "bounded_work_requests", lambda _spec: (
+			monkeypatch.setattr(stage, "bounded_work_requests", lambda _spec, _window=None: (
 				request, replace(request, artifact_key="_second_work", role="second_work"),
 			))
 			allocate = context.storage.allocate
@@ -68,8 +69,8 @@ def test_shared_requests_use_the_largest_declared_capacity():
 	first, second = _RequestedWorkStage(), _RequestedWorkStage()
 	request = replace(first.bounded_work_requests(spec)[0], grow_axes=("X",))
 	larger = replace(request, buffer_spec=BufferSpec(SinoOrder(2, 4, 10), np.float32))
-	first.bounded_work_requests = lambda _spec: (request,)
-	second.bounded_work_requests = lambda _spec: (larger,)
+	first.bounded_work_requests = lambda _spec, _window=None: (request,)
+	second.bounded_work_requests = lambda _spec, _window=None: (larger,)
 	assert collect_bounded_work([first, second], spec) == (larger,)
 	assert collect_bounded_work([second, first], spec) == (larger,)
 
@@ -88,6 +89,6 @@ def test_shared_key_rejects_conflicting_policy(conflict):
 	first = _RequestedWorkStage()
 	second = _RequestedWorkStage()
 	request, = first.bounded_work_requests(spec)
-	second.bounded_work_requests = lambda _spec: (replace(request, **conflict),)
+	second.bounded_work_requests = lambda _spec, _window=None: (replace(request, **conflict),)
 	with pytest.raises(ValueError, match="incompatible bounded work"):
 		collect_bounded_work([first, second], spec)

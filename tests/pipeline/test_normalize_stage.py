@@ -123,10 +123,11 @@ def test_legacy_flat_fields_are_sliced_from_the_canonical_source_window(layout, 
 	assert result.working_array.dtype == np.float32
 	np.testing.assert_array_equal(working, 10)
 	for index, projection in enumerate((1, 4, 7)):
-		expected_gain = 20 + 10 * np.arange(2, 7)[:, None] + 2 * projection
-		expected = np.broadcast_to(10 / expected_gain, (5, 2))
+		expected_gain = 20 + 10 * np.arange(3, 5)[:, None] + 2 * projection
+		expected = np.full((5, 2), 10, dtype=np.float32)
+		expected[1:3] = 10 / expected_gain
 		np.testing.assert_allclose(np.asarray(result.working_array)[layout.point_index(Theta=index)], expected)
-	assert result.artifacts["flat_fields"].shape == (4, 5, 2)
+	assert result.artifacts["flat_fields"].shape == (4, 2, 2)
 	assert state.scan.metadata["flat_fields"].shape == (4, len(detector_rows), 2)
 
 

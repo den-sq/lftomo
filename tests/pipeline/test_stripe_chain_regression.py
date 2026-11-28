@@ -271,7 +271,7 @@ def test_managed_vo_chain_allocates_row_indexed_work_once_and_matches_ndarray(so
 		],
 		"managed_bytes": 2 * 4 * 32 * 32 * 4 + 4 * 32 * 36 * 4,
 		"allocation_count": 3,
-		"indexing": "buffer_sample_ordinals",
+		"indexing": "stage_window_sample_ordinals",
 	}
 	work_events = [
 		event for event in events
