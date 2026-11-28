@@ -830,8 +830,9 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 			state_executor: PipelineStateExecutor | None = None,
 			stage_observer: StageObserver | None = None,
 			execution_observer: ExecutionSpanObserver | None = None,
-			window_config: WindowConfig | None = None) -> list[RunResult]:
-	"""Expand and execute YAML reconstruction runs with a file or resolved Scan."""
+			window_config: WindowConfig | None = None,
+			source_window: TomoWindow | None = None) -> list[RunResult]:
+	"""Execute runs, optionally using a canonical window instead of read bounds."""
 	recon, resolved_pipeline_path = load_recon(pipeline_path)
 	resolved_scan = resolve_scan(scan_path)
 	scan = resolved_scan.scan
@@ -865,12 +866,16 @@ def run_reconstruction(pipeline_path: str | Path, scan_path: str | Path | Resolv
 		# arrays as immutable. Copy only the mapping.
 		run_scan.metadata = dict(scan.metadata)
 		if state_executor is None:
-			segments = resolve_streaming_segments(planning_stages, run_scan, window_config)
+			segments = resolve_streaming_segments(
+				planning_stages, run_scan, window_config, source_window=source_window,
+			)
 		else:
 			# Custom executors own their complete, whole-selection pipeline lifecycle.
 			segments = (StreamingSegment(
 				0, len(planning_stages),
-				resolve_streaming_plan(planning_stages, run_scan, window_config),
+				resolve_streaming_plan(
+					planning_stages, run_scan, window_config, source_window=source_window,
+				),
 			),)
 		planned.append((
 			run, concrete, resolved_document, run_scan, segments,

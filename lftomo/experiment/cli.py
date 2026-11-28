@@ -205,12 +205,6 @@ class PipelineTrialExecutor:
 		read = next((stage for stage in recon.pipeline if stage.kind == "read"), None)
 		if read is None:
 			raise ValueError("fidelity window execution requires a read stage")
-		source = window.with_pad(["Y"])
-		read.params["y_start"] = source.pos.Y
-		read.params["y_stop"] = source.pos.Y + source.shape.Y
-		read.params["theta_start"] = window.pos.Theta
-		read.params["theta_stop"] = window.pos.Theta + window.shape.Theta
-		read.params["theta_stride"] = window.step.Theta
 		for stage in recon.pipeline:
 			if stage.kind == "evaluate":
 				stage.params["windows"] = [{
@@ -236,7 +230,10 @@ class PipelineTrialExecutor:
 				for name in CALIBRATION_RESOLUTION_FIELDS:
 					stage.params.pop(name, None)
 			stages = [create_stage(config) for config in recon.pipeline]
-			validate_pipeline(stages, self.resolved_scan.scan, NumpyBackend(), mode="complete")
+			validate_pipeline(
+				stages, self.resolved_scan.scan, NumpyBackend(), mode="complete",
+				source_window=window.with_pad(["Y"]),
+			)
 
 	@staticmethod
 	def _prefix_candidate_id(identity, window_id: str) -> str:
@@ -408,10 +405,13 @@ class PipelineTrialExecutor:
 					checkpoint=None if context is None else context.checkpoint,
 				).run(state)
 			if context is None and (decision is None or decision.action != "cache"):
-				result = run_reconstruction(pipeline_path, self.resolved_scan)[0]
+				result = run_reconstruction(
+					pipeline_path, self.resolved_scan, source_window=window.with_pad(["Y"]),
+				)[0]
 			else:
 				result = run_reconstruction(
 					pipeline_path, self.resolved_scan, state_executor=execute_state,
+					source_window=window.with_pad(["Y"]),
 				)[0]
 			window_artifacts = dict(result.artifacts)
 			raw_previews = window_artifacts.pop("preview_images", {})

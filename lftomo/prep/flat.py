@@ -6,8 +6,8 @@ import numpy as np
 import tifffile as tf
 
 from lftomo.util.mem import SharedNPArray
-from lftomo.util.shapes import DataRange, ImgSlice, SinoOrder
-from lftomo.util.window import DataRef, TomoWindow
+from lftomo.util.shapes import DataRange, ImgSlice, SinoOrder, Theta
+from lftomo.util.window import DataRef, TomoDataSet, TomoWindow
 from lftomo.util.log import log
 
 
@@ -41,10 +41,15 @@ class FLAT(Enum):
 
 
 def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats: np.ndarray,
-									projection: int, projection_count: int,
+									projection: TomoWindow, scope: TomoDataSet | TomoWindow,
 									pre_sub: bool = False) -> None:
-	"""Normalize a projection view using the supplied weighting position and count."""
-	weights = [projection_count - projection, projection]
+	"""Weight the projection's canonical position within its source scope.
+
+	Pipeline datasets own the physical acquisition extent. The classic prep API
+	uses its window extent and internal coordinates for its local weighting.
+	"""
+	shape = scope.physical_shape if isinstance(scope, TomoDataSet) else scope.shape
+	weights = [shape.Theta - projection.pos.Theta, projection.pos.Theta]
 	dark_map = np.average(
 		flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1], axis=0, weights=weights
 	)
@@ -78,14 +83,15 @@ def weighted_normalize(sino_mem: SharedNPArray, flats_mem: SharedNPArray, sino_r
 		:param pre_sub: Whether darks have already been subtracted from flats.
 	"""
 
-	index = SinoOrder.point_index(Y=window.internal.axis_slice("Y"), Theta=projection)
+	internal = window.internal
+	index = SinoOrder.point_index(Y=internal.axis_slice("Y"), Theta=projection)
 	with sino_mem[index] as sino, sino_read[index] as sino_sm, flats_mem as flats:
 		_weighted_normalize_projection(
 			sino,
 			sino_sm,
 			flats[:, window.axis_slice("Y"), :],
-			projection,
-			window.shape.Theta,
+			internal.rescope(pos=Theta(projection).merge(internal.pos), shape=Theta(1)),
+			window,
 			pre_sub,
 		)
 

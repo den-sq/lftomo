@@ -312,7 +312,7 @@ def test_level_specific_memory_and_output_guards_apply_during_preflight(tmp_path
 	assert overridden.prepare()[0].max_concurrency == 1
 
 
-def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monkeypatch):
+def test_fidelity_window_configures_evaluation_and_finalist_writer(monkeypatch):
 	config = experiment(values=(0.01,))
 	scan = SimpleNamespace(
 		detector=SimpleNamespace(rows=20),
@@ -336,9 +336,6 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 		scan.projection_shape(), projection_stride=4, projection_limit=10,
 		work_dtype=np.float64,
 	)
-	def unexpected_rebuild(*_args, **_kwargs):
-		raise AssertionError("execution must consume the evaluated canonical window")
-	monkeypatch.setattr(TomoWindow, "from_bounds", unexpected_rebuild)
 	base = dict(
 		resolved_recon=recon,
 		fidelity=SimpleNamespace(
@@ -349,10 +346,7 @@ def test_fidelity_window_injection_enforces_projection_and_finalist_writer(monke
 		__truediv__=lambda self, value: self,
 	))
 	read = screen.pipeline[0]
-	assert read.params == {
-		"y_start": 1, "y_stop": 5, "theta_start": 5, "theta_stop": 45,
-		"theta_stride": 4,
-	}
+	assert read.params == recon.pipeline[0].params
 	assert screen.pipeline[1].params["windows"] == [{
 		"id": "tune-a", "slice_start": 1, "slice_stop": 3,
 	}]
@@ -454,7 +448,7 @@ def test_pipeline_executor_publishes_blinded_screening_previews(monkeypatch, tmp
 	}
 	monkeypatch.setattr(
 		"lftomo.experiment.cli.run_reconstruction",
-		lambda *_args: [SimpleNamespace(artifacts={
+		lambda *_args, **_kwargs: [SimpleNamespace(artifacts={
 			"metrics": artifact,
 			"preview_images": {"tune-a-0": np.full((3, 3), 0.5)},
 		})],

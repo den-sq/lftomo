@@ -212,11 +212,13 @@ def _read_spec(
 	dataset: TomoDataSet | None = None,
 	source_window: TomoWindow | None = None,
 ) -> BufferSpec | None:
-	if (dataset is None) != (source_window is None):
-		raise ValueError("read planning requires dataset and source_window together")
+	if dataset is not None and source_window is None:
+		raise ValueError("read planning with a dataset requires its source_window")
 	if source_window is None:
 		physical_shape = scan.projection_shape()
-	dtype = None if dataset is None else dataset.dtype
+	# A canonical window is sufficient for metadata-only experiment preflight;
+	# creating the acquisition dataset remains execution-time source resolution.
+	dtype = None if source_window is None else source_window.dtype
 	dtype = scan.metadata.get("raw_dtype") if dtype is None else dtype
 	if dtype is None:
 		source = scan.projections

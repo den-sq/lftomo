@@ -87,7 +87,9 @@ def _read_source_window(
 	)
 
 
-def _source_geometry(stages: Sequence[Stage], scan: Any):
+def _source_geometry(
+	stages: Sequence[Stage], scan: Any, source_window: TomoWindow | None = None,
+):
 	"""Probe the acquisition once before creating any directional datasets."""
 
 	read = next((stage for stage in stages if stage.name.startswith("read.")), None)
@@ -108,7 +110,9 @@ def _source_geometry(stages: Sequence[Stage], scan: Any):
 		metadata = probe_source_metadata(scan, read)
 		physical_shape = metadata.physical_shape
 	try:
-		selected = _read_source_window(read, physical_shape, dtype=metadata.dtype)
+		selected = source_window if source_window is not None else _read_source_window(
+			read, physical_shape, dtype=metadata.dtype,
+		)
 	except ValueError as error:
 		raise WindowPlanError(str(error)) from error
 	return metadata, selected
@@ -171,8 +175,8 @@ def _dataset_for_axis(
 	extra = _canonical_pad(config.extra_pad)
 	extra_after = extra if config.extra_pad_after is None \
 		else _canonical_pad(config.extra_pad_after)
-	pad_before = ProjOrder.param_max(pad_before, extra)
-	pad_after = ProjOrder.param_max(pad_after, extra_after)
+	pad_before = ProjOrder.param_max(pad_before, extra, _canonical_pad(selected.pad_before))
+	pad_after = ProjOrder.param_max(pad_after, extra_after, _canonical_pad(selected.pad_after))
 	if sensitive:
 		message = (
 			"Extent-sensitive windowed Stages use fixed window+padding parity, "
@@ -198,11 +202,12 @@ def _dataset_for_axis(
 
 def resolve_streaming_plan(
 	stages: Sequence[Stage], scan: Any, config: WindowConfig | None = None,
+	*, source_window: TomoWindow | None = None,
 ) -> TomoDataSet:
 	"""Resolve one explicitly selected direction, retaining the legacy Y API."""
 
 	config = config or WindowConfig()
-	metadata, selected = _source_geometry(stages, scan)
+	metadata, selected = _source_geometry(stages, scan, source_window)
 	return _dataset_for_axis(stages, scan, config, metadata, selected, config.axis)
 
 
@@ -252,6 +257,7 @@ def _validate_boundary(stages: Sequence[Stage], stop: int, selected: TomoWindow)
 
 def resolve_streaming_segments(
 	stages: Sequence[Stage], scan: Any, config: WindowConfig | None = None,
+	*, source_window: TomoWindow | None = None,
 ) -> tuple[StreamingSegment, ...]:
 	"""Plan direction changes and propagate materialized halo coverage backward.
 
@@ -263,7 +269,7 @@ def resolve_streaming_segments(
 	if not stages:
 		return ()
 	config = config or WindowConfig()
-	metadata, selected = _source_geometry(stages, scan)
+	metadata, selected = _source_geometry(stages, scan, source_window)
 	if all(value is None for value in (config.rows, config.theta, config.columns)):
 		# With no partitioning, every Stage already has all selected axes.
 		# Direction preferences must not introduce unnecessary disk boundaries or

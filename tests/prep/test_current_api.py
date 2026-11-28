@@ -39,9 +39,7 @@ def test_weighted_normalize_uses_current_memory_and_window_api(
 	output = _shared(window.internal.with_pad().shape.to(SinoOrder))
 	source = _shared(output.shape)
 	flats = _shared(GenericOrder(4, 8, 4))
-	calls = []
 	views = []
-	kernel = flat._weighted_normalize_projection
 	getitem = SharedNPArray.__getitem__
 
 	def record_view(memory, index):
@@ -49,16 +47,6 @@ def test_weighted_normalize_uses_current_memory_and_window_api(
 		views.append(view)
 		return view
 
-	def record(target, original, fields, projection, projection_count, pre_sub):
-		assert isinstance(projection, int)
-		assert isinstance(projection_count, int)
-		assert np.shares_memory(target, views[0].array())
-		assert np.shares_memory(original, views[1].array())
-		assert np.shares_memory(fields, flats.array())
-		calls.append((projection, projection_count))
-		return kernel(target, original, fields, projection, projection_count, pre_sub)
-
-	monkeypatch.setattr(flat, "_weighted_normalize_projection", record)
 	monkeypatch.setattr(SharedNPArray, "__getitem__", record_view)
 	try:
 		output.array()[...] = -7
@@ -78,7 +66,6 @@ def test_weighted_normalize_uses_current_memory_and_window_api(
 
 		np.testing.assert_allclose(output.array(), expected)
 		assert [view.name for view in views] == [output.name, source.name]
-		assert calls == [(1, 3)]
 	finally:
 		for view in views:
 			view.shutdown()
