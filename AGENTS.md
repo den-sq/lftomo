@@ -37,6 +37,16 @@ regression tests rather than in a second specification here.
   `TomoWindow.with_output_padding`. The removed `AxisPad` and `WindowRegion`
   types must not be restored. Do not add another padding model. Consult
   `docs/windowed-streaming.md` and `tests/util/test_window.py`.
+- A Stage computes only the extent it must produce: the window's `internal`
+  extent plus the padding that later Stages still require. Padding is consumed
+  Stage by Stage; once the last Stage needing a context sample has run, later
+  Stages neither compute nor carry it. Express each Stage's produced extent and
+  the context it reads with `TomoWindow` (`internal`, `with_pad`, `rescope`).
+  A bound buffer's shape is its allocation, not the extent a Stage computes.
+- Work assignment and workspace extents follow from that window. Iterating
+  the whole padded buffer, sizing work from `with_pad()` where a narrower
+  window suffices, or carrying padding past its last consumer is a defect even
+  when output matches.
 
 ### Managed storage and work planes
 
@@ -50,14 +60,22 @@ regression tests rather than in a second specification here.
   implemented for shared memory by `lftomo.util.mem.SharedNPArray` and
   `SharedNPManager`, own production storage and lifecycle.
 - Route owned or reusable work planes and material scratch through that seam.
-  Bounded Stage work is declared through `Stage.bounded_work_requests` using
-  `BufferSpec`; the generic execution lifecycle shares requests across the
-  segment, allocates them, derives views from assigned buffer ranges and
-  retires them. Workers retain the held window and full buffer; their assigned
-  `DataRange` owns only scheduling, and `TomoWindow` translates sample ordinals
-  to source coordinates. Keep
-  algorithm-specific dtype, capacity, padding and initialization policy in the
-  requesting Stage, not the executor. Temporary work is separate from published
+  A Stage declares segment workspace through `Stage.bounded_work_requests`
+  using `BufferSpec`. "Bounded" describes lifetime, not extent: the generic
+  execution lifecycle merges requests across the segment, allocates each once
+  per segment execution, gives each worker a view for its assigned `DataRange`,
+  and retires it when the segment completes. A workspace's extent on the
+  dispatched axis is the extent the Stage computes, taken from the canonical
+  window as described under "Window and padding geometry", never from the bound
+  buffer or `with_pad()` by default.
+- Workers hold the window and the shared buffer. The assigned `DataRange`
+  selects which of the Stage's computed samples a worker processes, and
+  `TomoWindow` translates those ordinals to source coordinates.
+- The requesting Stage owns only the algorithm-specific parts of its
+  workspace: dtype, initialization, and padding the algorithm generates itself
+  (for example `stripe.fw`'s mirrored Θ extension), which it still expresses
+  through `TomoWindow`. The extent on the windowed axis comes from the window,
+  not from the Stage or the executor. Temporary work is separate from published
   `managed_artifacts` and prefix-cache state.
 - Declare unavoidable output temporaries created by external numerical
   libraries. Do not promise zero allocation when the external API cannot
