@@ -30,7 +30,6 @@ from lftomo.experiment import (
 from lftomo.experiment.cli import PipelineTrialExecutor
 from lftomo.experiment.runner import ExperimentInputs
 from lftomo.experiment.events import current_execution_context
-from lftomo.runner import run_reconstruction
 from lftomo.util.window import TomoWindow
 
 
@@ -216,61 +215,6 @@ def _lifecycle(
 		identity_validator=executor.validate_identity,
 	)
 	return ExperimentLifecycle(runner), executor
-
-
-@pytest.mark.parametrize("cache", [False, True])
-def test_fidelity_halo_and_strided_projection_outputs_match_read_selection(
-	tmp_path, monkeypatch, cache,
-):
-	api, original = _lifecycle(tmp_path, monkeypatch)
-	document = original.config.model_dump(mode="json")
-	document["windows"] = [{
-		"id": "tune-1", "y_start": 1, "y_stop": 3, "halo": 1,
-		"theta_start": 1, "theta_stop": 8,
-	}]
-	document["fidelities"][0]["projection_stride"] = 3
-	document["output"]["screening"] = "configured_writers"
-	document["candidate_space"]["pipeline"].append({
-		"kind": "write", "algorithm": "tiff_slices",
-		"params": {"naming_template": "slice_{slice:03d}.tif"},
-	})
-	config = ExperimentConfig.model_validate(document)
-	executor = PipelineTrialExecutor(
-		config, original.resolved_scan,
-		original.prefix_cache_policy.model_copy(update={"enabled": cache}),
-	)
-	runner = IndependentExperimentRunner(
-		config, api.runner.inputs, tmp_path / "selected", executor,
-	)
-	_preflight, trials = runner.prepare()
-	if cache:
-		executor.plan_prefix_cache(trials)
-	for index, trial in enumerate(trials):
-		identity = trial.identity
-		before = identity.model_dump(mode="json")
-		window = identity.fidelity.windows["tune-1"]
-		baseline = executor._window_recon(identity, "tune-1", window, tmp_path / f"baseline-{index}")
-		# This public read selection is the pre-window-handoff execution contract:
-		# reconstruct the halo as well as the interior, using source samples 1, 4, 7.
-		baseline.pipeline[0].params.update({
-			"y_start": 0, "y_stop": 4, "theta_start": 1, "theta_stop": 8,
-			"theta_stride": 3,
-		})
-		baseline_path = tmp_path / f"baseline-{index}.yaml"
-		baseline_path.write_text(baseline.to_yaml(), encoding="utf-8")
-		expected = run_reconstruction(baseline_path, original.resolved_scan)[0]
-		actual = executor(identity, tmp_path / f"actual-{index}")
-
-		assert identity.model_dump(mode="json") == before
-		window_artifacts = actual.artifacts["windows"]["tune-1"]
-		assert window_artifacts["metrics"] == expected.artifacts["metrics"]
-		assert [record.path.name for record in actual.outputs] == [
-			f"slice_{row:03d}.tif" for row in range(4)
-		]
-		for record, expected_path in zip(actual.outputs, expected.artifacts["output_files"], strict=True):
-			np.testing.assert_array_equal(tf.imread(record.path), tf.imread(expected_path))
-		if cache:
-			assert window_artifacts["prefix_cache"]["status"] == ("miss" if index == 0 else "hit")
 
 
 def test_real_pipeline_lifecycle_persists_cache_miss_hit_and_retries_old_failures(

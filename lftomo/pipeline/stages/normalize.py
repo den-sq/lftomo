@@ -31,6 +31,7 @@ from lftomo.pipeline.core import (
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import LocalArray, buffer_view
 from lftomo.util.shapes import FlatFieldOrder, ProjOrder, SinoOrder, Theta
+from lftomo.util.window import TomoWindow
 
 
 def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
@@ -157,6 +158,10 @@ class WeightedNormalizeStage(Stage):
 
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
+		scope = TomoWindow.from_bounds(
+			state.dataset.physical_shape, dtype=state.dataset.dtype,
+			work_dtype=state.dataset.work_dtype,
+		)
 		for local_index in state.work_indices("Theta"):
 			image = working[layout.point_index(Theta=local_index)]
 			_weighted_normalize_projection(
@@ -167,7 +172,7 @@ class WeightedNormalizeStage(Stage):
 					pos=Theta(state.source_window.source_index("Theta", local_index)),
 					shape=Theta(1),
 				),
-				state.dataset,
+				scope,
 				self.params.pre_sub,
 			)
 		return _finish_normalization(state, output)

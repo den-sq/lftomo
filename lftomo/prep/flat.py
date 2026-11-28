@@ -7,7 +7,7 @@ import tifffile as tf
 
 from lftomo.util.mem import SharedNPArray
 from lftomo.util.shapes import DataRange, ImgSlice, SinoOrder, Theta
-from lftomo.util.window import DataRef, TomoDataSet, TomoWindow
+from lftomo.util.window import DataRef, TomoWindow
 from lftomo.util.log import log
 
 
@@ -41,15 +41,11 @@ class FLAT(Enum):
 
 
 def _weighted_normalize_projection(target: np.ndarray, source: np.ndarray, flats: np.ndarray,
-									projection: TomoWindow, scope: TomoDataSet | TomoWindow,
+									projection: TomoWindow, scope: TomoWindow,
 									pre_sub: bool = False) -> None:
-	"""Weight the projection's canonical position within its source scope.
-
-	Pipeline datasets own the physical acquisition extent. The classic prep API
-	uses its window extent and internal coordinates for its local weighting.
-	"""
-	shape = scope.physical_shape if isinstance(scope, TomoDataSet) else scope.shape
-	weights = [shape.Theta - projection.pos.Theta, projection.pos.Theta]
+	"""Weight a source projection relative to its source-coordinate scope."""
+	position = projection.interval("Theta").start - scope.interval("Theta").start
+	weights = [scope.shape.Theta - position.Theta, position.Theta]
 	dark_map = np.average(
 		flats[FLAT.PREDARK.index:FLAT.POSTDARK.index + 1], axis=0, weights=weights
 	)
@@ -79,7 +75,7 @@ def weighted_normalize(sino_mem: SharedNPArray, flats_mem: SharedNPArray, sino_r
 		:param flats_mem: Shared memory metadata for flats (gains, darks).
 		:param sino_read: Shared memory metadata for input data.
 		:param window: Detector window in either ProjOrder or SinoOrder; buffers remain Y-first.
-		:param projection: Local projection # to normalize.
+		:param projection: Dense local projection coordinate to normalize, not a packed ordinal.
 		:param pre_sub: Whether darks have already been subtracted from flats.
 	"""
 
@@ -90,7 +86,10 @@ def weighted_normalize(sino_mem: SharedNPArray, flats_mem: SharedNPArray, sino_r
 			sino,
 			sino_sm,
 			flats[:, window.axis_slice("Y"), :],
-			internal.rescope(pos=Theta(projection).merge(internal.pos), shape=Theta(1)),
+			window.rescope(
+				pos=(window.interval("Theta").start + Theta(projection)).merge(window.pos),
+				shape=Theta(1),
+			),
 			window,
 			pre_sub,
 		)
