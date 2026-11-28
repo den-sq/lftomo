@@ -277,6 +277,8 @@ class SinoOrder(DataShape): Y: int; Theta: int; X: int 	 # noqa: E701,E702
 class ReverseSinoOrder(DataShape): X: int; Theta: int; Y: int 	 # noqa: E701,E702
 @dataclass(slots=True)
 class ImageStack(DataShape): Z: int; Y: int; X: int 	 # noqa: E701,E702
+@dataclass(slots=True)
+class FlatFieldOrder(DataShape): Flat: int; Y: int; X: int 	 # noqa: E701,E702
 
 
 @dataclass(slots=True)

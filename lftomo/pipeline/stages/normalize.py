@@ -30,7 +30,7 @@ from lftomo.pipeline.core import (
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
 from lftomo.storage import LocalArray, buffer_view
-from lftomo.util.shapes import GenericOrder, ProjOrder, SinoOrder
+from lftomo.util.shapes import FlatFieldOrder, ProjOrder, SinoOrder
 
 
 def _normalization_output(state: PipelineState) -> tuple[object, np.ndarray]:
@@ -65,38 +65,37 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 
 		return buffer_view(existing)
 	fields = np.asarray(state.scan.metadata["flat_fields"])
-	if fields.ndim == 3:
-		field_buffer = LocalArray(fields, ProjOrder(*fields.shape))
-		# Legacy flat_fields carries values but no source geometry. Until its
-		# detector interval is explicit, infer one of the historical origins
-		# from Y extent so this consumer can derive the current padded-window view.
-		# Binding the array to a DataRef would remove this inference and offset code.
-		if state.source_window is None or state.dataset is None:
-			raise RuntimeError("flat-field slicing requires canonical source geometry")
-		source = state.source_window.with_pad(["Y"])
-		selection = state.dataset.full_window().with_pad(["Y"]).interval("Y")
-		if field_buffer.shape.Y == selection.length.Y:
-			start = source.pos.Y - selection.start.Y
-		elif field_buffer.shape.Y == state.dataset.physical_shape.Y:
-			start = source.pos.Y
-		else:
-			raise ValueError(
-				"resolved flat_fields do not cover the canonical padded source window"
-			)
-		stop = start + source.shape.Y
-		if start < 0 or stop > field_buffer.shape.Y:
-			raise ValueError(
-				"selected flat_fields do not cover the canonical padded source window"
-			)
-		fields = field_buffer[ProjOrder.point_index(Y=slice(start, stop))].array()
+	field_buffer = LocalArray(fields, FlatFieldOrder(*fields.shape))
+	# Legacy flat_fields carries values but no source geometry. Until its
+	# detector interval is explicit, infer one of the historical origins
+	# from Y extent so this consumer can derive the current padded-window view.
+	# Binding the array to a DataRef would remove this inference and offset code.
+	if state.source_window is None or state.dataset is None:
+		raise RuntimeError("flat-field slicing requires canonical source geometry")
+	source = state.source_window.with_pad(["Y"])
+	selection = state.dataset.full_window().with_pad(["Y"]).interval("Y")
+	if field_buffer.shape.Y == selection.length.Y:
+		start = source.pos.Y - selection.start.Y
+	elif field_buffer.shape.Y == state.dataset.physical_shape.Y:
+		start = source.pos.Y
+	else:
+		raise ValueError(
+			"resolved flat_fields do not cover the canonical padded source window"
+		)
+	stop = start + source.shape.Y
+	if start < 0 or stop > field_buffer.shape.Y:
+		raise ValueError(
+			"selected flat_fields do not cover the canonical padded source window"
+		)
+	field_buffer = field_buffer[FlatFieldOrder.point_index(Y=slice(start, stop))]
 	if state.storage is None:
-		state.artifacts["flat_fields"] = fields
-		return fields
+		state.artifacts["flat_fields"] = field_buffer.array()
+		return field_buffer.array()
 	artifact = state.storage.allocate(
-		GenericOrder(*fields.shape), fields.dtype,
+		field_buffer.shape, field_buffer.dtype,
 		role="flat_fields", reuse_from=("flat_fields",),
 	)
-	artifact.array()[...] = fields
+	artifact.array()[...] = field_buffer.array()
 	state.artifacts["flat_fields"] = artifact
 	return artifact.array()
 
