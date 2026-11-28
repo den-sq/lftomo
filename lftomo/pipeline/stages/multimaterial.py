@@ -24,6 +24,7 @@ class MultimaterialStage(Stage):
 	The working FBP is the reference classifier's reconstruction, not the
 	configured downstream reconstruction. All halo rows participate in every
 	iteration. FFT extent and the projection-wide air median affect the result.
+	Only the Stage's produced extent is published back to the held input buffer.
 	"""
 
 	name = "phase.multimaterial"
@@ -79,9 +80,11 @@ class MultimaterialStage(Stage):
 			phase_fft_y=True, phase_fft_passes=params.n_iter + 1,
 		))
 
-	def bounded_work_requests(self, input_spec):
+	def bounded_work_requests(self, input_spec, window=None):
 		"""Declare the composite's mixed-layout scratch through the Stage hook."""
-		shape = input_spec.shape
+		# The iterative FFT and projection-wide air estimate consume this same
+		# context on every pass; only the final publication narrows to the core.
+		shape = input_spec.shape if window is None else window.with_pad().frange.length.to(input_spec.layout)
 		specs = {
 			"baseline": (shape, np.dtype(np.float32)),
 			"current": (shape, np.dtype(np.float32)),

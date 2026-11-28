@@ -11,7 +11,8 @@ import numpy as np
 from scipy.ndimage import shift
 
 from lftomo.pipeline.core import (
-	PadRequirement, PipelineState, Stage, StageContract, StageParams,
+	BoundedWorkRequest, BufferSpec, PadRequirement, PipelineState, ProjectionStage,
+	StageContract, StageParams,
 	allocate_output, commit_output,
 )
 from lftomo.pipeline.domains import DataDomain, PRESERVE
@@ -34,15 +35,6 @@ def _contract(*, resamples_detector: bool = False, mutates_input: bool = True,
 	)
 
 
-def _array(state: PipelineState, name: str) -> np.ndarray:
-	if state.backend.name != "numpy":
-		raise TypeError(f"{name} currently requires the NumPy backend")
-	data = np.asarray(state.working_array)
-	if data.ndim != 3:
-		raise ValueError(f"{name} expects a (Y, Theta, X) sinogram array")
-	return data
-
-
 _INTERPOLATION = {
 	"nearest": "INTER_NEAREST",
 	"linear": "INTER_LINEAR",
@@ -56,6 +48,7 @@ _BORDER_MODE = {
 	"reflect": "BORDER_REFLECT_101",
 	"symmetric": "BORDER_REFLECT",
 }
+_AFFINE_CANVAS = "_affine_canvas"
 
 
 def transform_affine_projection(
@@ -78,13 +71,15 @@ def transform_affine_projection(
 			(stage.params.movement_y * fraction, stage.params.movement_x * fraction),
 			order=3, mode="constant", cval=0.0,
 		)
-	if target is None:
-		width = stage.output_shape(ProjOrder(1, row_count, image.shape[1])).X
-		target = np.empty((row_count, width), dtype=image.dtype)
-	cv2.copyMakeBorder(
-		image, 0, 0, stage.params.pad_x, stage.params.pad_x,
-		getattr(cv2, _BORDER_MODE[stage.params.pad_mode]), dst=target, value=0,
-	)
+	if stage.target_layout is not None:
+		if target is None:
+			raise RuntimeError("fused affine correction requires its bounded canvas")
+		cv2.copyMakeBorder(
+			image, 0, 0, stage.params.pad_x, stage.params.pad_x,
+			getattr(cv2, _BORDER_MODE[stage.params.pad_mode]), dst=target, value=0,
+		)
+	else:
+		target = image
 	if stage.params.skew_degrees != 0:
 		width = target.shape[1]
 		left_padding = (target.shape[1] - image.shape[1]) // 2
@@ -100,16 +95,15 @@ def transform_affine_projection(
 			raise ValueError(
 				f"unknown skew interpolation {stage.params.interpolation!r}"
 			) from error
-		# OpenCV does not support an affine transform whose source and destination
-		# are the same array. Its result is the one unavoidable library temporary;
-		# the canonical output allocation still owns the published buffer.
-		target[...] = cv2.warpAffine(
+		# OpenCV cannot rotate in place. Its returned numerical temporary covers
+		# the established padded input; only the produced view is published.
+		return cv2.warpAffine(
 			target, matrix, (width, row_count), flags=interpolation,
 		)
 	return target
 
 
-class SkewCorrectStage(Stage):
+class SkewCorrectStage(ProjectionStage):
 	"""Rotate each projection image around the configured detector center."""
 
 	name = "skew_correct.cv2_affine"
@@ -137,34 +131,29 @@ class SkewCorrectStage(Stage):
 	@classmethod
 	def contract_for(cls, params: Params) -> StageContract:
 		active = params.enabled and params.degrees != 0
-		return replace(cls.contract, resamples_detector=active, mutates_input=active)
+		return replace(
+			cls.contract, resamples_detector=active, mutates_input=active,
+			extent_sensitive_axes=("Y", "X") if active else (),
+		)
 
-	def run(self, state: PipelineState) -> PipelineState:
-		data = _array(state, self.name)
-		layout = state.layout
+	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:
 		if not self.params.enabled or self.params.degrees == 0:
-			return state
+			return None
 		import cv2
 
-		height = data.shape[layout.axis_of("Y")]
-		width = data.shape[layout.axis_of("X")]
+		height, width = image.shape
 		center = (
 			width / 2 if self.params.center_px is None else self.params.center_px,
 			height / 2 if self.params.center_y_px is None else self.params.center_y_px,
 		)
 		matrix = cv2.getRotationMatrix2D(center, self.params.degrees, 1.0)
-		for projection in state.work_indices("Theta"):
-			image = data[layout.point_index(Theta=projection)]
-			image[:] = cv2.warpAffine(
-				image,
-				matrix,
-				(width, height),
-				flags=getattr(cv2, _INTERPOLATION[self.params.interpolation]),
-			)
-		return state
+		return cv2.warpAffine(
+			image, matrix, (width, height),
+			flags=getattr(cv2, _INTERPOLATION[self.params.interpolation]),
+		)
 
 
-class MovementCorrectStage(Stage):
+class MovementCorrectStage(ProjectionStage):
 	"""Apply a linearly increasing detector shift across projection angle."""
 
 	name = "movement_correct.linear_shift"
@@ -198,33 +187,27 @@ class MovementCorrectStage(Stage):
 		active = params.enabled and (params.y != 0 or params.x != 0)
 		return replace(
 			cls.contract, resamples_detector=active, mutates_input=active,
+			extent_sensitive_axes=("Y", "X") if active else (),
 			required_pad=PadRequirement(fixed=Proj(
 				Y=int(np.ceil(abs(params.y))) if active else 0,
 				X=int(np.ceil(abs(params.x))) if active else 0,
 			)),
 		)
 
-	def run(self, state: PipelineState) -> PipelineState:
-		data = _array(state, self.name)
-		layout = state.layout
+	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:
 		if not self.params.enabled or (self.params.y == 0 and self.params.x == 0):
-			return state
+			return None
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
-		for projection in state.work_indices("Theta"):
-			fraction = state.source_window.source_index("Theta", projection) / state.dataset.physical_shape.Theta
-			image = data[layout.point_index(Theta=projection)]
-			image[:] = shift(
-				image,
-				(self.params.y * fraction, self.params.x * fraction),
-				order=self.params.order,
-				mode=self.params.mode,
-				cval=self.params.cval,
-			)
-		return state
+		projection = next(state.work_indices("Theta"))
+		fraction = state.source_window.source_index("Theta", projection) / state.dataset.physical_shape.Theta
+		return shift(
+			image, (self.params.y * fraction, self.params.x * fraction),
+			order=self.params.order, mode=self.params.mode, cval=self.params.cval,
+		)
 
 
-class AffineSkewMovementStage(Stage):
+class AffineSkewMovementStage(ProjectionStage):
 	"""Legacy affine correction with an optional fused layout rewrite."""
 
 	name = "geometry.affine_skew_movement"
@@ -267,7 +250,7 @@ class AffineSkewMovementStage(Stage):
 		if params.transition_to is None:
 			return replace(
 				cls.contract, resamples_detector=active, mutates_input=active,
-				required_pad=pad,
+				required_pad=pad, extent_sensitive_axes=("Y", "X") if active else (),
 			)
 		target = ProjOrder if params.transition_to == "projection" else SinoOrder
 		source = SinoOrder if target is ProjOrder else ProjOrder
@@ -275,34 +258,85 @@ class AffineSkewMovementStage(Stage):
 			cls.contract, accepts=(source,), prefers=source, produces=target,
 			fused_transition=True, resamples_detector=active, mutates_input=False,
 			window_axes=(), required_pad=pad,
+			extent_sensitive_axes=("Y", "X") if active else (),
 		)
 
 	@property
 	def target_layout(self):
 		return self.contract.produces if self.contract.fused_transition else None
 
-	def output_window(self, source: TomoWindow) -> TomoWindow:
+	def output_window(self, source: TomoWindow, scan=None) -> TomoWindow:
 		"""Return the published output canvas for the fused affine transition."""
 
-		return source.with_output_padding(X(self.params.pad_x))
+		return source if self.target_layout is None else source.with_output_padding(X(self.params.pad_x))
 
 	def output_shape(self, source_shape) -> ProjOrder | SinoOrder:
 		"""Return the one canonical target-layout affine allocation shape."""
 
-		expanded = source_shape + X(self.params.pad_x) + X(self.params.pad_x)
-		return expanded.to(self.target_layout)
+		window = TomoWindow.from_bounds(source_shape)
+		return self.output_window(window).frange.length.to(self.target_layout)
+
+	def bounded_work_requests(self, input_spec: BufferSpec,
+			window: TomoWindow | None = None) -> tuple[BoundedWorkRequest, ...]:
+		if self.target_layout is None:
+			return ()
+		if window is None:
+			zero = input_spec.shape.make_with(0)
+			window = TomoWindow(
+				input_spec.shape, zero, zero, input_spec.shape.make_with(1), input_spec.dtype,
+			)
+		canvas = self.output_window(window.with_pad())
+		return (BoundedWorkRequest(
+			_AFFINE_CANVAS, BufferSpec(canvas.frange.length.to(ProjOrder), input_spec.dtype),
+			"affine_canvas", required_for_fallback=True,
+		),)
+
+	def run_projection(self, image: np.ndarray, state: PipelineState) -> np.ndarray | None:
+		if self.params.skew_degrees == 0 and (
+			not self.params.movement_enabled
+			or (self.params.movement_y == 0 and self.params.movement_x == 0)
+		):
+			return None
+		moving = self.params.movement_enabled and (
+			self.params.movement_y != 0 or self.params.movement_x != 0
+		)
+		if moving and (state.source_window is None or state.dataset is None):
+			raise RuntimeError(f"{self.name} requires canonical source geometry")
+		height, _width = image.shape
+		return transform_affine_projection(
+			self, image, state.source_window, next(state.work_indices("Theta")),
+			state.working_array.shape if state.dataset is None else state.dataset.physical_shape,
+			height,
+		)
+
+	def fill_output(self, state: PipelineState, output_buffer) -> None:
+		"""Calculate on the canonical padded canvas and publish its produced view."""
+		from lftomo.pipeline.execution import _work_states
+
+		read_output = self.output_window(state.read_window)
+		produced_output = self.output_window(state.produced_window)
+		crop = read_output.packed_index(produced_output, Proj)
+		destination = self.output_window(state.source_window).with_pad().packed_index(
+			produced_output, self.target_layout,
+		)
+		output = output_buffer.array()
+		for image, projection_state in _work_states(
+			state, "Theta", work_keys=(_AFFINE_CANVAS,), context=True,
+		):
+			projection = next(projection_state.work_indices("Theta"))
+			canvas = projection_state.artifacts[_AFFINE_CANVAS]
+			transformed = transform_affine_projection(
+				self, image, state.source_window, projection,
+				state.dataset.physical_shape, state.read_window.frange.length.Y,
+				target=canvas.array()[0],
+			)
+			index = list(destination)
+			index[self.target_layout.axis_of("Theta")] = projection
+			output[tuple(index)] = transformed[crop]
 
 	def run(self, state: PipelineState) -> PipelineState:
 		if self.target_layout is None:
-			movement = MovementCorrectStage(
-				enabled=self.params.movement_enabled,
-				y=self.params.movement_y, x=self.params.movement_x,
-			)
-			skew = SkewCorrectStage(
-				degrees=self.params.skew_degrees, center_px=self.params.center_px,
-				center_y_px=self.params.center_y_px, interpolation=self.params.interpolation,
-			)
-			return skew.run(movement.run(state))
+			return super().run(state)
 		if state.backend.name != "numpy":
 			raise TypeError("geometry.affine_skew_movement currently requires the NumPy backend")
 		data = np.asarray(state.working_array)
@@ -316,23 +350,24 @@ class AffineSkewMovementStage(Stage):
 		if state.source_window is None or state.dataset is None:
 			raise RuntimeError(f"{self.name} requires canonical source geometry")
 		source_shape = state.working_array.shape
-		row_count = source_shape.Y
 		shape = self.output_shape(source_shape)
-		output_buffer, output = allocate_output(
-			state, shape, data.dtype, role="fused_geometry",
-		)
-		for projection in state.work_indices("Theta"):
-			image = data[input_layout.point_index(Theta=projection)]
-			transform_affine_projection(
-				self, image, state.source_window, projection,
-				state.dataset.physical_shape, row_count,
-				target=output[self.target_layout.point_index(Theta=projection)],
+		from lftomo.pipeline.execution import _prepare_bounded_work, _release_bounded_work
+
+		requests = _prepare_bounded_work(state, (self,), "Theta")
+		try:
+			output_buffer, _output = allocate_output(
+				state, shape, data.dtype, role="fused_geometry",
 			)
+			self.fill_output(state, output_buffer)
+		finally:
+			_release_bounded_work(state, requests)
 		result = commit_output(
 			state, output_buffer, retire_as=None,
 		)
 		if state.source_window is not None:
 			result.source_window = self.output_window(state.source_window)
+		if state.stage_window is not None:
+			result.stage_window = self.output_window(state.stage_window)
 		result.artifacts["fused_layout_transition"] = {
 			"from": input_layout.__name__, "to": self.target_layout.__name__,
 			"pad_x": self.params.pad_x, "skew_degrees": self.params.skew_degrees,

@@ -10,6 +10,7 @@ model implementation.
 from __future__ import annotations
 
 import importlib
+from dataclasses import replace
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -105,11 +106,14 @@ def interpolate_missing_angles(volume: np.ndarray, mask: np.ndarray, theta: np.n
 	return out.reshape(dense.shape)
 
 
-def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict) -> PipelineState:
+def _store_result(state: PipelineState, volume: np.ndarray, metadata: dict, *, window=None) -> PipelineState:
 	values = np.asarray(volume, dtype=np.float32)
-	shape = ProjOrder(*values.shape)
-	output, target = allocate_output(state, shape.to(SinoOrder), np.float32, role="super_resolution")
-	target[...] = shape.transposed_view(values, SinoOrder)
+	result_shape = ProjOrder(*values.shape)
+	shape = result_shape.to(SinoOrder) if window is None else state.working_array.shape
+	output, target = allocate_output(state, shape, np.float32, role="super_resolution")
+	selection = state.work_index(shape)
+	result_selection = selection if window is None else window.packed_index(state.produced_window, SinoOrder)
+	target[selection] = result_shape.transposed_view(values, SinoOrder)[result_selection]
 	result = commit_output(
 		state, output, retire_as=None,
 	)
@@ -222,7 +226,9 @@ class DRHTStage(Stage):
 
 	def run(self, state: PipelineState) -> PipelineState:
 		volume, mask, theta = _dense_inputs(state)
-		seed = interpolate_missing_angles(volume, mask, theta)
+		seed = np.empty_like(volume)
+		for index in state.work_indices("Y"):
+			seed[:, index] = interpolate_missing_angles(volume[:, index], mask[:, index], theta)
 		issues = self._issues()
 		if issues:
 			if not self.params.allow_bicubic_fallback:
@@ -248,7 +254,7 @@ class DRHTStage(Stage):
 					)
 					scratch_handles.append(handle)
 					scratch[name] = handle.array()
-			for index in range(state.working_array.shape.Y):
+			for index in state.work_indices("Y"):
 				restored[:, index], maps = self._infer(
 					model, seed[:, index], torch, device, scratch,
 				)
@@ -272,7 +278,9 @@ class LDMStage(Stage):
 	"""
 
 	name = "super_resolve.ldm"
-	contract = _contract()
+	# The external volume callable has no row-locality guarantee. Preserve its
+	# held input; interpolation fallback below can use the produced selection.
+	contract = replace(_contract(), extent_sensitive_axes=("Theta", "Y", "X"))
 
 	class Params(StageParams):
 		repo_path: Path | None = None
@@ -297,8 +305,18 @@ class LDMStage(Stage):
 		if issues:
 			if not self.params.allow_interpolation_fallback:
 				raise RuntimeError("; ".join(issues))
-			seed = interpolate_missing_angles(volume, mask, theta)
-			return _store_result(state, seed, {"method": "ldm", "fallback": "interpolation", "issues": issues})
+			window = state.produced_window
+			if window is not None:
+				# Missing angles need their known bracketing samples; detector
+				# columns/rows interpolate independently and need no such halo.
+				window = window.with_pad(["Theta"])
+			selection = (state.work_index(ProjOrder) if window is None else
+				state.source_window.with_pad().packed_index(window, ProjOrder))
+			seed = interpolate_missing_angles(volume[selection], mask[selection], theta[selection[0]])
+			return _store_result(state, seed,
+				{"method": "ldm", "fallback": "interpolation", "issues": issues},
+				window=window,
+			)
 		old_path = list(sys.path)
 		try:
 			sys.path.insert(0, str(self.params.repo_path.resolve()))

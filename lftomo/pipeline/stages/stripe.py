@@ -31,11 +31,11 @@ FW_THETA_MIRROR_WORK_ARTIFACT = "_fw_theta_mirror_work"
 
 
 def _vo_work_requests(
-	input_spec: BufferSpec, median_half_width: int,
+	input_spec: BufferSpec, median_half_width: int, window: TomoWindow | None = None,
 ) -> tuple[BoundedWorkRequest, ...]:
 	"""Own Vo dtypes, sorting capacity and optional zero-filled line padding."""
 
-	shape = input_spec.shape.to(SinoOrder)
+	shape = (input_spec.shape if window is None else window.frange.length).to(SinoOrder)
 	dtype = input_spec.dtype
 	if max(shape.Theta, shape.X) > np.iinfo(np.uint32).max:
 		raise ValueError("Vo sorting indices exceed uint32 capacity")
@@ -116,8 +116,10 @@ class VoSortStripeStage(SinogramStage):
 
 		return _bottleneck_line_half_width(self.params.size) if self.params.dim == 1 else 0
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
-		return _vo_work_requests(input_spec, self.vo_line_median_half_width)
+	def bounded_work_requests(
+		self, input_spec: BufferSpec, window: TomoWindow | None = None,
+	) -> tuple[BoundedWorkRequest, ...]:
+		return _vo_work_requests(input_spec, self.vo_line_median_half_width, window)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_sort_array
@@ -144,8 +146,10 @@ class VoDeadStripeStage(SinogramStage):
 
 		return _bottleneck_line_half_width(self.params.size) if self.params.norm else 0
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
-		return _vo_work_requests(input_spec, self.vo_line_median_half_width)
+	def bounded_work_requests(
+		self, input_spec: BufferSpec, window: TomoWindow | None = None,
+	) -> tuple[BoundedWorkRequest, ...]:
+		return _vo_work_requests(input_spec, self.vo_line_median_half_width, window)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_dead_array, _remove_large_array
@@ -175,8 +179,10 @@ class VoLargeStripeStage(SinogramStage):
 
 		return _bottleneck_line_half_width(self.params.size)
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
-		return _vo_work_requests(input_spec, self.vo_line_median_half_width)
+	def bounded_work_requests(
+		self, input_spec: BufferSpec, window: TomoWindow | None = None,
+	) -> tuple[BoundedWorkRequest, ...]:
+		return _vo_work_requests(input_spec, self.vo_line_median_half_width, window)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_large_array
@@ -213,8 +219,10 @@ class VoFamilyStripeStage(SinogramStage):
 		uses_sort = "remove_sort_vo" in self.params.order and self.params.dim == 1
 		return _bottleneck_line_half_width(self.params.size) if uses_large or uses_sort else 0
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
-		return _vo_work_requests(input_spec, self.vo_line_median_half_width)
+	def bounded_work_requests(
+		self, input_spec: BufferSpec, window: TomoWindow | None = None,
+	) -> tuple[BoundedWorkRequest, ...]:
+		return _vo_work_requests(input_spec, self.vo_line_median_half_width, window)
 
 	def run_sinogram(self, sinogram: np.ndarray, state: PipelineState) -> None:
 		from lftomo.prep.stripe import _remove_dead_array, _remove_large_array, _remove_sort_array
@@ -260,12 +268,15 @@ class FourierWaveletStripeStage(SinogramStage):
 					values["wname"] = wavelet
 			return values
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+	def bounded_work_requests(
+		self, input_spec: BufferSpec, window: TomoWindow | None = None,
+	) -> tuple[BoundedWorkRequest, ...]:
 		if not self.params.theta_mirror:
 			return ()
 		from lftomo.prep.stripe import _fw_theta_mirror_window
 
-		window = _fw_theta_mirror_window(input_spec.shape.to(SinoOrder))
+		shape = input_spec.shape if window is None else window.frange.length
+		window = _fw_theta_mirror_window(shape.to(SinoOrder))
 		return (BoundedWorkRequest(
 			FW_THETA_MIRROR_WORK_ARTIFACT,
 			BufferSpec(window.with_pad().shape, input_spec.dtype), "fw_theta_mirror_work",
@@ -317,6 +328,7 @@ class AllOfTheStripeStage(Stage):
 		import tomopy
 
 		shape = state.working_array.shape
+		data = data[state.work_index()]
 		tomopy_input = shape.transposed_view(data, ProjOrder)
 		# TomoPy copies this view into its own multiprocessing shared array and
 		# returns that allocation. The final assignment is therefore the required

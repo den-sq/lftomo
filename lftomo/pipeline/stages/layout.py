@@ -81,7 +81,9 @@ class LayoutConvertStage(Stage):
 		output, converted = allocate_output(
 			state, shape, data.dtype, role=f"layout:{target.__name__}",
 		)
-		converted[...] = input_shape.transposed_view(data, target)
+		converted[state.work_index(shape)] = input_shape.transposed_view(
+			data[state.work_index()], target,
+		)
 		return commit_output(
 			state, output, retire_as=None,
 		)

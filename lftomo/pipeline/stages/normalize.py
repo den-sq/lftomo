@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict
+from copy import copy
+from dataclasses import asdict, replace
 from typing import Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -57,7 +58,7 @@ def _finish_normalization(state: PipelineState, output: object) -> PipelineState
 	)
 
 
-def _managed_flat_fields(state: PipelineState) -> np.ndarray:
+def _managed_flat_fields(state: PipelineState, *, context: bool = False) -> np.ndarray:
 	"""Publish legacy detector maps as one run-managed shared artifact."""
 
 	existing = state.artifacts.get("flat_fields")
@@ -73,7 +74,7 @@ def _managed_flat_fields(state: PipelineState) -> np.ndarray:
 	# Binding the array to a DataRef would remove this inference and offset code.
 	if state.source_window is None or state.dataset is None:
 		raise RuntimeError("flat-field slicing requires canonical source geometry")
-	source = state.source_window.with_pad(["Y"])
+	source = state.read_window if context else state.produced_window
 	selection = state.dataset.full_window().with_pad(["Y"]).interval("Y")
 	if field_buffer.shape.Y == selection.length.Y:
 		start = source.pos.Y - selection.start.Y
@@ -150,8 +151,8 @@ class WeightedNormalizeStage(Stage):
 		layout = state.layout
 		if working.ndim != 3:
 			raise ValueError("weighted-normalize expects a three-dimensional working array")
-		y_size = working.shape[layout.axis_of("Y")]
-		if flats.shape != (4, y_size, working.shape[layout.axis_of("X")]):
+		y_size = state.produced_window.frange.length.Y
+		if flats.shape != (4, y_size, state.produced_window.frange.length.X):
 			raise ValueError(
 				"flat_fields must have shape (4, Y, X) matching the working array"
 			)
@@ -163,12 +164,12 @@ class WeightedNormalizeStage(Stage):
 			work_dtype=state.dataset.work_dtype,
 		)
 		for local_index in state.work_indices("Theta"):
-			image = working[layout.point_index(Theta=local_index)]
+			image = working[state.projection_index(local_index)]
 			_weighted_normalize_projection(
 				image,
 				image,
 				flats,
-				state.source_window.with_pad().rescope(
+				state.produced_window.rescope(
 					pos=Theta(state.source_window.source_index("Theta", local_index)),
 					shape=Theta(1),
 				),
@@ -180,8 +181,8 @@ class WeightedNormalizeStage(Stage):
 
 def _flat_fields(state: PipelineState, data: np.ndarray, layout: type) -> np.ndarray:
 	flats = _managed_flat_fields(state)
-	y_size = data.shape[layout.axis_of("Y")]
-	if flats.shape != (4, y_size, data.shape[layout.axis_of("X")]):
+	y_size = state.produced_window.frange.length.Y
+	if flats.shape != (4, y_size, state.produced_window.frange.length.X):
 		raise ValueError("flat_fields must have shape (4, Y, X) matching the working array")
 	return flats
 
@@ -213,7 +214,7 @@ def _tracking_fields(
 		bundle = CalibrationBundle.open(ref.manifest_path)
 		if state.source_window is None:
 			raise RuntimeError("calibration reads require PipelineState.source_window")
-		source_window = state.source_window.with_pad(["Y"])
+		source_window = state.read_window
 		start = source_window.pos.Y
 		stop = start + source_window.shape.Y
 		if stop - start != y_size:
@@ -223,10 +224,10 @@ def _tracking_fields(
 			for name in ("pre_gain", "post_gain", "pre_dark", "post_dark")
 		)
 	if "flat_fields" in state.artifacts or "flat_fields" in state.scan.metadata:
-		fields = _managed_flat_fields(state)
+		fields = _managed_flat_fields(state, context=True)
 	else:
 		raise ValueError("normalize.beam_tracking requires a calibration bundle or legacy flat_fields")
-	if fields.shape != (4, y_size, state.working_array.shape.X):
+	if fields.shape != (4, y_size, state.read_window.frange.length.X):
 		raise ValueError("legacy flat_fields must have shape (4, Y, X) for beam tracking")
 	return tuple(fields)
 
@@ -239,6 +240,7 @@ class BeamTrackingNormalizeStage(Stage):
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
 		mutates_input=False, window_axes=("Y", "Theta"),
+		extent_sensitive_axes=("Y", "X"),
 		cacheable_prefix=True,
 		produces_artifacts=("beam_tracking_qc",),
 	)
@@ -267,6 +269,10 @@ class BeamTrackingNormalizeStage(Stage):
 				**(value or {}),
 			}
 
+	@classmethod
+	def contract_for(cls, params: Params) -> StageContract:
+		return replace(cls.contract, extent_sensitive_axes=("Y", "X", "Theta")) if params.fit_schedule else cls.contract
+
 	def run(self, state: PipelineState) -> PipelineState:
 		if state.backend.name != "numpy":
 			raise TypeError("BeamTrackingNormalizeStage currently requires the NumPy backend")
@@ -274,7 +280,7 @@ class BeamTrackingNormalizeStage(Stage):
 		layout = state.layout
 		if data.ndim != 3:
 			raise ValueError("normalize.beam_tracking expects a three-dimensional array")
-		y_size = data.shape[layout.axis_of("Y")]
+		y_size = state.read_window.frange.length.Y
 		pre_gain, post_gain, pre_dark, post_dark = _tracking_fields(
 			state, y_size, self.params.component_names,
 		)
@@ -288,17 +294,7 @@ class BeamTrackingNormalizeStage(Stage):
 			fit = prepared
 			schedule = fit.schedule
 		elif self.params.fit_schedule:
-			assigned = np.fromiter(state.work_indices("Theta"), dtype=np.intp)
-			indices = assigned[np.unique(
-				np.linspace(0, len(assigned) - 1, self.params.schedule_sample_count).astype(int),
-			)]
-			fractions = np.asarray([
-				state.source_window.source_index("Theta", int(index)) for index in indices
-			]) / max(projection_count - 1, 1)
-			fit = calibrate_schedule(
-				np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
-				fractions, pre_gain, post_gain,
-			)
+			fit = _fit_tracking_schedule(self, state, pre_gain, post_gain)
 			schedule = fit.schedule
 		gain_at = optimal_transport_interp(
 			pre_gain, post_gain, transport_sigma=self.params.transport_sigma, schedule=schedule,
@@ -312,10 +308,13 @@ class BeamTrackingNormalizeStage(Stage):
 			# not carry that motion model, so keep them within measured endpoints.
 			dark_time = float(np.clip(beam_time, 0, 1))
 			dark = (1 - dark_time) * pre_dark + dark_time * post_dark
-			image = data[layout.point_index(Theta=local_index)]
-			image[:] = _normalize_with_maps(
+			image = data[state.projection_index(local_index, context=True)]
+			normalized = _normalize_with_maps(
 				image, gain, dark, self.params.pre_subtracted, floor_nonpositive=True,
 			)
+			data[state.projection_index(local_index)] = normalized[
+				state.read_window.packed_index(state.produced_window, ProjOrder)[1:]
+			]
 		state.artifacts["beam_tracking_qc"] = {
 			"diagnostics": diagnose_beam_change(pre_gain, post_gain),
 			"schedule": schedule.__dict__,
@@ -335,6 +334,7 @@ class BeamKeyframesNormalizeStage(Stage):
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
 		mutates_input=False, window_axes=("Y", "Theta"),
+		extent_sensitive_axes=("Y", "X"),
 		cacheable_prefix=True,
 		produces_artifacts=("beam_keyframe_qc",),
 	)
@@ -348,10 +348,10 @@ class BeamKeyframesNormalizeStage(Stage):
 	def run(self, state: PipelineState) -> PipelineState:
 		output, data = _normalization_output(state)
 		layout = state.layout
-		y_size = data.shape[layout.axis_of("Y")]
+		y_size = state.read_window.frange.length.Y
 		if state.source_window is None:
 			raise RuntimeError(f"{self.name} requires PipelineState.source_window")
-		source_window = state.source_window.with_pad(["Y"])
+		source_window = state.read_window
 		start = source_window.pos.Y
 		stop = start + source_window.shape.Y
 		if stop - start != y_size:
@@ -397,8 +397,11 @@ class BeamKeyframesNormalizeStage(Stage):
 				- np.log(np.clip(bracket.before, 1e-6, None)), self.params.transport_sigma,
 			)
 			gain = np.exp(average + (bracket.weight - 0.5) * transport)
-			image = data[layout.point_index(Theta=local_index)]
-			image[:] = _normalize_with_maps(image, gain, dark, False, floor_nonpositive=True)
+			image = data[state.projection_index(local_index, context=True)]
+			normalized = _normalize_with_maps(image, gain, dark, False, floor_nonpositive=True)
+			data[state.projection_index(local_index)] = normalized[
+				state.read_window.packed_index(state.produced_window, ProjOrder)[1:]
+			]
 		state.artifacts["beam_keyframe_qc"] = {
 			"component": self.params.component, "maximum_gap_seen": maximum_seen_gap,
 			"observability": "events wholly inside a keyframe gap cannot be recovered",
@@ -414,6 +417,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		produces=PRESERVE, accepts=(ProjOrder, SinoOrder), prefers=ProjOrder,
 		accepts_domain=(DataDomain.RAW,), produces_domain=DataDomain.TRANSMISSION,
 		mutates_input=False, window_axes=("Y", "Theta"),
+		extent_sensitive_axes=("Y", "X"),
 		cacheable_prefix=True,
 		consumes_artifacts=("calibration_bundle",), produces_artifacts=("beam_basis_qc",),
 	)
@@ -445,7 +449,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		if value.ndim == 2:
 			mask = value
 		elif value.ndim == 3:
-			mask = value[layout.point_index(Theta=index)]
+			mask = value[state.projection_index(index, context=True)]
 		else:
 			raise ValueError(f"{self.params.air_mask_artifact} must be a 2-D or 3-D mask")
 		if mask.shape != shape:
@@ -466,16 +470,16 @@ class BeamBasisFitNormalizeStage(Stage):
 		descriptor = bundle.component(self.params.component)
 		if descriptor.kind != "beam_basis" or descriptor.coordinate_frame != "beam":
 			raise ValueError("beam-basis component must have kind='beam_basis' in beam coordinates")
-		y_size = data.shape[layout.axis_of("Y")]
+		y_size = state.read_window.frange.length.Y
 		if state.source_window is None:
 			raise RuntimeError(f"{self.name} requires PipelineState.source_window")
-		source_window = state.source_window.with_pad(["Y"])
+		source_window = state.read_window
 		start = source_window.pos.Y
 		stop = start + source_window.shape.Y
 		if stop - start != y_size:
 			raise ValueError("calibration rows do not match the canonical source window")
 		basis = bundle.read_component(self.params.component, y_start=start, y_stop=stop)
-		if basis.shape[2] != state.working_array.shape.X:
+		if basis.shape[2] != state.read_window.frange.length.X:
 			raise ValueError("beam-basis X extent is incompatible with the active detector window")
 		detector = None if self.params.detector_component is None else bundle.read_component(
 			self.params.detector_component, y_start=start, y_stop=stop,
@@ -492,7 +496,7 @@ class BeamBasisFitNormalizeStage(Stage):
 		training_max = np.asarray(metadata.get("training_coefficient_max", []), dtype=float)
 		qcs, coefficients, violations = [], [], []
 		for index in state.work_indices("Theta"):
-			image = data[layout.point_index(Theta=index)]
+			image = data[state.projection_index(index, context=True)]
 			fit = fit_projection_beam(
 				image, basis, detector=detector,
 				air_mask=self._mask(state, layout, index, image.shape),
@@ -525,7 +529,9 @@ class BeamBasisFitNormalizeStage(Stage):
 					f"beam-basis fit failed QC for projection {index}: "
 					+ ", ".join(projection_violations)
 				)
-			image[:] = fit.transmission
+			data[state.projection_index(index)] = fit.transmission[
+				state.read_window.packed_index(state.produced_window, ProjOrder)[1:]
+			]
 			coefficients.append(fit.coefficients)
 			violations.append(projection_violations)
 			qcs.append({
@@ -605,7 +611,7 @@ class ThetaSwitchNormalizeStage(Stage):
 				gain, dark = post_gain, post_dark
 			else:
 				gain, dark = pre_gain, pre_dark
-			image = data[layout.point_index(Theta=local_projection)]
+			image = data[state.projection_index(local_projection)]
 			image[:] = _normalize_with_maps(
 				image, gain, dark, self.params.pre_subtracted,
 				self.params.floor_nonpositive, self.params.floor_value,
@@ -624,7 +630,26 @@ class TaperBlendedNormalizeStage(ThetaSwitchNormalizeStage):
 		gain_averaging: Literal[True] = True
 		gain_movement_enabled: Literal[False] = False
 
+def _fit_tracking_schedule(stage: Stage, state: PipelineState, pre_gain, post_gain):
+	"""Fit once from the complete canonical read extent, before worker slicing."""
 
+	if state.source_window is None or state.dataset is None:
+		raise RuntimeError(f"{stage.name} requires canonical source geometry")
+	read_state = copy(state)
+	read_state.stage_window = state.read_window
+	read_state.work_range = None
+	data = np.asarray(state.working_array)
+	assigned = np.fromiter(read_state.work_indices("Theta"), dtype=np.intp)
+	indices = assigned[np.unique(
+		np.linspace(0, len(assigned) - 1, stage.params.schedule_sample_count).astype(int),
+	)]
+	fractions = np.asarray([
+		state.source_window.source_index("Theta", int(index)) for index in indices
+	]) / max(state.dataset.physical_shape.Theta - 1, 1)
+	return calibrate_schedule(
+		np.stack([data[read_state.projection_index(int(index))] for index in indices]),
+		fractions, pre_gain, post_gain,
+	)
 
 
 def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
@@ -637,26 +662,11 @@ def prepare_normalization_dispatch(stage: Stage, state: PipelineState) -> None:
 		return
 	if not isinstance(stage, BeamTrackingNormalizeStage) or not stage.params.fit_schedule:
 		return
-	data = np.asarray(state.working_array)
-	layout = state.layout
-	y_size = data.shape[layout.axis_of("Y")]
+	y_size = state.read_window.frange.length.Y
 	pre_gain, post_gain, _pre_dark, _post_dark = _tracking_fields(
 		state, y_size, stage.params.component_names,
 	)
-	if state.source_window is None or state.dataset is None:
-		raise RuntimeError(f"{stage.name} requires canonical source geometry")
-	projection_count = state.dataset.physical_shape.Theta
-	assigned = np.fromiter(state.work_indices("Theta"), dtype=np.intp)
-	indices = assigned[np.unique(
-		np.linspace(0, len(assigned) - 1, stage.params.schedule_sample_count).astype(int),
-	)]
-	fractions = np.asarray([
-		state.source_window.source_index("Theta", int(index)) for index in indices
-	]) / max(projection_count - 1, 1)
-	stage._dispatch_schedule_fit = calibrate_schedule(
-		np.stack([data[layout.point_index(Theta=int(index))] for index in indices]),
-		fractions, pre_gain, post_gain,
-	)
+	stage._dispatch_schedule_fit = _fit_tracking_schedule(stage, state, pre_gain, post_gain)
 
 
 def finish_normalization_dispatch(stage: Stage, state: PipelineState) -> None:

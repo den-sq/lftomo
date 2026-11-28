@@ -32,6 +32,7 @@ from lftomo.pipeline import (
 	StageObserver,
 )
 from lftomo.pipeline.domains import DataDomain
+from lftomo.pipeline.streaming import resolve_stage_windows
 from lftomo.storage import FileBackedNPArray, LocalArray, ManagedBuffer, TypedBuffer, buffer_view
 from lftomo.util.converter import CONVERTER
 from lftomo.util.shapes import DataRange, DataShape, Interval
@@ -554,6 +555,7 @@ def _run_stages(
 	*,
 	execution_observer: ExecutionSpanObserver | None = None,
 	stage_index_offset: int = 0,
+	continuation_stages: Sequence[Stage] = (),
 ) -> PipelineState:
 	if not stages:
 		return state
@@ -567,6 +569,7 @@ def _run_stages(
 		execution_observer=execution_observer,
 		stage_indices=tuple(range(stage_index_offset, stage_index_offset + len(stages))),
 		checkpoint=checkpoint,
+		continuation_stages=continuation_stages,
 	).run(state)
 
 
@@ -1105,7 +1108,7 @@ class PrefixCacheStore:
 			]
 			prefix_id = _hash_document({"stages": stage_identity})
 			identity = _fingerprint({
-				"schema_version": 2,
+				"schema_version": 3,
 				"runtime": runtime_identity,
 				"backend": state.backend,
 				"initial_working_array": state.working_array,
@@ -1116,6 +1119,9 @@ class PrefixCacheStore:
 				"artifacts": state.artifacts,
 				"dataset": state.dataset,
 				"source_window": state.source_window,
+				"stage_windows": resolve_stage_windows(
+					tuple(stages), state.scan, state.source_window, state.dataset,
+				)[:decision.stage_count],
 				"stages": stage_identity,
 			})
 			cache_key = _hash_document(identity)
@@ -1173,6 +1179,7 @@ class PrefixCacheStore:
 					):
 						built = _run_stages(
 							_clone_initial_state(state), prefix_stages, observer, checkpoint,
+							continuation_stages=suffix_stages,
 							execution_observer=(
 								cache_build_execution_observer or execution_observer
 							),
@@ -1214,13 +1221,15 @@ class PrefixCacheStore:
 			):
 				check = _run_stages(
 					_clone_initial_state(state), prefix_stages, observer, checkpoint,
+					continuation_stages=suffix_stages,
 					execution_observer=(
 						cache_verify_execution_observer or execution_observer
 					),
 				)
+			selection = check.work_index() if check.produced_window is not None else (...,)
 			if not (
 				_equivalent(
-					np.asarray(check.working_array), np.asarray(fork.working_array),
+					np.asarray(check.working_array)[selection], np.asarray(fork.working_array)[selection],
 					rtol=self.policy.verify_rtol, atol=self.policy.verify_atol,
 				)
 				and _equivalent(

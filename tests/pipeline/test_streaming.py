@@ -419,7 +419,7 @@ def test_direction_planner_rejects_unsupported_artifact_boundary():
 
 def test_direction_planner_rejects_changed_geometry_before_boundary():
 	class ExpandedStage(_DirectionalStage):
-		def output_window(self, source):
+		def output_window(self, source, scan=None):
 			return source.with_output_padding(X(1))
 
 	with pytest.raises(WindowPlanError, match="changes output geometry"):

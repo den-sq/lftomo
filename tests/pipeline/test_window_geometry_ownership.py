@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 import lftomo.pipeline as pipeline
-from lftomo.util.shapes import Y
+from lftomo.pipeline.core import PadRequirement, ProjectionStage, SinogramStage
+from lftomo.pipeline.streaming import resolve_stage_windows
+from lftomo.storage import LocalArray
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.window import TomoWindow
+from tests.pipeline.test_core import recon_config, scan_config
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -22,7 +31,7 @@ _REMOVED_UNIT_HELPERS = {
 # indices. Lower these ceilings when removing reads; new modules start at zero.
 # Remaining reads inspect numerical-library inputs/results at these boundaries.
 _POSITIONAL_SHAPE_CEILINGS = {
-	"pipeline/stages/geometry.py": 5,  # OpenCV affine image and target dimensions.
+	"pipeline/stages/geometry.py": 4,  # OpenCV affine image and target dimensions.
 	"pipeline/stages/multimaterial.py": 1,  # NumPy air-reference image kernel.
 	"pipeline/stages/normalize.py": 1,  # Calibration bundle's external basis array.
 	"pipeline/stages/read.py": 3,  # HDF5 calibration dataset validation/read.
@@ -158,3 +167,73 @@ def test_runtime_source_bounds_are_not_written_back_to_stage_configuration():
 				found.append(f"{path.relative_to(_ROOT)}:{node.lineno} {node.slice.value}")
 
 	assert found == []
+
+
+class _ContextProjection(ProjectionStage):
+	def run_projection(self, image, state):
+		state.artifacts.setdefault("reads", []).append(image.shape)
+		return image + 1
+
+
+class _ProducedSinogram(SinogramStage):
+	def run_sinogram(self, sinogram, state):
+		state.artifacts.setdefault("rows", []).extend(state.work_indices("Y"))
+		sinogram += 1
+
+
+@pytest.mark.parametrize("layout", [ProjOrder, SinoOrder])
+@pytest.mark.parametrize("bounds", [(0, 4), (5, 9), (12, 15)])
+@pytest.mark.parametrize("sensitive", [False, True])
+@pytest.mark.parametrize("fragmented", [False, True])
+def test_stage_windows_own_dispatch_extents_and_consume_context(layout, bounds, sensitive, fragmented):
+	"""Every projection/sinogram adapter must honor canonical computed coverage."""
+	physical = ProjOrder(3, 15, 4)
+	held = TomoWindow.from_bounds(physical, y=bounds, halo=5, dtype=np.float32)
+	stages = [_ContextProjection(), _ContextProjection(), _ProducedSinogram()]
+	stages[0].contract = replace(stages[0].contract, required_pad=PadRequirement(fixed=Y(2)))
+	stages[1].contract = replace(
+		stages[1].contract, required_pad=PadRequirement(fixed=Y(3)),
+		extent_sensitive_axes=("Y",) if sensitive else (),
+	)
+	windows = resolve_stage_windows(stages, scan_config(), held)
+	shape = held.with_pad().frange.length.to(layout)
+	values = np.zeros(shape.as_tuple(), np.float32)
+	state = pipeline.PipelineState(LocalArray(values, shape), scan_config(), recon_config(), source_window=held)
+	if fragmented:
+		state = pipeline.Pipeline(
+			stages[:1], validate=False, continuation_stages=stages[1:],
+		).run(state)
+		result = pipeline.Pipeline(stages[1:], validate=False).run(state)
+	else:
+		result = pipeline.Pipeline(stages, validate=False).run(state)
+	expected = np.zeros_like(values)
+	for window in windows:
+		expected[held.with_pad().packed_index(window, layout)] += 1
+	np.testing.assert_array_equal(values, expected)
+	assert result.artifacts["reads"] == [
+		(window.with_pad().shape.Y, physical.X) for window in windows[:2] for _ in range(physical.Theta)
+	]
+	assert result.artifacts["rows"] == list(range(
+		held.pad_before.Y, held.pad_before.Y + bounds[1] - bounds[0],
+	))
+	assert windows[0].shape.Y == (
+		held.with_pad().shape.Y if sensitive else
+		min(physical.Y, bounds[1] + 3) - max(0, bounds[0] - 3)
+	)
+	if sensitive:
+		assert windows[1].with_pad().frange == held.with_pad().frange
+	assert windows[1].shape.Y == windows[2].shape.Y == bounds[1] - bounds[0]
+
+
+def test_assigned_ranges_and_compact_workspace_share_the_stage_window_frame():
+	held = TomoWindow.from_bounds(ProjOrder(4, 20, 6), y=(7, 11), halo=(Y(3), Y(4)), dtype=np.float32)
+	computed = held.for_stage(Y(1), Y(2), Y(2), Y(3))
+	shape = held.with_pad().frange.length
+	state = pipeline.PipelineState(
+		LocalArray(np.zeros(shape.as_tuple(), np.float32), shape), scan_config(), recon_config(),
+		source_window=held, stage_window=computed, work_range=Y.drange(0, shape.Y, 2),
+	)
+	assert list(state.work_indices("Y")) == [2, 4, 6, 8]
+	state.work_range = Y.drange(4, 5, 1)
+	assert state.scratch_index(computed.frange.length.to(SinoOrder))[0] == slice(2, 3, 1)
+	assert state.work_index(SinoOrder)[0] == slice(4, 5, 1)

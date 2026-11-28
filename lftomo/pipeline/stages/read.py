@@ -283,7 +283,7 @@ class HDF5DxchangeReadStage(Stage):
 			produces_artifacts=artifacts, managed_artifacts=artifacts,
 		)
 
-	def bounded_work_requests(self, input_spec: BufferSpec) -> tuple[BoundedWorkRequest, ...]:
+	def bounded_work_requests(self, input_spec: BufferSpec, window=None) -> tuple[BoundedWorkRequest, ...]:
 		if self.params.noise is None:
 			return ()
 		return tuple(BoundedWorkRequest(

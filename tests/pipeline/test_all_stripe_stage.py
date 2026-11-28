@@ -1,9 +1,11 @@
 import numpy as np
+import pytest
 
 from lftomo.config import Acquisition, Detector, Recon, Scan, StageConfig, TIFFStackProjections
 from lftomo.pipeline import LocalArray, Pipeline, PipelineState
 from lftomo.pipeline.stages import AllOfTheStripeStage, STAGE_REGISTRY, create_stage
-from lftomo.util.shapes import SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.window import TomoWindow
 
 
 def _state(array, config):
@@ -22,13 +24,15 @@ def _state(array, config):
 	)
 
 
-def test_all_of_the_stripe_is_registered_and_transposes_for_tomopy(monkeypatch):
+@pytest.mark.parametrize("halo", [0, 1])
+def test_all_of_the_stripe_is_registered_and_transposes_for_tomopy(monkeypatch, halo):
 	config = StageConfig(
 		kind="stripe",
 		algorithm="all_of_the_stripe",
 		params={"snr": 2.5, "la_size": 7, "sm_size": 3, "dim": 2, "ncore": 4},
 	)
-	working = np.arange(2 * 3 * 5, dtype=np.float32).reshape(2, 3, 5)
+	rows = 2 + 2 * halo
+	working = np.arange(rows * 3 * 5, dtype=np.float32).reshape(rows, 3, 5)
 	before = working.copy()
 	calls = {}
 
@@ -40,7 +44,11 @@ def test_all_of_the_stripe_is_registered_and_transposes_for_tomopy(monkeypatch):
 
 	monkeypatch.setattr("tomopy.remove_all_stripe", remove_all_stripe)
 	stage = create_stage(config)
-	result = Pipeline([stage]).run(_state(working, config))
+	state = _state(working, config)
+	state.source_window = TomoWindow.from_bounds(
+		ProjOrder(3, rows, 5), y=(halo, halo + 2), halo=halo,
+	)
+	result = Pipeline([stage]).run(state)
 
 	assert STAGE_REGISTRY["stripe.all_of_the_stripe"] is AllOfTheStripeStage
 	assert calls["shape"] == (3, 2, 5)
@@ -54,4 +62,5 @@ def test_all_of_the_stripe_is_registered_and_transposes_for_tomopy(monkeypatch):
 	}
 	assert calls["shares_input"] is True
 	assert np.asarray(result.working_array) is working
-	np.testing.assert_array_equal(working, before + 10)
+	before[halo:halo + 2] += 10
+	np.testing.assert_array_equal(working, before)

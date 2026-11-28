@@ -18,7 +18,8 @@ from lftomo.pipeline.stages import (
 	WeightedNormalizeStage,
 	create_stage,
 )
-from lftomo.util.shapes import ProjOrder, SinoOrder
+from lftomo.util.shapes import ProjOrder, SinoOrder, Y
+from lftomo.util.window import TomoWindow
 from tests.sample_data import attach_source_geometry
 
 
@@ -87,6 +88,19 @@ def test_beam_tracking_preserves_layout_and_removes_nonlinear_drift(layout):
 	assert result.layout is layout
 	assert np.std(np.asarray(result.working_array) - 1) < 2e-6
 	assert "projection_count" not in result.artifacts["beam_tracking_qc"]
+	window_values = projections.copy() if layout is ProjOrder else projections.transpose(1, 0, 2).copy()
+	window_state = attach_source_geometry(PipelineState(
+		LocalArray(window_values, layout(*window_values.shape)), _scan(flats), recon,
+		domain=DataDomain.RAW,
+	))
+	window_state.source_window = TomoWindow.from_bounds(ProjOrder(*projections.shape), y=(6, 18), halo=Y(6))
+	BeamTrackingNormalizeStage(transport_sigma=3, schedule=schedule.__dict__).run(window_state)
+	core = layout.point_index(Y=slice(6, 18))
+	np.testing.assert_array_equal(window_values[core], data[core])
+	for rows in (slice(0, 6), slice(18, 24)):
+		index = layout.point_index(Y=rows)
+		original = projections if layout is ProjOrder else projections.transpose(1, 0, 2)
+		np.testing.assert_array_equal(window_values[index], original[index])
 
 
 def test_tracking_beats_weighted_normalization():
@@ -169,6 +183,25 @@ def test_schedule_fit_recovers_nonzero_initial_beam_time():
 	assert fit.schedule.alpha == pytest.approx(schedule.alpha, abs=0.03)
 	assert fit.schedule.beta == pytest.approx(schedule.beta, abs=0.03)
 	assert fit.residual_std < 0.01
+	states = []
+	for window in (None, TomoWindow.from_bounds(
+		ProjOrder(*projections.shape), y=(6, 18), theta=(1, 2), halo=ProjOrder(1, 6, 0),
+	)):
+		values = projections.astype(np.float32)
+		state = attach_source_geometry(PipelineState(
+			LocalArray(values, ProjOrder(*values.shape)), _scan(flats, count=3), Recon(pipeline=[]),
+			domain=DataDomain.RAW,
+		))
+		if window is not None:
+			state.source_window = window
+		states.append(BeamTrackingNormalizeStage(fit_schedule=True).run(state))
+	whole, windowed = states
+	np.testing.assert_array_equal(
+		np.asarray(windowed.working_array)[1, 6:18], np.asarray(whole.working_array)[1, 6:18],
+	)
+	assert windowed.artifacts["beam_tracking_qc"]["schedule"] == whole.artifacts["beam_tracking_qc"]["schedule"]
+	np.testing.assert_array_equal(np.asarray(windowed.working_array)[0], projections[0].astype(np.float32))
+	np.testing.assert_array_equal(np.asarray(windowed.working_array)[2], projections[2].astype(np.float32))
 
 
 def test_stage_registry_and_domain_contract():

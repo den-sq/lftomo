@@ -59,12 +59,28 @@ serial execution; process workers only execute `run_projection`. Keep shared
 preparation and window-wide checks in these hooks, rather than overriding `run`.
 
 `PipelineState.work_range` is a `DataRange` in packed buffer sample ordinals,
-independent of source coordinates and storage layout. `None` assigns the full
-buffer. Use `state.work_indices("Theta")` or `state.work_indices("Y")` for work
+independent of source coordinates and storage layout. `None` assigns the Stage's
+produced window (the full buffer only when no source window is bound).
+Use `state.work_indices("Theta")` or `state.work_indices("Y")` for work
 loops, and `state.work_index()` for vectorized operations over the assignment.
 `state.work_index(other_shape)` expresses the same assignment in another
 semantic layout. The full array's shape describes storage, not the work extent
 of a dispatched invocation.
+
+`state.stage_window` owns the produced extent and its required input padding.
+`state.produced_window` exposes that extent; `state.read_window` includes its
+context. Projection adapters supply read views and publish only the produced
+selection. `work_index(context=True)` selects read context explicitly, while
+`scratch_index(shape)` maps assigned samples into compact workspace coordinates.
+Extent-sensitive kernels retain the held input on their declared sensitive axes;
+the planner propagates that need upstream before consuming the context.
+
+When a pipeline executes only a prefix, `continuation_stages` supplies the
+remaining authored Stages to window planning without executing them. Prefix
+cache builds and verification, center replay, and reconstruction splits use
+this same resolver so their boundaries preserve downstream context demand.
+Cache identity includes the resolved canonical prefix windows: suffixes that
+need different coverage cannot reuse the same prefix snapshot.
 
 For source coordinates, map each assigned ordinal through
 `state.source_window.source_index(axis, index)`. This accounts for the held
@@ -187,15 +203,16 @@ temporaries.
 Flat/dark calibration arrays and detector-sized phase filters are also
 manager-issued artifacts declared by their producer contracts.
 
-Bounded segment and composite scratch is declared by `Stage.bounded_work_requests` and
+Bounded segment and composite scratch is declared by `Stage.bounded_work_requests(input_spec, window)` and
 resolved by `collect_bounded_work` before allocation. `BufferSpec` owns each
 request's shape and dtype; same-key requests share one compatible allocation
 for the complete segment. Runtime collection derives its input descriptor with
 `BufferSpec.from_buffer` at this planning boundary and discards it after
-allocation. Generic execution owns allocation, initialization,
+allocation. The supplied `TomoWindow` owns the computed extent and read context;
+the bound buffer still owns the full allocation. Generic execution owns allocation, initialization,
 assignment-based views and retirement through the existing storage backend.
 The `bounded_work_allocations` artifact records each resolved role, shape,
-dtype and byte count, with `indexing="buffer_sample_ordinals"`. Vo's former
+dtype and byte count, with `indexing="stage_window_sample_ordinals"`. Vo's former
 `vo_scratch_allocations` report is replaced
 by this algorithm-independent report; benchmark result fields keep their
 existing meaning. Multimaterial planes, including the reconstruction-layout
@@ -205,10 +222,8 @@ allocates only requests marked `required_for_fallback` through `allocate_output`
 and removes temporary keys
 on completion or failure. Mixed-axis composites report no single unit axis.
 
-Requests are inspectable without execution. Non-sinogram Stage requests are
-included in the predictive allocation schedule. Bounded sinogram scratch is
-still omitted from the shared-memory peak; [#360](https://github.com/den-sq/lftomo/issues/360)
-tracks accounting for it once per segment, including standalone sinogram dispatch.
+Requests are inspectable without execution. Stage requests, including bounded
+sinogram scratch, appear once per segment in the predictive allocation schedule.
 
 Before starting a run's manager or reading projection pixels, the runner checks
 the largest padded windows' planned shared-memory peak against available
@@ -272,11 +287,13 @@ path; mutating suffixes continue to receive an independent writable copy.
 Serialized shape and dtype are consumed when restoring that typed buffer,
 rather than retained as another runtime geometry record.
 
-Read Stages also establish distinct geometry records on `PipelineState`:
+Canonical geometry on `PipelineState` has distinct owners:
 
 - `dataset`: the full source `TomoDataSet`, including the complete angle vector;
-- `source_window`: the immutable global source selection, position, stride, and
-  padding; and
+- `source_window`: the held allocation's global source selection, position,
+  stride, and padding;
+- `stage_window`: the current Stage's produced extent and required read context;
+  and
 - `working_array.shape` and `working_array.dtype`: the current buffer's
   allocation geometry and dtype; the shape type supplies its layout.
 

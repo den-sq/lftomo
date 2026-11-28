@@ -65,6 +65,7 @@ class PlanStep:
 	allocation_buffer: BufferSpec | None = None
 	output_role: str | None = None
 	retires_role: str | None = None
+	stage_window: TomoWindow | None = None
 
 
 @dataclass(frozen=True)
@@ -279,15 +280,10 @@ def stage_output_spec(
 	elif stage.name == "geometry.affine_skew_movement" and getattr(stage, "target_layout", None) is not None:
 		shape = stage.output_shape(shape)
 	elif stage.name == "helical_correct.index_remap" and getattr(stage.params, "enabled", True):
-		pitch = stage.params.pitch_px_per_projection
-		if pitch is None and scan.helical.pitch_um_per_projection is not None:
-			pitch = scan.helical.pitch_um_per_projection / scan.pixel_size_um
-		if pitch is not None:
-			if source_window is None:
-				raise RuntimeError("helical planning requires the canonical source window")
-			shape, _shifts, _start, _stop = stage.output_geometry(
-				shape, pitch, source_window,
-			)
+		if source_window is not None:
+			shape = stage.output_window(source_window, scan).with_pad().frange.length.to(layout)
+		elif stage.params.pitch_px_per_projection is not None or scan.helical.pitch_um_per_projection is not None:
+			raise RuntimeError("helical planning requires the canonical source window")
 	elif stage.name.startswith("recon."):
 		geometry = getattr(stage, "output_geometry", None)
 		shape = (
@@ -411,15 +407,19 @@ def build_allocation_schedule(
 	for step, stage in zip(steps, stages):
 		artifact_specs: list[tuple[str, int]] = []
 		if "flat_fields" in stage.contract.produces_artifacts and step.output_buffer is not None:
-			rows, width = step.output_buffer.shape.Y, step.output_buffer.shape.X
+			shape = step.output_buffer.shape if step.stage_window is None else step.stage_window.frange.length
+			rows, width = shape.Y, shape.X
 			artifact_specs.append(("flat_fields", 4 * rows * width * np.dtype(np.float32).itemsize))
 		if "phase_filter" in stage.contract.produces_artifacts and step.output_buffer is not None:
-			shape = step.output_buffer.shape
+			shape = (step.output_buffer.shape if step.stage_window is None
+				else step.stage_window.with_pad().frange.length)
 			resolve_shape = getattr(stage, "phase_filter_shape", None)
 			filter_shape = resolve_shape(shape) if resolve_shape is not None else ImgSlice(shape.Y, shape.X)
 			artifact_specs.append(("phase_filter", filter_shape.nbytes(np.float64)))
 		if "phase_envelope" in stage.contract.managed_artifacts and step.output_buffer is not None:
-			artifact_specs.append(("phase_envelope", step.output_buffer.shape.nbytes(np.float32)))
+			shape = (step.output_buffer.shape if step.stage_window is None
+				else step.stage_window.with_pad().frange.length)
+			artifact_specs.append(("phase_envelope", shape.nbytes(np.float32)))
 		for artifact_role, artifact_bytes in artifact_specs:
 			physical_role = artifact_role
 			suffix = 1
@@ -444,7 +444,10 @@ def build_allocation_schedule(
 		):
 			segment = bounded_segments.get(step.index)
 			work_stop = segment.stop if segment is not None else step.index + 1
-			requests = collect_bounded_work(stages[step.index:work_stop], step.input_buffer)
+			requests = collect_bounded_work(
+				stages[step.index:work_stop], step.input_buffer,
+				tuple(item.stage_window for item in steps[step.index:work_stop]),
+			)
 			prepare_work(step.index, requests)
 		# Scratch stays live until the complete bounded segment has finished.
 		if step.index + 1 == work_stop:

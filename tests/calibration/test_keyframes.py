@@ -12,7 +12,8 @@ from lftomo.config import Recon, Scan, StageConfig
 from lftomo.pipeline import LocalArray, NumpyBackend, PipelineState, validate_pipeline
 from lftomo.pipeline.domains import DataDomain
 from lftomo.pipeline.stages import BeamKeyframesNormalizeStage, create_stage
-from lftomo.util.shapes import ProjOrder
+from lftomo.util.shapes import ProjOrder, Y
+from lftomo.util.window import TomoWindow
 from tests.sample_data import attach_source_geometry
 
 
@@ -64,6 +65,17 @@ def test_event_keyframes_beat_endpoint_model_and_keep_detector_defect_fixed(tmp_
 	endpoint_mid = np.sqrt(keyframes[0] * keyframes[-1])
 	assert np.std(keyframes[1] / endpoint_mid - 1) > 0.03
 	assert state.artifacts["beam_keyframe_qc"]["maximum_gap_seen"] == 5
+	window_values = keyframes.copy()
+	window_state = attach_source_geometry(PipelineState(
+		LocalArray(window_values, ProjOrder(*window_values.shape)), _scan(20, 28, 3), Recon(pipeline=[]),
+		artifacts={"calibration_bundle": ref, "projection_times": np.array([0, 5, 10])},
+		domain=DataDomain.RAW,
+	))
+	window_state.source_window = TomoWindow.from_bounds(ProjOrder(*keyframes.shape), y=(5, 15), halo=Y(5))
+	BeamKeyframesNormalizeStage(transport_sigma=2).run(window_state)
+	np.testing.assert_array_equal(window_values[:, 5:15], projections[:, 5:15])
+	for rows in (slice(0, 5), slice(15, 20)):
+		np.testing.assert_array_equal(window_values[:, rows], keyframes[:, rows])
 
 
 def test_heldout_midpoints_beat_a_scan_endpoint_model(tmp_path):
