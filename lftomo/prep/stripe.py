@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 from collections import namedtuple
-from dataclasses import astuple
 from multiprocessing import Pool
 from numbers import Integral
 
@@ -324,7 +323,7 @@ def remove_stripe_fw(dw: TomoWindow, sino_mem: SharedNPArray, level: int = None,
 	:param proc_count: int, optional
 	"""
 	if level is None:
-		level = int(np.ceil(np.log2(np.max(astuple(sino_mem.shape)))))
+		level = int(np.ceil(np.log2(np.max(sino_mem.shape.as_tuple()))))
 	with Pool(proc_count) as pool:
 		pool.starmap(_remove_stripe_fw, [(sino_mem, i, level, wname, sigma, zero_pad)
 											for i in dw.internal.int_iter()])

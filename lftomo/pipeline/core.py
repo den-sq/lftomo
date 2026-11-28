@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 import time
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Sequence
 import uuid
@@ -52,9 +52,9 @@ class RuntimeRequirement:
 def _canonical_pad(value: DataShape) -> ProjOrder:
 	"""Normalize semantic tomography-axis padding without owning its geometry."""
 
-	if not set(asdict(value)).issubset({"Theta", "Y", "X"}):
+	if not set(value.as_dict()).issubset({"Theta", "Y", "X"}):
 		raise ValueError("padding may use only Theta, Y, and X axes")
-	if any(component < 0 for component in asdict(value).values()):
+	if any(component < 0 for component in value.as_dict().values()):
 		raise ValueError("axis padding cannot be negative")
 	return ProjOrder(Theta=0, Y=0, X=0) + value
 

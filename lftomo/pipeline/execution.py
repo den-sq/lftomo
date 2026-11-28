@@ -503,7 +503,7 @@ def run_helical_fill_kernel(
 		return
 	rows = np.arange(row_start, row_stop)
 	source_rows = rows + shift_px
-	valid = (source_rows >= 0) & (source_rows < source_image.shape[0])
+	valid = (source_rows >= 0) & (source_rows < source.shape.Y)
 	target_image[valid] = source_image[source_rows[valid]]
 
 

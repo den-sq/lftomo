@@ -117,7 +117,7 @@ class TIFFSlicesWriteStage(Stage):
 
 		rows = list(
 			state.source_window.int_iter("Y") if state.source_window is not None
-			else Y.drange(0, working.shape[0], 1).get_iter(IntIter)
+			else Y.drange(0, state.working_array.shape.Y, 1).get_iter(IntIter)
 		)
 		paths = []
 		for source_row in rows:
@@ -334,11 +334,13 @@ class NeuroglancerWriteStage(Stage):
 				cloudpath, mip=0, compress=False, progress=False,
 				parallel=1, cache=False, fill_missing=False, bounded=True,
 			)
-		for position in Y.drange(0, data.shape[0], self.params.block_slices):
-			block = data[position.Y:position.Y + self.params.block_slices]
+		for position in Y.drange(0, state.working_array.shape.Y, self.params.block_slices):
+			block_buffer = state.working_array[
+				ReconOrder.point_index(Y=slice(position.Y, position.Y + self.params.block_slices))
+			]
 			start = output_start + position.Y
-			volume[:, :, start:start + block.shape[0]] = ReconOrder(*block.shape).transposed_view(
-				block, ReverseReconOrder,
+			volume[:, :, start:start + block_buffer.shape.Y] = block_buffer.shape.transposed_view(
+				block_buffer.array(), ReverseReconOrder,
 			)
 		_record_outputs(state, [layer / "info"])
 		state.artifacts["neuroglancer_source"] = cloudpath

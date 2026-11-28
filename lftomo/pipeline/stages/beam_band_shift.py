@@ -180,7 +180,7 @@ class BeamBandShiftNormalizeStage(Stage):
 				np.exp(warped, out=warped)
 				if residual is not None:
 					scale = float(np.clip(dy / model.dy_end, 0, model.s_max))
-					for row in range(warped.shape[0]):
+					for row in range(source.shape.Y):
 						np.multiply(residual[row], scale, out=lines[index])
 						np.exp(lines[index], out=lines[index])
 						np.multiply(warped[row], lines[index], out=warped[row])
